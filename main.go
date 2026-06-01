@@ -4,11 +4,13 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
 	"xray-checker/checker"
 	"xray-checker/config"
 	"xray-checker/logger"
 	"xray-checker/metrics"
 	"xray-checker/models"
+	"xray-checker/speedtest"
 	"xray-checker/subscription"
 	"xray-checker/web"
 	"xray-checker/xray"
@@ -98,6 +100,18 @@ func main() {
 		config.CLIConfig.Proxy.CheckMethod,
 	)
 
+	speedTestManager := speedtest.NewManager(
+		proxyChecker,
+		config.CLIConfig.Xray.StartPort,
+		"data/speedtest_schedule.json",
+		speedtest.TestConfig{},
+	)
+	if err := speedTestManager.Load(); err != nil {
+		logger.Warn("Failed to load speed test schedule: %v", err)
+	}
+	speedTestManager.StartScheduler()
+	defer speedTestManager.Stop()
+
 	runCheckIteration := func() {
 		logger.Info("Starting proxy check iteration")
 		proxyChecker.CheckAllProxies()
@@ -180,6 +194,12 @@ func main() {
 	protectedHandler.Handle("/api/v1/system/ip", web.APISystemIPHandler(proxyChecker))
 	protectedHandler.Handle("/api/v1/docs", web.APIDocsHandler())
 	protectedHandler.Handle("/api/v1/openapi.yaml", web.APIOpenAPIHandler())
+	protectedHandler.Handle("/admin", web.AdminHandler())
+	protectedHandler.Handle("/admin/", web.AdminHandler())
+	protectedHandler.Handle("/api/v1/admin/proxies", web.AdminProxiesHandler(proxyChecker, config.CLIConfig.Xray.StartPort))
+	protectedHandler.Handle("/api/v1/admin/speed-tests/run", web.AdminSpeedTestRunHandler(speedTestManager))
+	protectedHandler.Handle("/api/v1/admin/speed-tests", web.AdminSpeedTestSnapshotHandler(speedTestManager))
+	protectedHandler.Handle("/api/v1/admin/schedules", web.AdminScheduleHandler(speedTestManager))
 
 	if config.CLIConfig.Web.Public {
 		mux.Handle("/", web.IndexHandler(version, proxyChecker))
@@ -188,6 +208,8 @@ func main() {
 			config.CLIConfig.Metrics.Username,
 			config.CLIConfig.Metrics.Password,
 		)(protectedHandler)
+		mux.Handle("/admin", middlewareHandler)
+		mux.Handle("/admin/", middlewareHandler)
 		mux.Handle("/metrics", middlewareHandler)
 		mux.Handle("/api/", middlewareHandler)
 	} else if config.CLIConfig.Metrics.Protected {
@@ -199,6 +221,13 @@ func main() {
 		mux.Handle("/", middlewareHandler)
 	} else {
 		protectedHandler.Handle("/", web.IndexHandler(version, proxyChecker))
+		adminHandler := web.BasicAuthMiddleware(
+			config.CLIConfig.Metrics.Username,
+			config.CLIConfig.Metrics.Password,
+		)(protectedHandler)
+		mux.Handle("/admin", adminHandler)
+		mux.Handle("/admin/", adminHandler)
+		mux.Handle("/api/v1/admin/", adminHandler)
 		mux.Handle("/", protectedHandler)
 	}
 

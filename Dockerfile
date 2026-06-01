@@ -36,7 +36,7 @@ LABEL org.opencontainers.image.source=https://github.com/${USERNAME}/${REPOSITOR
 
 RUN apk add --no-cache ca-certificates curl tzdata && \
     adduser -D -u 1000 appuser && \
-    mkdir -p /app/geo && \
+    mkdir -p /app/geo /app/data && \
     chown -R appuser:appuser /app
 
 WORKDIR /app

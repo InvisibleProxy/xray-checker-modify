@@ -1,0 +1,54 @@
+services:
+  xray-checker:
+    build:
+      context: .
+    image: xray-checker:local
+    container_name: xray-checker
+    restart: unless-stopped
+    environment:
+      SUBSCRIPTION_URL: ${SUBSCRIPTION_URL:?set SUBSCRIPTION_URL in .env}
+      WEB_PUBLIC: "true"
+      WEB_SHOW_DETAILS: "false"
+      METRICS_PROTECTED: "true"
+      METRICS_USERNAME: ${METRICS_USERNAME:-admin}
+      METRICS_PASSWORD: ${METRICS_PASSWORD:?set METRICS_PASSWORD in .env}
+      PROXY_CHECK_METHOD: ${PROXY_CHECK_METHOD:-status}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    expose:
+      - "2112"
+    ports:
+      - "127.0.0.1:2112:2112"
+    volumes:
+      - xray_geo:/app/geo
+      - xray_data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:2112/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: xray-checker-caddy
+    restart: unless-stopped
+    depends_on:
+      xray-checker:
+        condition: service_healthy
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  xray_geo:
+  xray_data:
+  caddy_data:
+  caddy_config:

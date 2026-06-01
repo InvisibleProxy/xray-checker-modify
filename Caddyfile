@@ -1,0 +1,27 @@
+{
+	email {$ACME_EMAIL}
+	acme_ca https://acme-v02.api.letsencrypt.org/directory
+}
+
+{$PUBLIC_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		X-Frame-Options DENY
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+		X-Robots-Tag "noindex, nofollow"
+		-Server
+	}
+
+	route {
+		@sensitive path /admin* /metrics /health /api/v1/admin* /api/v1/proxies* /api/v1/config /api/v1/status /api/v1/system* /api/v1/docs /api/v1/openapi.yaml
+		respond @sensitive 404
+
+		@public path / /static/* /config/* /api/v1/public/proxies
+		reverse_proxy @public xray-checker:2112
+
+		respond 404
+	}
+}

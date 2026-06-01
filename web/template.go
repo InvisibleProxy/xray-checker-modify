@@ -80,3 +80,7 @@ func RenderIndex(w io.Writer, data PageData) error {
 	_, err := io.WriteString(w, html)
 	return err
 }
+
+func RenderAdmin(w io.Writer) error {
+	return indexTmpl.ExecuteTemplate(w, "admin.html", nil)
+}

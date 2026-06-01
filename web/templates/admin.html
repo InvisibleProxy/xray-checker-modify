@@ -1,0 +1,588 @@
+{{ define "admin.html" }}
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Xray Checker Admin</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0f1114;
+        --panel: #1a1d21;
+        --panel-2: #23262b;
+        --border: #2d3138;
+        --text: #e5e7eb;
+        --muted: #9ca3af;
+        --green: #3aff82;
+        --red: #ff5252;
+        --yellow: #ffbf47;
+        --blue: #6ea8fe;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      header,
+      main {
+        max-width: 1320px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      h1,
+      h2 {
+        margin: 0;
+        font-size: 18px;
+        letter-spacing: 0;
+      }
+      h2 {
+        font-size: 15px;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: minmax(260px, 360px) 1fr;
+        gap: 16px;
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 16px;
+      }
+      .stack {
+        display: grid;
+        gap: 12px;
+      }
+      label {
+        display: grid;
+        gap: 6px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      input,
+      select,
+      button {
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--panel-2);
+        color: var(--text);
+        padding: 9px 10px;
+        font: inherit;
+      }
+      input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
+        padding: 0;
+      }
+      button {
+        cursor: pointer;
+        font-weight: 600;
+      }
+      button.primary {
+        background: var(--green);
+        color: #061009;
+        border-color: var(--green);
+      }
+      button.secondary {
+        background: transparent;
+      }
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .split {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        white-space: nowrap;
+      }
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--muted);
+      }
+      .dot.online {
+        background: var(--green);
+      }
+      .dot.offline {
+        background: var(--red);
+      }
+      .table-wrap {
+        overflow-x: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        padding: 10px 8px;
+        border-bottom: 1px solid var(--border);
+        text-align: left;
+        vertical-align: middle;
+      }
+      th {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 3px 8px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .error {
+        color: var(--red);
+      }
+      .ok {
+        color: var(--green);
+      }
+      .warn {
+        color: var(--yellow);
+      }
+      @media (max-width: 960px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+        header {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>Xray Checker Admin</h1>
+        <div class="muted">Manual speed tests and private schedule control</div>
+      </div>
+      <div class="row">
+        <span id="run-state" class="pill">Idle</span>
+        <button id="refresh" class="secondary" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="panel stack">
+        <h2>Speed Test</h2>
+        <label>
+          Test URL
+          <input id="url" type="url" autocomplete="off" />
+        </label>
+        <div class="split">
+          <label>
+            Max MB
+            <input id="max-mb" type="number" min="1" max="100" step="1" />
+          </label>
+          <label>
+            Timeout sec
+            <input id="timeout" type="number" min="5" max="300" step="5" />
+          </label>
+        </div>
+        <label>
+          Concurrency
+          <input id="concurrency" type="number" min="1" max="10" step="1" />
+        </label>
+
+        <h2>Filters</h2>
+        <label>
+          Search
+          <input id="search" type="search" autocomplete="off" placeholder="Name, server, subscription" />
+        </label>
+        <div class="split">
+          <label>
+            Status
+            <select id="status-filter">
+              <option value="">All</option>
+              <option value="online">Online</option>
+              <option value="offline">Offline</option>
+            </select>
+          </label>
+          <label>
+            Protocol
+            <select id="protocol-filter">
+              <option value="">All</option>
+            </select>
+          </label>
+        </div>
+        <label>
+          Subscription
+          <select id="sub-filter">
+            <option value="">All</option>
+          </select>
+        </label>
+
+        <div class="row">
+          <button id="select-visible" class="secondary" type="button">Select Visible</button>
+          <button id="clear-selection" class="secondary" type="button">Clear</button>
+        </div>
+        <button id="run" class="primary" type="button">Run Selected</button>
+
+        <h2>Schedule</h2>
+        <label class="row">
+          <input id="schedule-enabled" type="checkbox" />
+          Enabled
+        </label>
+        <label>
+          Interval minutes
+          <input id="schedule-minutes" type="number" min="1" step="1" />
+        </label>
+        <button id="save-schedule" class="secondary" type="button">Save Schedule</button>
+        <div id="message" class="muted"></div>
+      </section>
+
+      <section class="stack">
+        <section class="panel stack">
+          <div class="row" style="justify-content: space-between">
+            <h2>Nodes</h2>
+            <span id="selection-count" class="muted">0 selected</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th></th>
+                  <th>Name</th>
+                  <th>Status</th>
+                  <th>Protocol</th>
+                  <th>Subscription</th>
+                  <th>Server</th>
+                  <th>Last Speed</th>
+                </tr>
+              </thead>
+              <tbody id="nodes"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel stack">
+          <h2>Results</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Node</th>
+                  <th>Speed</th>
+                  <th>Downloaded</th>
+                  <th>Duration</th>
+                  <th>TTFB</th>
+                  <th>Checked</th>
+                  <th>Error</th>
+                </tr>
+              </thead>
+              <tbody id="results"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script>
+      const state = {
+        proxies: [],
+        snapshot: null,
+        selected: new Set(),
+      };
+
+      const basePath = (() => {
+        const idx = window.location.pathname.indexOf("/admin");
+        return idx > 0 ? window.location.pathname.slice(0, idx) : "";
+      })();
+
+      const $ = (id) => document.getElementById(id);
+      const api = (path) => `${basePath}/api/v1/admin${path}`;
+      const mb = 1024 * 1024;
+
+      function escapeHtml(value) {
+        return String(value || "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      async function request(path, options = {}) {
+        const res = await fetch(api(path), {
+          headers: { "Content-Type": "application/json" },
+          ...options,
+        });
+        const payload = await res.json().catch(() => null);
+        if (!res.ok || !payload || !payload.success) {
+          throw new Error((payload && payload.error) || `HTTP ${res.status}`);
+        }
+        return payload.data;
+      }
+
+      function configFromForm() {
+        return {
+          url: $("url").value.trim(),
+          maxBytes: Math.max(1, Number($("max-mb").value || 10)) * mb,
+          timeoutSec: Math.max(5, Number($("timeout").value || 120)),
+          concurrency: Math.max(1, Number($("concurrency").value || 2)),
+        };
+      }
+
+      function currentFilters() {
+        return {
+          status: $("status-filter").value,
+          protocol: $("protocol-filter").value,
+          subName: $("sub-filter").value,
+          search: $("search").value.trim().toLowerCase(),
+        };
+      }
+
+      function filteredProxies() {
+        const filters = currentFilters();
+        return state.proxies.filter((proxy) => {
+          if (filters.status === "online" && !proxy.online) return false;
+          if (filters.status === "offline" && proxy.online) return false;
+          if (filters.protocol && proxy.protocol !== filters.protocol) return false;
+          if (filters.subName && proxy.subName !== filters.subName) return false;
+          if (filters.search) {
+            const haystack = [proxy.name, proxy.server, proxy.subName, proxy.protocol].join(" ").toLowerCase();
+            if (!haystack.includes(filters.search)) return false;
+          }
+          return true;
+        });
+      }
+
+      function resultFor(stableId) {
+        if (!state.snapshot) return null;
+        return state.snapshot.results.find((result) => result.stableId === stableId) || null;
+      }
+
+      function formatBytes(bytes) {
+        if (!bytes) return "0 B";
+        if (bytes >= mb) return `${(bytes / mb).toFixed(1)} MB`;
+        return `${(bytes / 1024).toFixed(0)} KB`;
+      }
+
+      function formatTime(iso) {
+        if (!iso || iso.startsWith("0001-")) return "";
+        return new Date(iso).toLocaleString();
+      }
+
+      function renderFilters() {
+        const protocols = [...new Set(state.proxies.map((proxy) => proxy.protocol).filter(Boolean))].sort();
+        const subs = [...new Set(state.proxies.map((proxy) => proxy.subName).filter(Boolean))].sort();
+        $("protocol-filter").innerHTML = `<option value="">All</option>` + protocols.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join("");
+        $("sub-filter").innerHTML = `<option value="">All</option>` + subs.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join("");
+      }
+
+      function renderNodes() {
+        const rows = filteredProxies().map((proxy) => {
+          const result = resultFor(proxy.stableId);
+          const speed = result && !result.error ? `${result.mbps.toFixed(2)} Mbps` : "n/a";
+          const checked = state.selected.has(proxy.stableId) ? "checked" : "";
+          return `
+            <tr>
+              <td><input type="checkbox" data-id="${proxy.stableId}" ${checked}></td>
+              <td>
+                <div>${escapeHtml(proxy.name || "Unnamed")}</div>
+                <div class="muted mono">${escapeHtml(proxy.stableId)}</div>
+              </td>
+              <td>
+                <span class="status">
+                  <span class="dot ${proxy.online ? "online" : "offline"}"></span>
+                  ${proxy.online ? "Online" : "Offline"}
+                </span>
+              </td>
+              <td><span class="pill">${escapeHtml(proxy.protocol)}</span></td>
+              <td>${escapeHtml(proxy.subName || "")}</td>
+              <td class="mono">${escapeHtml(proxy.server)}:${proxy.port}</td>
+              <td>${speed}</td>
+            </tr>`;
+        });
+        $("nodes").innerHTML = rows.join("") || `<tr><td colspan="7" class="muted">No nodes match filters</td></tr>`;
+        $("nodes").querySelectorAll("input[type=checkbox]").forEach((input) => {
+          input.addEventListener("change", () => {
+            input.checked ? state.selected.add(input.dataset.id) : state.selected.delete(input.dataset.id);
+            renderSelectionCount();
+          });
+        });
+        renderSelectionCount();
+      }
+
+      function renderResults() {
+        const results = state.snapshot ? state.snapshot.results : [];
+        $("results").innerHTML = results.map((result) => `
+          <tr>
+            <td>${escapeHtml(result.name || "Unnamed")}</td>
+            <td class="${result.error ? "error" : "ok"}">${result.error ? "Failed" : `${result.mbps.toFixed(2)} Mbps`}</td>
+            <td>${formatBytes(result.downloadedBytes)}</td>
+            <td>${result.durationMs || 0} ms</td>
+            <td>${result.ttfbMs || 0} ms</td>
+            <td>${formatTime(result.checkedAt)}</td>
+            <td class="error">${escapeHtml(result.error || "")}</td>
+          </tr>
+        `).join("") || `<tr><td colspan="7" class="muted">No speed test results yet</td></tr>`;
+      }
+
+      function renderRunState() {
+        const run = state.snapshot && state.snapshot.lastRun;
+        if (!run || !run.running) {
+          $("run-state").textContent = "Idle";
+          $("run").disabled = false;
+          return;
+        }
+        $("run-state").textContent = `Running ${run.completed}/${run.selected}`;
+        $("run").disabled = true;
+      }
+
+      function renderSelectionCount() {
+        $("selection-count").textContent = `${state.selected.size} selected`;
+      }
+
+      function applyDefaults() {
+        if (!state.snapshot) return;
+        const defaults = state.snapshot.defaults;
+        $("url").value = defaults.url || "";
+        $("max-mb").value = Math.round((defaults.maxBytes || 0) / mb) || 10;
+        $("timeout").value = defaults.timeoutSec || 120;
+        $("concurrency").value = defaults.concurrency || 2;
+
+        const schedule = state.snapshot.schedule || {};
+        $("schedule-enabled").checked = !!schedule.enabled;
+        $("schedule-minutes").value = Math.max(1, Math.round((schedule.intervalSec || 3600) / 60));
+        $("status-filter").value = schedule.onlyOnline ? "online" : "";
+        $("protocol-filter").value = schedule.protocol || "";
+        $("sub-filter").value = schedule.subName || "";
+        if (Array.isArray(schedule.proxyIds)) {
+          state.selected = new Set(schedule.proxyIds);
+        }
+        if (schedule.config && schedule.config.url) {
+          $("url").value = schedule.config.url;
+          $("max-mb").value = Math.round(schedule.config.maxBytes / mb) || $("max-mb").value;
+          $("timeout").value = schedule.config.timeoutSec || $("timeout").value;
+          $("concurrency").value = schedule.config.concurrency || $("concurrency").value;
+        }
+      }
+
+      function renderAll() {
+        renderRunState();
+        renderNodes();
+        renderResults();
+      }
+
+      async function load(initial = false) {
+        const [proxies, snapshot] = await Promise.all([
+          request("/proxies"),
+          request("/speed-tests"),
+        ]);
+        state.proxies = proxies;
+        state.snapshot = snapshot;
+        if (initial) {
+          renderFilters();
+          applyDefaults();
+        }
+        renderAll();
+      }
+
+      async function runSelected() {
+        $("message").textContent = "";
+        if (state.selected.size === 0) {
+          $("message").textContent = "Select at least one node";
+          return;
+        }
+        try {
+          await request("/speed-tests/run", {
+            method: "POST",
+            body: JSON.stringify({
+              proxyIds: [...state.selected],
+              config: configFromForm(),
+            }),
+          });
+          await load();
+        } catch (err) {
+          $("message").textContent = err.message;
+        }
+      }
+
+      async function saveSchedule() {
+        $("message").textContent = "";
+        try {
+          const filters = currentFilters();
+          await request("/schedules", {
+            method: "PUT",
+            body: JSON.stringify({
+              enabled: $("schedule-enabled").checked,
+              intervalSec: Math.max(1, Number($("schedule-minutes").value || 60)) * 60,
+              proxyIds: [...state.selected],
+              onlyOnline: filters.status === "online",
+              subName: filters.subName,
+              protocol: filters.protocol,
+              config: configFromForm(),
+            }),
+          });
+          $("message").textContent = "Schedule saved";
+          await load();
+        } catch (err) {
+          $("message").textContent = err.message;
+        }
+      }
+
+      $("refresh").addEventListener("click", () => load());
+      $("run").addEventListener("click", runSelected);
+      $("save-schedule").addEventListener("click", saveSchedule);
+      $("select-visible").addEventListener("click", () => {
+        filteredProxies().forEach((proxy) => state.selected.add(proxy.stableId));
+        renderNodes();
+      });
+      $("clear-selection").addEventListener("click", () => {
+        state.selected.clear();
+        renderNodes();
+      });
+      ["search", "status-filter", "protocol-filter", "sub-filter"].forEach((id) => {
+        $(id).addEventListener("input", renderNodes);
+        $(id).addEventListener("change", renderNodes);
+      });
+
+      load(true).catch((err) => {
+        $("message").textContent = err.message;
+      });
+      setInterval(() => {
+        if (state.snapshot && state.snapshot.lastRun && state.snapshot.lastRun.running) {
+          load().catch(() => {});
+        }
+      }, 2000);
+    </script>
+  </body>
+</html>
+{{ end }}
