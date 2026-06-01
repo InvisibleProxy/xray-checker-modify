@@ -147,7 +147,7 @@ Adds measured latency (TTFB - Time To First Byte) to endpoint responses, useful 
 - Required: No
 - Default: `https://proof.ovh.net/files/10Mb.dat`
 
-Default URL used by private speed tests in the admin panel, schedules, and Telegram-triggered checks. The URL can still be overridden per saved schedule or manual run.
+Default URL used by private speed tests in the admin panel, schedules, and Telegram-triggered checks. The URL can still be overridden per saved schedule or manual run. If a schedule is already saved with another `Test URL`, the saved value takes precedence over `SPEED_TEST_URL`.
 
 ## Web UI
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -31,14 +32,14 @@ const (
 )
 
 type Config struct {
-	Enabled              bool    `json:"enabled"`
-	BotToken             string  `json:"botToken"`
-	ChatID               string  `json:"chatId"`
-	MessageThreadID      int     `json:"messageThreadId"`
-	AdminUserIDs         []int64 `json:"adminUserIds"`
-	CommandPollingEnabled bool   `json:"commandPollingEnabled"`
-	SpeedReportsEnabled  bool    `json:"speedReportsEnabled"`
-	SpeedReportMode      string  `json:"speedReportMode"`
+	Enabled               bool    `json:"enabled"`
+	BotToken              string  `json:"botToken"`
+	ChatID                string  `json:"chatId"`
+	MessageThreadID       int     `json:"messageThreadId"`
+	AdminUserIDs          []int64 `json:"adminUserIds"`
+	CommandPollingEnabled bool    `json:"commandPollingEnabled"`
+	SpeedReportsEnabled   bool    `json:"speedReportsEnabled"`
+	SpeedReportMode       string  `json:"speedReportMode"`
 	LowSpeedThresholdMbps float64 `json:"lowSpeedThresholdMbps"`
 	SpeedReportLimit      int     `json:"speedReportLimit"`
 	NodeAlertsEnabled     bool    `json:"nodeAlertsEnabled"`
@@ -51,31 +52,31 @@ type Config struct {
 type AdminConfig struct {
 	Enabled                 bool    `json:"enabled"`
 	CommandPollingEnabled   bool    `json:"commandPollingEnabled"`
-	SpeedReportsEnabled    bool    `json:"speedReportsEnabled"`
-	SpeedReportMode        string  `json:"speedReportMode"`
-	LowSpeedThresholdMbps  float64 `json:"lowSpeedThresholdMbps"`
-	SpeedReportLimit       int     `json:"speedReportLimit"`
-	NodeAlertsEnabled      bool    `json:"nodeAlertsEnabled"`
-	AlertAfterFailures     int     `json:"alertAfterFailures"`
-	AlertRepeatMinutes     int     `json:"alertRepeatMinutes"`
-	NotifyRecovery         bool    `json:"notifyRecovery"`
-	BotTokenConfigured     bool    `json:"botTokenConfigured"`
-	ChatConfigured         bool    `json:"chatConfigured"`
+	SpeedReportsEnabled     bool    `json:"speedReportsEnabled"`
+	SpeedReportMode         string  `json:"speedReportMode"`
+	LowSpeedThresholdMbps   float64 `json:"lowSpeedThresholdMbps"`
+	SpeedReportLimit        int     `json:"speedReportLimit"`
+	NodeAlertsEnabled       bool    `json:"nodeAlertsEnabled"`
+	AlertAfterFailures      int     `json:"alertAfterFailures"`
+	AlertRepeatMinutes      int     `json:"alertRepeatMinutes"`
+	NotifyRecovery          bool    `json:"notifyRecovery"`
+	BotTokenConfigured      bool    `json:"botTokenConfigured"`
+	ChatConfigured          bool    `json:"chatConfigured"`
 	MessageThreadConfigured bool    `json:"messageThreadConfigured"`
-	AdminUserCount         int     `json:"adminUserCount"`
+	AdminUserCount          int     `json:"adminUserCount"`
 }
 
 func DefaultConfig() Config {
 	return Config{
 		CommandPollingEnabled: true,
-		SpeedReportsEnabled:  true,
-		SpeedReportMode:      "always",
-		SpeedReportLimit:     defaultSpeedReportLimit,
-		NodeAlertsEnabled:    true,
-		AlertAfterFailures:   defaultAlertAfterFailures,
-		AlertRepeatMinutes:   defaultAlertRepeatMinutes,
-		NotifyRecovery:       true,
-		TimeoutSec:           defaultTimeoutSec,
+		SpeedReportsEnabled:   true,
+		SpeedReportMode:       "always",
+		SpeedReportLimit:      defaultSpeedReportLimit,
+		NodeAlertsEnabled:     true,
+		AlertAfterFailures:    defaultAlertAfterFailures,
+		AlertRepeatMinutes:    defaultAlertRepeatMinutes,
+		NotifyRecovery:        true,
+		TimeoutSec:            defaultTimeoutSec,
 	}
 }
 
@@ -115,6 +116,7 @@ type Service struct {
 	mu           sync.RWMutex
 	config       Config
 	alerts       map[string]nodeAlertState
+	menuMessages map[string]int
 	lastUpdateID int
 
 	stopCh   chan struct{}
@@ -146,7 +148,7 @@ type update struct {
 
 type message struct {
 	MessageID       int    `json:"message_id"`
-	MessageThreadID int   `json:"message_thread_id"`
+	MessageThreadID int    `json:"message_thread_id"`
 	Text            string `json:"text"`
 	Chat            chat   `json:"chat"`
 	From            *user  `json:"from"`
@@ -188,6 +190,7 @@ func NewService(statePath string, proxyChecker *checker.ProxyChecker, speedManag
 		statePath:    statePath,
 		config:       DefaultConfig(),
 		alerts:       make(map[string]nodeAlertState),
+		menuMessages: make(map[string]int),
 		stopCh:       make(chan struct{}),
 	}
 }
@@ -233,18 +236,18 @@ func (s *Service) AdminConfig() AdminConfig {
 	return AdminConfig{
 		Enabled:                 cfg.Enabled,
 		CommandPollingEnabled:   cfg.CommandPollingEnabled,
-		SpeedReportsEnabled:    cfg.SpeedReportsEnabled,
-		SpeedReportMode:        cfg.SpeedReportMode,
-		LowSpeedThresholdMbps:  cfg.LowSpeedThresholdMbps,
-		SpeedReportLimit:       cfg.SpeedReportLimit,
-		NodeAlertsEnabled:      cfg.NodeAlertsEnabled,
-		AlertAfterFailures:     cfg.AlertAfterFailures,
-		AlertRepeatMinutes:     cfg.AlertRepeatMinutes,
-		NotifyRecovery:         cfg.NotifyRecovery,
-		BotTokenConfigured:     cfg.BotToken != "",
-		ChatConfigured:         cfg.ChatID != "",
+		SpeedReportsEnabled:     cfg.SpeedReportsEnabled,
+		SpeedReportMode:         cfg.SpeedReportMode,
+		LowSpeedThresholdMbps:   cfg.LowSpeedThresholdMbps,
+		SpeedReportLimit:        cfg.SpeedReportLimit,
+		NodeAlertsEnabled:       cfg.NodeAlertsEnabled,
+		AlertAfterFailures:      cfg.AlertAfterFailures,
+		AlertRepeatMinutes:      cfg.AlertRepeatMinutes,
+		NotifyRecovery:          cfg.NotifyRecovery,
+		BotTokenConfigured:      cfg.BotToken != "",
+		ChatConfigured:          cfg.ChatID != "",
 		MessageThreadConfigured: cfg.MessageThreadID > 0,
-		AdminUserCount:         len(cfg.AdminUserIDs),
+		AdminUserCount:          len(cfg.AdminUserIDs),
 	}
 }
 
@@ -269,7 +272,6 @@ func (s *Service) UpdateAdminConfig(input AdminConfig) error {
 		return err
 	}
 	s.setConfig(cfg)
-	go s.syncBotCommands()
 	return nil
 }
 
@@ -288,11 +290,6 @@ func (s *Service) UpdateConfig(cfg Config) error {
 
 func (s *Service) Start() {
 	go s.pollingLoop()
-	go func() {
-		if s.wait(2 * time.Second) {
-			s.syncBotCommands()
-		}
-	}()
 }
 
 func (s *Service) Stop() {
@@ -479,7 +476,7 @@ func (s *Service) handleCallback(cb *callbackQuery) {
 	if data == "id" {
 		s.answerCallback(cb.ID, "")
 		if cb.Message != nil {
-			s.sendCommandReplyWithMarkup(cb.Message, formatIDReplyFor(cb.Message, cb.From), backToMenuMarkup())
+			s.editCommandMessage(cb.Message, formatIDReplyFor(cb.Message, cb.From), backToMenuMarkup())
 		}
 		return
 	}
@@ -490,25 +487,25 @@ func (s *Service) handleCallback(cb *callbackQuery) {
 	}
 
 	switch {
-	case data == "menu" || data == "menu:refresh":
+	case data == "back_to_menu" || data == "menu" || data == "menu:refresh":
 		s.answerCallback(cb.ID, "Обновлено")
-		s.sendMenuToMessage(cb.Message, cb.From)
+		s.editMenuMessage(cb.Message, cb.From)
 	case data == "status":
 		s.answerCallback(cb.ID, "")
-		s.sendCommandReplyWithMarkup(cb.Message, s.formatStatus(), backToMenuMarkup())
+		s.editCommandMessage(cb.Message, s.formatStatus(), backToMenuMarkup())
 	case data == "issues":
 		s.answerCallback(cb.ID, "")
-		s.sendCommandReplyWithMarkup(cb.Message, s.formatIssuesSummary(), backToMenuMarkup())
+		s.editCommandMessage(cb.Message, s.formatIssuesSummary(), backToMenuMarkup())
 	case data == "help":
 		s.answerCallback(cb.ID, "")
-		s.sendCommandReplyWithMarkup(cb.Message, s.formatHelp(cfg), backToMenuMarkup())
+		s.editCommandMessage(cb.Message, s.formatHelp(cfg), backToMenuMarkup())
 	case data == "speed:list":
 		s.answerCallback(cb.ID, "")
-		s.sendCommandReplyWithMarkup(cb.Message, s.formatRecentSpeedOverview(), s.speedHistoryMarkup())
+		s.editCommandMessage(cb.Message, s.formatRecentSpeedOverview(), s.speedHistoryMarkup())
 	case strings.HasPrefix(data, "speed:"):
 		s.answerCallback(cb.ID, "")
 		query := strings.TrimPrefix(data, "speed:")
-		s.sendCommandReplyWithMarkup(cb.Message, s.formatSpeedHistory(query), backToMenuMarkup())
+		s.editCommandMessage(cb.Message, s.formatSpeedHistory(query), backToMenuMarkup())
 	case data == "speedtest:online":
 		s.handleSpeedTestCallback(cb, true)
 	case data == "speedtest:all":
@@ -528,13 +525,13 @@ func (s *Service) handleSpeedTestCallback(cb *callbackQuery, onlyOnline bool) {
 	if err := s.speedManager.Run(req, "telegram"); err != nil {
 		s.answerCallback(cb.ID, "Не запущено")
 		if cb.Message != nil {
-			s.sendCommandReplyWithMarkup(cb.Message, fmt.Sprintf("Speed test was not started: %v", err), backToMenuMarkup())
+			s.editCommandMessage(cb.Message, fmt.Sprintf("<b>Speed-test не запущен</b>\n\n%s", htmlEscape(err.Error())), backToMenuMarkup())
 		}
 		return
 	}
 	s.answerCallback(cb.ID, "Speed test запущен")
 	if cb.Message != nil {
-		s.sendCommandReplyWithMarkup(cb.Message, "Speed test started. The report will be sent when it finishes.", backToMenuMarkup())
+		s.editCommandMessage(cb.Message, "<b>Speed-test запущен</b>\n\nОтчет будет отправлен после завершения проверки.", backToMenuMarkup())
 	}
 }
 
@@ -544,7 +541,43 @@ func (s *Service) sendMenu(msg *message) {
 
 func (s *Service) sendMenuToMessage(msg *message, from *user) {
 	cfg := s.Config()
-	s.sendCommandReplyWithMarkup(msg, s.formatMenu(cfg, s.isAdminUser(from, cfg)), mainMenuMarkup(s.isAdminUser(from, cfg)))
+	threadID := msg.MessageThreadID
+	if threadID == 0 {
+		threadID = cfg.MessageThreadID
+	}
+	userID := userIDFrom(from)
+	text := s.formatMenu(cfg, s.isAdminUser(from, cfg))
+	replyMarkup := mainMenuMarkup(s.isAdminUser(from, cfg))
+	chatID := strconv.FormatInt(msg.Chat.ID, 10)
+
+	if messageID, ok := s.lastMenuMessageID(msg.Chat.ID, threadID, userID); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
+		err := s.editTextWithMarkup(ctx, chatID, messageID, text, replyMarkup)
+		cancel()
+		if err == nil || isMessageNotModified(err) {
+			return
+		}
+		s.forgetMenuMessage(msg.Chat.ID, threadID, userID)
+		logger.Warn("Failed to edit previous Telegram menu message: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
+	defer cancel()
+	sent, err := s.sendHTMLToWithMarkup(ctx, chatID, threadID, text, replyMarkup)
+	if err != nil {
+		logger.Warn("Failed to send Telegram menu: %v", err)
+		return
+	}
+	if sent != nil && sent.MessageID > 0 {
+		s.rememberMenuMessage(msg.Chat.ID, threadID, userID, sent.MessageID)
+	}
+}
+
+func (s *Service) editMenuMessage(msg *message, from *user) {
+	cfg := s.Config()
+	if s.editCommandMessage(msg, s.formatMenu(cfg, s.isAdminUser(from, cfg)), mainMenuMarkup(s.isAdminUser(from, cfg))) {
+		s.rememberMenuMessage(msg.Chat.ID, msg.MessageThreadID, userIDFrom(from), msg.MessageID)
+	}
 }
 
 func (s *Service) handleSpeedTestCommand(msg *message, args []string) {
@@ -579,26 +612,30 @@ func (s *Service) handleSpeedTestCommand(msg *message, args []string) {
 	}
 
 	if err := s.speedManager.Run(req, "telegram"); err != nil {
-		s.sendCommandReply(msg, fmt.Sprintf("Speed test was not started: %v", err))
+		s.sendCommandReply(msg, fmt.Sprintf("<b>Speed-test не запущен</b>\n\n%s", htmlEscape(err.Error())))
 		return
 	}
-	s.sendCommandReply(msg, "Speed test started. The report will be sent when it finishes.")
+	s.sendCommandReply(msg, "<b>Speed-test запущен</b>\n\nОтчет будет отправлен после завершения проверки.")
 }
 
 func (s *Service) formatHelp(cfg Config) string {
 	var lines []string
 	lines = append(lines,
-		"Xray Checker bot commands:",
-		"/menu - open the action menu",
-		"/status - show node status summary",
-		"/speed <stableId or name> - show recent speed results for a node",
-		"/id - show chat, topic and user IDs",
+		"<b>InvisibleProxyChecker</b>",
+		"",
+		"<b>Команды</b>",
+		"Главное управление доступно через кнопки под сообщением.",
+		"",
+		"• <code>/start</code> — открыть главное меню",
+		"• <code>/status</code> — статусы нод",
+		"• <code>/speed &lt;id или имя&gt;</code> — история замеров ноды",
+		"• <code>/id</code> — ID чата, топика и пользователя",
 	)
 	if len(cfg.AdminUserIDs) > 0 {
 		lines = append(lines,
-			"/speedtest - run speed test for online nodes",
-			"/speedtest all - run speed test for all nodes",
-			"/speedtest <stableId or name> - run speed test for one node",
+			"• <code>/speedtest</code> — speed-test online-нод",
+			"• <code>/speedtest all</code> — speed-test всех нод",
+			"• <code>/speedtest &lt;id или имя&gt;</code> — speed-test одной ноды",
 		)
 	}
 	return strings.Join(lines, "\n")
@@ -621,18 +658,62 @@ func (s *Service) formatMenu(cfg Config, isAdmin bool) string {
 	if isAdmin {
 		adminText = "да"
 	}
+	thresholdText := "не задан"
+	if cfg.LowSpeedThresholdMbps > 0 {
+		thresholdText = fmt.Sprintf("%.2f Mbps", cfg.LowSpeedThresholdMbps)
+	}
 
 	return strings.Join([]string{
-		"Invisible Proxy",
+		"<b>InvisibleProxyChecker</b>",
 		"",
-		"Панель управления Xray Checker",
-		fmt.Sprintf("Ноды: %d всего | %d online | %d offline", total, online, offline),
-		fmt.Sprintf("Speed-test отчеты: %s", speedReports),
-		fmt.Sprintf("Оповещения: %s", alerts),
-		fmt.Sprintf("Администратор: %s", adminText),
+		"<b>Панель управления</b>",
+		fmt.Sprintf("Ноды: <b>%d</b> всего | <b>%d</b> online | <b>%d</b> offline", total, online, offline),
+		"",
+		"<b>Speed-test</b>",
+		fmt.Sprintf("Отчеты: <b>%s</b>", htmlEscape(speedReports)),
+		fmt.Sprintf("Порог низкой скорости: <b>%s</b>", htmlEscape(thresholdText)),
+		"",
+		"<b>Оповещения</b>",
+		fmt.Sprintf("Недоступность нод: <b>%s</b>", htmlEscape(alerts)),
+		"",
+		"<b>Доступ</b>",
+		fmt.Sprintf("Текущий пользователь админ: <b>%s</b>", htmlEscape(adminText)),
 		"",
 		"Выберите действие:",
 	}, "\n")
+}
+
+func (s *Service) lastMenuMessageID(chatID int64, threadID int, userID int64) (int, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	messageID, ok := s.menuMessages[menuMessageKey(chatID, threadID, userID)]
+	return messageID, ok
+}
+
+func (s *Service) rememberMenuMessage(chatID int64, threadID int, userID int64, messageID int) {
+	if messageID <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.menuMessages[menuMessageKey(chatID, threadID, userID)] = messageID
+}
+
+func (s *Service) forgetMenuMessage(chatID int64, threadID int, userID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.menuMessages, menuMessageKey(chatID, threadID, userID))
+}
+
+func menuMessageKey(chatID int64, threadID int, userID int64) string {
+	return fmt.Sprintf("%d:%d:%d", chatID, threadID, userID)
+}
+
+func userIDFrom(from *user) int64 {
+	if from == nil {
+		return 0
+	}
+	return from.ID
 }
 
 func (s *Service) nodeCounts() (total int, online int, offline int) {
@@ -665,7 +746,7 @@ func (s *Service) formatStatus() string {
 			proxy.StableID = proxy.GenerateStableID()
 		}
 		online, latency, err := s.proxyChecker.GetProxyStatusByStableID(proxy.StableID)
-		line := formatProxyLine(proxy, online, latency)
+		line := formatProxyLineHTML(proxy, online, latency)
 		if err != nil || !online {
 			offlineLines = append(offlineLines, line)
 		} else {
@@ -674,16 +755,18 @@ func (s *Service) formatStatus() string {
 	}
 
 	lines := []string{
-		"Node statuses",
-		fmt.Sprintf("Total: %d, online: %d, offline: %d", len(proxies), len(onlineLines), len(offlineLines)),
+		"<b>InvisibleProxyChecker</b>",
+		"",
+		"<b>Статусы нод</b>",
+		fmt.Sprintf("Всего: <b>%d</b> | Online: <b>%d</b> | Offline: <b>%d</b>", len(proxies), len(onlineLines), len(offlineLines)),
 	}
 	if len(offlineLines) > 0 {
-		lines = append(lines, "", "Offline:")
-		lines = append(lines, limitLines(offlineLines, 20)...)
+		lines = append(lines, "", "<b>Недоступны</b>")
+		lines = append(lines, limitLines(offlineLines, 12)...)
 	}
 	if len(onlineLines) > 0 {
-		lines = append(lines, "", "Online:")
-		lines = append(lines, limitLines(onlineLines, 20)...)
+		lines = append(lines, "", "<b>Онлайн</b>")
+		lines = append(lines, limitLines(onlineLines, 12)...)
 	}
 	return trimMessage(strings.Join(lines, "\n"))
 }
@@ -697,22 +780,26 @@ func (s *Service) formatIssuesSummary() string {
 		}
 		online, latency, err := s.proxyChecker.GetProxyStatusByStableID(proxy.StableID)
 		if err != nil || !online {
-			offlineLines = append(offlineLines, formatProxyLine(proxy, online, latency))
+			offlineLines = append(offlineLines, formatProxyLineHTML(proxy, online, latency))
 		}
 	}
 
-	speedLines := speedIssues(s.speedManager.Snapshot().Results, cfg.LowSpeedThresholdMbps)
-	lines := []string{"Проблемные ноды"}
+	speedLines := speedIssuesHTML(s.speedManager.Snapshot().Results, cfg.LowSpeedThresholdMbps)
+	lines := []string{
+		"<b>InvisibleProxyChecker</b>",
+		"",
+		"<b>Проблемные ноды</b>",
+	}
 	if len(offlineLines) == 0 && len(speedLines) == 0 {
 		lines = append(lines, "", "Проблем не найдено.")
 		return strings.Join(lines, "\n")
 	}
 	if len(offlineLines) > 0 {
-		lines = append(lines, "", "Недоступны:")
-		lines = append(lines, limitLines(offlineLines, 20)...)
+		lines = append(lines, "", "<b>Недоступны</b>")
+		lines = append(lines, limitLines(offlineLines, 12)...)
 	}
 	if len(speedLines) > 0 {
-		lines = append(lines, "", "Speed-test:")
+		lines = append(lines, "", "<b>Speed-test ниже порога или с ошибками</b>")
 		lines = append(lines, limitLines(speedLines, cfg.SpeedReportLimit)...)
 	}
 	return trimMessage(strings.Join(lines, "\n"))
@@ -721,7 +808,7 @@ func (s *Service) formatIssuesSummary() string {
 func (s *Service) formatSpeedHistory(query string) string {
 	query = strings.TrimSpace(query)
 	if query == "" {
-		return "Usage: /speed <stableId or name>"
+		return "<b>История замеров</b>\n\nИспользование: <code>/speed &lt;id или имя&gt;</code>"
 	}
 
 	proxy, matches := s.findProxy(query)
@@ -739,12 +826,15 @@ func (s *Service) formatSpeedHistory(query string) string {
 		}
 	}
 	if len(history) == 0 {
-		return fmt.Sprintf("No speed-test results for %s yet.", proxy.Name)
+		return fmt.Sprintf("<b>История замеров</b>\n\nДля ноды <b>%s</b> пока нет результатов speed-test.", htmlEscape(proxy.Name))
 	}
 
 	lines := []string{
-		fmt.Sprintf("Recent speed results for %s", proxy.Name),
-		fmt.Sprintf("ID: %s", proxy.StableID),
+		"<b>InvisibleProxyChecker</b>",
+		"",
+		"<b>История замеров</b>",
+		fmt.Sprintf("<b>%s</b>", htmlEscape(proxy.Name)),
+		fmt.Sprintf("ID: <code>%s</code>", htmlEscape(proxy.StableID)),
 	}
 	cfg := s.Config()
 	for _, result := range limitResults(history, 5) {
@@ -756,22 +846,26 @@ func (s *Service) formatSpeedHistory(query string) string {
 func (s *Service) formatRecentSpeedOverview() string {
 	results := s.speedManager.Snapshot().Results
 	if len(results) == 0 {
-		return "Пока нет результатов speed-test."
+		return "<b>Последние замеры</b>\n\nПока нет результатов speed-test."
 	}
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].CheckedAt.After(results[j].CheckedAt)
 	})
 
 	cfg := s.Config()
-	lines := []string{"Последние замеры speed-test:"}
+	lines := []string{
+		"<b>InvisibleProxyChecker</b>",
+		"",
+		"<b>Последние замеры speed-test</b>",
+	}
 	for _, result := range limitResults(results, 10) {
-		status := fmt.Sprintf("%.2f Mbps", result.Mbps)
+		status := fmt.Sprintf("<b>%.2f Mbps</b>", result.Mbps)
 		if result.Error != "" {
-			status = "FAILED"
+			status = "<b>FAILED</b>"
 		} else if cfg.LowSpeedThresholdMbps > 0 && result.Mbps < cfg.LowSpeedThresholdMbps {
-			status = fmt.Sprintf("LOW %.2f Mbps", result.Mbps)
+			status = fmt.Sprintf("<b>LOW %.2f Mbps</b>", result.Mbps)
 		}
-		lines = append(lines, fmt.Sprintf("- %s: %s", result.Name, status))
+		lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  <code>%s</code> · %s · %s", htmlEscape(result.Name), htmlEscape(result.StableID), status, htmlEscape(formatCheckedAt(result.CheckedAt))))
 	}
 	lines = append(lines, "", "Нажмите на ноду ниже, чтобы открыть историю.")
 	return trimMessage(strings.Join(lines, "\n"))
@@ -829,9 +923,22 @@ func (s *Service) sendCommandReplyWithMarkup(msg *message, text string, replyMar
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.Config().TimeoutSec)*time.Second)
 	defer cancel()
-	if err := s.sendTextToWithMarkup(ctx, strconv.FormatInt(msg.Chat.ID, 10), threadID, text, replyMarkup); err != nil {
+	if _, err := s.sendHTMLToWithMarkup(ctx, strconv.FormatInt(msg.Chat.ID, 10), threadID, text, replyMarkup); err != nil {
 		logger.Warn("Failed to send Telegram command reply: %v", err)
 	}
+}
+
+func (s *Service) editCommandMessage(msg *message, text string, replyMarkup string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.Config().TimeoutSec)*time.Second)
+	defer cancel()
+	if err := s.editTextWithMarkup(ctx, strconv.FormatInt(msg.Chat.ID, 10), msg.MessageID, text, replyMarkup); err != nil {
+		if isMessageNotModified(err) {
+			return true
+		}
+		logger.Warn("Failed to edit Telegram command message: %v", err)
+		return false
+	}
+	return true
 }
 
 func (s *Service) sendTextTo(ctx context.Context, chatID string, threadID int, text string) error {
@@ -854,6 +961,49 @@ func (s *Service) sendTextToWithMarkup(ctx context.Context, chatID string, threa
 	return err
 }
 
+func (s *Service) sendHTMLToWithMarkup(ctx context.Context, chatID string, threadID int, text string, replyMarkup string) (*message, error) {
+	values := url.Values{}
+	values.Set("chat_id", chatID)
+	values.Set("text", trimMessage(text))
+	values.Set("parse_mode", "HTML")
+	values.Set("disable_web_page_preview", "true")
+	if threadID > 0 {
+		values.Set("message_thread_id", strconv.Itoa(threadID))
+	}
+	if replyMarkup != "" {
+		values.Set("reply_markup", replyMarkup)
+	}
+
+	result, err := s.doAPI(ctx, "sendMessage", values)
+	if err != nil {
+		return nil, err
+	}
+	var sent message
+	if err := json.Unmarshal(result, &sent); err != nil {
+		return nil, nil
+	}
+	return &sent, nil
+}
+
+func isMessageNotModified(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "message is not modified")
+}
+
+func (s *Service) editTextWithMarkup(ctx context.Context, chatID string, messageID int, text string, replyMarkup string) error {
+	values := url.Values{}
+	values.Set("chat_id", chatID)
+	values.Set("message_id", strconv.Itoa(messageID))
+	values.Set("text", trimMessage(text))
+	values.Set("parse_mode", "HTML")
+	values.Set("disable_web_page_preview", "true")
+	if replyMarkup != "" {
+		values.Set("reply_markup", replyMarkup)
+	}
+
+	_, err := s.doAPI(ctx, "editMessageText", values)
+	return err
+}
+
 func (s *Service) answerCallback(callbackID string, text string) {
 	if callbackID == "" {
 		return
@@ -867,33 +1017,6 @@ func (s *Service) answerCallback(callbackID string, text string) {
 	defer cancel()
 	if _, err := s.doAPI(ctx, "answerCallbackQuery", values); err != nil {
 		logger.Warn("Failed to answer Telegram callback: %v", err)
-	}
-}
-
-func (s *Service) syncBotCommands() {
-	cfg := s.Config()
-	if !cfg.Enabled || !cfg.CommandPollingEnabled || cfg.BotToken == "" {
-		return
-	}
-	commands := []map[string]string{
-		{"command": "start", "description": "Открыть меню"},
-		{"command": "menu", "description": "Открыть меню"},
-		{"command": "status", "description": "Статусы серверов"},
-		{"command": "speed", "description": "Последние замеры ноды"},
-		{"command": "speedtest", "description": "Запустить speed-test"},
-		{"command": "id", "description": "Показать ID чата, топика и пользователя"},
-		{"command": "help", "description": "Справка по командам"},
-	}
-	data, err := json.Marshal(commands)
-	if err != nil {
-		return
-	}
-	values := url.Values{}
-	values.Set("commands", string(data))
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
-	defer cancel()
-	if _, err := s.doAPI(ctx, "setMyCommands", values); err != nil {
-		logger.Warn("Failed to update Telegram bot commands: %v", err)
 	}
 }
 
@@ -1231,6 +1354,20 @@ func speedIssues(results []speedtest.Result, threshold float64) []string {
 	return lines
 }
 
+func speedIssuesHTML(results []speedtest.Result, threshold float64) []string {
+	var lines []string
+	for _, result := range results {
+		if result.Error != "" {
+			lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  %s · %s", htmlEscape(result.Name), htmlCode(result.StableID), htmlEscape(result.Error)))
+			continue
+		}
+		if threshold > 0 && result.Mbps < threshold {
+			lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  %s · <b>LOW %.2f Mbps</b> · порог %.2f Mbps", htmlEscape(result.Name), htmlCode(result.StableID), result.Mbps, threshold))
+		}
+	}
+	return lines
+}
+
 func successfulResults(results []speedtest.Result) []speedtest.Result {
 	var successful []speedtest.Result
 	for _, result := range results {
@@ -1257,22 +1394,22 @@ func mainMenuMarkup(isAdmin bool) string {
 	}
 	if isAdmin {
 		rows = append(rows, []inlineKeyboardButton{
-			{Text: "🚀 Speed-test online", CallbackData: "speedtest:online"},
+			{Text: "Speed-test online", CallbackData: "speedtest:online"},
 		})
 		rows = append(rows, []inlineKeyboardButton{
-			{Text: "🧪 Speed-test all", CallbackData: "speedtest:all"},
+			{Text: "Speed-test all", CallbackData: "speedtest:all"},
 		})
 	}
 	rows = append(rows, []inlineKeyboardButton{
-		{Text: "🔄 Обновить", CallbackData: "menu:refresh"},
-		{Text: "ℹ️ Помощь", CallbackData: "help"},
+		{Text: "Обновить", CallbackData: "back_to_menu"},
+		{Text: "Помощь", CallbackData: "help"},
 	})
 	return encodeMarkup(rows)
 }
 
 func backToMenuMarkup() string {
 	return encodeMarkup([][]inlineKeyboardButton{
-		{{Text: "⬅️ Меню", CallbackData: "menu"}},
+		{{Text: "Меню", CallbackData: "back_to_menu"}},
 	})
 }
 
@@ -1300,7 +1437,7 @@ func (s *Service) speedHistoryMarkup() string {
 	if len(row) > 0 {
 		rows = append(rows, row)
 	}
-	rows = append(rows, []inlineKeyboardButton{{Text: "⬅️ Меню", CallbackData: "menu"}})
+	rows = append(rows, []inlineKeyboardButton{{Text: "Меню", CallbackData: "back_to_menu"}})
 	return encodeMarkup(rows)
 }
 
@@ -1349,15 +1486,15 @@ func formatSpeedResult(result speedtest.Result, threshold float64) string {
 }
 
 func formatSpeedHistoryLine(result speedtest.Result, threshold float64) string {
-	prefix := result.CheckedAt.Format("2006-01-02 15:04:05")
+	prefix := formatCheckedAt(result.CheckedAt)
 	if result.Error != "" {
-		return fmt.Sprintf("- %s: FAILED, %s", prefix, result.Error)
+		return fmt.Sprintf("• %s\n  <b>FAILED</b> · %s", htmlCode(prefix), htmlEscape(result.Error))
 	}
 	marker := "OK"
 	if threshold > 0 && result.Mbps < threshold {
 		marker = "LOW"
 	}
-	return fmt.Sprintf("- %s: %s %.2f Mbps, %s, %d ms, TTFB %d ms", prefix, marker, result.Mbps, formatBytes(result.DownloadedBytes), result.DurationMs, result.TTFBMs)
+	return fmt.Sprintf("• %s\n  <b>%s %.2f Mbps</b> · %s · %d ms · TTFB %d ms", htmlCode(prefix), marker, result.Mbps, htmlEscape(formatBytes(result.DownloadedBytes)), result.DurationMs, result.TTFBMs)
 }
 
 func formatBytes(bytes int64) string {
@@ -1381,6 +1518,18 @@ func formatProxyLine(proxy *models.ProxyConfig, online bool, latency time.Durati
 		latencyText = fmt.Sprintf("%d ms", latency.Milliseconds())
 	}
 	return fmt.Sprintf("- %s %s [%s] (%s, %s)", status, proxy.Name, proxy.StableID, proxy.Protocol, latencyText)
+}
+
+func formatProxyLineHTML(proxy *models.ProxyConfig, online bool, latency time.Duration) string {
+	status := "OFFLINE"
+	if online {
+		status = "ONLINE"
+	}
+	latencyText := "n/a"
+	if latency > 0 {
+		latencyText = fmt.Sprintf("%d ms", latency.Milliseconds())
+	}
+	return fmt.Sprintf("• <b>%s</b> <b>%s</b>\n  %s · %s · %s", htmlEscape(status), htmlEscape(proxy.Name), htmlCode(proxy.StableID), htmlCode(proxy.Protocol), htmlEscape(latencyText))
 }
 
 func formatNodeDown(proxy *models.ProxyConfig, failures int) string {
@@ -1420,30 +1569,46 @@ func formatIDReply(msg *message) string {
 
 func formatIDReplyFor(msg *message, from *user) string {
 	var lines []string
-	lines = append(lines, fmt.Sprintf("Chat ID: %d", msg.Chat.ID))
+	lines = append(lines, "<b>InvisibleProxyChecker</b>", "", "<b>Telegram IDs</b>")
+	lines = append(lines, fmt.Sprintf("Chat ID: %s", htmlCode(strconv.FormatInt(msg.Chat.ID, 10))))
 	if msg.MessageThreadID > 0 {
-		lines = append(lines, fmt.Sprintf("Topic ID: %d", msg.MessageThreadID))
+		lines = append(lines, fmt.Sprintf("Topic ID: %s", htmlCode(strconv.Itoa(msg.MessageThreadID))))
 	}
 	if from != nil {
-		lines = append(lines, fmt.Sprintf("User ID: %d", from.ID))
+		lines = append(lines, fmt.Sprintf("User ID: %s", htmlCode(strconv.FormatInt(from.ID, 10))))
 	}
 	return strings.Join(lines, "\n")
 }
 
 func formatProxySearchMiss(matches []*models.ProxyConfig) string {
 	if len(matches) == 0 {
-		return "Node not found."
+		return "<b>Нода не найдена</b>\n\nПроверьте stable ID или часть имени."
 	}
 	var lines []string
-	lines = append(lines, "Several nodes matched. Use stableId:")
+	lines = append(lines, "<b>Найдено несколько нод</b>", "", "Уточните запрос по stable ID:")
 	for _, proxy := range matches {
 		if len(lines) >= 11 {
 			lines = append(lines, fmt.Sprintf("...and %d more", len(matches)-10))
 			break
 		}
-		lines = append(lines, fmt.Sprintf("- %s: %s", proxy.StableID, proxy.Name))
+		lines = append(lines, fmt.Sprintf("• %s — <b>%s</b>", htmlCode(proxy.StableID), htmlEscape(proxy.Name)))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func htmlEscape(value string) string {
+	return html.EscapeString(value)
+}
+
+func htmlCode(value string) string {
+	return "<code>" + htmlEscape(value) + "</code>"
+}
+
+func formatCheckedAt(value time.Time) string {
+	if value.IsZero() {
+		return "n/a"
+	}
+	return value.Format("2006-01-02 15:04:05")
 }
 
 func trimMessage(text string) string {

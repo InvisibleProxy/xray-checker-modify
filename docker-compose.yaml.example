@@ -2,6 +2,8 @@ services:
   xray-checker:
     build:
       context: .
+      args:
+        ENABLE_UPX: ${ENABLE_UPX:-false}
     image: xray-checker:local
     container_name: xray-checker
     restart: unless-stopped

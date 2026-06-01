@@ -28,8 +28,12 @@ jobs:
           push: true
           build-args: |
             GIT_TAG=${{  github.ref_name }}
+            GIT_COMMIT=${{ github.sha }}
             USERNAME=${{ github.repository_owner }}
             REPOSITORY_NAME=${{ github.event.repository.name }}
+            ENABLE_UPX=false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/xray-checker:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/xray-checker:${{ github.ref_name }}

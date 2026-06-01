@@ -1,33 +1,39 @@
-FROM --platform=${BUILDPLATFORM:-linux/amd64} golang:1.25-alpine AS builder
+# syntax=docker/dockerfile:1.7
 
-ARG TARGETPLATFORM
-ARG BUILDPLATFORM
-ARG TARGETOS
-ARG TARGETARCH
+ARG GO_VERSION=1.25
+ARG ALPINE_VERSION=3.21
+
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
+
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 ARG GIT_TAG
 ARG GIT_COMMIT
 ARG USERNAME=kutovoys
 ARG REPOSITORY_NAME=xray-checker
+ARG ENABLE_UPX=false
 
 ENV CGO_ENABLED=0
 ENV GO111MODULE=on
 
-# Install UPX for binary compression
-RUN apk add --no-cache upx
-
 WORKDIR /go/src/github.com/${USERNAME}/${REPOSITORY_NAME}
 
-COPY go.mod go.mod
-COPY go.sum go.sum
-RUN go mod download
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+  go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=${CGO_ENABLED} GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-  go build -ldflags="-s -w -X main.version=${GIT_TAG} -X main.commit=${GIT_COMMIT}" -a -installsuffix cgo -o /usr/bin/xray-checker . && \
-  upx --best --lzma /usr/bin/xray-checker
+RUN --mount=type=cache,target=/go/pkg/mod \
+  --mount=type=cache,target=/root/.cache/go-build \
+  GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+  go build -trimpath -ldflags="-s -w -X main.version=${GIT_TAG} -X main.commit=${GIT_COMMIT}" -o /usr/bin/xray-checker . && \
+  if [ "${ENABLE_UPX}" = "true" ]; then \
+    apk add --no-cache upx && \
+    upx --best --lzma /usr/bin/xray-checker; \
+  fi
 
-FROM alpine:3.21
+FROM alpine:${ALPINE_VERSION}
 
 ARG USERNAME=kutovoys
 ARG REPOSITORY_NAME=xray-checker

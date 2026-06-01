@@ -86,7 +86,7 @@ type Snapshot struct {
 	Defaults TestConfig     `json:"defaults"`
 	Schedule ScheduleConfig `json:"schedule"`
 	LastRun  RunInfo        `json:"lastRun"`
-	Results  []Result      `json:"results"`
+	Results  []Result       `json:"results"`
 }
 
 type RunReport struct {
@@ -157,7 +157,7 @@ func (m *Manager) Load() error {
 	if err := json.Unmarshal(data, &schedule); err != nil {
 		return err
 	}
-	schedule.Config = normalizeConfig(schedule.Config)
+	schedule.Config = m.normalizeConfig(schedule.Config)
 	if schedule.IntervalSec < 60 {
 		schedule.IntervalSec = 3600
 	}
@@ -213,7 +213,7 @@ func (m *Manager) Schedule() ScheduleConfig {
 }
 
 func (m *Manager) UpdateSchedule(schedule ScheduleConfig) error {
-	schedule.Config = normalizeConfig(schedule.Config)
+	schedule.Config = m.normalizeConfig(schedule.Config)
 	if schedule.Enabled && schedule.IntervalSec < 60 {
 		return fmt.Errorf("intervalSec must be at least 60 when schedule is enabled")
 	}
@@ -234,7 +234,7 @@ func (m *Manager) UpdateSchedule(schedule ScheduleConfig) error {
 }
 
 func (m *Manager) Run(req RunRequest, source string) error {
-	req.Config = normalizeConfig(req.Config)
+	req.Config = m.normalizeConfig(req.Config)
 	proxies := m.selectProxies(req)
 	if len(proxies) == 0 {
 		return fmt.Errorf("no proxies selected")
@@ -496,24 +496,50 @@ func (m *Manager) signalScheduleChange() {
 	}
 }
 
+func (m *Manager) normalizeConfig(cfg TestConfig) TestConfig {
+	return normalizeConfigWithDefaults(cfg, m.defaults)
+}
+
 func normalizeConfig(cfg TestConfig) TestConfig {
+	return normalizeConfigWithDefaults(cfg, TestConfig{
+		URL:         defaultURL,
+		MaxBytes:    defaultMaxBytes,
+		TimeoutSec:  defaultTimeoutSec,
+		Concurrency: defaultConcurrency,
+	})
+}
+
+func normalizeConfigWithDefaults(cfg TestConfig, defaults TestConfig) TestConfig {
+	if defaults.URL == "" {
+		defaults.URL = defaultURL
+	}
+	if defaults.MaxBytes <= 0 {
+		defaults.MaxBytes = defaultMaxBytes
+	}
+	if defaults.TimeoutSec <= 0 {
+		defaults.TimeoutSec = defaultTimeoutSec
+	}
+	if defaults.Concurrency <= 0 {
+		defaults.Concurrency = defaultConcurrency
+	}
+
 	if cfg.URL == "" {
-		cfg.URL = defaultURL
+		cfg.URL = defaults.URL
 	}
 	if cfg.MaxBytes <= 0 {
-		cfg.MaxBytes = defaultMaxBytes
+		cfg.MaxBytes = defaults.MaxBytes
 	}
 	if cfg.MaxBytes > maxBytesLimit {
 		cfg.MaxBytes = maxBytesLimit
 	}
 	if cfg.TimeoutSec <= 0 {
-		cfg.TimeoutSec = defaultTimeoutSec
+		cfg.TimeoutSec = defaults.TimeoutSec
 	}
 	if cfg.TimeoutSec > maxTimeoutSec {
 		cfg.TimeoutSec = maxTimeoutSec
 	}
 	if cfg.Concurrency <= 0 {
-		cfg.Concurrency = defaultConcurrency
+		cfg.Concurrency = defaults.Concurrency
 	}
 	if cfg.Concurrency > maxConcurrency {
 		cfg.Concurrency = maxConcurrency
