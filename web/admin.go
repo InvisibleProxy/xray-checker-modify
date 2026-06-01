@@ -113,18 +113,18 @@ func AdminTelegramHandler(service *telegram.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			writeJSON(w, service.Config())
+			writeJSON(w, service.AdminConfig())
 		case http.MethodPut:
-			var cfg telegram.Config
+			var cfg telegram.AdminConfig
 			if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 				writeError(w, "Invalid JSON body", http.StatusBadRequest)
 				return
 			}
-			if err := service.UpdateConfig(cfg); err != nil {
+			if err := service.UpdateAdminConfig(cfg); err != nil {
 				writeError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			writeJSON(w, service.Config())
+			writeJSON(w, service.AdminConfig())
 		default:
 			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}

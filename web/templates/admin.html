@@ -31,7 +31,7 @@
       }
       header,
       main {
-        max-width: 1320px;
+        max-width: 1480px;
         margin: 0 auto;
         padding: 20px;
       }
@@ -56,18 +56,21 @@
       }
       .grid {
         display: grid;
-        grid-template-columns: minmax(260px, 360px) 1fr;
+        grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
         gap: 16px;
+        align-items: start;
       }
       .panel {
         background: var(--panel);
         border: 1px solid var(--border);
         border-radius: 8px;
         padding: 16px;
+        min-width: 0;
       }
       .stack {
         display: grid;
         gap: 12px;
+        align-content: start;
       }
       label {
         display: grid;
@@ -148,6 +151,7 @@
         border-bottom: 1px solid var(--border);
         text-align: left;
         vertical-align: middle;
+        overflow-wrap: anywhere;
       }
       th {
         color: var(--muted);
@@ -156,6 +160,16 @@
       }
       .mono {
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      .node-name {
+        min-width: 180px;
+      }
+      .server-cell {
+        min-width: 170px;
+      }
+      .speed-cell,
+      .status-cell {
+        white-space: nowrap;
       }
       .pill {
         display: inline-flex;
@@ -174,6 +188,33 @@
       }
       .warn {
         color: var(--yellow);
+      }
+      .config-status {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+      .config-status div {
+        min-width: 0;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--panel-2);
+        padding: 9px 10px;
+      }
+      .config-status span,
+      .hint {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .config-status strong {
+        display: block;
+        margin-top: 3px;
+        font-size: 13px;
+        overflow-wrap: anywhere;
+      }
+      .hint {
+        line-height: 1.4;
       }
       @media (max-width: 960px) {
         .grid {
@@ -270,24 +311,25 @@
           <input id="telegram-enabled" type="checkbox" />
           Enabled
         </label>
-        <label>
-          Bot token
-          <input id="telegram-token" type="password" autocomplete="off" />
-        </label>
-        <div class="split">
-          <label>
-            Chat ID
-            <input id="telegram-chat" type="text" autocomplete="off" placeholder="-100..." />
-          </label>
-          <label>
-            Topic ID
-            <input id="telegram-topic" type="number" min="0" step="1" />
-          </label>
+        <div class="config-status">
+          <div>
+            <span>Bot token</span>
+            <strong id="telegram-token-state">Not set</strong>
+          </div>
+          <div>
+            <span>Chat</span>
+            <strong id="telegram-chat-state">Not set</strong>
+          </div>
+          <div>
+            <span>Topic</span>
+            <strong id="telegram-topic-state">Not set</strong>
+          </div>
+          <div>
+            <span>Admins</span>
+            <strong id="telegram-admin-state">0 users</strong>
+          </div>
         </div>
-        <label>
-          Admin user IDs
-          <input id="telegram-admins" type="text" autocomplete="off" placeholder="123456,987654" />
-        </label>
+        <div class="hint">Sensitive Telegram values are read from environment variables only.</div>
         <label class="row">
           <input id="telegram-commands" type="checkbox" />
           Bot commands
@@ -432,20 +474,9 @@
         };
       }
 
-      function parseAdminIds(value) {
-        return value
-          .split(",")
-          .map((part) => Number(part.trim()))
-          .filter((value) => Number.isFinite(value) && value !== 0);
-      }
-
       function telegramFromForm() {
         return {
           enabled: $("telegram-enabled").checked,
-          botToken: $("telegram-token").value.trim(),
-          chatId: $("telegram-chat").value.trim(),
-          messageThreadId: Math.max(0, Number($("telegram-topic").value || 0)),
-          adminUserIds: parseAdminIds($("telegram-admins").value),
           commandPollingEnabled: $("telegram-commands").checked,
           speedReportsEnabled: $("telegram-speed-reports").checked,
           speedReportMode: $("telegram-report-mode").value,
@@ -514,11 +545,11 @@
           return `
             <tr>
               <td><input type="checkbox" data-id="${proxy.stableId}" ${checked}></td>
-              <td>
+              <td class="node-name">
                 <div>${escapeHtml(proxy.name || "Unnamed")}</div>
                 <div class="muted mono">${escapeHtml(proxy.stableId)}</div>
               </td>
-              <td>
+              <td class="status-cell">
                 <span class="status">
                   <span class="dot ${proxy.online ? "online" : "offline"}"></span>
                   ${proxy.online ? "Online" : "Offline"}
@@ -526,8 +557,8 @@
               </td>
               <td><span class="pill">${escapeHtml(proxy.protocol)}</span></td>
               <td>${escapeHtml(proxy.subName || "")}</td>
-              <td class="mono">${escapeHtml(proxy.server)}:${proxy.port}</td>
-              <td>${speed}</td>
+              <td class="mono server-cell">${escapeHtml(proxy.server)}:${proxy.port}</td>
+              <td class="speed-cell">${speed}</td>
             </tr>`;
         });
         $("nodes").innerHTML = rows.join("") || `<tr><td colspan="7" class="muted">No nodes match filters</td></tr>`;
@@ -598,10 +629,14 @@
       function applyTelegram() {
         const cfg = state.telegram || {};
         $("telegram-enabled").checked = !!cfg.enabled;
-        $("telegram-token").value = cfg.botToken || "";
-        $("telegram-chat").value = cfg.chatId || "";
-        $("telegram-topic").value = cfg.messageThreadId || 0;
-        $("telegram-admins").value = Array.isArray(cfg.adminUserIds) ? cfg.adminUserIds.join(",") : "";
+        $("telegram-token-state").textContent = cfg.botTokenConfigured ? "Configured" : "Not set";
+        $("telegram-token-state").className = cfg.botTokenConfigured ? "ok" : "warn";
+        $("telegram-chat-state").textContent = cfg.chatConfigured ? "Configured" : "Not set";
+        $("telegram-chat-state").className = cfg.chatConfigured ? "ok" : "warn";
+        $("telegram-topic-state").textContent = cfg.messageThreadConfigured ? "Configured" : "Not set";
+        $("telegram-topic-state").className = cfg.messageThreadConfigured ? "ok" : "muted";
+        $("telegram-admin-state").textContent = `${cfg.adminUserCount || 0} users`;
+        $("telegram-admin-state").className = cfg.adminUserCount > 0 ? "ok" : "warn";
         $("telegram-commands").checked = cfg.commandPollingEnabled !== false;
         $("telegram-speed-reports").checked = cfg.speedReportsEnabled !== false;
         $("telegram-report-mode").value = cfg.speedReportMode || "always";

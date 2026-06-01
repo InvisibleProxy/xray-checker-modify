@@ -139,6 +139,16 @@ This allows Xray Checker to monitor each resolved endpoint individually.
 
 Adds measured latency (TTFB - Time To First Byte) to endpoint responses, useful for monitoring systems that can interpret response delays.
 
+## Speed Test
+
+### SPEED_TEST_URL
+
+- CLI: `--speed-test-url`
+- Required: No
+- Default: `https://proof.ovh.net/files/10Mb.dat`
+
+Default URL used by private speed tests in the admin panel, schedules, and Telegram-triggered checks. The URL can still be overridden per saved schedule or manual run.
+
 ## Web UI
 
 ### WEB_SHOW_DETAILS

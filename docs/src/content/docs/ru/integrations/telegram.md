@@ -14,6 +14,7 @@ Xray Checker умеет отправлять отчеты speed-test и опов
 - Показывать статусы нод командой `/status`.
 - Показывать последние замеры скорости конкретной ноды командой `/speed`.
 - Запускать speed-test из Telegram командой `/speedtest`. Команда доступна только администраторам.
+- Открывать inline-меню командой `/start` или `/menu`.
 
 ## Требования
 
@@ -48,6 +49,7 @@ METRICS_PASSWORD=replace-with-a-long-random-password
 
 PROXY_CHECK_METHOD=status
 LOG_LEVEL=info
+SPEED_TEST_URL=https://proof.ovh.net/files/10Mb.dat
 
 TELEGRAM_ENABLED=true
 TELEGRAM_BOT_TOKEN=123456:bot-token-from-botfather
@@ -74,12 +76,10 @@ http://127.0.0.1:2112/admin
 
 Если вы не знаете ID чата или топика:
 
-1. Откройте `/admin`.
-2. В блоке `Telegram` включите `Enabled`.
-3. Укажите `Bot token`.
-4. Включите `Bot commands`.
-5. Сохраните настройки. `Chat ID` можно временно оставить пустым.
-6. Напишите боту в нужном чате или топике:
+1. Укажите `TELEGRAM_ENABLED=true` и `TELEGRAM_BOT_TOKEN` в `.env`.
+2. Оставьте `TELEGRAM_CHAT_ID`, `TELEGRAM_MESSAGE_THREAD_ID` и `TELEGRAM_ADMIN_IDS` пустыми.
+3. Перезапустите сервис.
+4. Напишите боту в нужном чате или топике:
 
 ```text
 /id
@@ -93,13 +93,13 @@ Topic ID: 42
 User ID: 123456789
 ```
 
-После этого заполните в админке:
+После этого заполните в `.env`:
 
-- `Chat ID` — ID чата или группы.
-- `Topic ID` — ID топика, если сообщения нужно отправлять в конкретную тему.
-- `Admin user IDs` — список Telegram user ID администраторов через запятую.
+- `TELEGRAM_CHAT_ID` — ID чата или группы.
+- `TELEGRAM_MESSAGE_THREAD_ID` — ID топика, если сообщения нужно отправлять в конкретную тему.
+- `TELEGRAM_ADMIN_IDS` — список Telegram user ID администраторов через запятую.
 
-Сохраните настройки и нажмите `Test`. Тестовое сообщение уйдет в заданный чат или топик.
+Перезапустите сервис и нажмите `Test` в админке. Тестовое сообщение уйдет в заданный чат или топик.
 
 ## Настройки в админ-панели
 
@@ -108,10 +108,7 @@ User ID: 123456789
 | Поле | Описание |
 | --- | --- |
 | `Enabled` | Включает Telegram-интеграцию. |
-| `Bot token` | Токен бота из BotFather. |
-| `Chat ID` | ID обычного чата, группы или супергруппы. |
-| `Topic ID` | ID топика группы. Оставьте `0`, если топик не нужен. |
-| `Admin user IDs` | Telegram user ID пользователей, которым разрешен запуск speed-test. |
+| `Bot token`, `Chat`, `Topic`, `Admins` | Только статус, задано ли значение через env. Сами значения в веб-интерфейсе не показываются и не изменяются. |
 | `Bot commands` | Включает polling команд `/status`, `/speed`, `/speedtest`, `/id`. |
 | `Speed reports` | Включает отправку отчетов после speed-test. |
 | `Report mode` | `Always` отправляет каждый отчет, `Only issues` отправляет только отчеты с ошибками или низкой скоростью, `Disabled` отключает отчеты. |
@@ -122,13 +119,22 @@ User ID: 123456789
 | `Repeat min` | Как часто повторять alert по уже недоступной ноде. |
 | `Recovery alerts` | Отправлять сообщение, когда нода восстановилась. |
 
-Настройки сохраняются в:
+Нечувствительные настройки сохраняются в:
 
 ```text
 data/telegram_config.json
 ```
 
 При Docker Compose этот файл хранится в volume `xray_data`.
+
+Токен бота, chat ID, topic ID и admin user IDs задаются только через переменные окружения:
+
+```env
+TELEGRAM_BOT_TOKEN=123456:bot-token-from-botfather
+TELEGRAM_CHAT_ID=-1001234567890
+TELEGRAM_MESSAGE_THREAD_ID=42
+TELEGRAM_ADMIN_IDS=123456789
+```
 
 ## Команды бота
 
@@ -147,6 +153,15 @@ data/telegram_config.json
 ```
 
 Показывает доступные команды.
+
+### Меню
+
+```text
+/start
+/menu
+```
+
+Открывает меню с кнопками: статусы нод, проблемные ноды, последние замеры, запуск speed-test для администратора и получение ID.
 
 ### Статусы нод
 
@@ -204,7 +219,7 @@ data/telegram_config.json
 /speedtest sub:Premium
 ```
 
-Команда `/speedtest` доступна только пользователям из `Admin user IDs`.
+Команда `/speedtest` доступна только пользователям из `TELEGRAM_ADMIN_IDS`.
 
 ## Как выбирается нода для Telegram
 
@@ -226,11 +241,11 @@ data/telegram_config.json
 2. Дождитесь первой проверки нод или нажмите refresh в админке.
 3. Создайте бота через BotFather.
 4. Добавьте бота в чат или топик.
-5. Включите Telegram в `/admin`, укажите токен и включите команды.
+5. Укажите `TELEGRAM_BOT_TOKEN` в `.env`, включите `TELEGRAM_ENABLED=true` и перезапустите сервис.
 6. Получите ID через `/id`.
-7. Заполните `Chat ID`, `Topic ID` и `Admin user IDs`.
-8. Нажмите `Test`.
-9. Настройте `Low Mbps`, режим отчетов и параметры down-alert.
+7. Заполните `TELEGRAM_CHAT_ID`, `TELEGRAM_MESSAGE_THREAD_ID` и `TELEGRAM_ADMIN_IDS` в `.env`.
+8. Перезапустите сервис и нажмите `Test`.
+9. Настройте `Low Mbps`, режим отчетов и параметры down-alert в `/admin`.
 
 ## Диагностика
 
@@ -239,7 +254,7 @@ data/telegram_config.json
 Проверьте:
 
 - `Enabled` включен.
-- `Bot token` задан верно.
+- `TELEGRAM_BOT_TOKEN` задан верно.
 - `Bot commands` включены.
 - В подписке есть хотя бы одна нода, через которую доступен Telegram.
 - Бот добавлен в нужную группу или топик.
@@ -248,8 +263,8 @@ data/telegram_config.json
 
 Проверьте:
 
-- `Chat ID` заполнен.
-- `Topic ID` указан только если нужен конкретный топик.
+- `TELEGRAM_CHAT_ID` заполнен.
+- `TELEGRAM_MESSAGE_THREAD_ID` указан только если нужен конкретный топик.
 - Бот имеет право писать в чат.
 - После запуска уже появилась хотя бы одна рабочая нода.
 

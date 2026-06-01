@@ -105,7 +105,7 @@ func main() {
 		proxyChecker,
 		config.CLIConfig.Xray.StartPort,
 		"data/speedtest_schedule.json",
-		speedtest.TestConfig{},
+		speedtest.TestConfig{URL: config.CLIConfig.SpeedTest.URL},
 	)
 	if err := speedTestManager.Load(); err != nil {
 		logger.Warn("Failed to load speed test schedule: %v", err)
