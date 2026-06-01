@@ -443,6 +443,7 @@
       const $ = (id) => document.getElementById(id);
       const api = (path) => `${basePath}/api/v1/admin${path}`;
       const mb = 1024 * 1024;
+      const speedDraftKey = "xray-checker-admin-speed-test";
 
       function escapeHtml(value) {
         return String(value || "")
@@ -472,6 +473,29 @@
           timeoutSec: Math.max(5, Number($("timeout").value || 120)),
           concurrency: Math.max(1, Number($("concurrency").value || 2)),
         };
+      }
+
+      function applySpeedConfig(config) {
+        if (!config) return;
+        if (Object.prototype.hasOwnProperty.call(config, "url")) $("url").value = config.url || "";
+        if (config.maxBytes) $("max-mb").value = Math.round(config.maxBytes / mb) || $("max-mb").value;
+        if (config.timeoutSec) $("timeout").value = config.timeoutSec;
+        if (config.concurrency) $("concurrency").value = config.concurrency;
+      }
+
+      function loadSpeedDraft() {
+        try {
+          return JSON.parse(localStorage.getItem(speedDraftKey) || "null");
+        } catch {
+          return null;
+        }
+      }
+
+      function saveSpeedDraft() {
+        try {
+          localStorage.setItem(speedDraftKey, JSON.stringify(configFromForm()));
+        } catch {
+        }
       }
 
       function telegramFromForm() {
@@ -604,10 +628,12 @@
       function applyDefaults() {
         if (!state.snapshot) return;
         const defaults = state.snapshot.defaults;
-        $("url").value = defaults.url || "";
-        $("max-mb").value = Math.round((defaults.maxBytes || 0) / mb) || 10;
-        $("timeout").value = defaults.timeoutSec || 120;
-        $("concurrency").value = defaults.concurrency || 2;
+        applySpeedConfig({
+          url: defaults.url || "",
+          maxBytes: defaults.maxBytes || 10 * mb,
+          timeoutSec: defaults.timeoutSec || 120,
+          concurrency: defaults.concurrency || 2,
+        });
 
         const schedule = state.snapshot.schedule || {};
         $("schedule-enabled").checked = !!schedule.enabled;
@@ -618,12 +644,10 @@
         if (Array.isArray(schedule.proxyIds)) {
           state.selected = new Set(schedule.proxyIds);
         }
-        if (schedule.config && schedule.config.url) {
-          $("url").value = schedule.config.url;
-          $("max-mb").value = Math.round(schedule.config.maxBytes / mb) || $("max-mb").value;
-          $("timeout").value = schedule.config.timeoutSec || $("timeout").value;
-          $("concurrency").value = schedule.config.concurrency || $("concurrency").value;
+        if (schedule.enabled && schedule.config && schedule.config.url) {
+          applySpeedConfig(schedule.config);
         }
+        applySpeedConfig(loadSpeedDraft());
       }
 
       function applyTelegram() {
@@ -678,6 +702,7 @@
           return;
         }
         try {
+          saveSpeedDraft();
           await request("/speed-tests/run", {
             method: "POST",
             body: JSON.stringify({
@@ -695,6 +720,7 @@
         $("message").textContent = "";
         try {
           const filters = currentFilters();
+          saveSpeedDraft();
           await request("/schedules", {
             method: "PUT",
             body: JSON.stringify({
@@ -759,6 +785,10 @@
       ["search", "status-filter", "protocol-filter", "sub-filter"].forEach((id) => {
         $(id).addEventListener("input", renderNodes);
         $(id).addEventListener("change", renderNodes);
+      });
+      ["url", "max-mb", "timeout", "concurrency"].forEach((id) => {
+        $(id).addEventListener("input", saveSpeedDraft);
+        $(id).addEventListener("change", saveSpeedDraft);
       });
 
       load(true).catch((err) => {

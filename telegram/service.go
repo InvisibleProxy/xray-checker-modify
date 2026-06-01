@@ -324,7 +324,7 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
 	defer cancel()
 
-	if err := s.sendText(ctx, text); err != nil {
+	if err := s.sendTextToWithMarkup(ctx, cfg.ChatID, cfg.MessageThreadID, text, backToMenuMarkup()); err != nil {
 		logger.Warn("Failed to send Telegram speed-test report: %v", err)
 	}
 }
@@ -496,12 +496,22 @@ func (s *Service) handleCallback(cb *callbackQuery) {
 	case data == "issues":
 		s.answerCallback(cb.ID, "")
 		s.editCommandMessage(cb.Message, s.formatIssuesSummary(), backToMenuMarkup())
+	case data == "nodes:list":
+		s.answerCallback(cb.ID, "")
+		s.editCommandMessage(cb.Message, s.formatNodeList(), s.nodeListMarkup())
 	case data == "help":
 		s.answerCallback(cb.ID, "")
 		s.editCommandMessage(cb.Message, s.formatHelp(cfg), backToMenuMarkup())
 	case data == "speed:list":
 		s.answerCallback(cb.ID, "")
 		s.editCommandMessage(cb.Message, s.formatRecentSpeedOverview(), s.speedHistoryMarkup())
+	case strings.HasPrefix(data, "node:test:"):
+		stableID := strings.TrimPrefix(data, "node:test:")
+		s.handleNodeSpeedTestCallback(cb, stableID)
+	case strings.HasPrefix(data, "node:"):
+		s.answerCallback(cb.ID, "")
+		stableID := strings.TrimPrefix(data, "node:")
+		s.editCommandMessage(cb.Message, s.formatNodeDetails(stableID), s.nodeDetailMarkup(stableID, s.isAdminUser(cb.From, cfg)))
 	case strings.HasPrefix(data, "speed:"):
 		s.answerCallback(cb.ID, "")
 		query := strings.TrimPrefix(data, "speed:")
@@ -512,6 +522,39 @@ func (s *Service) handleCallback(cb *callbackQuery) {
 		s.handleSpeedTestCallback(cb, false)
 	default:
 		s.answerCallback(cb.ID, "Неизвестное действие")
+	}
+}
+
+func (s *Service) handleNodeSpeedTestCallback(cb *callbackQuery, stableID string) {
+	cfg := s.Config()
+	if !s.isAdminUser(cb.From, cfg) {
+		s.answerCallback(cb.ID, "Только для администратора")
+		return
+	}
+	proxy, matches := s.findProxy(stableID)
+	if proxy == nil {
+		s.answerCallback(cb.ID, "Нода не найдена")
+		if cb.Message != nil {
+			s.editCommandMessage(cb.Message, formatProxySearchMiss(matches), s.nodeListMarkup())
+		}
+		return
+	}
+
+	req := speedtest.RunRequest{
+		ProxyIDs:   []string{proxy.StableID},
+		OnlyOnline: false,
+	}
+	if err := s.speedManager.Run(req, "telegram"); err != nil {
+		s.answerCallback(cb.ID, "Не запущено")
+		if cb.Message != nil {
+			s.editCommandMessage(cb.Message, fmt.Sprintf("<b>Speed-test не запущен</b>\n\n%s", htmlEscape(err.Error())), s.nodeDetailMarkup(proxy.StableID, true))
+		}
+		return
+	}
+
+	s.answerCallback(cb.ID, "Speed-test запущен")
+	if cb.Message != nil {
+		s.editCommandMessage(cb.Message, fmt.Sprintf("<b>Speed-test запущен</b>\n\nНода: <b>%s</b>\nОтчет будет отправлен после завершения проверки.", htmlEscape(proxy.Name)), s.nodeDetailMarkup(proxy.StableID, true))
 	}
 }
 
@@ -683,6 +726,95 @@ func (s *Service) formatMenu(cfg Config, isAdmin bool) string {
 	}, "\n")
 }
 
+func (s *Service) formatNodeList() string {
+	proxies := s.sortedProxies()
+	total, online, offline := s.nodeCounts()
+	lines := []string{
+		"<b>InvisibleProxyChecker</b>",
+		"",
+		"<b>Ноды</b>",
+		fmt.Sprintf("Всего: <b>%d</b> | Online: <b>%d</b> | Offline: <b>%d</b>", total, online, offline),
+		"",
+		"Выберите ноду кнопкой ниже, чтобы открыть статус, последние замеры и действия.",
+	}
+	if len(proxies) == 0 {
+		lines = append(lines, "", "Ноды не найдены.")
+	}
+	return trimMessage(strings.Join(lines, "\n"))
+}
+
+func (s *Service) formatNodeDetails(stableID string) string {
+	proxy, matches := s.findProxy(stableID)
+	if proxy == nil {
+		return formatProxySearchMiss(matches)
+	}
+	online, latency, err := s.proxyChecker.GetProxyStatusByStableID(proxy.StableID)
+	status := "ONLINE"
+	if err != nil || !online {
+		status = "OFFLINE"
+	}
+	latencyText := "n/a"
+	if latency > 0 {
+		latencyText = fmt.Sprintf("%d ms", latency.Milliseconds())
+	}
+
+	lines := []string{
+		"<b>InvisibleProxyChecker</b>",
+		"",
+		"<b>Нода</b>",
+		fmt.Sprintf("<b>%s</b>", htmlEscape(proxy.Name)),
+		fmt.Sprintf("ID: %s", htmlCode(proxy.StableID)),
+		fmt.Sprintf("Статус: <b>%s</b> · %s", htmlEscape(status), htmlEscape(latencyText)),
+		fmt.Sprintf("Протокол: %s", htmlCode(proxy.Protocol)),
+	}
+	if proxy.SubName != "" {
+		lines = append(lines, fmt.Sprintf("Подписка: <b>%s</b>", htmlEscape(proxy.SubName)))
+	}
+	if proxy.Server != "" {
+		lines = append(lines, fmt.Sprintf("Сервер: %s", htmlCode(fmt.Sprintf("%s:%d", proxy.Server, proxy.Port))))
+	}
+
+	history := s.speedManager.ResultHistory(proxy.StableID)
+	if len(history) == 0 {
+		if result := s.latestSpeedResult(proxy.StableID); result != nil {
+			history = []speedtest.Result{*result}
+		}
+	}
+	lines = append(lines, "", "<b>Последние замеры</b>")
+	if len(history) == 0 {
+		lines = append(lines, "Пока нет результатов speed-test.")
+	} else {
+		cfg := s.Config()
+		for _, result := range limitResults(history, 5) {
+			lines = append(lines, formatSpeedHistoryLine(result, cfg.LowSpeedThresholdMbps))
+		}
+	}
+	return trimMessage(strings.Join(lines, "\n"))
+}
+
+func (s *Service) latestSpeedResult(stableID string) *speedtest.Result {
+	for _, result := range s.speedManager.Snapshot().Results {
+		if result.StableID == stableID {
+			resultCopy := result
+			return &resultCopy
+		}
+	}
+	return nil
+}
+
+func (s *Service) sortedProxies() []*models.ProxyConfig {
+	proxies := s.proxyChecker.GetProxies()
+	for _, proxy := range proxies {
+		if proxy.StableID == "" {
+			proxy.StableID = proxy.GenerateStableID()
+		}
+	}
+	sort.Slice(proxies, func(i, j int) bool {
+		return strings.ToLower(proxies[i].Name) < strings.ToLower(proxies[j].Name)
+	})
+	return proxies
+}
+
 func (s *Service) lastMenuMessageID(chatID int64, threadID int, userID int64) (int, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -734,10 +866,7 @@ func (s *Service) nodeCounts() (total int, online int, offline int) {
 }
 
 func (s *Service) formatStatus() string {
-	proxies := s.proxyChecker.GetProxies()
-	sort.Slice(proxies, func(i, j int) bool {
-		return strings.ToLower(proxies[i].Name) < strings.ToLower(proxies[j].Name)
-	})
+	proxies := s.sortedProxies()
 
 	var onlineLines []string
 	var offlineLines []string
@@ -1384,12 +1513,12 @@ func successfulResults(results []speedtest.Result) []speedtest.Result {
 func mainMenuMarkup(isAdmin bool) string {
 	rows := [][]inlineKeyboardButton{
 		{
-			{Text: "📊 Статусы", CallbackData: "status"},
+			{Text: "🖥 Ноды", CallbackData: "nodes:list"},
 			{Text: "📈 Замеры", CallbackData: "speed:list"},
 		},
 		{
 			{Text: "⚠️ Проблемы", CallbackData: "issues"},
-			{Text: "🆔 ID", CallbackData: "id"},
+			{Text: "📊 Все статусы", CallbackData: "status"},
 		},
 	}
 	if isAdmin {
@@ -1402,7 +1531,6 @@ func mainMenuMarkup(isAdmin bool) string {
 	}
 	rows = append(rows, []inlineKeyboardButton{
 		{Text: "Обновить", CallbackData: "back_to_menu"},
-		{Text: "Помощь", CallbackData: "help"},
 	})
 	return encodeMarkup(rows)
 }
@@ -1411,6 +1539,38 @@ func backToMenuMarkup() string {
 	return encodeMarkup([][]inlineKeyboardButton{
 		{{Text: "Меню", CallbackData: "back_to_menu"}},
 	})
+}
+
+func (s *Service) nodeListMarkup() string {
+	var rows [][]inlineKeyboardButton
+	for _, proxy := range s.sortedProxies() {
+		online, _, err := s.proxyChecker.GetProxyStatusByStableID(proxy.StableID)
+		status := "🔴"
+		if err == nil && online {
+			status = "🟢"
+		}
+		rows = append(rows, []inlineKeyboardButton{{
+			Text:         status + " " + shortButtonText(proxy.Name),
+			CallbackData: "node:" + proxy.StableID,
+		}})
+	}
+	rows = append(rows, []inlineKeyboardButton{{Text: "Меню", CallbackData: "back_to_menu"}})
+	return encodeMarkup(rows)
+}
+
+func (s *Service) nodeDetailMarkup(stableID string, isAdmin bool) string {
+	var rows [][]inlineKeyboardButton
+	if isAdmin {
+		rows = append(rows, []inlineKeyboardButton{{
+			Text:         "Speed-test этой ноды",
+			CallbackData: "node:test:" + stableID,
+		}})
+	}
+	rows = append(rows, []inlineKeyboardButton{
+		{Text: "Ноды", CallbackData: "nodes:list"},
+		{Text: "Меню", CallbackData: "back_to_menu"},
+	})
+	return encodeMarkup(rows)
 }
 
 func (s *Service) speedHistoryMarkup() string {
