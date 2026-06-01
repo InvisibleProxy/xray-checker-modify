@@ -20,13 +20,14 @@ import (
 )
 
 const (
-	defaultURL         = "https://proof.ovh.net/files/10Mb.dat"
-	defaultMaxBytes    = int64(10 * 1024 * 1024)
-	defaultTimeoutSec  = 120
-	defaultConcurrency = 2
-	maxBytesLimit      = int64(100 * 1024 * 1024)
-	maxTimeoutSec      = 300
-	maxConcurrency     = 10
+	defaultURL          = "https://proof.ovh.net/files/10Mb.dat"
+	defaultMaxBytes     = int64(10 * 1024 * 1024)
+	defaultTimeoutSec   = 120
+	defaultConcurrency  = 2
+	maxBytesLimit       = int64(100 * 1024 * 1024)
+	maxTimeoutSec       = 300
+	maxConcurrency      = 10
+	defaultHistoryLimit = 10
 )
 
 type TestConfig struct {
@@ -88,6 +89,19 @@ type Snapshot struct {
 	Results  []Result      `json:"results"`
 }
 
+type RunReport struct {
+	Source     string
+	StartedAt  time.Time
+	FinishedAt time.Time
+	Selected   int
+	Config     TestConfig
+	Results    []Result
+}
+
+type Reporter interface {
+	NotifySpeedTest(report RunReport)
+}
+
 type Manager struct {
 	proxyChecker *checker.ProxyChecker
 	startPort    int
@@ -98,7 +112,9 @@ type Manager struct {
 	running  bool
 	lastRun  RunInfo
 	results  map[string]Result
+	history  map[string][]Result
 	schedule ScheduleConfig
+	reporter Reporter
 
 	stopCh     chan struct{}
 	scheduleCh chan struct{}
@@ -112,9 +128,16 @@ func NewManager(proxyChecker *checker.ProxyChecker, startPort int, statePath str
 		statePath:    statePath,
 		defaults:     defaults,
 		results:      make(map[string]Result),
+		history:      make(map[string][]Result),
 		stopCh:       make(chan struct{}),
 		scheduleCh:   make(chan struct{}, 1),
 	}
+}
+
+func (m *Manager) SetReporter(reporter Reporter) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reporter = reporter
 }
 
 func (m *Manager) Load() error {
@@ -173,6 +196,16 @@ func (m *Manager) Snapshot() Snapshot {
 	}
 }
 
+func (m *Manager) ResultHistory(stableID string) []Result {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	history := m.history[stableID]
+	result := make([]Result, len(history))
+	copy(result, history)
+	return result
+}
+
 func (m *Manager) Schedule() ScheduleConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -207,6 +240,7 @@ func (m *Manager) Run(req RunRequest, source string) error {
 		return fmt.Errorf("no proxies selected")
 	}
 
+	startedAt := time.Now()
 	m.mu.Lock()
 	if m.running {
 		m.mu.Unlock()
@@ -216,13 +250,13 @@ func (m *Manager) Run(req RunRequest, source string) error {
 	m.lastRun = RunInfo{
 		Running:   true,
 		Source:    source,
-		StartedAt: time.Now(),
+		StartedAt: startedAt,
 		Selected:  len(proxies),
 		Config:    req.Config,
 	}
 	m.mu.Unlock()
 
-	go m.run(proxies, req.Config, source)
+	go m.run(proxies, req.Config, source, startedAt)
 	return nil
 }
 
@@ -261,10 +295,11 @@ func (m *Manager) schedulerLoop() {
 	}
 }
 
-func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source string) {
+func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source string, startedAt time.Time) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, cfg.Concurrency)
 	results := make(chan Result, len(proxies))
+	runResults := make([]Result, 0, len(proxies))
 
 	for _, proxy := range proxies {
 		wg.Add(1)
@@ -282,18 +317,38 @@ func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source stri
 	}()
 
 	for result := range results {
+		runResults = append(runResults, result)
+
 		m.mu.Lock()
 		m.results[result.StableID] = result
+		m.history[result.StableID] = append([]Result{result}, m.history[result.StableID]...)
+		if len(m.history[result.StableID]) > defaultHistoryLimit {
+			m.history[result.StableID] = m.history[result.StableID][:defaultHistoryLimit]
+		}
 		m.lastRun.Completed++
 		m.mu.Unlock()
 	}
 
 	finishedAt := time.Now()
+	report := RunReport{
+		Source:     source,
+		StartedAt:  startedAt,
+		FinishedAt: finishedAt,
+		Selected:   len(proxies),
+		Config:     cfg,
+		Results:    runResults,
+	}
+
 	m.mu.Lock()
 	m.running = false
 	m.lastRun.Running = false
 	m.lastRun.FinishedAt = &finishedAt
+	reporter := m.reporter
 	m.mu.Unlock()
+
+	if reporter != nil {
+		go reporter.NotifySpeedTest(report)
+	}
 }
 
 func (m *Manager) testProxy(proxy *models.ProxyConfig, cfg TestConfig, source string) Result {
@@ -410,7 +465,7 @@ func (m *Manager) selectProxies(req RunRequest) []*models.ProxyConfig {
 			continue
 		}
 		if req.OnlyOnline {
-			online, _, err := m.proxyChecker.GetProxyStatus(proxy.Name)
+			online, _, err := m.proxyChecker.GetProxyStatusByStableID(proxy.StableID)
 			if err != nil || !online {
 				continue
 			}

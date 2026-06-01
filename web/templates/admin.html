@@ -264,6 +264,78 @@
           <input id="schedule-minutes" type="number" min="1" step="1" />
         </label>
         <button id="save-schedule" class="secondary" type="button">Save Schedule</button>
+
+        <h2>Telegram</h2>
+        <label class="row">
+          <input id="telegram-enabled" type="checkbox" />
+          Enabled
+        </label>
+        <label>
+          Bot token
+          <input id="telegram-token" type="password" autocomplete="off" />
+        </label>
+        <div class="split">
+          <label>
+            Chat ID
+            <input id="telegram-chat" type="text" autocomplete="off" placeholder="-100..." />
+          </label>
+          <label>
+            Topic ID
+            <input id="telegram-topic" type="number" min="0" step="1" />
+          </label>
+        </div>
+        <label>
+          Admin user IDs
+          <input id="telegram-admins" type="text" autocomplete="off" placeholder="123456,987654" />
+        </label>
+        <label class="row">
+          <input id="telegram-commands" type="checkbox" />
+          Bot commands
+        </label>
+        <label class="row">
+          <input id="telegram-speed-reports" type="checkbox" />
+          Speed reports
+        </label>
+        <div class="split">
+          <label>
+            Report mode
+            <select id="telegram-report-mode">
+              <option value="always">Always</option>
+              <option value="issues">Only issues</option>
+              <option value="disabled">Disabled</option>
+            </select>
+          </label>
+          <label>
+            Low Mbps
+            <input id="telegram-low-speed" type="number" min="0" step="0.1" />
+          </label>
+        </div>
+        <label>
+          Report rows
+          <input id="telegram-report-limit" type="number" min="1" max="50" step="1" />
+        </label>
+        <label class="row">
+          <input id="telegram-node-alerts" type="checkbox" />
+          Node down alerts
+        </label>
+        <div class="split">
+          <label>
+            Failed checks
+            <input id="telegram-alert-failures" type="number" min="1" step="1" />
+          </label>
+          <label>
+            Repeat min
+            <input id="telegram-alert-repeat" type="number" min="1" step="1" />
+          </label>
+        </div>
+        <label class="row">
+          <input id="telegram-recovery" type="checkbox" />
+          Recovery alerts
+        </label>
+        <div class="row">
+          <button id="save-telegram" class="secondary" type="button">Save Telegram</button>
+          <button id="test-telegram" class="secondary" type="button">Test</button>
+        </div>
         <div id="message" class="muted"></div>
       </section>
 
@@ -317,6 +389,7 @@
       const state = {
         proxies: [],
         snapshot: null,
+        telegram: null,
         selected: new Set(),
       };
 
@@ -356,6 +429,33 @@
           maxBytes: Math.max(1, Number($("max-mb").value || 10)) * mb,
           timeoutSec: Math.max(5, Number($("timeout").value || 120)),
           concurrency: Math.max(1, Number($("concurrency").value || 2)),
+        };
+      }
+
+      function parseAdminIds(value) {
+        return value
+          .split(",")
+          .map((part) => Number(part.trim()))
+          .filter((value) => Number.isFinite(value) && value !== 0);
+      }
+
+      function telegramFromForm() {
+        return {
+          enabled: $("telegram-enabled").checked,
+          botToken: $("telegram-token").value.trim(),
+          chatId: $("telegram-chat").value.trim(),
+          messageThreadId: Math.max(0, Number($("telegram-topic").value || 0)),
+          adminUserIds: parseAdminIds($("telegram-admins").value),
+          commandPollingEnabled: $("telegram-commands").checked,
+          speedReportsEnabled: $("telegram-speed-reports").checked,
+          speedReportMode: $("telegram-report-mode").value,
+          lowSpeedThresholdMbps: Math.max(0, Number($("telegram-low-speed").value || 0)),
+          speedReportLimit: Math.max(1, Number($("telegram-report-limit").value || 10)),
+          nodeAlertsEnabled: $("telegram-node-alerts").checked,
+          alertAfterFailures: Math.max(1, Number($("telegram-alert-failures").value || 1)),
+          alertRepeatMinutes: Math.max(1, Number($("telegram-alert-repeat").value || 60)),
+          notifyRecovery: $("telegram-recovery").checked,
+          timeoutSec: 20,
         };
       }
 
@@ -495,6 +595,24 @@
         }
       }
 
+      function applyTelegram() {
+        const cfg = state.telegram || {};
+        $("telegram-enabled").checked = !!cfg.enabled;
+        $("telegram-token").value = cfg.botToken || "";
+        $("telegram-chat").value = cfg.chatId || "";
+        $("telegram-topic").value = cfg.messageThreadId || 0;
+        $("telegram-admins").value = Array.isArray(cfg.adminUserIds) ? cfg.adminUserIds.join(",") : "";
+        $("telegram-commands").checked = cfg.commandPollingEnabled !== false;
+        $("telegram-speed-reports").checked = cfg.speedReportsEnabled !== false;
+        $("telegram-report-mode").value = cfg.speedReportMode || "always";
+        $("telegram-low-speed").value = cfg.lowSpeedThresholdMbps || 0;
+        $("telegram-report-limit").value = cfg.speedReportLimit || 10;
+        $("telegram-node-alerts").checked = cfg.nodeAlertsEnabled !== false;
+        $("telegram-alert-failures").value = cfg.alertAfterFailures || 1;
+        $("telegram-alert-repeat").value = cfg.alertRepeatMinutes || 60;
+        $("telegram-recovery").checked = cfg.notifyRecovery !== false;
+      }
+
       function renderAll() {
         renderRunState();
         renderNodes();
@@ -502,15 +620,18 @@
       }
 
       async function load(initial = false) {
-        const [proxies, snapshot] = await Promise.all([
+        const [proxies, snapshot, telegram] = await Promise.all([
           request("/proxies"),
           request("/speed-tests"),
+          request("/telegram"),
         ]);
         state.proxies = proxies;
         state.snapshot = snapshot;
+        state.telegram = telegram;
         if (initial) {
           renderFilters();
           applyDefaults();
+          applyTelegram();
         }
         renderAll();
       }
@@ -558,9 +679,40 @@
         }
       }
 
+      async function saveTelegram() {
+        $("message").textContent = "";
+        try {
+          state.telegram = await request("/telegram", {
+            method: "PUT",
+            body: JSON.stringify(telegramFromForm()),
+          });
+          applyTelegram();
+          $("message").textContent = "Telegram settings saved";
+        } catch (err) {
+          $("message").textContent = err.message;
+        }
+      }
+
+      async function testTelegram() {
+        $("message").textContent = "";
+        try {
+          state.telegram = await request("/telegram", {
+            method: "PUT",
+            body: JSON.stringify(telegramFromForm()),
+          });
+          applyTelegram();
+          await request("/telegram/test", { method: "POST", body: "{}" });
+          $("message").textContent = "Telegram test message sent";
+        } catch (err) {
+          $("message").textContent = err.message;
+        }
+      }
+
       $("refresh").addEventListener("click", () => load());
       $("run").addEventListener("click", runSelected);
       $("save-schedule").addEventListener("click", saveSchedule);
+      $("save-telegram").addEventListener("click", saveTelegram);
+      $("test-telegram").addEventListener("click", testTelegram);
       $("select-visible").addEventListener("click", () => {
         filteredProxies().forEach((proxy) => state.selected.add(proxy.stableId));
         renderNodes();

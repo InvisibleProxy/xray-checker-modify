@@ -8,6 +8,7 @@ import (
 	"xray-checker/checker"
 	"xray-checker/models"
 	"xray-checker/speedtest"
+	"xray-checker/telegram"
 )
 
 type AdminProxyInfo struct {
@@ -45,7 +46,7 @@ func AdminProxiesHandler(proxyChecker *checker.ProxyChecker, startPort int) http
 			if proxy.StableID == "" {
 				proxy.StableID = proxy.GenerateStableID()
 			}
-			online, latency, _ := proxyChecker.GetProxyStatus(proxy.Name)
+			online, latency, _ := proxyChecker.GetProxyStatusByStableID(proxy.StableID)
 			result = append(result, adminProxyInfo(proxy, online, latency.Milliseconds(), startPort))
 		}
 		writeJSON(w, result)
@@ -105,6 +106,42 @@ func AdminScheduleHandler(manager *speedtest.Manager) http.HandlerFunc {
 		default:
 			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
+	}
+}
+
+func AdminTelegramHandler(service *telegram.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, service.Config())
+		case http.MethodPut:
+			var cfg telegram.Config
+			if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+				writeError(w, "Invalid JSON body", http.StatusBadRequest)
+				return
+			}
+			if err := service.UpdateConfig(cfg); err != nil {
+				writeError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, service.Config())
+		default:
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	}
+}
+
+func AdminTelegramTestHandler(service *telegram.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := service.SendTestMessage(); err != nil {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "sent"})
 	}
 }
 

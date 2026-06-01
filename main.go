@@ -12,6 +12,7 @@ import (
 	"xray-checker/models"
 	"xray-checker/speedtest"
 	"xray-checker/subscription"
+	"xray-checker/telegram"
 	"xray-checker/web"
 	"xray-checker/xray"
 
@@ -109,12 +110,27 @@ func main() {
 	if err := speedTestManager.Load(); err != nil {
 		logger.Warn("Failed to load speed test schedule: %v", err)
 	}
+
+	telegramService := telegram.NewService(
+		"data/telegram_config.json",
+		proxyChecker,
+		speedTestManager,
+		config.CLIConfig.Xray.StartPort,
+	)
+	if err := telegramService.Load(); err != nil {
+		logger.Warn("Failed to load Telegram settings: %v", err)
+	}
+	speedTestManager.SetReporter(telegramService)
+	telegramService.Start()
+	defer telegramService.Stop()
+
 	speedTestManager.StartScheduler()
 	defer speedTestManager.Stop()
 
 	runCheckIteration := func() {
 		logger.Info("Starting proxy check iteration")
 		proxyChecker.CheckAllProxies()
+		go telegramService.NotifyNodeStatuses()
 
 		if config.CLIConfig.Metrics.PushURL != "" {
 			pushConfig, err := metrics.ParseURL(config.CLIConfig.Metrics.PushURL)
@@ -200,6 +216,8 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/speed-tests/run", web.AdminSpeedTestRunHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/speed-tests", web.AdminSpeedTestSnapshotHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/schedules", web.AdminScheduleHandler(speedTestManager))
+	protectedHandler.Handle("/api/v1/admin/telegram/test", web.AdminTelegramTestHandler(telegramService))
+	protectedHandler.Handle("/api/v1/admin/telegram", web.AdminTelegramHandler(telegramService))
 
 	if config.CLIConfig.Web.Public {
 		mux.Handle("/", web.IndexHandler(version, proxyChecker))

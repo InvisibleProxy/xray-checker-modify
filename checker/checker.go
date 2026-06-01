@@ -405,6 +405,45 @@ func (pc *ProxyChecker) GetProxyStatus(name string) (bool, time.Duration, error)
 	return status.(bool), latency.(time.Duration), nil
 }
 
+func (pc *ProxyChecker) GetProxyStatusByStableID(stableID string) (bool, time.Duration, error) {
+	pc.mu.RLock()
+	var metricKey string
+	for _, proxy := range pc.proxies {
+		if proxy.StableID == "" {
+			proxy.StableID = proxy.GenerateStableID()
+		}
+
+		if proxy.StableID == stableID {
+			metricKey = fmt.Sprintf("%s|%s:%d|%s|%s|%s",
+				proxy.Protocol,
+				proxy.Server,
+				proxy.Port,
+				proxy.Name,
+				proxy.SubName,
+				proxy.StableID,
+			)
+			break
+		}
+	}
+	pc.mu.RUnlock()
+
+	if metricKey == "" {
+		return false, 0, fmt.Errorf("proxy not found")
+	}
+
+	status, ok := pc.currentMetrics.Load(metricKey)
+	if !ok {
+		return false, 0, fmt.Errorf("metric not found")
+	}
+
+	latency, _ := pc.latencyMetrics.Load(metricKey)
+	if latency == nil {
+		latency = time.Duration(0)
+	}
+
+	return status.(bool), latency.(time.Duration), nil
+}
+
 func (pc *ProxyChecker) GetProxyByStableID(stableID string) (*models.ProxyConfig, bool) {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
