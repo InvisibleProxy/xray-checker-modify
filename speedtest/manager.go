@@ -21,7 +21,7 @@ import (
 
 const (
 	defaultURL          = "https://proof.ovh.net/files/10Mb.dat"
-	defaultMaxBytes     = int64(10 * 1024 * 1024)
+	defaultMaxBytes     = int64(100 * 1024 * 1024)
 	defaultTimeoutSec   = 120
 	defaultConcurrency  = 2
 	maxBytesLimit       = int64(100 * 1024 * 1024)
