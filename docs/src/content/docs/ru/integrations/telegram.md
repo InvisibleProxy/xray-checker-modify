@@ -70,7 +70,7 @@ docker compose up -d --build
 http://127.0.0.1:2112/admin
 ```
 
-Если используется `compose.yaml` из репозитория, публичный Caddy-прокси не публикует `/admin`, `/metrics` и приватные API наружу. Управление Telegram-настройками остается доступным только через локальный порт Xray Checker.
+Если используется `docker-compose.yaml.example` из репозитория, публичный Caddy-прокси не публикует `/admin`, `/metrics` и приватные API наружу. Управление Telegram-настройками остается доступным только через локальный порт Xray Checker.
 
 ## Получение chat ID, topic ID и admin user ID
 
