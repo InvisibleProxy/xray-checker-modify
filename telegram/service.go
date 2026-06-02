@@ -1477,11 +1477,11 @@ func speedIssuesHTML(results []speedtest.Result, threshold float64) []string {
 	var lines []string
 	for _, result := range results {
 		if result.Error != "" {
-			lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  <b>FAILED</b> · %s\n  %s", htmlEscape(result.Name), htmlCode(result.StableID), htmlEscape(result.Error)))
+			lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  ❌ <b>Ошибка</b> · %s\n  %s", htmlEscape(result.Name), htmlCode(result.StableID), htmlEscape(result.Error)))
 			continue
 		}
 		if threshold > 0 && result.Mbps < threshold {
-			lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  <b>LOW %.2f Mbps</b> · порог %.2f Mbps · %s\n  %s · %d ms", htmlEscape(result.Name), result.Mbps, threshold, htmlCode(result.StableID), htmlEscape(formatBytes(result.DownloadedBytes)), result.DurationMs))
+			lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  ⚠️ <b>%.2f Mbps</b> · порог %.2f Mbps · %s\n  %s · %d ms", htmlEscape(result.Name), result.Mbps, threshold, htmlCode(result.StableID), htmlEscape(formatBytes(result.DownloadedBytes)), result.DurationMs))
 		}
 	}
 	return lines
@@ -1629,14 +1629,14 @@ func limitResults(results []speedtest.Result, limit int) []speedtest.Result {
 
 func formatSpeedResultHTML(result speedtest.Result, threshold float64) string {
 	if threshold <= 0 || result.Mbps >= threshold {
-		return fmt.Sprintf("• <b>%s</b>\n  <b>%.2f Mbps</b>", htmlEscape(result.Name), result.Mbps)
+		return fmt.Sprintf("• <b>%s</b>\n  ✅ <b>%.2f Mbps</b>", htmlEscape(result.Name), result.Mbps)
 	}
 
 	ttfbText := ""
 	if result.TTFBMs > 0 {
 		ttfbText = fmt.Sprintf(" · TTFB %d ms", result.TTFBMs)
 	}
-	return fmt.Sprintf("• <b>%s</b>\n  <b>LOW %.2f Mbps</b> · %s · %d ms%s", htmlEscape(result.Name), result.Mbps, htmlEscape(formatBytes(result.DownloadedBytes)), result.DurationMs, ttfbText)
+	return fmt.Sprintf("• <b>%s</b>\n  ⚠️ <b>%.2f Mbps</b> · %s · %d ms%s", htmlEscape(result.Name), result.Mbps, htmlEscape(formatBytes(result.DownloadedBytes)), result.DurationMs, ttfbText)
 }
 
 func reportSourceLabel(source string) string {
