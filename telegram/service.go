@@ -588,10 +588,7 @@ func (s *Service) sendMenu(msg *message) {
 
 func (s *Service) sendMenuToMessage(msg *message, from *user) {
 	cfg := s.Config()
-	threadID := msg.MessageThreadID
-	if threadID == 0 {
-		threadID = cfg.MessageThreadID
-	}
+	threadID := replyThreadID(msg, cfg)
 	userID := userIDFrom(from)
 	text := s.formatMenu(cfg, s.isAdminUser(from, cfg))
 	replyMarkup := mainMenuMarkup(s.isAdminUser(from, cfg))
@@ -852,6 +849,22 @@ func userIDFrom(from *user) int64 {
 	return from.ID
 }
 
+func replyThreadID(msg *message, cfg Config) int {
+	if msg == nil {
+		return 0
+	}
+	if msg.MessageThreadID > 0 {
+		return msg.MessageThreadID
+	}
+	if cfg.MessageThreadID <= 0 || cfg.ChatID == "" {
+		return 0
+	}
+	if cfg.ChatID != strconv.FormatInt(msg.Chat.ID, 10) {
+		return 0
+	}
+	return cfg.MessageThreadID
+}
+
 func (s *Service) nodeCounts() (total int, online int, offline int) {
 	proxies := s.proxyChecker.GetProxies()
 	total = len(proxies)
@@ -1068,12 +1081,10 @@ func (s *Service) sendCommandReply(msg *message, text string) {
 }
 
 func (s *Service) sendCommandReplyWithMarkup(msg *message, text string, replyMarkup string) {
-	threadID := msg.MessageThreadID
-	if threadID == 0 {
-		threadID = s.Config().MessageThreadID
-	}
+	cfg := s.Config()
+	threadID := replyThreadID(msg, cfg)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.Config().TimeoutSec)*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
 	defer cancel()
 	if _, err := s.sendHTMLToWithMarkup(ctx, strconv.FormatInt(msg.Chat.ID, 10), threadID, text, replyMarkup); err != nil {
 		logger.Warn("Failed to send Telegram command reply: %v", err)
