@@ -316,11 +316,15 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 	}
 
 	failed, slow := countSpeedIssues(report.Results, cfg.LowSpeedThresholdMbps)
+	scheduleIssuesOnly := report.Source == "schedule"
+	if scheduleIssuesOnly && failed == 0 && slow == 0 {
+		return
+	}
 	if cfg.SpeedReportMode == "issues" && failed == 0 && slow == 0 {
 		return
 	}
 
-	text := s.formatSpeedReport(report, cfg, failed, slow)
+	text := s.formatSpeedReport(report, cfg, failed, slow, scheduleIssuesOnly)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
 	defer cancel()
 
@@ -1000,12 +1004,28 @@ func (s *Service) formatRecentSpeedOverview() string {
 	return trimMessage(strings.Join(lines, "\n"))
 }
 
-func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, failed int, slow int) string {
+func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, failed int, slow int, issuesOnly bool) string {
 	successful := 0
 	for _, result := range report.Results {
 		if result.Error == "" {
 			successful++
 		}
+	}
+
+	issues := speedIssuesHTML(report.Results, cfg.LowSpeedThresholdMbps)
+	if issuesOnly {
+		lines := []string{
+			"<b>InvisibleProxyChecker</b>",
+			"",
+			"<b>Speed-test по расписанию: проблемы</b>",
+			fmt.Sprintf("Завершен: %s", htmlCode(report.FinishedAt.Format("2006-01-02 15:04:05"))),
+		}
+		if cfg.LowSpeedThresholdMbps > 0 {
+			lines = append(lines, fmt.Sprintf("Порог низкой скорости: <b>%.2f Mbps</b>", cfg.LowSpeedThresholdMbps))
+		}
+		lines = append(lines, "", "<b>Требует внимания</b>")
+		lines = append(lines, limitLines(issues, cfg.SpeedReportLimit)...)
+		return trimMessage(strings.Join(lines, "\n"))
 	}
 
 	lines := []string{
@@ -1022,7 +1042,6 @@ func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, fail
 		lines = append(lines, fmt.Sprintf("Порог низкой скорости: <b>%.2f Mbps</b>", cfg.LowSpeedThresholdMbps))
 	}
 
-	issues := speedIssuesHTML(report.Results, cfg.LowSpeedThresholdMbps)
 	if len(issues) > 0 {
 		lines = append(lines, "", "<b>Требует внимания</b>")
 		lines = append(lines, limitLines(issues, cfg.SpeedReportLimit)...)
