@@ -324,7 +324,7 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
 	defer cancel()
 
-	if err := s.sendTextToWithMarkup(ctx, cfg.ChatID, cfg.MessageThreadID, text, backToMenuMarkup()); err != nil {
+	if _, err := s.sendHTMLToWithMarkup(ctx, cfg.ChatID, cfg.MessageThreadID, text, backToMenuMarkup()); err != nil {
 		logger.Warn("Failed to send Telegram speed-test report: %v", err)
 	}
 }
@@ -1009,26 +1009,30 @@ func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, fail
 	}
 
 	lines := []string{
-		"Speed test report",
-		fmt.Sprintf("Source: %s", report.Source),
-		fmt.Sprintf("Finished: %s", report.FinishedAt.Format("2006-01-02 15:04:05")),
-		fmt.Sprintf("Selected: %d, successful: %d, low: %d, failed: %d", report.Selected, successful, slow, failed),
+		"<b>InvisibleProxyChecker</b>",
+		"",
+		"<b>Speed-test завершен</b>",
+		fmt.Sprintf("Источник: <b>%s</b>", htmlEscape(reportSourceLabel(report.Source))),
+		fmt.Sprintf("Завершен: %s", htmlCode(report.FinishedAt.Format("2006-01-02 15:04:05"))),
+		"",
+		"<b>Сводка</b>",
+		fmt.Sprintf("Проверено: <b>%d</b> · Успешно: <b>%d</b> · Низкая скорость: <b>%d</b> · Ошибки: <b>%d</b>", report.Selected, successful, slow, failed),
 	}
 	if cfg.LowSpeedThresholdMbps > 0 {
-		lines = append(lines, fmt.Sprintf("Low speed threshold: %.2f Mbps", cfg.LowSpeedThresholdMbps))
+		lines = append(lines, fmt.Sprintf("Порог низкой скорости: <b>%.2f Mbps</b>", cfg.LowSpeedThresholdMbps))
 	}
 
-	issues := speedIssues(report.Results, cfg.LowSpeedThresholdMbps)
+	issues := speedIssuesHTML(report.Results, cfg.LowSpeedThresholdMbps)
 	if len(issues) > 0 {
-		lines = append(lines, "", "Attention:")
+		lines = append(lines, "", "<b>Требует внимания</b>")
 		lines = append(lines, limitLines(issues, cfg.SpeedReportLimit)...)
 	}
 
 	top := successfulResults(report.Results)
 	if len(top) > 0 {
-		lines = append(lines, "", "Top results:")
+		lines = append(lines, "", "<b>Лучшие результаты</b>")
 		for _, result := range limitResults(top, cfg.SpeedReportLimit) {
-			lines = append(lines, formatSpeedResult(result, cfg.LowSpeedThresholdMbps))
+			lines = append(lines, formatSpeedResultHTML(result, cfg.LowSpeedThresholdMbps))
 		}
 	}
 
@@ -1469,29 +1473,15 @@ func countSpeedIssues(results []speedtest.Result, threshold float64) (failed int
 	return failed, slow
 }
 
-func speedIssues(results []speedtest.Result, threshold float64) []string {
-	var lines []string
-	for _, result := range results {
-		if result.Error != "" {
-			lines = append(lines, fmt.Sprintf("- FAILED %s: %s", result.Name, result.Error))
-			continue
-		}
-		if threshold > 0 && result.Mbps < threshold {
-			lines = append(lines, fmt.Sprintf("- LOW %s: %.2f Mbps", result.Name, result.Mbps))
-		}
-	}
-	return lines
-}
-
 func speedIssuesHTML(results []speedtest.Result, threshold float64) []string {
 	var lines []string
 	for _, result := range results {
 		if result.Error != "" {
-			lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  %s · %s", htmlEscape(result.Name), htmlCode(result.StableID), htmlEscape(result.Error)))
+			lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  <b>FAILED</b> · %s\n  %s", htmlEscape(result.Name), htmlCode(result.StableID), htmlEscape(result.Error)))
 			continue
 		}
 		if threshold > 0 && result.Mbps < threshold {
-			lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  %s · <b>LOW %.2f Mbps</b> · порог %.2f Mbps", htmlEscape(result.Name), htmlCode(result.StableID), result.Mbps, threshold))
+			lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  <b>LOW %.2f Mbps</b> · порог %.2f Mbps · %s\n  %s · %d ms", htmlEscape(result.Name), result.Mbps, threshold, htmlCode(result.StableID), htmlEscape(formatBytes(result.DownloadedBytes)), result.DurationMs))
 		}
 	}
 	return lines
@@ -1637,12 +1627,32 @@ func limitResults(results []speedtest.Result, limit int) []speedtest.Result {
 	return results[:limit]
 }
 
-func formatSpeedResult(result speedtest.Result, threshold float64) string {
+func formatSpeedResultHTML(result speedtest.Result, threshold float64) string {
 	marker := "OK"
 	if threshold > 0 && result.Mbps < threshold {
 		marker = "LOW"
 	}
-	return fmt.Sprintf("- %s %s: %.2f Mbps, %s, %d ms", marker, result.Name, result.Mbps, formatBytes(result.DownloadedBytes), result.DurationMs)
+	ttfbText := ""
+	if result.TTFBMs > 0 {
+		ttfbText = fmt.Sprintf(" · TTFB %d ms", result.TTFBMs)
+	}
+	return fmt.Sprintf("• <b>%s</b>\n  <b>%s %.2f Mbps</b> · %s · %d ms%s", htmlEscape(result.Name), marker, result.Mbps, htmlEscape(formatBytes(result.DownloadedBytes)), result.DurationMs, ttfbText)
+}
+
+func reportSourceLabel(source string) string {
+	switch source {
+	case "manual":
+		return "админ-панель"
+	case "telegram":
+		return "Telegram"
+	case "schedule":
+		return "расписание"
+	default:
+		if source == "" {
+			return "неизвестно"
+		}
+		return source
+	}
 }
 
 func formatSpeedHistoryLine(result speedtest.Result, threshold float64) string {
