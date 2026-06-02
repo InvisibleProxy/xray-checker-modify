@@ -1628,15 +1628,15 @@ func limitResults(results []speedtest.Result, limit int) []speedtest.Result {
 }
 
 func formatSpeedResultHTML(result speedtest.Result, threshold float64) string {
-	marker := "OK"
-	if threshold > 0 && result.Mbps < threshold {
-		marker = "LOW"
+	if threshold <= 0 || result.Mbps >= threshold {
+		return fmt.Sprintf("• <b>%s</b>\n  <b>%.2f Mbps</b>", htmlEscape(result.Name), result.Mbps)
 	}
+
 	ttfbText := ""
 	if result.TTFBMs > 0 {
 		ttfbText = fmt.Sprintf(" · TTFB %d ms", result.TTFBMs)
 	}
-	return fmt.Sprintf("• <b>%s</b>\n  <b>%s %.2f Mbps</b> · %s · %d ms%s", htmlEscape(result.Name), marker, result.Mbps, htmlEscape(formatBytes(result.DownloadedBytes)), result.DurationMs, ttfbText)
+	return fmt.Sprintf("• <b>%s</b>\n  <b>LOW %.2f Mbps</b> · %s · %d ms%s", htmlEscape(result.Name), result.Mbps, htmlEscape(formatBytes(result.DownloadedBytes)), result.DurationMs, ttfbText)
 }
 
 func reportSourceLabel(source string) string {
