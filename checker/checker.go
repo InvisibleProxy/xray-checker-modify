@@ -121,7 +121,7 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 			0,
 		)
 		pc.currentMetrics.Store(metricKey, false)
-		pc.storeStatusDetails(metricKey, false, 0)
+		pc.storeStatusDetails(proxy.StableID, false, 0)
 	}
 
 	setFailedLatency := func() {
@@ -207,7 +207,7 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 
 		pc.latencyMetrics.Store(metricKey, latency)
 		pc.currentMetrics.Store(metricKey, true)
-		pc.storeStatusDetails(metricKey, true, latency)
+		pc.storeStatusDetails(proxy.StableID, true, latency)
 	}
 }
 
@@ -344,14 +344,13 @@ func (pc *ProxyChecker) ClearMetrics() {
 		pc.latencyMetrics.Delete(key)
 		return true
 	})
-
-	pc.statusDetails.Range(func(key, _ interface{}) bool {
-		pc.statusDetails.Delete(key)
-		return true
-	})
 }
 
-func (pc *ProxyChecker) storeStatusDetails(metricKey string, online bool, latency time.Duration) {
+func (pc *ProxyChecker) storeStatusDetails(stableID string, online bool, latency time.Duration) {
+	if stableID == "" {
+		return
+	}
+
 	now := time.Now()
 	details := ProxyStatusDetails{
 		Online:        online,
@@ -360,7 +359,7 @@ func (pc *ProxyChecker) storeStatusDetails(metricKey string, online bool, latenc
 		LastChangedAt: now,
 	}
 
-	if previousValue, ok := pc.statusDetails.Load(metricKey); ok {
+	if previousValue, ok := pc.statusDetails.Load(stableID); ok {
 		previous := previousValue.(ProxyStatusDetails)
 		if previous.Online == online {
 			details.LastChangedAt = previous.LastChangedAt
@@ -374,7 +373,7 @@ func (pc *ProxyChecker) storeStatusDetails(metricKey string, online bool, latenc
 		details.DownSince = now
 	}
 
-	pc.statusDetails.Store(metricKey, details)
+	pc.statusDetails.Store(stableID, details)
 }
 
 func (pc *ProxyChecker) UpdateProxies(newProxies []*models.ProxyConfig) {
@@ -382,7 +381,26 @@ func (pc *ProxyChecker) UpdateProxies(newProxies []*models.ProxyConfig) {
 	defer pc.mu.Unlock()
 	atomic.AddUint64(&pc.generation, 1)
 	pc.ClearMetrics()
+	pc.pruneStatusDetails(newProxies)
 	pc.proxies = newProxies
+}
+
+func (pc *ProxyChecker) pruneStatusDetails(proxies []*models.ProxyConfig) {
+	active := make(map[string]bool, len(proxies))
+	for _, proxy := range proxies {
+		if proxy.StableID == "" {
+			proxy.StableID = proxy.GenerateStableID()
+		}
+		active[proxy.StableID] = true
+	}
+
+	pc.statusDetails.Range(func(key, _ interface{}) bool {
+		stableID, ok := key.(string)
+		if !ok || !active[stableID] {
+			pc.statusDetails.Delete(key)
+		}
+		return true
+	})
 }
 
 func (pc *ProxyChecker) CheckAllProxies() {
@@ -488,31 +506,24 @@ func (pc *ProxyChecker) GetProxyStatusByStableID(stableID string) (bool, time.Du
 
 func (pc *ProxyChecker) GetProxyStatusDetailsByStableID(stableID string) (ProxyStatusDetails, error) {
 	pc.mu.RLock()
-	var metricKey string
+	found := false
 	for _, proxy := range pc.proxies {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
 
 		if proxy.StableID == stableID {
-			metricKey = fmt.Sprintf("%s|%s:%d|%s|%s|%s",
-				proxy.Protocol,
-				proxy.Server,
-				proxy.Port,
-				proxy.Name,
-				proxy.SubName,
-				proxy.StableID,
-			)
+			found = true
 			break
 		}
 	}
 	pc.mu.RUnlock()
 
-	if metricKey == "" {
+	if !found {
 		return ProxyStatusDetails{}, fmt.Errorf("proxy not found")
 	}
 
-	details, ok := pc.statusDetails.Load(metricKey)
+	details, ok := pc.statusDetails.Load(stableID)
 	if !ok {
 		return ProxyStatusDetails{}, fmt.Errorf("metric not found")
 	}
