@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -43,6 +44,16 @@ type ProxyStatusDetails struct {
 	CheckedAt     time.Time
 	LastChangedAt time.Time
 	DownSince     time.Time
+	HostCheck     HostCheckDetails
+}
+
+type HostCheckDetails struct {
+	Checked   bool
+	Online    bool
+	Latency   time.Duration
+	CheckedAt time.Time
+	Target    string
+	Error     string
 }
 
 func NewProxyChecker(proxies []*models.ProxyConfig, startPort int, ipCheckURL string, ipCheckTimeout int, genMethodURL string, downloadURL string, downloadTimeout int, downloadMinSize int64, checkMethod string) *ProxyChecker {
@@ -121,7 +132,15 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 			0,
 		)
 		pc.currentMetrics.Store(metricKey, false)
-		pc.storeStatusDetails(proxy.StableID, false, 0)
+		hostCheck := pc.hostCheckIfBecameUnavailable(proxy)
+		pc.storeStatusDetails(proxy.StableID, false, 0, hostCheck)
+		if hostCheck != nil {
+			if hostCheck.Online {
+				logger.Info("%s | Host TCP check success | Target: %s | Latency: %s", proxy.Name, hostCheck.Target, hostCheck.Latency)
+			} else {
+				logger.Warn("%s | Host TCP check failed | Target: %s | %s", proxy.Name, hostCheck.Target, hostCheck.Error)
+			}
+		}
 	}
 
 	setFailedLatency := func() {
@@ -207,7 +226,7 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 
 		pc.latencyMetrics.Store(metricKey, latency)
 		pc.currentMetrics.Store(metricKey, true)
-		pc.storeStatusDetails(proxy.StableID, true, latency)
+		pc.storeStatusDetails(proxy.StableID, true, latency, nil)
 	}
 }
 
@@ -346,7 +365,7 @@ func (pc *ProxyChecker) ClearMetrics() {
 	})
 }
 
-func (pc *ProxyChecker) storeStatusDetails(stableID string, online bool, latency time.Duration) {
+func (pc *ProxyChecker) storeStatusDetails(stableID string, online bool, latency time.Duration, hostCheck *HostCheckDetails) {
 	if stableID == "" {
 		return
 	}
@@ -366,14 +385,91 @@ func (pc *ProxyChecker) storeStatusDetails(stableID string, online bool, latency
 		}
 		if !online && !previous.Online && !previous.DownSince.IsZero() {
 			details.DownSince = previous.DownSince
+			details.HostCheck = previous.HostCheck
 		}
 	}
 
 	if !online && details.DownSince.IsZero() {
 		details.DownSince = now
 	}
+	if !online && hostCheck != nil {
+		details.HostCheck = *hostCheck
+	}
 
 	pc.statusDetails.Store(stableID, details)
+}
+
+func (pc *ProxyChecker) hostCheckIfBecameUnavailable(proxy *models.ProxyConfig) *HostCheckDetails {
+	if proxy == nil || proxy.StableID == "" {
+		return nil
+	}
+
+	if previousValue, ok := pc.statusDetails.Load(proxy.StableID); ok {
+		previous := previousValue.(ProxyStatusDetails)
+		if !previous.Online {
+			return nil
+		}
+	}
+
+	result := pc.tcpCheckHost(proxy.Server, proxy.Port)
+	return &result
+}
+
+func (pc *ProxyChecker) tcpCheckHost(host string, port int) HostCheckDetails {
+	result := HostCheckDetails{
+		Checked:   true,
+		CheckedAt: time.Now(),
+	}
+
+	host = strings.TrimSpace(host)
+	if host == "" {
+		result.Error = "empty host"
+		return result
+	}
+	if port <= 0 || port > 65535 {
+		result.Error = fmt.Sprintf("invalid port %d", port)
+		return result
+	}
+	result.Target = net.JoinHostPort(host, fmt.Sprintf("%d", port))
+
+	timeout := 3 * time.Second
+	if pc.ipCheckTimeout > 0 {
+		checkTimeout := time.Duration(pc.ipCheckTimeout) * time.Second
+		if checkTimeout < timeout {
+			timeout = checkTimeout
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout+time.Second)
+	defer cancel()
+
+	start := time.Now()
+	dialer := &net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", result.Target)
+	result.Latency = time.Since(start)
+	if ctx.Err() == context.DeadlineExceeded {
+		result.Error = "TCP check timeout"
+		return result
+	}
+	if err != nil {
+		result.Error = compactHostCheckError(err)
+		return result
+	}
+	conn.Close()
+
+	result.Online = true
+	return result
+}
+
+func compactHostCheckError(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := strings.TrimSpace(err.Error())
+	if len(text) > 200 {
+		return text[:200] + "..."
+	}
+	return text
 }
 
 func (pc *ProxyChecker) UpdateProxies(newProxies []*models.ProxyConfig) {

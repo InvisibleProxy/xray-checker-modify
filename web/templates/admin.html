@@ -399,6 +399,7 @@
                   <th>Name</th>
                   <th>Status</th>
                   <th>Down Since</th>
+                  <th>Host TCP</th>
                   <th>Protocol</th>
                   <th>Subscription</th>
                   <th>Server</th>
@@ -572,6 +573,15 @@
         return `${minutes} min`;
       }
 
+      function formatHostCheck(proxy) {
+        if (proxy.online || !proxy.hostCheckChecked) return "";
+        const target = proxy.hostCheckTarget ? `<div class="muted mono">${escapeHtml(proxy.hostCheckTarget)}</div>` : "";
+        if (proxy.hostCheckOnline) {
+          return `<span class="ok">Reachable</span><div class="muted">${proxy.hostCheckLatencyMs || 0} ms</div>${target}`;
+        }
+        return `<span class="error">Unreachable</span>${target}<div class="muted">${escapeHtml(proxy.hostCheckError || "TCP check failed")}</div>`;
+      }
+
       function renderFilters() {
         const protocols = [...new Set(state.proxies.map((proxy) => proxy.protocol).filter(Boolean))].sort();
         const subs = [...new Set(state.proxies.map((proxy) => proxy.subName).filter(Boolean))].sort();
@@ -586,6 +596,7 @@
           const checked = state.selected.has(proxy.stableId) ? "checked" : "";
           const downSince = proxy.downSince ? formatTime(proxy.downSince) : "";
           const downtime = proxy.downSince ? formatDurationSec(proxy.downtimeSec) : "";
+          const hostCheck = formatHostCheck(proxy);
           return `
             <tr>
               <td><input type="checkbox" data-id="${proxy.stableId}" ${checked}></td>
@@ -600,13 +611,14 @@
                 </span>
               </td>
               <td>${proxy.online ? "" : `${escapeHtml(downSince || "n/a")}<div class="muted">${escapeHtml(downtime)}</div>`}</td>
+              <td>${hostCheck}</td>
               <td><span class="pill">${escapeHtml(proxy.protocol)}</span></td>
               <td>${escapeHtml(proxy.subName || "")}</td>
               <td class="mono server-cell">${escapeHtml(proxy.server)}:${proxy.port}</td>
               <td class="speed-cell">${speed}</td>
             </tr>`;
         });
-        $("nodes").innerHTML = rows.join("") || `<tr><td colspan="8" class="muted">No nodes match filters</td></tr>`;
+        $("nodes").innerHTML = rows.join("") || `<tr><td colspan="9" class="muted">No nodes match filters</td></tr>`;
         $("nodes").querySelectorAll("input[type=checkbox]").forEach((input) => {
           input.addEventListener("change", () => {
             input.checked ? state.selected.add(input.dataset.id) : state.selected.delete(input.dataset.id);

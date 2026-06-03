@@ -378,7 +378,7 @@ func (s *Service) NotifyNodeStatuses() {
 			}
 			if state.FailCount >= cfg.AlertAfterFailures && shouldRepeatAlert(state.LastAlert, cfg.AlertRepeatMinutes, now) {
 				state.LastAlert = now
-				messageText = formatNodeDown(proxy, state.FailCount, state.DownSince, now)
+				messageText = formatNodeDown(proxy, state.FailCount, state.DownSince, now, details.HostCheck)
 			}
 		} else {
 			if state.WasDown && cfg.NotifyRecovery {
@@ -851,6 +851,11 @@ func (s *Service) formatNodeDetails(stableID string) string {
 		lines = append(lines, fmt.Sprintf("Недоступна с: <b>%s</b>", htmlEscape(formatCheckedAt(details.DownSince))))
 		lines = append(lines, fmt.Sprintf("Простой: <b>%s</b>", htmlEscape(formatDuration(time.Since(details.DownSince)))))
 	}
+	if status == "OFFLINE" {
+		if hostCheck := formatHostCheckHTML(details.HostCheck); hostCheck != "" {
+			lines = append(lines, fmt.Sprintf("Host TCP: %s", hostCheck))
+		}
+	}
 	if proxy.SubName != "" {
 		lines = append(lines, fmt.Sprintf("Подписка: <b>%s</b>", htmlEscape(proxy.SubName)))
 	}
@@ -976,7 +981,7 @@ func (s *Service) formatStatus() string {
 		}
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
 		online := err == nil && details.Online
-		line := formatProxyLineHTML(proxy, online, details.Latency, details.DownSince)
+		line := formatProxyLineHTML(proxy, online, details.Latency, details.DownSince, details.HostCheck)
 		if !online {
 			offlineLines = append(offlineLines, line)
 		} else {
@@ -1019,7 +1024,7 @@ func (s *Service) formatIssuesSummary() string {
 		}
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
 		if err != nil || !details.Online {
-			offlineLines = append(offlineLines, formatProxyLineHTML(proxy, false, details.Latency, details.DownSince))
+			offlineLines = append(offlineLines, formatProxyLineHTML(proxy, false, details.Latency, details.DownSince, details.HostCheck))
 		}
 	}
 
@@ -1838,6 +1843,29 @@ func formatDuration(value time.Duration) string {
 	return fmt.Sprintf("%d мин", minutes)
 }
 
+func formatHostCheckHTML(hostCheck checker.HostCheckDetails) string {
+	if !hostCheck.Checked {
+		return ""
+	}
+	targetText := ""
+	if hostCheck.Target != "" {
+		targetText = " · " + htmlCode(hostCheck.Target)
+	}
+	if hostCheck.Online {
+		latencyText := "n/a"
+		if hostCheck.Latency > 0 {
+			latencyText = fmt.Sprintf("%d ms", hostCheck.Latency.Milliseconds())
+		}
+		return fmt.Sprintf("<b>доступен</b> · %s%s", htmlEscape(latencyText), targetText)
+	}
+
+	errorText := strings.TrimSpace(hostCheck.Error)
+	if errorText == "" {
+		errorText = "TCP check failed"
+	}
+	return fmt.Sprintf("<b>недоступен</b>%s · %s", targetText, htmlEscape(errorText))
+}
+
 func formatProxyLine(proxy *models.ProxyConfig, online bool, latency time.Duration) string {
 	status := "OFFLINE"
 	if online {
@@ -1850,7 +1878,7 @@ func formatProxyLine(proxy *models.ProxyConfig, online bool, latency time.Durati
 	return fmt.Sprintf("- %s %s [%s] (%s, %s)", status, proxy.Name, proxy.StableID, proxy.Protocol, latencyText)
 }
 
-func formatProxyLineHTML(proxy *models.ProxyConfig, online bool, latency time.Duration, downSince time.Time) string {
+func formatProxyLineHTML(proxy *models.ProxyConfig, online bool, latency time.Duration, downSince time.Time, hostCheck checker.HostCheckDetails) string {
 	status := "OFFLINE"
 	if online {
 		status = "ONLINE"
@@ -1865,10 +1893,15 @@ func formatProxyLineHTML(proxy *models.ProxyConfig, online bool, latency time.Du
 		parts = append(parts, fmt.Sprintf("с %s", htmlEscape(formatCheckedAt(downSince))))
 		parts = append(parts, fmt.Sprintf("простой %s", htmlEscape(formatDuration(time.Since(downSince)))))
 	}
+	if !online {
+		if hostCheckText := formatHostCheckHTML(hostCheck); hostCheckText != "" {
+			parts = append(parts, "host TCP "+hostCheckText)
+		}
+	}
 	return fmt.Sprintf("• <b>%s</b> <b>%s</b>\n  %s", htmlEscape(status), htmlEscape(proxy.Name), strings.Join(parts, " · "))
 }
 
-func formatNodeDown(proxy *models.ProxyConfig, failures int, downSince time.Time, now time.Time) string {
+func formatNodeDown(proxy *models.ProxyConfig, failures int, downSince time.Time, now time.Time, hostCheck checker.HostCheckDetails) string {
 	lines := []string{
 		"<b>⚠️ Нода недоступна</b>",
 		"",
@@ -1882,6 +1915,9 @@ func formatNodeDown(proxy *models.ProxyConfig, failures int, downSince time.Time
 	if !downSince.IsZero() {
 		lines = append(lines, fmt.Sprintf("Недоступна с: <b>%s</b>", htmlEscape(formatCheckedAt(downSince))))
 		lines = append(lines, fmt.Sprintf("Простой: <b>%s</b>", htmlEscape(formatDuration(now.Sub(downSince)))))
+	}
+	if hostCheckText := formatHostCheckHTML(hostCheck); hostCheckText != "" {
+		lines = append(lines, fmt.Sprintf("Host TCP: %s", hostCheckText))
 	}
 	lines = append(lines, fmt.Sprintf("Провалов подряд: <b>%d</b>", failures))
 	return strings.Join(lines, "\n")

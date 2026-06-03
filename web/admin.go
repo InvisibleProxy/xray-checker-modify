@@ -22,8 +22,13 @@ type AdminProxyInfo struct {
 	ProxyPort int    `json:"proxyPort"`
 	Online    bool   `json:"online"`
 	LatencyMs int64  `json:"latencyMs"`
-	DownSince   string `json:"downSince,omitempty"`
-	DowntimeSec int64 `json:"downtimeSec"`
+	DownSince          string `json:"downSince,omitempty"`
+	DowntimeSec        int64  `json:"downtimeSec"`
+	HostCheckChecked   bool   `json:"hostCheckChecked"`
+	HostCheckOnline    bool   `json:"hostCheckOnline"`
+	HostCheckLatencyMs int64  `json:"hostCheckLatencyMs"`
+	HostCheckTarget    string `json:"hostCheckTarget,omitempty"`
+	HostCheckError     string `json:"hostCheckError,omitempty"`
 }
 
 func AdminHandler() http.HandlerFunc {
@@ -171,7 +176,12 @@ func adminProxyInfo(proxy *models.ProxyConfig, details checker.ProxyStatusDetail
 		ProxyPort: startPort + proxy.Index,
 		Online:    details.Online,
 		LatencyMs: details.Latency.Milliseconds(),
-		DownSince: downSince,
-		DowntimeSec: downtimeSec,
+		DownSince:          downSince,
+		DowntimeSec:        downtimeSec,
+		HostCheckChecked:   details.HostCheck.Checked,
+		HostCheckOnline:    details.HostCheck.Online,
+		HostCheckLatencyMs: details.HostCheck.Latency.Milliseconds(),
+		HostCheckTarget:    details.HostCheck.Target,
+		HostCheckError:     details.HostCheck.Error,
 	}
 }
