@@ -760,12 +760,93 @@ func (s *Service) handleStatusRefreshCallback(cb *callbackQuery) {
 	go func() {
 		defer s.endStatusCheck()
 
+		offlineBefore := s.offlineStableIDs()
 		s.proxyChecker.CheckAllProxies()
+		s.refreshHostDiagnosticsForStillOffline(offlineBefore)
 
 		if msg != nil {
 			s.editCommandMessage(msg, s.formatStatus(), statusMarkup())
 		}
 	}()
+}
+
+func (s *Service) offlineStableIDs() map[string]bool {
+	result := make(map[string]bool)
+	for _, proxy := range s.proxyChecker.GetProxies() {
+		if proxy.StableID == "" {
+			proxy.StableID = proxy.GenerateStableID()
+		}
+
+		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+		if err == nil && !details.Online {
+			result[proxy.StableID] = true
+		}
+	}
+	return result
+}
+
+func (s *Service) refreshHostDiagnosticsForStillOffline(stableIDs map[string]bool) {
+	if len(stableIDs) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	var changedMu sync.Mutex
+	stateChanged := false
+	for stableID := range stableIDs {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+
+			details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(id)
+			if err != nil || details.Online {
+				return
+			}
+
+			refreshed, err := s.proxyChecker.RefreshHostDiagnosticsByStableID(id)
+			if err != nil {
+				logger.Warn("Failed to refresh host diagnostics for %s: %v", id, err)
+				return
+			}
+
+			if s.updateAlertDiagnostics(id, refreshed.HostCheck, refreshed.PingCheck) {
+				changedMu.Lock()
+				stateChanged = true
+				changedMu.Unlock()
+			}
+		}(stableID)
+	}
+	wg.Wait()
+
+	if stateChanged {
+		if err := s.saveAlertState(); err != nil {
+			logger.Warn("Failed to save Telegram node alert state: %v", err)
+		}
+	}
+}
+
+func (s *Service) updateAlertDiagnostics(stableID string, hostCheck checker.HostCheckDetails, pingCheck checker.PingCheckDetails) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	state := s.alerts[stableID]
+	if state == (nodeAlertState{}) {
+		return false
+	}
+
+	previous := state
+	if hostCheck.Checked {
+		state.HostCheck = hostCheck
+	}
+	if pingCheck.Checked {
+		state.PingCheck = pingCheck
+	}
+	if previous == state {
+		return false
+	}
+
+	s.alerts[stableID] = state
+	return true
 }
 
 func (s *Service) beginStatusCheck() bool {
