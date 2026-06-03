@@ -149,20 +149,7 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 		pc.currentMetrics.Store(metricKey, false)
 		hostCheck, pingCheck := pc.hostDiagnosticsIfBecameUnavailable(proxy)
 		pc.storeStatusDetails(proxy.StableID, false, 0, hostCheck, pingCheck)
-		if hostCheck != nil {
-			if hostCheck.Online {
-				logger.Info("%s | Host TCP check success | Target: %s | Latency: %s", proxy.Name, hostCheck.Target, hostCheck.Latency)
-			} else {
-				logger.Warn("%s | Host TCP check failed | Target: %s | %s", proxy.Name, hostCheck.Target, hostCheck.Error)
-			}
-		}
-		if pingCheck != nil {
-			if pingCheck.Online {
-				logger.Info("%s | Host ping success | Target: %s | Latency: %s", proxy.Name, pingCheck.Target, pingCheck.Latency)
-			} else {
-				logger.Warn("%s | Host ping failed | Target: %s | %s", proxy.Name, pingCheck.Target, pingCheck.Error)
-			}
-		}
+		logHostDiagnostics(proxy.Name, hostCheck, pingCheck)
 	}
 
 	setFailedLatency := func() {
@@ -440,6 +427,40 @@ func (pc *ProxyChecker) hostDiagnosticsIfBecameUnavailable(proxy *models.ProxyCo
 	hostCheck := pc.tcpCheckHost(proxy.Server, proxy.Port)
 	pingCheck := pc.pingHost(proxy.Server)
 	return &hostCheck, &pingCheck
+}
+
+func (pc *ProxyChecker) RefreshHostDiagnosticsByStableID(stableID string) (ProxyStatusDetails, error) {
+	proxy, ok := pc.GetProxyByStableID(stableID)
+	if !ok {
+		return ProxyStatusDetails{}, fmt.Errorf("proxy not found")
+	}
+	if proxy.StableID == "" {
+		proxy.StableID = proxy.GenerateStableID()
+	}
+
+	hostCheck := pc.tcpCheckHost(proxy.Server, proxy.Port)
+	pingCheck := pc.pingHost(proxy.Server)
+	pc.storeStatusDetails(proxy.StableID, false, 0, &hostCheck, &pingCheck)
+	logHostDiagnostics(proxy.Name, &hostCheck, &pingCheck)
+
+	return pc.GetProxyStatusDetailsByStableID(proxy.StableID)
+}
+
+func logHostDiagnostics(proxyName string, hostCheck *HostCheckDetails, pingCheck *PingCheckDetails) {
+	if hostCheck != nil {
+		if hostCheck.Online {
+			logger.Info("%s | Host TCP check success | Target: %s | Latency: %s", proxyName, hostCheck.Target, hostCheck.Latency)
+		} else {
+			logger.Warn("%s | Host TCP check failed | Target: %s | %s", proxyName, hostCheck.Target, hostCheck.Error)
+		}
+	}
+	if pingCheck != nil {
+		if pingCheck.Online {
+			logger.Info("%s | Host ping success | Target: %s | Latency: %s", proxyName, pingCheck.Target, pingCheck.Latency)
+		} else {
+			logger.Warn("%s | Host ping failed | Target: %s | %s", proxyName, pingCheck.Target, pingCheck.Error)
+		}
+	}
 }
 
 func (pc *ProxyChecker) tcpCheckHost(host string, port int) HostCheckDetails {

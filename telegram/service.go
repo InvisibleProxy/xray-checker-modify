@@ -429,6 +429,9 @@ func (s *Service) NotifyNodeStatuses() {
 		isDown := err != nil || !details.Online
 
 		var messageText string
+		var downMessageState nodeAlertState
+		var shouldSendDownAlert bool
+		var shouldRefreshDiagnostics bool
 		s.mu.Lock()
 		state := s.alerts[proxy.StableID]
 		previous := state
@@ -448,8 +451,9 @@ func (s *Service) NotifyNodeStatuses() {
 				}
 			}
 			if state.FailCount >= cfg.AlertAfterFailures && shouldRepeatAlert(state.LastAlert, cfg.AlertRepeatMinutes, now) {
+				shouldRefreshDiagnostics = !state.LastAlert.IsZero()
 				state.LastAlert = now
-				messageText = formatNodeDown(proxy, state.FailCount, state.DownSince, now, details.HostCheck, details.PingCheck)
+				shouldSendDownAlert = true
 			}
 		} else {
 			if state.WasDown && cfg.NotifyRecovery {
@@ -465,7 +469,42 @@ func (s *Service) NotifyNodeStatuses() {
 		} else {
 			s.alerts[proxy.StableID] = state
 		}
+		downMessageState = state
 		s.mu.Unlock()
+
+		if shouldSendDownAlert && shouldRefreshDiagnostics {
+			refreshed, err := s.proxyChecker.RefreshHostDiagnosticsByStableID(proxy.StableID)
+			if err != nil {
+				logger.Warn("Failed to refresh host diagnostics for %s: %v", proxy.Name, err)
+			} else {
+				s.mu.Lock()
+				state := s.alerts[proxy.StableID]
+				if state == (nodeAlertState{}) {
+					state = downMessageState
+				}
+				previous := state
+				if refreshed.HostCheck.Checked {
+					state.HostCheck = refreshed.HostCheck
+				}
+				if refreshed.PingCheck.Checked {
+					state.PingCheck = refreshed.PingCheck
+				}
+				if previous != state {
+					stateChanged = true
+				}
+				if state == (nodeAlertState{}) {
+					delete(s.alerts, proxy.StableID)
+				} else {
+					s.alerts[proxy.StableID] = state
+				}
+				downMessageState = state
+				s.mu.Unlock()
+			}
+		}
+
+		if shouldSendDownAlert {
+			messageText = formatNodeDown(proxy, downMessageState.FailCount, downMessageState.DownSince, now, downMessageState.HostCheck, downMessageState.PingCheck)
+		}
 
 		if messageText == "" {
 			continue
