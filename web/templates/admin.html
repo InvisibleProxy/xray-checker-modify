@@ -360,6 +360,10 @@
           <input id="telegram-node-alerts" type="checkbox" />
           Node down alerts
         </label>
+        <label>
+          Availability check min
+          <input id="telegram-alert-check" type="number" min="1" step="1" />
+        </label>
         <div class="split">
           <label>
             Failed checks
@@ -394,6 +398,7 @@
                   <th></th>
                   <th>Name</th>
                   <th>Status</th>
+                  <th>Down Since</th>
                   <th>Protocol</th>
                   <th>Subscription</th>
                   <th>Server</th>
@@ -507,6 +512,7 @@
           lowSpeedThresholdMbps: Math.max(0, Number($("telegram-low-speed").value || 0)),
           speedReportLimit: Math.max(1, Number($("telegram-report-limit").value || 10)),
           nodeAlertsEnabled: $("telegram-node-alerts").checked,
+          alertCheckMinutes: Math.max(1, Number($("telegram-alert-check").value || 5)),
           alertAfterFailures: Math.max(1, Number($("telegram-alert-failures").value || 1)),
           alertRepeatMinutes: Math.max(1, Number($("telegram-alert-repeat").value || 60)),
           notifyRecovery: $("telegram-recovery").checked,
@@ -554,6 +560,18 @@
         return new Date(iso).toLocaleString();
       }
 
+      function formatDurationSec(seconds) {
+        seconds = Math.max(0, Number(seconds || 0));
+        const minutesTotal = Math.floor(seconds / 60);
+        if (minutesTotal <= 0) return "<1 min";
+        const days = Math.floor(minutesTotal / 1440);
+        const hours = Math.floor((minutesTotal % 1440) / 60);
+        const minutes = minutesTotal % 60;
+        if (days > 0) return `${days} d ${hours} h ${minutes} min`;
+        if (hours > 0) return `${hours} h ${minutes} min`;
+        return `${minutes} min`;
+      }
+
       function renderFilters() {
         const protocols = [...new Set(state.proxies.map((proxy) => proxy.protocol).filter(Boolean))].sort();
         const subs = [...new Set(state.proxies.map((proxy) => proxy.subName).filter(Boolean))].sort();
@@ -566,6 +584,8 @@
           const result = resultFor(proxy.stableId);
           const speed = result && !result.error ? `${result.mbps.toFixed(2)} Mbps` : "n/a";
           const checked = state.selected.has(proxy.stableId) ? "checked" : "";
+          const downSince = proxy.downSince ? formatTime(proxy.downSince) : "";
+          const downtime = proxy.downSince ? formatDurationSec(proxy.downtimeSec) : "";
           return `
             <tr>
               <td><input type="checkbox" data-id="${proxy.stableId}" ${checked}></td>
@@ -579,13 +599,14 @@
                   ${proxy.online ? "Online" : "Offline"}
                 </span>
               </td>
+              <td>${proxy.online ? "" : `${escapeHtml(downSince || "n/a")}<div class="muted">${escapeHtml(downtime)}</div>`}</td>
               <td><span class="pill">${escapeHtml(proxy.protocol)}</span></td>
               <td>${escapeHtml(proxy.subName || "")}</td>
               <td class="mono server-cell">${escapeHtml(proxy.server)}:${proxy.port}</td>
               <td class="speed-cell">${speed}</td>
             </tr>`;
         });
-        $("nodes").innerHTML = rows.join("") || `<tr><td colspan="7" class="muted">No nodes match filters</td></tr>`;
+        $("nodes").innerHTML = rows.join("") || `<tr><td colspan="8" class="muted">No nodes match filters</td></tr>`;
         $("nodes").querySelectorAll("input[type=checkbox]").forEach((input) => {
           input.addEventListener("change", () => {
             input.checked ? state.selected.add(input.dataset.id) : state.selected.delete(input.dataset.id);
@@ -667,6 +688,7 @@
         $("telegram-low-speed").value = cfg.lowSpeedThresholdMbps || 0;
         $("telegram-report-limit").value = cfg.speedReportLimit || 10;
         $("telegram-node-alerts").checked = cfg.nodeAlertsEnabled !== false;
+        $("telegram-alert-check").value = cfg.alertCheckMinutes || 5;
         $("telegram-alert-failures").value = cfg.alertAfterFailures || 1;
         $("telegram-alert-repeat").value = cfg.alertRepeatMinutes || 60;
         $("telegram-recovery").checked = cfg.notifyRecovery !== false;

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"xray-checker/checker"
 	"xray-checker/models"
@@ -21,6 +22,8 @@ type AdminProxyInfo struct {
 	ProxyPort int    `json:"proxyPort"`
 	Online    bool   `json:"online"`
 	LatencyMs int64  `json:"latencyMs"`
+	DownSince   string `json:"downSince,omitempty"`
+	DowntimeSec int64 `json:"downtimeSec"`
 }
 
 func AdminHandler() http.HandlerFunc {
@@ -46,8 +49,13 @@ func AdminProxiesHandler(proxyChecker *checker.ProxyChecker, startPort int) http
 			if proxy.StableID == "" {
 				proxy.StableID = proxy.GenerateStableID()
 			}
-			online, latency, _ := proxyChecker.GetProxyStatusByStableID(proxy.StableID)
-			result = append(result, adminProxyInfo(proxy, online, latency.Milliseconds(), startPort))
+			details, err := proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+			if err != nil {
+				online, latency, _ := proxyChecker.GetProxyStatusByStableID(proxy.StableID)
+				details.Online = online
+				details.Latency = latency
+			}
+			result = append(result, adminProxyInfo(proxy, details, startPort))
 		}
 		writeJSON(w, result)
 	}
@@ -145,7 +153,14 @@ func AdminTelegramTestHandler(service *telegram.Service) http.HandlerFunc {
 	}
 }
 
-func adminProxyInfo(proxy *models.ProxyConfig, online bool, latencyMs int64, startPort int) AdminProxyInfo {
+func adminProxyInfo(proxy *models.ProxyConfig, details checker.ProxyStatusDetails, startPort int) AdminProxyInfo {
+	downSince := ""
+	downtimeSec := int64(0)
+	if !details.DownSince.IsZero() {
+		downSince = details.DownSince.Format(time.RFC3339)
+		downtimeSec = int64(time.Since(details.DownSince).Seconds())
+	}
+
 	return AdminProxyInfo{
 		StableID:  proxy.StableID,
 		Name:      proxy.Name,
@@ -154,7 +169,9 @@ func adminProxyInfo(proxy *models.ProxyConfig, online bool, latencyMs int64, sta
 		Port:      proxy.Port,
 		Protocol:  proxy.Protocol,
 		ProxyPort: startPort + proxy.Index,
-		Online:    online,
-		LatencyMs: latencyMs,
+		Online:    details.Online,
+		LatencyMs: details.Latency.Milliseconds(),
+		DownSince: downSince,
+		DowntimeSec: downtimeSec,
 	}
 }
