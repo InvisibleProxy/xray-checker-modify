@@ -499,6 +499,50 @@ func (pc *ProxyChecker) pruneStatusDetails(proxies []*models.ProxyConfig) {
 	})
 }
 
+func (pc *ProxyChecker) RestoreOfflineStatus(stableID string, downSince time.Time, hostCheck HostCheckDetails) bool {
+	if stableID == "" || downSince.IsZero() {
+		return false
+	}
+
+	pc.mu.RLock()
+	var metricKey string
+	for _, proxy := range pc.proxies {
+		if proxy.StableID == "" {
+			proxy.StableID = proxy.GenerateStableID()
+		}
+
+		if proxy.StableID == stableID {
+			metricKey = fmt.Sprintf("%s|%s:%d|%s|%s|%s",
+				proxy.Protocol,
+				proxy.Server,
+				proxy.Port,
+				proxy.Name,
+				proxy.SubName,
+				proxy.StableID,
+			)
+			break
+		}
+	}
+	pc.mu.RUnlock()
+
+	if metricKey == "" {
+		return false
+	}
+
+	now := time.Now()
+	pc.statusDetails.Store(stableID, ProxyStatusDetails{
+		Online:        false,
+		Latency:       0,
+		CheckedAt:     now,
+		LastChangedAt: downSince,
+		DownSince:     downSince,
+		HostCheck:     hostCheck,
+	})
+	pc.currentMetrics.Store(metricKey, false)
+	pc.latencyMetrics.Store(metricKey, time.Duration(0))
+	return true
+}
+
 func (pc *ProxyChecker) CheckAllProxies() {
 	if _, err := pc.GetCurrentIP(); err != nil {
 		logger.Warn("Error getting current IP: %v", err)

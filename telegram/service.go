@@ -115,18 +115,19 @@ func (c *Config) Normalize() {
 }
 
 type Service struct {
-	proxyChecker *checker.ProxyChecker
-	speedManager *speedtest.Manager
-	startPort    int
-	statePath    string
+	proxyChecker   *checker.ProxyChecker
+	speedManager   *speedtest.Manager
+	startPort      int
+	statePath      string
+	alertStatePath string
 
-	mu           sync.RWMutex
-	config       Config
-	alerts       map[string]nodeAlertState
-	menuMessages map[string]int
-	statusCheck  bool
-	lastAlertRun time.Time
-	lastUpdateID int
+	mu             sync.RWMutex
+	config         Config
+	alerts         map[string]nodeAlertState
+	menuMessages   map[string]int
+	statusCheck    bool
+	lastAlertRun   time.Time
+	lastUpdateID   int
 
 	stopCh   chan struct{}
 	stopOnce sync.Once
@@ -137,6 +138,30 @@ type nodeAlertState struct {
 	WasDown   bool
 	DownSince time.Time
 	LastAlert time.Time
+	HostCheck checker.HostCheckDetails
+}
+
+type nodeAlertStateFile struct {
+	Version   int                               `json:"version"`
+	UpdatedAt time.Time                         `json:"updatedAt"`
+	Nodes     map[string]persistedNodeAlertState `json:"nodes"`
+}
+
+type persistedNodeAlertState struct {
+	FailCount int                 `json:"failCount"`
+	WasDown   bool                `json:"wasDown"`
+	DownSince time.Time           `json:"downSince"`
+	LastAlert time.Time           `json:"lastAlert"`
+	HostCheck *persistedHostCheck `json:"hostCheck,omitempty"`
+}
+
+type persistedHostCheck struct {
+	Checked   bool      `json:"checked"`
+	Online    bool      `json:"online"`
+	LatencyMs int64     `json:"latencyMs"`
+	CheckedAt time.Time `json:"checkedAt"`
+	Target    string    `json:"target,omitempty"`
+	Error     string    `json:"error,omitempty"`
 }
 
 type proxyCandidate struct {
@@ -193,15 +218,21 @@ type inlineKeyboardButton struct {
 }
 
 func NewService(statePath string, proxyChecker *checker.ProxyChecker, speedManager *speedtest.Manager, startPort int) *Service {
+	alertStatePath := ""
+	if statePath != "" {
+		alertStatePath = filepath.Join(filepath.Dir(statePath), "node_alert_state.json")
+	}
+
 	return &Service{
-		proxyChecker: proxyChecker,
-		speedManager: speedManager,
-		startPort:    startPort,
-		statePath:    statePath,
-		config:       DefaultConfig(),
-		alerts:       make(map[string]nodeAlertState),
-		menuMessages: make(map[string]int),
-		stopCh:       make(chan struct{}),
+		proxyChecker:   proxyChecker,
+		speedManager:   speedManager,
+		startPort:      startPort,
+		statePath:      statePath,
+		alertStatePath: alertStatePath,
+		config:         DefaultConfig(),
+		alerts:         make(map[string]nodeAlertState),
+		menuMessages:   make(map[string]int),
+		stopCh:         make(chan struct{}),
 	}
 }
 
@@ -211,6 +242,7 @@ func (s *Service) Load() error {
 		applyEnvDefaults(&cfg)
 		disableInvalidEnabledConfig(&cfg)
 		s.setConfig(cfg)
+		s.loadAlertStateWithWarn()
 		return nil
 	}
 
@@ -220,6 +252,7 @@ func (s *Service) Load() error {
 			applyEnvDefaults(&cfg)
 			disableInvalidEnabledConfig(&cfg)
 			s.setConfig(cfg)
+			s.loadAlertStateWithWarn()
 			return nil
 		}
 		return err
@@ -232,6 +265,7 @@ func (s *Service) Load() error {
 	cfg.Normalize()
 	disableInvalidEnabledConfig(&cfg)
 	s.setConfig(cfg)
+	s.loadAlertStateWithWarn()
 	return nil
 }
 
@@ -356,7 +390,26 @@ func (s *Service) NotifyNodeStatuses() {
 		return
 	}
 
-	for _, proxy := range s.proxyChecker.GetProxies() {
+	proxies := s.proxyChecker.GetProxies()
+	active := make(map[string]bool, len(proxies))
+	for _, proxy := range proxies {
+		if proxy.StableID == "" {
+			proxy.StableID = proxy.GenerateStableID()
+		}
+		active[proxy.StableID] = true
+	}
+
+	stateChanged := false
+	s.mu.Lock()
+	for stableID := range s.alerts {
+		if !active[stableID] {
+			delete(s.alerts, stableID)
+			stateChanged = true
+		}
+	}
+	s.mu.Unlock()
+
+	for _, proxy := range proxies {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
@@ -367,9 +420,13 @@ func (s *Service) NotifyNodeStatuses() {
 		var messageText string
 		s.mu.Lock()
 		state := s.alerts[proxy.StableID]
+		previous := state
 		if isDown {
 			state.FailCount++
 			state.WasDown = true
+			if details.HostCheck.Checked {
+				state.HostCheck = details.HostCheck
+			}
 			if state.DownSince.IsZero() {
 				state.DownSince = details.DownSince
 				if state.DownSince.IsZero() {
@@ -386,7 +443,14 @@ func (s *Service) NotifyNodeStatuses() {
 			}
 			state = nodeAlertState{}
 		}
-		s.alerts[proxy.StableID] = state
+		if previous != state {
+			stateChanged = true
+		}
+		if state == (nodeAlertState{}) {
+			delete(s.alerts, proxy.StableID)
+		} else {
+			s.alerts[proxy.StableID] = state
+		}
 		s.mu.Unlock()
 
 		if messageText == "" {
@@ -397,6 +461,12 @@ func (s *Service) NotifyNodeStatuses() {
 			logger.Warn("Failed to send Telegram node alert: %v", err)
 		}
 		cancel()
+	}
+
+	if stateChanged {
+		if err := s.saveAlertState(); err != nil {
+			logger.Warn("Failed to save Telegram node alert state: %v", err)
+		}
 	}
 }
 
@@ -1477,6 +1547,173 @@ func (s *Service) wait(duration time.Duration) bool {
 		return true
 	case <-s.stopCh:
 		return false
+	}
+}
+
+func (s *Service) loadAlertStateWithWarn() {
+	if err := s.loadAlertState(); err != nil {
+		logger.Warn("Failed to load Telegram node alert state: %v", err)
+	}
+}
+
+func (s *Service) loadAlertState() error {
+	if s.alertStatePath == "" {
+		return nil
+	}
+
+	data, err := os.ReadFile(s.alertStatePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	var stateFile nodeAlertStateFile
+	if err := json.Unmarshal(data, &stateFile); err != nil {
+		return err
+	}
+	if len(stateFile.Nodes) == 0 {
+		return nil
+	}
+
+	active := make(map[string]bool)
+	for _, proxy := range s.proxyChecker.GetProxies() {
+		if proxy.StableID == "" {
+			proxy.StableID = proxy.GenerateStableID()
+		}
+		active[proxy.StableID] = true
+	}
+
+	loaded := make(map[string]nodeAlertState)
+	for stableID, persisted := range stateFile.Nodes {
+		stableID = strings.TrimSpace(stableID)
+		if stableID == "" || !active[stableID] {
+			continue
+		}
+
+		state := persisted.toNodeAlertState()
+		if !state.WasDown && state.FailCount <= 0 && state.DownSince.IsZero() && state.LastAlert.IsZero() {
+			continue
+		}
+		loaded[stableID] = state
+	}
+	if len(loaded) == 0 {
+		return nil
+	}
+
+	s.mu.Lock()
+	for stableID, state := range loaded {
+		s.alerts[stableID] = state
+	}
+	s.mu.Unlock()
+
+	restored := 0
+	for stableID, state := range loaded {
+		if state.WasDown && !state.DownSince.IsZero() {
+			if s.proxyChecker.RestoreOfflineStatus(stableID, state.DownSince, state.HostCheck) {
+				restored++
+			}
+		}
+	}
+
+	logger.Info("Loaded Telegram node alert state: %d nodes, restored %d offline statuses", len(loaded), restored)
+	return nil
+}
+
+func (s *Service) saveAlertState() error {
+	if s.alertStatePath == "" {
+		return nil
+	}
+
+	active := make(map[string]bool)
+	for _, proxy := range s.proxyChecker.GetProxies() {
+		if proxy.StableID == "" {
+			proxy.StableID = proxy.GenerateStableID()
+		}
+		active[proxy.StableID] = true
+	}
+
+	nodes := make(map[string]persistedNodeAlertState)
+	s.mu.RLock()
+	for stableID, state := range s.alerts {
+		if !active[stableID] {
+			continue
+		}
+		if !state.WasDown && state.FailCount <= 0 && state.DownSince.IsZero() && state.LastAlert.IsZero() {
+			continue
+		}
+		nodes[stableID] = persistedNodeAlertStateFrom(state)
+	}
+	s.mu.RUnlock()
+
+	if len(nodes) == 0 {
+		if err := os.Remove(s.alertStatePath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(s.alertStatePath), 0755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(nodeAlertStateFile{
+		Version:   1,
+		UpdatedAt: time.Now(),
+		Nodes:     nodes,
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.alertStatePath, data, 0600)
+}
+
+func persistedNodeAlertStateFrom(state nodeAlertState) persistedNodeAlertState {
+	persisted := persistedNodeAlertState{
+		FailCount: state.FailCount,
+		WasDown:   state.WasDown,
+		DownSince: state.DownSince,
+		LastAlert: state.LastAlert,
+	}
+	if state.HostCheck.Checked {
+		hostCheck := persistedHostCheckFrom(state.HostCheck)
+		persisted.HostCheck = &hostCheck
+	}
+	return persisted
+}
+
+func (p persistedNodeAlertState) toNodeAlertState() nodeAlertState {
+	state := nodeAlertState{
+		FailCount: p.FailCount,
+		WasDown:   p.WasDown,
+		DownSince: p.DownSince,
+		LastAlert: p.LastAlert,
+	}
+	if p.HostCheck != nil {
+		state.HostCheck = p.HostCheck.toHostCheckDetails()
+	}
+	return state
+}
+
+func persistedHostCheckFrom(hostCheck checker.HostCheckDetails) persistedHostCheck {
+	return persistedHostCheck{
+		Checked:   hostCheck.Checked,
+		Online:    hostCheck.Online,
+		LatencyMs: hostCheck.Latency.Milliseconds(),
+		CheckedAt: hostCheck.CheckedAt,
+		Target:    hostCheck.Target,
+		Error:     hostCheck.Error,
+	}
+}
+
+func (p persistedHostCheck) toHostCheckDetails() checker.HostCheckDetails {
+	return checker.HostCheckDetails{
+		Checked:   p.Checked,
+		Online:    p.Online,
+		Latency:   time.Duration(p.LatencyMs) * time.Millisecond,
+		CheckedAt: p.CheckedAt,
+		Target:    p.Target,
+		Error:     p.Error,
 	}
 }
 
