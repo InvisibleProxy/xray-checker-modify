@@ -399,7 +399,7 @@
                   <th>Name</th>
                   <th>Status</th>
                   <th>Down Since</th>
-                  <th>Host TCP</th>
+                  <th>Host Check</th>
                   <th>Protocol</th>
                   <th>Subscription</th>
                   <th>Server</th>
@@ -574,12 +574,16 @@
       }
 
       function formatHostCheck(proxy) {
-        if (proxy.online || !proxy.hostCheckChecked) return "";
-        const target = proxy.hostCheckTarget ? `<div class="muted mono">${escapeHtml(proxy.hostCheckTarget)}</div>` : "";
-        if (proxy.hostCheckOnline) {
-          return `<span class="ok">Reachable</span><div class="muted">${proxy.hostCheckLatencyMs || 0} ms</div>${target}`;
+        if (proxy.online) return "";
+        const parts = [];
+        if (proxy.hostCheckChecked) {
+          parts.push(`<div><span class="${proxy.hostCheckOnline ? "ok" : "error"}">TCP ${proxy.hostCheckOnline ? "OK" : "No"}</span></div>`);
         }
-        return `<span class="error">Unreachable</span>${target}<div class="muted">${escapeHtml(proxy.hostCheckError || "TCP check failed")}</div>`;
+        if (proxy.pingCheckChecked) {
+          const pingText = proxy.pingCheckOnline ? `${proxy.pingCheckLatencyMs || 0} ms` : "No";
+          parts.push(`<div><span class="${proxy.pingCheckOnline ? "ok" : "error"}">Ping ${escapeHtml(pingText)}</span></div>`);
+        }
+        return parts.join("");
       }
 
       function renderFilters() {

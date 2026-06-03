@@ -8,10 +8,15 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 
 	"xray-checker/logger"
 	"xray-checker/metrics"
@@ -45,9 +50,19 @@ type ProxyStatusDetails struct {
 	LastChangedAt time.Time
 	DownSince     time.Time
 	HostCheck     HostCheckDetails
+	PingCheck     PingCheckDetails
 }
 
 type HostCheckDetails struct {
+	Checked   bool
+	Online    bool
+	Latency   time.Duration
+	CheckedAt time.Time
+	Target    string
+	Error     string
+}
+
+type PingCheckDetails struct {
 	Checked   bool
 	Online    bool
 	Latency   time.Duration
@@ -132,13 +147,20 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 			0,
 		)
 		pc.currentMetrics.Store(metricKey, false)
-		hostCheck := pc.hostCheckIfBecameUnavailable(proxy)
-		pc.storeStatusDetails(proxy.StableID, false, 0, hostCheck)
+		hostCheck, pingCheck := pc.hostDiagnosticsIfBecameUnavailable(proxy)
+		pc.storeStatusDetails(proxy.StableID, false, 0, hostCheck, pingCheck)
 		if hostCheck != nil {
 			if hostCheck.Online {
 				logger.Info("%s | Host TCP check success | Target: %s | Latency: %s", proxy.Name, hostCheck.Target, hostCheck.Latency)
 			} else {
 				logger.Warn("%s | Host TCP check failed | Target: %s | %s", proxy.Name, hostCheck.Target, hostCheck.Error)
+			}
+		}
+		if pingCheck != nil {
+			if pingCheck.Online {
+				logger.Info("%s | Host ping success | Target: %s | Latency: %s", proxy.Name, pingCheck.Target, pingCheck.Latency)
+			} else {
+				logger.Warn("%s | Host ping failed | Target: %s | %s", proxy.Name, pingCheck.Target, pingCheck.Error)
 			}
 		}
 	}
@@ -226,7 +248,7 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 
 		pc.latencyMetrics.Store(metricKey, latency)
 		pc.currentMetrics.Store(metricKey, true)
-		pc.storeStatusDetails(proxy.StableID, true, latency, nil)
+		pc.storeStatusDetails(proxy.StableID, true, latency, nil, nil)
 	}
 }
 
@@ -365,7 +387,7 @@ func (pc *ProxyChecker) ClearMetrics() {
 	})
 }
 
-func (pc *ProxyChecker) storeStatusDetails(stableID string, online bool, latency time.Duration, hostCheck *HostCheckDetails) {
+func (pc *ProxyChecker) storeStatusDetails(stableID string, online bool, latency time.Duration, hostCheck *HostCheckDetails, pingCheck *PingCheckDetails) {
 	if stableID == "" {
 		return
 	}
@@ -386,6 +408,7 @@ func (pc *ProxyChecker) storeStatusDetails(stableID string, online bool, latency
 		if !online && !previous.Online && !previous.DownSince.IsZero() {
 			details.DownSince = previous.DownSince
 			details.HostCheck = previous.HostCheck
+			details.PingCheck = previous.PingCheck
 		}
 	}
 
@@ -395,24 +418,28 @@ func (pc *ProxyChecker) storeStatusDetails(stableID string, online bool, latency
 	if !online && hostCheck != nil {
 		details.HostCheck = *hostCheck
 	}
+	if !online && pingCheck != nil {
+		details.PingCheck = *pingCheck
+	}
 
 	pc.statusDetails.Store(stableID, details)
 }
 
-func (pc *ProxyChecker) hostCheckIfBecameUnavailable(proxy *models.ProxyConfig) *HostCheckDetails {
+func (pc *ProxyChecker) hostDiagnosticsIfBecameUnavailable(proxy *models.ProxyConfig) (*HostCheckDetails, *PingCheckDetails) {
 	if proxy == nil || proxy.StableID == "" {
-		return nil
+		return nil, nil
 	}
 
 	if previousValue, ok := pc.statusDetails.Load(proxy.StableID); ok {
 		previous := previousValue.(ProxyStatusDetails)
 		if !previous.Online {
-			return nil
+			return nil, nil
 		}
 	}
 
-	result := pc.tcpCheckHost(proxy.Server, proxy.Port)
-	return &result
+	hostCheck := pc.tcpCheckHost(proxy.Server, proxy.Port)
+	pingCheck := pc.pingHost(proxy.Server)
+	return &hostCheck, &pingCheck
 }
 
 func (pc *ProxyChecker) tcpCheckHost(host string, port int) HostCheckDetails {
@@ -432,13 +459,7 @@ func (pc *ProxyChecker) tcpCheckHost(host string, port int) HostCheckDetails {
 	}
 	result.Target = net.JoinHostPort(host, fmt.Sprintf("%d", port))
 
-	timeout := 3 * time.Second
-	if pc.ipCheckTimeout > 0 {
-		checkTimeout := time.Duration(pc.ipCheckTimeout) * time.Second
-		if checkTimeout < timeout {
-			timeout = checkTimeout
-		}
-	}
+	timeout := pc.hostDiagnosticsTimeout()
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout+time.Second)
 	defer cancel()
@@ -459,6 +480,131 @@ func (pc *ProxyChecker) tcpCheckHost(host string, port int) HostCheckDetails {
 
 	result.Online = true
 	return result
+}
+
+func (pc *ProxyChecker) pingHost(host string) PingCheckDetails {
+	result := PingCheckDetails{
+		Checked:   true,
+		CheckedAt: time.Now(),
+	}
+
+	host = strings.TrimSpace(host)
+	if host == "" {
+		result.Error = "empty host"
+		return result
+	}
+
+	timeout := pc.hostDiagnosticsTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		result.Error = compactHostCheckError(err)
+		return result
+	}
+	if len(ips) == 0 {
+		result.Error = "host resolved to no IP addresses"
+		return result
+	}
+
+	var lastErr error
+	for _, ipAddr := range ips {
+		ip := ipAddr.IP
+		if ip == nil {
+			continue
+		}
+		result.Target = ip.String()
+
+		latency, err := pingIP(ip, timeout)
+		result.Latency = latency
+		if err == nil {
+			result.Online = true
+			result.Error = ""
+			return result
+		}
+		lastErr = err
+	}
+
+	if lastErr != nil {
+		result.Error = compactHostCheckError(lastErr)
+	} else {
+		result.Error = "no usable IP address"
+	}
+	return result
+}
+
+func (pc *ProxyChecker) hostDiagnosticsTimeout() time.Duration {
+	timeout := 3 * time.Second
+	if pc.ipCheckTimeout > 0 {
+		checkTimeout := time.Duration(pc.ipCheckTimeout) * time.Second
+		if checkTimeout < timeout {
+			timeout = checkTimeout
+		}
+	}
+	return timeout
+}
+
+func pingIP(ip net.IP, timeout time.Duration) (time.Duration, error) {
+	network := "udp4"
+	listenAddr := "0.0.0.0"
+	protocol := ipv4.ICMPTypeEcho.Protocol()
+	var messageType icmp.Type = ipv4.ICMPTypeEcho
+	if ip.To4() == nil {
+		network = "udp6"
+		listenAddr = "::"
+		protocol = ipv6.ICMPTypeEchoRequest.Protocol()
+		messageType = ipv6.ICMPTypeEchoRequest
+	}
+
+	conn, err := icmp.ListenPacket(network, listenAddr)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+
+	deadline := time.Now().Add(timeout)
+	if err := conn.SetDeadline(deadline); err != nil {
+		return 0, err
+	}
+
+	id := os.Getpid() & 0xffff
+	seq := int(time.Now().UnixNano() & 0xffff)
+	message := icmp.Message{
+		Type: messageType,
+		Code: 0,
+		Body: &icmp.Echo{
+			ID:   id,
+			Seq:  seq,
+			Data: []byte("xray-checker"),
+		},
+	}
+	payload, err := message.Marshal(nil)
+	if err != nil {
+		return 0, err
+	}
+
+	start := time.Now()
+	if _, err := conn.WriteTo(payload, &net.UDPAddr{IP: ip}); err != nil {
+		return time.Since(start), err
+	}
+
+	buffer := make([]byte, 1500)
+	for {
+		n, _, err := conn.ReadFrom(buffer)
+		latency := time.Since(start)
+		if err != nil {
+			return latency, err
+		}
+
+		reply, err := icmp.ParseMessage(protocol, buffer[:n])
+		if err != nil {
+			continue
+		}
+		if echo, ok := reply.Body.(*icmp.Echo); ok && echo.ID == id && echo.Seq == seq {
+			return latency, nil
+		}
+	}
 }
 
 func compactHostCheckError(err error) string {
@@ -499,7 +645,7 @@ func (pc *ProxyChecker) pruneStatusDetails(proxies []*models.ProxyConfig) {
 	})
 }
 
-func (pc *ProxyChecker) RestoreOfflineStatus(stableID string, downSince time.Time, hostCheck HostCheckDetails) bool {
+func (pc *ProxyChecker) RestoreOfflineStatus(stableID string, downSince time.Time, hostCheck HostCheckDetails, pingCheck PingCheckDetails) bool {
 	if stableID == "" || downSince.IsZero() {
 		return false
 	}
@@ -537,6 +683,7 @@ func (pc *ProxyChecker) RestoreOfflineStatus(stableID string, downSince time.Tim
 		LastChangedAt: downSince,
 		DownSince:     downSince,
 		HostCheck:     hostCheck,
+		PingCheck:     pingCheck,
 	})
 	pc.currentMetrics.Store(metricKey, false)
 	pc.latencyMetrics.Store(metricKey, time.Duration(0))

@@ -13,15 +13,15 @@ import (
 )
 
 type AdminProxyInfo struct {
-	StableID  string `json:"stableId"`
-	Name      string `json:"name"`
-	SubName   string `json:"subName"`
-	Server    string `json:"server"`
-	Port      int    `json:"port"`
-	Protocol  string `json:"protocol"`
-	ProxyPort int    `json:"proxyPort"`
-	Online    bool   `json:"online"`
-	LatencyMs int64  `json:"latencyMs"`
+	StableID           string `json:"stableId"`
+	Name               string `json:"name"`
+	SubName            string `json:"subName"`
+	Server             string `json:"server"`
+	Port               int    `json:"port"`
+	Protocol           string `json:"protocol"`
+	ProxyPort          int    `json:"proxyPort"`
+	Online             bool   `json:"online"`
+	LatencyMs          int64  `json:"latencyMs"`
 	DownSince          string `json:"downSince,omitempty"`
 	DowntimeSec        int64  `json:"downtimeSec"`
 	HostCheckChecked   bool   `json:"hostCheckChecked"`
@@ -29,6 +29,11 @@ type AdminProxyInfo struct {
 	HostCheckLatencyMs int64  `json:"hostCheckLatencyMs"`
 	HostCheckTarget    string `json:"hostCheckTarget,omitempty"`
 	HostCheckError     string `json:"hostCheckError,omitempty"`
+	PingCheckChecked   bool   `json:"pingCheckChecked"`
+	PingCheckOnline    bool   `json:"pingCheckOnline"`
+	PingCheckLatencyMs int64  `json:"pingCheckLatencyMs"`
+	PingCheckTarget    string `json:"pingCheckTarget,omitempty"`
+	PingCheckError     string `json:"pingCheckError,omitempty"`
 }
 
 func AdminHandler() http.HandlerFunc {
@@ -167,15 +172,15 @@ func adminProxyInfo(proxy *models.ProxyConfig, details checker.ProxyStatusDetail
 	}
 
 	return AdminProxyInfo{
-		StableID:  proxy.StableID,
-		Name:      proxy.Name,
-		SubName:   proxy.SubName,
-		Server:    proxy.Server,
-		Port:      proxy.Port,
-		Protocol:  proxy.Protocol,
-		ProxyPort: startPort + proxy.Index,
-		Online:    details.Online,
-		LatencyMs: details.Latency.Milliseconds(),
+		StableID:           proxy.StableID,
+		Name:               proxy.Name,
+		SubName:            proxy.SubName,
+		Server:             proxy.Server,
+		Port:               proxy.Port,
+		Protocol:           proxy.Protocol,
+		ProxyPort:          startPort + proxy.Index,
+		Online:             details.Online,
+		LatencyMs:          details.Latency.Milliseconds(),
 		DownSince:          downSince,
 		DowntimeSec:        downtimeSec,
 		HostCheckChecked:   details.HostCheck.Checked,
@@ -183,5 +188,10 @@ func adminProxyInfo(proxy *models.ProxyConfig, details checker.ProxyStatusDetail
 		HostCheckLatencyMs: details.HostCheck.Latency.Milliseconds(),
 		HostCheckTarget:    details.HostCheck.Target,
 		HostCheckError:     details.HostCheck.Error,
+		PingCheckChecked:   details.PingCheck.Checked,
+		PingCheckOnline:    details.PingCheck.Online,
+		PingCheckLatencyMs: details.PingCheck.Latency.Milliseconds(),
+		PingCheckTarget:    details.PingCheck.Target,
+		PingCheckError:     details.PingCheck.Error,
 	}
 }

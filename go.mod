@@ -9,6 +9,7 @@ require (
 	github.com/prometheus/common v0.64.0
 	github.com/xtls/libxray v0.0.0-20251227071437-55f9ac38eb66
 	github.com/xtls/xray-core v1.251208.0
+	golang.org/x/net v0.47.0
 )
 
 require (
@@ -52,7 +53,6 @@ require (
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
 	golang.org/x/crypto v0.44.0 // indirect
 	golang.org/x/mod v0.29.0 // indirect
-	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/sync v0.18.0 // indirect
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/text v0.31.0 // indirect

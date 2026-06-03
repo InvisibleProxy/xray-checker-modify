@@ -121,13 +121,13 @@ type Service struct {
 	statePath      string
 	alertStatePath string
 
-	mu             sync.RWMutex
-	config         Config
-	alerts         map[string]nodeAlertState
-	menuMessages   map[string]int
-	statusCheck    bool
-	lastAlertRun   time.Time
-	lastUpdateID   int
+	mu           sync.RWMutex
+	config       Config
+	alerts       map[string]nodeAlertState
+	menuMessages map[string]int
+	statusCheck  bool
+	lastAlertRun time.Time
+	lastUpdateID int
 
 	stopCh   chan struct{}
 	stopOnce sync.Once
@@ -139,11 +139,12 @@ type nodeAlertState struct {
 	DownSince time.Time
 	LastAlert time.Time
 	HostCheck checker.HostCheckDetails
+	PingCheck checker.PingCheckDetails
 }
 
 type nodeAlertStateFile struct {
-	Version   int                               `json:"version"`
-	UpdatedAt time.Time                         `json:"updatedAt"`
+	Version   int                                `json:"version"`
+	UpdatedAt time.Time                          `json:"updatedAt"`
 	Nodes     map[string]persistedNodeAlertState `json:"nodes"`
 }
 
@@ -153,9 +154,19 @@ type persistedNodeAlertState struct {
 	DownSince time.Time           `json:"downSince"`
 	LastAlert time.Time           `json:"lastAlert"`
 	HostCheck *persistedHostCheck `json:"hostCheck,omitempty"`
+	PingCheck *persistedPingCheck `json:"pingCheck,omitempty"`
 }
 
 type persistedHostCheck struct {
+	Checked   bool      `json:"checked"`
+	Online    bool      `json:"online"`
+	LatencyMs int64     `json:"latencyMs"`
+	CheckedAt time.Time `json:"checkedAt"`
+	Target    string    `json:"target,omitempty"`
+	Error     string    `json:"error,omitempty"`
+}
+
+type persistedPingCheck struct {
 	Checked   bool      `json:"checked"`
 	Online    bool      `json:"online"`
 	LatencyMs int64     `json:"latencyMs"`
@@ -427,6 +438,9 @@ func (s *Service) NotifyNodeStatuses() {
 			if details.HostCheck.Checked {
 				state.HostCheck = details.HostCheck
 			}
+			if details.PingCheck.Checked {
+				state.PingCheck = details.PingCheck
+			}
 			if state.DownSince.IsZero() {
 				state.DownSince = details.DownSince
 				if state.DownSince.IsZero() {
@@ -435,7 +449,7 @@ func (s *Service) NotifyNodeStatuses() {
 			}
 			if state.FailCount >= cfg.AlertAfterFailures && shouldRepeatAlert(state.LastAlert, cfg.AlertRepeatMinutes, now) {
 				state.LastAlert = now
-				messageText = formatNodeDown(proxy, state.FailCount, state.DownSince, now, details.HostCheck)
+				messageText = formatNodeDown(proxy, state.FailCount, state.DownSince, now, details.HostCheck, details.PingCheck)
 			}
 		} else {
 			if state.WasDown && cfg.NotifyRecovery {
@@ -922,8 +936,8 @@ func (s *Service) formatNodeDetails(stableID string) string {
 		lines = append(lines, fmt.Sprintf("Простой: <b>%s</b>", htmlEscape(formatDuration(time.Since(details.DownSince)))))
 	}
 	if status == "OFFLINE" {
-		if hostCheck := formatHostCheckHTML(details.HostCheck); hostCheck != "" {
-			lines = append(lines, fmt.Sprintf("Host TCP: %s", hostCheck))
+		if diagnostics := formatHostDiagnosticsHTML(details.HostCheck, details.PingCheck); diagnostics != "" {
+			lines = append(lines, fmt.Sprintf("Диагностика: %s", diagnostics))
 		}
 	}
 	if proxy.SubName != "" {
@@ -1051,7 +1065,7 @@ func (s *Service) formatStatus() string {
 		}
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
 		online := err == nil && details.Online
-		line := formatProxyLineHTML(proxy, online, details.Latency, details.DownSince, details.HostCheck)
+		line := formatProxyLineHTML(proxy, online, details.Latency, details.DownSince, details.HostCheck, details.PingCheck)
 		if !online {
 			offlineLines = append(offlineLines, line)
 		} else {
@@ -1094,7 +1108,7 @@ func (s *Service) formatIssuesSummary() string {
 		}
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
 		if err != nil || !details.Online {
-			offlineLines = append(offlineLines, formatProxyLineHTML(proxy, false, details.Latency, details.DownSince, details.HostCheck))
+			offlineLines = append(offlineLines, formatProxyLineHTML(proxy, false, details.Latency, details.DownSince, details.HostCheck, details.PingCheck))
 		}
 	}
 
@@ -1611,7 +1625,7 @@ func (s *Service) loadAlertState() error {
 	restored := 0
 	for stableID, state := range loaded {
 		if state.WasDown && !state.DownSince.IsZero() {
-			if s.proxyChecker.RestoreOfflineStatus(stableID, state.DownSince, state.HostCheck) {
+			if s.proxyChecker.RestoreOfflineStatus(stableID, state.DownSince, state.HostCheck, state.PingCheck) {
 				restored++
 			}
 		}
@@ -1679,6 +1693,10 @@ func persistedNodeAlertStateFrom(state nodeAlertState) persistedNodeAlertState {
 		hostCheck := persistedHostCheckFrom(state.HostCheck)
 		persisted.HostCheck = &hostCheck
 	}
+	if state.PingCheck.Checked {
+		pingCheck := persistedPingCheckFrom(state.PingCheck)
+		persisted.PingCheck = &pingCheck
+	}
 	return persisted
 }
 
@@ -1691,6 +1709,9 @@ func (p persistedNodeAlertState) toNodeAlertState() nodeAlertState {
 	}
 	if p.HostCheck != nil {
 		state.HostCheck = p.HostCheck.toHostCheckDetails()
+	}
+	if p.PingCheck != nil {
+		state.PingCheck = p.PingCheck.toPingCheckDetails()
 	}
 	return state
 }
@@ -1708,6 +1729,28 @@ func persistedHostCheckFrom(hostCheck checker.HostCheckDetails) persistedHostChe
 
 func (p persistedHostCheck) toHostCheckDetails() checker.HostCheckDetails {
 	return checker.HostCheckDetails{
+		Checked:   p.Checked,
+		Online:    p.Online,
+		Latency:   time.Duration(p.LatencyMs) * time.Millisecond,
+		CheckedAt: p.CheckedAt,
+		Target:    p.Target,
+		Error:     p.Error,
+	}
+}
+
+func persistedPingCheckFrom(pingCheck checker.PingCheckDetails) persistedPingCheck {
+	return persistedPingCheck{
+		Checked:   pingCheck.Checked,
+		Online:    pingCheck.Online,
+		LatencyMs: pingCheck.Latency.Milliseconds(),
+		CheckedAt: pingCheck.CheckedAt,
+		Target:    pingCheck.Target,
+		Error:     pingCheck.Error,
+	}
+}
+
+func (p persistedPingCheck) toPingCheckDetails() checker.PingCheckDetails {
+	return checker.PingCheckDetails{
 		Checked:   p.Checked,
 		Online:    p.Online,
 		Latency:   time.Duration(p.LatencyMs) * time.Millisecond,
@@ -2080,27 +2123,35 @@ func formatDuration(value time.Duration) string {
 	return fmt.Sprintf("%d мин", minutes)
 }
 
-func formatHostCheckHTML(hostCheck checker.HostCheckDetails) string {
-	if !hostCheck.Checked {
-		return ""
+func formatHostDiagnosticsHTML(hostCheck checker.HostCheckDetails, pingCheck checker.PingCheckDetails) string {
+	var parts []string
+	if hostCheck.Checked {
+		parts = append(parts, formatTCPCheckHTML(hostCheck))
 	}
-	targetText := ""
-	if hostCheck.Target != "" {
-		targetText = " · " + htmlCode(hostCheck.Target)
+	if pingCheck.Checked {
+		parts = append(parts, formatPingCheckHTML(pingCheck))
 	}
-	if hostCheck.Online {
-		latencyText := "n/a"
-		if hostCheck.Latency > 0 {
-			latencyText = fmt.Sprintf("%d ms", hostCheck.Latency.Milliseconds())
-		}
-		return fmt.Sprintf("<b>доступен</b> · %s%s", htmlEscape(latencyText), targetText)
-	}
+	return strings.Join(parts, " · ")
+}
 
-	errorText := strings.TrimSpace(hostCheck.Error)
-	if errorText == "" {
-		errorText = "TCP check failed"
+func formatTCPCheckHTML(hostCheck checker.HostCheckDetails) string {
+	if hostCheck.Online {
+		if hostCheck.Latency > 0 {
+			return fmt.Sprintf("TCP 🟢 %d ms", hostCheck.Latency.Milliseconds())
+		}
+		return "TCP 🟢"
 	}
-	return fmt.Sprintf("<b>недоступен</b>%s · %s", targetText, htmlEscape(errorText))
+	return "TCP 🔴"
+}
+
+func formatPingCheckHTML(pingCheck checker.PingCheckDetails) string {
+	if pingCheck.Online {
+		if pingCheck.Latency > 0 {
+			return fmt.Sprintf("Ping 🟢 %d ms", pingCheck.Latency.Milliseconds())
+		}
+		return "Ping 🟢"
+	}
+	return "Ping 🔴"
 }
 
 func formatProxyLine(proxy *models.ProxyConfig, online bool, latency time.Duration) string {
@@ -2115,7 +2166,7 @@ func formatProxyLine(proxy *models.ProxyConfig, online bool, latency time.Durati
 	return fmt.Sprintf("- %s %s [%s] (%s, %s)", status, proxy.Name, proxy.StableID, proxy.Protocol, latencyText)
 }
 
-func formatProxyLineHTML(proxy *models.ProxyConfig, online bool, latency time.Duration, downSince time.Time, hostCheck checker.HostCheckDetails) string {
+func formatProxyLineHTML(proxy *models.ProxyConfig, online bool, latency time.Duration, downSince time.Time, hostCheck checker.HostCheckDetails, pingCheck checker.PingCheckDetails) string {
 	status := "OFFLINE"
 	if online {
 		status = "ONLINE"
@@ -2131,14 +2182,14 @@ func formatProxyLineHTML(proxy *models.ProxyConfig, online bool, latency time.Du
 		parts = append(parts, fmt.Sprintf("простой %s", htmlEscape(formatDuration(time.Since(downSince)))))
 	}
 	if !online {
-		if hostCheckText := formatHostCheckHTML(hostCheck); hostCheckText != "" {
-			parts = append(parts, "host TCP "+hostCheckText)
+		if diagnostics := formatHostDiagnosticsHTML(hostCheck, pingCheck); diagnostics != "" {
+			parts = append(parts, diagnostics)
 		}
 	}
 	return fmt.Sprintf("• <b>%s</b> <b>%s</b>\n  %s", htmlEscape(status), htmlEscape(proxy.Name), strings.Join(parts, " · "))
 }
 
-func formatNodeDown(proxy *models.ProxyConfig, failures int, downSince time.Time, now time.Time, hostCheck checker.HostCheckDetails) string {
+func formatNodeDown(proxy *models.ProxyConfig, failures int, downSince time.Time, now time.Time, hostCheck checker.HostCheckDetails, pingCheck checker.PingCheckDetails) string {
 	lines := []string{
 		"<b>⚠️ Нода недоступна</b>",
 		"",
@@ -2153,8 +2204,8 @@ func formatNodeDown(proxy *models.ProxyConfig, failures int, downSince time.Time
 		lines = append(lines, fmt.Sprintf("Недоступна с: <b>%s</b>", htmlEscape(formatCheckedAt(downSince))))
 		lines = append(lines, fmt.Sprintf("Простой: <b>%s</b>", htmlEscape(formatDuration(now.Sub(downSince)))))
 	}
-	if hostCheckText := formatHostCheckHTML(hostCheck); hostCheckText != "" {
-		lines = append(lines, fmt.Sprintf("Host TCP: %s", hostCheckText))
+	if diagnostics := formatHostDiagnosticsHTML(hostCheck, pingCheck); diagnostics != "" {
+		lines = append(lines, fmt.Sprintf("Диагностика: %s", diagnostics))
 	}
 	lines = append(lines, fmt.Sprintf("Провалов подряд: <b>%d</b>", failures))
 	return strings.Join(lines, "\n")
