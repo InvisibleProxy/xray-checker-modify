@@ -56,19 +56,22 @@ type ScheduleConfig struct {
 }
 
 type Result struct {
-	StableID        string    `json:"stableId"`
-	Name            string    `json:"name"`
-	SubName         string    `json:"subName"`
-	Protocol        string    `json:"protocol"`
-	URL             string    `json:"url"`
-	StatusCode      int       `json:"statusCode"`
-	DownloadedBytes int64     `json:"downloadedBytes"`
-	DurationMs      int64     `json:"durationMs"`
-	TTFBMs          int64     `json:"ttfbMs"`
-	Mbps            float64   `json:"mbps"`
-	Error           string    `json:"error"`
-	CheckedAt       time.Time `json:"checkedAt"`
-	Source          string    `json:"source"`
+	StableID        string                    `json:"stableId"`
+	Name            string                    `json:"name"`
+	SubName         string                    `json:"subName"`
+	Protocol        string                    `json:"protocol"`
+	URL             string                    `json:"url"`
+	StatusCode      int                       `json:"statusCode"`
+	DownloadedBytes int64                     `json:"downloadedBytes"`
+	DurationMs      int64                     `json:"durationMs"`
+	TTFBMs          int64                     `json:"ttfbMs"`
+	Mbps            float64                   `json:"mbps"`
+	Error           string                    `json:"error"`
+	Offline         bool                      `json:"offline"`
+	HostCheck       *checker.HostCheckDetails `json:"hostCheck,omitempty"`
+	PingCheck       *checker.PingCheckDetails `json:"pingCheck,omitempty"`
+	CheckedAt       time.Time                 `json:"checkedAt"`
+	Source          string                    `json:"source"`
 }
 
 type RunInfo struct {
@@ -307,6 +310,10 @@ func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source stri
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			if result, offline := m.offlineResult(p, source); offline {
+				results <- result
+				return
+			}
 			results <- m.testProxy(p, cfg, source)
 		}(proxy)
 	}
@@ -439,6 +446,36 @@ func (m *Manager) testProxy(proxy *models.ProxyConfig, cfg TestConfig, source st
 		result.Mbps = float64(result.DownloadedBytes*8) / duration.Seconds() / 1000000
 	}
 	return result
+}
+
+func (m *Manager) offlineResult(proxy *models.ProxyConfig, source string) (Result, bool) {
+	if proxy.StableID == "" {
+		proxy.StableID = proxy.GenerateStableID()
+	}
+
+	details, err := m.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+	if err != nil || details.Online {
+		return Result{}, false
+	}
+
+	result := Result{
+		StableID:  proxy.StableID,
+		Name:      proxy.Name,
+		SubName:   proxy.SubName,
+		Protocol:  proxy.Protocol,
+		Offline:   true,
+		CheckedAt: time.Now(),
+		Source:    source,
+	}
+	if details.HostCheck.Checked {
+		hostCheck := details.HostCheck
+		result.HostCheck = &hostCheck
+	}
+	if details.PingCheck.Checked {
+		pingCheck := details.PingCheck
+		result.PingCheck = &pingCheck
+	}
+	return result, true
 }
 
 func (m *Manager) selectProxies(req RunRequest) []*models.ProxyConfig {

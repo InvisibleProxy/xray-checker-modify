@@ -586,6 +586,48 @@
         return parts.join("");
       }
 
+      function checkValue(check, key) {
+        if (!check) return undefined;
+        const pascalKey = key.charAt(0).toUpperCase() + key.slice(1);
+        return check[key] ?? check[pascalKey];
+      }
+
+      function formatSpeedCheck(prefix, check) {
+        if (!checkValue(check, "checked")) return "";
+        if (checkValue(check, "online")) {
+          const latencyMs = checkValue(check, "latencyMs");
+          const rawLatency = Number(latencyMs ?? checkValue(check, "latency") ?? 0);
+          const latency = latencyMs == null && rawLatency > 100000 ? Math.round(rawLatency / 1000000) : rawLatency;
+          return latency > 0 ? `${prefix} OK ${latency} ms` : `${prefix} OK`;
+        }
+        return `${prefix} No`;
+      }
+
+      function formatSpeedDiagnostics(result) {
+        if (!result || !result.offline) return "";
+        return [
+          formatSpeedCheck("TCP", result.hostCheck),
+          formatSpeedCheck("Ping", result.pingCheck),
+        ].filter(Boolean).join(" · ");
+      }
+
+      function formatNodeSpeed(result) {
+        if (!result) return "n/a";
+        if (result.offline) return "Offline";
+        if (result.error) return "n/a";
+        return `${result.mbps.toFixed(2)} Mbps`;
+      }
+
+      function formatSpeedStatus(result) {
+        if (result.offline) return "Offline";
+        if (result.error) return "Failed";
+        return `${result.mbps.toFixed(2)} Mbps`;
+      }
+
+      function speedStatusClass(result) {
+        return result.offline || result.error ? "error" : "ok";
+      }
+
       function renderFilters() {
         const protocols = [...new Set(state.proxies.map((proxy) => proxy.protocol).filter(Boolean))].sort();
         const subs = [...new Set(state.proxies.map((proxy) => proxy.subName).filter(Boolean))].sort();
@@ -596,7 +638,7 @@
       function renderNodes() {
         const rows = filteredProxies().map((proxy) => {
           const result = resultFor(proxy.stableId);
-          const speed = result && !result.error ? `${result.mbps.toFixed(2)} Mbps` : "n/a";
+          const speed = formatNodeSpeed(result);
           const checked = state.selected.has(proxy.stableId) ? "checked" : "";
           const downSince = proxy.downSince ? formatTime(proxy.downSince) : "";
           const downtime = proxy.downSince ? formatDurationSec(proxy.downtimeSec) : "";
@@ -634,17 +676,20 @@
 
       function renderResults() {
         const results = state.snapshot ? state.snapshot.results : [];
-        $("results").innerHTML = results.map((result) => `
-          <tr>
-            <td>${escapeHtml(result.name || "Unnamed")}</td>
-            <td class="${result.error ? "error" : "ok"}">${result.error ? "Failed" : `${result.mbps.toFixed(2)} Mbps`}</td>
-            <td>${formatBytes(result.downloadedBytes)}</td>
-            <td>${result.durationMs || 0} ms</td>
-            <td>${result.ttfbMs || 0} ms</td>
-            <td>${formatTime(result.checkedAt)}</td>
-            <td class="error">${escapeHtml(result.error || "")}</td>
-          </tr>
-        `).join("") || `<tr><td colspan="7" class="muted">No speed test results yet</td></tr>`;
+        $("results").innerHTML = results.map((result) => {
+          const diagnostics = formatSpeedDiagnostics(result);
+          return `
+            <tr>
+              <td>${escapeHtml(result.name || "Unnamed")}</td>
+              <td class="${speedStatusClass(result)}">${formatSpeedStatus(result)}</td>
+              <td>${result.offline ? "n/a" : formatBytes(result.downloadedBytes)}</td>
+              <td>${result.offline ? "n/a" : `${result.durationMs || 0} ms`}</td>
+              <td>${result.offline ? "n/a" : `${result.ttfbMs || 0} ms`}</td>
+              <td>${formatTime(result.checkedAt)}</td>
+              <td class="${result.error || result.offline ? "error" : ""}">${escapeHtml(result.error || diagnostics || "")}</td>
+            </tr>
+          `;
+        }).join("") || `<tr><td colspan="7" class="muted">No speed test results yet</td></tr>`;
       }
 
       function renderRunState() {

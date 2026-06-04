@@ -1308,7 +1308,9 @@ func (s *Service) formatRecentSpeedOverview() string {
 	}
 	for _, result := range limitResults(results, 10) {
 		status := fmt.Sprintf("<b>%.2f Mbps</b>", result.Mbps)
-		if result.Error != "" {
+		if result.Offline {
+			status = "<b>OFFLINE</b>"
+		} else if result.Error != "" {
 			status = "<b>FAILED</b>"
 		} else if cfg.LowSpeedThresholdMbps > 0 && result.Mbps < cfg.LowSpeedThresholdMbps {
 			status = fmt.Sprintf("<b>LOW %.2f Mbps</b>", result.Mbps)
@@ -1322,7 +1324,7 @@ func (s *Service) formatRecentSpeedOverview() string {
 func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, failed int, slow int, issuesOnly bool) string {
 	successful := 0
 	for _, result := range report.Results {
-		if result.Error == "" {
+		if !result.Offline && result.Error == "" {
 			successful++
 		}
 	}
@@ -1990,6 +1992,10 @@ func parseCommand(text string) (string, []string) {
 
 func countSpeedIssues(results []speedtest.Result, threshold float64) (failed int, slow int) {
 	for _, result := range results {
+		if result.Offline {
+			failed++
+			continue
+		}
 		if result.Error != "" {
 			failed++
 			continue
@@ -2004,6 +2010,14 @@ func countSpeedIssues(results []speedtest.Result, threshold float64) (failed int
 func speedIssuesHTML(results []speedtest.Result, threshold float64) []string {
 	var lines []string
 	for _, result := range results {
+		if result.Offline {
+			diagnostics := formatSpeedResultDiagnosticsHTML(result)
+			if diagnostics == "" {
+				diagnostics = "Диагностика: нет данных"
+			}
+			lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  ⚠️ <b>Нода offline</b> · %s\n  %s", htmlEscape(result.Name), htmlCode(result.StableID), diagnostics))
+			continue
+		}
 		if result.Error != "" {
 			lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  ❌ <b>Ошибка</b> · %s\n  %s", htmlEscape(result.Name), htmlCode(result.StableID), htmlEscape(result.Error)))
 			continue
@@ -2018,7 +2032,7 @@ func speedIssuesHTML(results []speedtest.Result, threshold float64) []string {
 func successfulResults(results []speedtest.Result) []speedtest.Result {
 	var successful []speedtest.Result
 	for _, result := range results {
-		if result.Error == "" {
+		if !result.Offline && result.Error == "" {
 			successful = append(successful, result)
 		}
 	}
@@ -2170,6 +2184,14 @@ func limitResults(results []speedtest.Result, limit int) []speedtest.Result {
 }
 
 func formatSpeedResultHTML(result speedtest.Result, threshold float64) string {
+	if result.Offline {
+		diagnostics := formatSpeedResultDiagnosticsHTML(result)
+		if diagnostics == "" {
+			diagnostics = "Диагностика: нет данных"
+		}
+		return fmt.Sprintf("• <b>%s</b>\n  ⚠️ <b>Нода offline</b> · %s", htmlEscape(result.Name), diagnostics)
+	}
+
 	if threshold <= 0 || result.Mbps >= threshold {
 		return fmt.Sprintf("• <b>%s</b>\n  ✅ <b>%.2f Mbps</b>", htmlEscape(result.Name), result.Mbps)
 	}
@@ -2199,6 +2221,13 @@ func reportSourceLabel(source string) string {
 
 func formatSpeedHistoryLine(result speedtest.Result, threshold float64) string {
 	prefix := formatCheckedAt(result.CheckedAt)
+	if result.Offline {
+		diagnostics := formatSpeedResultDiagnosticsHTML(result)
+		if diagnostics == "" {
+			return fmt.Sprintf("• %s\n  <b>OFFLINE</b>", htmlCode(prefix))
+		}
+		return fmt.Sprintf("• %s\n  <b>OFFLINE</b> · %s", htmlCode(prefix), diagnostics)
+	}
 	if result.Error != "" {
 		return fmt.Sprintf("• %s\n  <b>FAILED</b> · %s", htmlCode(prefix), htmlEscape(result.Error))
 	}
@@ -2207,6 +2236,18 @@ func formatSpeedHistoryLine(result speedtest.Result, threshold float64) string {
 		marker = "LOW"
 	}
 	return fmt.Sprintf("• %s\n  <b>%s %.2f Mbps</b> · %s · %d ms · TTFB %d ms", htmlCode(prefix), marker, result.Mbps, htmlEscape(formatBytes(result.DownloadedBytes)), result.DurationMs, result.TTFBMs)
+}
+
+func formatSpeedResultDiagnosticsHTML(result speedtest.Result) string {
+	var hostCheck checker.HostCheckDetails
+	var pingCheck checker.PingCheckDetails
+	if result.HostCheck != nil {
+		hostCheck = *result.HostCheck
+	}
+	if result.PingCheck != nil {
+		pingCheck = *result.PingCheck
+	}
+	return formatHostDiagnosticsHTML(hostCheck, pingCheck)
 }
 
 func formatBytes(bytes int64) string {
