@@ -23,64 +23,79 @@ import (
 )
 
 const (
-	defaultTimeoutSec         = 20
-	defaultSpeedReportLimit   = 10
-	defaultAlertCheckMinutes  = 5
-	defaultAlertAfterFailures = 1
-	defaultAlertRepeatMinutes = 60
-	maxSpeedReportLimit       = 50
-	menuSpeedButtonLimit      = 8
+	defaultTimeoutSec                  = 20
+	defaultSpeedReportLimit            = 10
+	defaultAlertCheckMinutes           = 5
+	defaultAlertAfterFailures          = 1
+	defaultAlertDiagnosticsMinutes     = 60
+	defaultAlertMaxReminderMinutes     = 1440
+	defaultAlertReminderScheduleString = "15,60,180,360,720"
+	maxSpeedReportLimit                = 50
+	menuSpeedButtonLimit               = 8
 )
 
+var defaultAlertReminderScheduleMinutes = parseMinuteSchedule(defaultAlertReminderScheduleString)
+
 type Config struct {
-	Enabled               bool    `json:"enabled"`
-	BotToken              string  `json:"botToken"`
-	ChatID                string  `json:"chatId"`
-	MessageThreadID       int     `json:"messageThreadId"`
-	AdminUserIDs          []int64 `json:"adminUserIds"`
-	CommandPollingEnabled bool    `json:"commandPollingEnabled"`
-	SpeedReportsEnabled   bool    `json:"speedReportsEnabled"`
-	SpeedReportMode       string  `json:"speedReportMode"`
-	LowSpeedThresholdMbps float64 `json:"lowSpeedThresholdMbps"`
-	SpeedReportLimit      int     `json:"speedReportLimit"`
-	NodeAlertsEnabled     bool    `json:"nodeAlertsEnabled"`
-	AlertCheckMinutes     int     `json:"alertCheckMinutes"`
-	AlertAfterFailures    int     `json:"alertAfterFailures"`
-	AlertRepeatMinutes    int     `json:"alertRepeatMinutes"`
-	NotifyRecovery        bool    `json:"notifyRecovery"`
-	TimeoutSec            int     `json:"timeoutSec"`
+	Enabled                      bool    `json:"enabled"`
+	BotToken                     string  `json:"botToken"`
+	ChatID                       string  `json:"chatId"`
+	MessageThreadID              int     `json:"messageThreadId"`
+	AdminUserIDs                 []int64 `json:"adminUserIds"`
+	CommandPollingEnabled        bool    `json:"commandPollingEnabled"`
+	SpeedReportsEnabled          bool    `json:"speedReportsEnabled"`
+	SpeedReportMode              string  `json:"speedReportMode"`
+	LowSpeedThresholdMbps        float64 `json:"lowSpeedThresholdMbps"`
+	SpeedReportLimit             int     `json:"speedReportLimit"`
+	NodeAlertsEnabled            bool    `json:"nodeAlertsEnabled"`
+	AlertCheckMinutes            int     `json:"alertCheckMinutes"`
+	AlertAfterFailures           int     `json:"alertAfterFailures"`
+	AlertRepeatMinutes           int     `json:"alertRepeatMinutes,omitempty"`
+	AlertDiagnosticsMinutes      int     `json:"alertDiagnosticsMinutes"`
+	AlertReminderScheduleMinutes []int   `json:"alertReminderScheduleMinutes"`
+	AlertMaxReminderMinutes      int     `json:"alertMaxReminderMinutes"`
+	GroupOfflineReminders        bool    `json:"groupOfflineReminders"`
+	NotifyRecovery               bool    `json:"notifyRecovery"`
+	TimeoutSec                   int     `json:"timeoutSec"`
 }
 
 type AdminConfig struct {
-	Enabled                 bool    `json:"enabled"`
-	CommandPollingEnabled   bool    `json:"commandPollingEnabled"`
-	SpeedReportsEnabled     bool    `json:"speedReportsEnabled"`
-	SpeedReportMode         string  `json:"speedReportMode"`
-	LowSpeedThresholdMbps   float64 `json:"lowSpeedThresholdMbps"`
-	SpeedReportLimit        int     `json:"speedReportLimit"`
-	NodeAlertsEnabled       bool    `json:"nodeAlertsEnabled"`
-	AlertCheckMinutes       int     `json:"alertCheckMinutes"`
-	AlertAfterFailures      int     `json:"alertAfterFailures"`
-	AlertRepeatMinutes      int     `json:"alertRepeatMinutes"`
-	NotifyRecovery          bool    `json:"notifyRecovery"`
-	BotTokenConfigured      bool    `json:"botTokenConfigured"`
-	ChatConfigured          bool    `json:"chatConfigured"`
-	MessageThreadConfigured bool    `json:"messageThreadConfigured"`
-	AdminUserCount          int     `json:"adminUserCount"`
+	Enabled                      bool    `json:"enabled"`
+	CommandPollingEnabled        bool    `json:"commandPollingEnabled"`
+	SpeedReportsEnabled          bool    `json:"speedReportsEnabled"`
+	SpeedReportMode              string  `json:"speedReportMode"`
+	LowSpeedThresholdMbps        float64 `json:"lowSpeedThresholdMbps"`
+	SpeedReportLimit             int     `json:"speedReportLimit"`
+	NodeAlertsEnabled            bool    `json:"nodeAlertsEnabled"`
+	AlertCheckMinutes            int     `json:"alertCheckMinutes"`
+	AlertAfterFailures           int     `json:"alertAfterFailures"`
+	AlertRepeatMinutes           int     `json:"alertRepeatMinutes,omitempty"`
+	AlertDiagnosticsMinutes      int     `json:"alertDiagnosticsMinutes"`
+	AlertReminderScheduleMinutes []int   `json:"alertReminderScheduleMinutes"`
+	AlertMaxReminderMinutes      int     `json:"alertMaxReminderMinutes"`
+	GroupOfflineReminders        bool    `json:"groupOfflineReminders"`
+	NotifyRecovery               bool    `json:"notifyRecovery"`
+	BotTokenConfigured           bool    `json:"botTokenConfigured"`
+	ChatConfigured               bool    `json:"chatConfigured"`
+	MessageThreadConfigured      bool    `json:"messageThreadConfigured"`
+	AdminUserCount               int     `json:"adminUserCount"`
 }
 
 func DefaultConfig() Config {
 	return Config{
-		CommandPollingEnabled: true,
-		SpeedReportsEnabled:   true,
-		SpeedReportMode:       "always",
-		SpeedReportLimit:      defaultSpeedReportLimit,
-		NodeAlertsEnabled:     true,
-		AlertCheckMinutes:     defaultAlertCheckMinutes,
-		AlertAfterFailures:    defaultAlertAfterFailures,
-		AlertRepeatMinutes:    defaultAlertRepeatMinutes,
-		NotifyRecovery:        true,
-		TimeoutSec:            defaultTimeoutSec,
+		CommandPollingEnabled:        true,
+		SpeedReportsEnabled:          true,
+		SpeedReportMode:              "always",
+		SpeedReportLimit:             defaultSpeedReportLimit,
+		NodeAlertsEnabled:            true,
+		AlertCheckMinutes:            defaultAlertCheckMinutes,
+		AlertAfterFailures:           defaultAlertAfterFailures,
+		AlertDiagnosticsMinutes:      defaultAlertDiagnosticsMinutes,
+		AlertReminderScheduleMinutes: append([]int(nil), defaultAlertReminderScheduleMinutes...),
+		AlertMaxReminderMinutes:      defaultAlertMaxReminderMinutes,
+		GroupOfflineReminders:        true,
+		NotifyRecovery:               true,
+		TimeoutSec:                   defaultTimeoutSec,
 	}
 }
 
@@ -106,8 +121,26 @@ func (c *Config) Normalize() {
 	if c.AlertAfterFailures <= 0 {
 		c.AlertAfterFailures = defaultAlertAfterFailures
 	}
-	if c.AlertRepeatMinutes <= 0 {
-		c.AlertRepeatMinutes = defaultAlertRepeatMinutes
+	if c.AlertDiagnosticsMinutes <= 0 {
+		if c.AlertRepeatMinutes > 0 {
+			c.AlertDiagnosticsMinutes = c.AlertRepeatMinutes
+		} else {
+			c.AlertDiagnosticsMinutes = defaultAlertDiagnosticsMinutes
+		}
+	}
+	c.AlertReminderScheduleMinutes = normalizeMinuteSchedule(c.AlertReminderScheduleMinutes)
+	if len(c.AlertReminderScheduleMinutes) == 0 {
+		c.AlertReminderScheduleMinutes = append([]int(nil), defaultAlertReminderScheduleMinutes...)
+	}
+	if c.AlertMaxReminderMinutes <= 0 {
+		if c.AlertRepeatMinutes > 0 {
+			c.AlertMaxReminderMinutes = c.AlertRepeatMinutes
+		} else {
+			c.AlertMaxReminderMinutes = defaultAlertMaxReminderMinutes
+		}
+	}
+	if c.AlertMaxReminderMinutes < c.AlertReminderScheduleMinutes[len(c.AlertReminderScheduleMinutes)-1] {
+		c.AlertMaxReminderMinutes = c.AlertReminderScheduleMinutes[len(c.AlertReminderScheduleMinutes)-1]
 	}
 	if c.TimeoutSec <= 0 {
 		c.TimeoutSec = defaultTimeoutSec
@@ -134,12 +167,15 @@ type Service struct {
 }
 
 type nodeAlertState struct {
-	FailCount int
-	WasDown   bool
-	DownSince time.Time
-	LastAlert time.Time
-	HostCheck checker.HostCheckDetails
-	PingCheck checker.PingCheckDetails
+	FailCount       int
+	WasDown         bool
+	DownSince       time.Time
+	LastAlert       time.Time
+	AlertCount      int
+	NextAlert       time.Time
+	LastDiagnostics time.Time
+	HostCheck       checker.HostCheckDetails
+	PingCheck       checker.PingCheckDetails
 }
 
 type nodeAlertStateFile struct {
@@ -149,12 +185,15 @@ type nodeAlertStateFile struct {
 }
 
 type persistedNodeAlertState struct {
-	FailCount int                 `json:"failCount"`
-	WasDown   bool                `json:"wasDown"`
-	DownSince time.Time           `json:"downSince"`
-	LastAlert time.Time           `json:"lastAlert"`
-	HostCheck *persistedHostCheck `json:"hostCheck,omitempty"`
-	PingCheck *persistedPingCheck `json:"pingCheck,omitempty"`
+	FailCount       int                 `json:"failCount"`
+	WasDown         bool                `json:"wasDown"`
+	DownSince       time.Time           `json:"downSince"`
+	LastAlert       time.Time           `json:"lastAlert"`
+	AlertCount      int                 `json:"alertCount"`
+	NextAlert       time.Time           `json:"nextAlert"`
+	LastDiagnostics time.Time           `json:"lastDiagnostics"`
+	HostCheck       *persistedHostCheck `json:"hostCheck,omitempty"`
+	PingCheck       *persistedPingCheck `json:"pingCheck,omitempty"`
 }
 
 type persistedHostCheck struct {
@@ -178,6 +217,12 @@ type persistedPingCheck struct {
 type proxyCandidate struct {
 	Proxy   *models.ProxyConfig
 	Latency time.Duration
+}
+
+type nodeDownAlert struct {
+	Proxy     *models.ProxyConfig
+	State     nodeAlertState
+	NextAfter time.Duration
 }
 
 type apiResponse struct {
@@ -272,6 +317,7 @@ func (s *Service) Load() error {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return err
 	}
+	applyLegacyAlertRepeat(data, &cfg)
 	applyEnvOverrides(&cfg)
 	cfg.Normalize()
 	disableInvalidEnabledConfig(&cfg)
@@ -289,21 +335,25 @@ func (s *Service) Config() Config {
 func (s *Service) AdminConfig() AdminConfig {
 	cfg := s.Config()
 	return AdminConfig{
-		Enabled:                 cfg.Enabled,
-		CommandPollingEnabled:   cfg.CommandPollingEnabled,
-		SpeedReportsEnabled:     cfg.SpeedReportsEnabled,
-		SpeedReportMode:         cfg.SpeedReportMode,
-		LowSpeedThresholdMbps:   cfg.LowSpeedThresholdMbps,
-		SpeedReportLimit:        cfg.SpeedReportLimit,
-		NodeAlertsEnabled:       cfg.NodeAlertsEnabled,
-		AlertCheckMinutes:       cfg.AlertCheckMinutes,
-		AlertAfterFailures:      cfg.AlertAfterFailures,
-		AlertRepeatMinutes:      cfg.AlertRepeatMinutes,
-		NotifyRecovery:          cfg.NotifyRecovery,
-		BotTokenConfigured:      cfg.BotToken != "",
-		ChatConfigured:          cfg.ChatID != "",
-		MessageThreadConfigured: cfg.MessageThreadID > 0,
-		AdminUserCount:          len(cfg.AdminUserIDs),
+		Enabled:                      cfg.Enabled,
+		CommandPollingEnabled:        cfg.CommandPollingEnabled,
+		SpeedReportsEnabled:          cfg.SpeedReportsEnabled,
+		SpeedReportMode:              cfg.SpeedReportMode,
+		LowSpeedThresholdMbps:        cfg.LowSpeedThresholdMbps,
+		SpeedReportLimit:             cfg.SpeedReportLimit,
+		NodeAlertsEnabled:            cfg.NodeAlertsEnabled,
+		AlertCheckMinutes:            cfg.AlertCheckMinutes,
+		AlertAfterFailures:           cfg.AlertAfterFailures,
+		AlertRepeatMinutes:           cfg.AlertRepeatMinutes,
+		AlertDiagnosticsMinutes:      cfg.AlertDiagnosticsMinutes,
+		AlertReminderScheduleMinutes: append([]int(nil), cfg.AlertReminderScheduleMinutes...),
+		AlertMaxReminderMinutes:      cfg.AlertMaxReminderMinutes,
+		GroupOfflineReminders:        cfg.GroupOfflineReminders,
+		NotifyRecovery:               cfg.NotifyRecovery,
+		BotTokenConfigured:           cfg.BotToken != "",
+		ChatConfigured:               cfg.ChatID != "",
+		MessageThreadConfigured:      cfg.MessageThreadID > 0,
+		AdminUserCount:               len(cfg.AdminUserIDs),
 	}
 }
 
@@ -319,6 +369,10 @@ func (s *Service) UpdateAdminConfig(input AdminConfig) error {
 	cfg.AlertCheckMinutes = input.AlertCheckMinutes
 	cfg.AlertAfterFailures = input.AlertAfterFailures
 	cfg.AlertRepeatMinutes = input.AlertRepeatMinutes
+	cfg.AlertDiagnosticsMinutes = input.AlertDiagnosticsMinutes
+	cfg.AlertReminderScheduleMinutes = append([]int(nil), input.AlertReminderScheduleMinutes...)
+	cfg.AlertMaxReminderMinutes = input.AlertMaxReminderMinutes
+	cfg.GroupOfflineReminders = input.GroupOfflineReminders
 	cfg.NotifyRecovery = input.NotifyRecovery
 	cfg.Normalize()
 	if cfg.Enabled && cfg.BotToken == "" {
@@ -420,6 +474,8 @@ func (s *Service) NotifyNodeStatuses() {
 	}
 	s.mu.Unlock()
 
+	var downAlerts []nodeDownAlert
+	var recoveryMessages []string
 	for _, proxy := range proxies {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
@@ -428,7 +484,6 @@ func (s *Service) NotifyNodeStatuses() {
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
 		isDown := err != nil || !details.Online
 
-		var messageText string
 		var downMessageState nodeAlertState
 		var shouldSendDownAlert bool
 		var shouldRefreshDiagnostics bool
@@ -444,20 +499,32 @@ func (s *Service) NotifyNodeStatuses() {
 			if details.PingCheck.Checked {
 				state.PingCheck = details.PingCheck
 			}
+			state.LastDiagnostics = latestDiagnosticsAt(state.LastDiagnostics, state.HostCheck, state.PingCheck)
 			if state.DownSince.IsZero() {
 				state.DownSince = details.DownSince
 				if state.DownSince.IsZero() {
 					state.DownSince = now
 				}
 			}
-			if state.FailCount >= cfg.AlertAfterFailures && shouldRepeatAlert(state.LastAlert, cfg.AlertRepeatMinutes, now) {
-				shouldRefreshDiagnostics = !state.LastAlert.IsZero()
-				state.LastAlert = now
-				shouldSendDownAlert = true
+			shouldRefreshDiagnostics = shouldRefreshNodeDiagnostics(state, cfg, now)
+			if state.FailCount >= cfg.AlertAfterFailures {
+				if state.NextAlert.IsZero() {
+					if state.LastAlert.IsZero() {
+						state.NextAlert = now
+					} else {
+						state.NextAlert = nextAlertAt(state.LastAlert, state.AlertCount, cfg)
+					}
+				}
+				if !now.Before(state.NextAlert) {
+					state.LastAlert = now
+					state.AlertCount++
+					state.NextAlert = nextAlertAt(now, state.AlertCount, cfg)
+					shouldSendDownAlert = true
+				}
 			}
 		} else {
 			if state.WasDown && cfg.NotifyRecovery {
-				messageText = formatNodeRecovery(proxy, details.Latency, state.DownSince, now)
+				recoveryMessages = append(recoveryMessages, formatNodeRecovery(proxy, details.Latency, state.DownSince, now))
 			}
 			state = nodeAlertState{}
 		}
@@ -472,7 +539,7 @@ func (s *Service) NotifyNodeStatuses() {
 		downMessageState = state
 		s.mu.Unlock()
 
-		if shouldSendDownAlert && shouldRefreshDiagnostics {
+		if isDown && shouldRefreshDiagnostics {
 			refreshed, err := s.proxyChecker.RefreshHostDiagnosticsByStableID(proxy.StableID)
 			if err != nil {
 				logger.Warn("Failed to refresh host diagnostics for %s: %v", proxy.Name, err)
@@ -489,6 +556,7 @@ func (s *Service) NotifyNodeStatuses() {
 				if refreshed.PingCheck.Checked {
 					state.PingCheck = refreshed.PingCheck
 				}
+				state.LastDiagnostics = latestDiagnosticsAt(now, state.HostCheck, state.PingCheck)
 				if previous != state {
 					stateChanged = true
 				}
@@ -503,23 +571,41 @@ func (s *Service) NotifyNodeStatuses() {
 		}
 
 		if shouldSendDownAlert {
-			messageText = formatNodeDown(proxy, downMessageState.FailCount, downMessageState.DownSince, now, downMessageState.HostCheck, downMessageState.PingCheck)
+			downAlerts = append(downAlerts, nodeDownAlert{
+				Proxy:     proxy,
+				State:     downMessageState,
+				NextAfter: downMessageState.NextAlert.Sub(now),
+			})
 		}
+	}
 
-		if messageText == "" {
-			continue
+	for _, text := range recoveryMessages {
+		s.sendNodeAlertMessage(cfg, text)
+	}
+
+	if cfg.GroupOfflineReminders && len(downAlerts) > 1 {
+		s.sendNodeAlertMessage(cfg, formatNodeDownGroup(downAlerts, now))
+	} else {
+		for _, alert := range downAlerts {
+			s.sendNodeAlertMessage(cfg, formatNodeDown(alert.Proxy, alert.State, now))
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
-		if _, err := s.sendHTMLToWithMarkup(ctx, cfg.ChatID, cfg.MessageThreadID, messageText, ""); err != nil {
-			logger.Warn("Failed to send Telegram node alert: %v", err)
-		}
-		cancel()
 	}
 
 	if stateChanged {
 		if err := s.saveAlertState(); err != nil {
 			logger.Warn("Failed to save Telegram node alert state: %v", err)
 		}
+	}
+}
+
+func (s *Service) sendNodeAlertMessage(cfg Config, text string) {
+	if text == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
+	defer cancel()
+	if _, err := s.sendHTMLToWithMarkup(ctx, cfg.ChatID, cfg.MessageThreadID, text, ""); err != nil {
+		logger.Warn("Failed to send Telegram node alert: %v", err)
 	}
 }
 
@@ -979,7 +1065,14 @@ func (s *Service) formatMenu(cfg Config, isAdmin bool) string {
 	}
 	alerts := "выключены"
 	if cfg.NodeAlertsEnabled {
-		alerts = fmt.Sprintf("каждые %d мин, после %d проверок, повтор %d мин", cfg.AlertCheckMinutes, cfg.AlertAfterFailures, cfg.AlertRepeatMinutes)
+		alerts = fmt.Sprintf(
+			"проверка %d мин, после %d провалов, диагностика %d мин, напоминания %s мин, максимум %d мин",
+			cfg.AlertCheckMinutes,
+			cfg.AlertAfterFailures,
+			cfg.AlertDiagnosticsMinutes,
+			formatIntList(cfg.AlertReminderScheduleMinutes),
+			cfg.AlertMaxReminderMinutes,
+		)
 	}
 	adminText := "нет"
 	if isAdmin {
@@ -1806,10 +1899,13 @@ func (s *Service) saveAlertState() error {
 
 func persistedNodeAlertStateFrom(state nodeAlertState) persistedNodeAlertState {
 	persisted := persistedNodeAlertState{
-		FailCount: state.FailCount,
-		WasDown:   state.WasDown,
-		DownSince: state.DownSince,
-		LastAlert: state.LastAlert,
+		FailCount:       state.FailCount,
+		WasDown:         state.WasDown,
+		DownSince:       state.DownSince,
+		LastAlert:       state.LastAlert,
+		AlertCount:      state.AlertCount,
+		NextAlert:       state.NextAlert,
+		LastDiagnostics: state.LastDiagnostics,
 	}
 	if state.HostCheck.Checked {
 		hostCheck := persistedHostCheckFrom(state.HostCheck)
@@ -1824,10 +1920,13 @@ func persistedNodeAlertStateFrom(state nodeAlertState) persistedNodeAlertState {
 
 func (p persistedNodeAlertState) toNodeAlertState() nodeAlertState {
 	state := nodeAlertState{
-		FailCount: p.FailCount,
-		WasDown:   p.WasDown,
-		DownSince: p.DownSince,
-		LastAlert: p.LastAlert,
+		FailCount:       p.FailCount,
+		WasDown:         p.WasDown,
+		DownSince:       p.DownSince,
+		LastAlert:       p.LastAlert,
+		AlertCount:      p.AlertCount,
+		NextAlert:       p.NextAlert,
+		LastDiagnostics: p.LastDiagnostics,
 	}
 	if p.HostCheck != nil {
 		state.HostCheck = p.HostCheck.toHostCheckDetails()
@@ -1835,6 +1934,10 @@ func (p persistedNodeAlertState) toNodeAlertState() nodeAlertState {
 	if p.PingCheck != nil {
 		state.PingCheck = p.PingCheck.toPingCheckDetails()
 	}
+	if state.AlertCount <= 0 && !state.LastAlert.IsZero() {
+		state.AlertCount = 1
+	}
+	state.LastDiagnostics = latestDiagnosticsAt(state.LastDiagnostics, state.HostCheck, state.PingCheck)
 	return state
 }
 
@@ -1915,6 +2018,22 @@ func (s *Service) setConfig(cfg Config) {
 	s.mu.Unlock()
 }
 
+func applyLegacyAlertRepeat(data []byte, cfg *Config) {
+	if cfg.AlertRepeatMinutes <= 0 {
+		return
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return
+	}
+	if _, ok := raw["alertDiagnosticsMinutes"]; !ok {
+		cfg.AlertDiagnosticsMinutes = cfg.AlertRepeatMinutes
+	}
+	if _, ok := raw["alertMaxReminderMinutes"]; !ok {
+		cfg.AlertMaxReminderMinutes = cfg.AlertRepeatMinutes
+	}
+}
+
 func applyEnvDefaults(cfg *Config) {
 	if v := os.Getenv("TELEGRAM_ENABLED"); v != "" {
 		cfg.Enabled = parseBool(v)
@@ -1976,6 +2095,46 @@ func parseInt64List(value string) []int64 {
 		}
 	}
 	return result
+}
+
+func normalizeMinuteSchedule(values []int) []int {
+	seen := make(map[int]bool)
+	var result []int
+	for _, value := range values {
+		if value <= 0 || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	sort.Ints(result)
+	return result
+}
+
+func parseMinuteSchedule(value string) []int {
+	var result []int
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		minutes, err := strconv.Atoi(part)
+		if err == nil {
+			result = append(result, minutes)
+		}
+	}
+	return normalizeMinuteSchedule(result)
+}
+
+func formatIntList(values []int) string {
+	if len(values) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, strconv.Itoa(value))
+	}
+	return strings.Join(parts, ",")
 }
 
 func parseCommand(text string) (string, []string) {
@@ -2350,9 +2509,14 @@ func formatProxyLineHTML(proxy *models.ProxyConfig, online bool, latency time.Du
 	return fmt.Sprintf("• <b>%s</b> <b>%s</b>\n  %s", htmlEscape(status), htmlEscape(proxy.Name), strings.Join(parts, " · "))
 }
 
-func formatNodeDown(proxy *models.ProxyConfig, failures int, downSince time.Time, now time.Time, hostCheck checker.HostCheckDetails, pingCheck checker.PingCheckDetails) string {
+func formatNodeDown(proxy *models.ProxyConfig, state nodeAlertState, now time.Time) string {
+	title := "⚠️ Нода недоступна"
+	if state.AlertCount > 1 {
+		title = "⚠️ Нода всё ещё недоступна"
+	}
+
 	lines := []string{
-		"<b>⚠️ Нода недоступна</b>",
+		fmt.Sprintf("<b>%s</b>", htmlEscape(title)),
 		"",
 		fmt.Sprintf("<b>%s</b>", htmlEscape(proxy.Name)),
 		fmt.Sprintf("ID: %s", htmlCode(proxy.StableID)),
@@ -2361,15 +2525,41 @@ func formatNodeDown(proxy *models.ProxyConfig, failures int, downSince time.Time
 	if proxy.SubName != "" {
 		lines = append(lines, fmt.Sprintf("Подписка: <b>%s</b>", htmlEscape(proxy.SubName)))
 	}
-	if !downSince.IsZero() {
-		lines = append(lines, fmt.Sprintf("Недоступна с: <b>%s</b>", htmlEscape(formatCheckedAt(downSince))))
-		lines = append(lines, fmt.Sprintf("Простой: <b>%s</b>", htmlEscape(formatDuration(now.Sub(downSince)))))
+	if !state.DownSince.IsZero() {
+		lines = append(lines, fmt.Sprintf("Недоступна с: <b>%s</b>", htmlEscape(formatCheckedAt(state.DownSince))))
+		lines = append(lines, fmt.Sprintf("Простой: <b>%s</b>", htmlEscape(formatDuration(now.Sub(state.DownSince)))))
 	}
-	if diagnostics := formatHostDiagnosticsHTML(hostCheck, pingCheck); diagnostics != "" {
+	if diagnostics := formatHostDiagnosticsHTML(state.HostCheck, state.PingCheck); diagnostics != "" {
 		lines = append(lines, fmt.Sprintf("Диагностика: %s", diagnostics))
 	}
-	lines = append(lines, fmt.Sprintf("Провалов подряд: <b>%d</b>", failures))
+	if nextAfter := state.NextAlert.Sub(now); nextAfter > 0 {
+		lines = append(lines, fmt.Sprintf("Следующее напоминание: через <b>%s</b>", htmlEscape(formatDuration(nextAfter))))
+	}
+	lines = append(lines, fmt.Sprintf("Провалов подряд: <b>%d</b>", state.FailCount))
 	return strings.Join(lines, "\n")
+}
+
+func formatNodeDownGroup(alerts []nodeDownAlert, now time.Time) string {
+	lines := []string{
+		fmt.Sprintf("<b>⚠️ Недоступны %d ноды</b>", len(alerts)),
+		"",
+	}
+	for _, alert := range alerts {
+		state := alert.State
+		downtime := "n/a"
+		if !state.DownSince.IsZero() {
+			downtime = formatDuration(now.Sub(state.DownSince))
+		}
+		parts := []string{fmt.Sprintf("простой %s", htmlEscape(downtime))}
+		if diagnostics := formatHostDiagnosticsHTML(state.HostCheck, state.PingCheck); diagnostics != "" {
+			parts = append(parts, diagnostics)
+		}
+		if alert.NextAfter > 0 {
+			parts = append(parts, fmt.Sprintf("следующее через %s", htmlEscape(formatDuration(alert.NextAfter))))
+		}
+		lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  %s", htmlEscape(alert.Proxy.Name), strings.Join(parts, " · ")))
+	}
+	return trimMessage(strings.Join(lines, "\n"))
 }
 
 func formatNodeRecovery(proxy *models.ProxyConfig, latency time.Duration, downSince time.Time, now time.Time) string {
@@ -2391,11 +2581,41 @@ func formatNodeRecovery(proxy *models.ProxyConfig, latency time.Duration, downSi
 	return strings.Join(lines, "\n")
 }
 
-func shouldRepeatAlert(lastAlert time.Time, repeatMinutes int, now time.Time) bool {
-	if lastAlert.IsZero() {
+func shouldRefreshNodeDiagnostics(state nodeAlertState, cfg Config, now time.Time) bool {
+	if cfg.AlertDiagnosticsMinutes <= 0 {
+		return false
+	}
+	lastDiagnostics := latestDiagnosticsAt(state.LastDiagnostics, state.HostCheck, state.PingCheck)
+	if lastDiagnostics.IsZero() {
 		return true
 	}
-	return now.Sub(lastAlert) >= time.Duration(repeatMinutes)*time.Minute
+	return now.Sub(lastDiagnostics) >= time.Duration(cfg.AlertDiagnosticsMinutes)*time.Minute
+}
+
+func latestDiagnosticsAt(current time.Time, hostCheck checker.HostCheckDetails, pingCheck checker.PingCheckDetails) time.Time {
+	latest := current
+	if hostCheck.Checked && hostCheck.CheckedAt.After(latest) {
+		latest = hostCheck.CheckedAt
+	}
+	if pingCheck.Checked && pingCheck.CheckedAt.After(latest) {
+		latest = pingCheck.CheckedAt
+	}
+	return latest
+}
+
+func nextAlertAt(from time.Time, alertCount int, cfg Config) time.Time {
+	return from.Add(time.Duration(nextAlertIntervalMinutes(alertCount, cfg)) * time.Minute)
+}
+
+func nextAlertIntervalMinutes(alertCount int, cfg Config) int {
+	if alertCount <= 0 {
+		return 0
+	}
+	index := alertCount - 1
+	if index >= 0 && index < len(cfg.AlertReminderScheduleMinutes) {
+		return cfg.AlertReminderScheduleMinutes[index]
+	}
+	return cfg.AlertMaxReminderMinutes
 }
 
 func formatIDReply(msg *message) string {

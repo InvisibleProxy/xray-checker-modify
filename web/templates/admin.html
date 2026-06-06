@@ -370,10 +370,22 @@
             <input id="telegram-alert-failures" type="number" min="1" step="1" />
           </label>
           <label>
-            Repeat min
-            <input id="telegram-alert-repeat" type="number" min="1" step="1" />
+            Diagnostics refresh min
+            <input id="telegram-alert-diagnostics" type="number" min="1" step="1" />
           </label>
         </div>
+        <label>
+          Reminder schedule min
+          <input id="telegram-alert-schedule" type="text" placeholder="15,60,180,360,720" />
+        </label>
+        <label>
+          Max reminder min
+          <input id="telegram-alert-max" type="number" min="1" step="1" />
+        </label>
+        <label class="row">
+          <input id="telegram-alert-group" type="checkbox" />
+          Group offline reminders
+        </label>
         <label class="row">
           <input id="telegram-recovery" type="checkbox" />
           Recovery alerts
@@ -504,6 +516,21 @@
         }
       }
 
+      function parseMinuteSchedule(value) {
+        return [...new Set(String(value || "")
+          .split(",")
+          .map((part) => Number(part.trim()))
+          .filter((value) => Number.isFinite(value) && value > 0)
+          .map((value) => Math.round(value))
+          .filter((value) => value > 0))]
+          .sort((a, b) => a - b);
+      }
+
+      function formatMinuteSchedule(values) {
+        if (!Array.isArray(values) || values.length === 0) return "15,60,180,360,720";
+        return values.join(",");
+      }
+
       function telegramFromForm() {
         return {
           enabled: $("telegram-enabled").checked,
@@ -515,7 +542,10 @@
           nodeAlertsEnabled: $("telegram-node-alerts").checked,
           alertCheckMinutes: Math.max(1, Number($("telegram-alert-check").value || 5)),
           alertAfterFailures: Math.max(1, Number($("telegram-alert-failures").value || 1)),
-          alertRepeatMinutes: Math.max(1, Number($("telegram-alert-repeat").value || 60)),
+          alertDiagnosticsMinutes: Math.max(1, Number($("telegram-alert-diagnostics").value || 60)),
+          alertReminderScheduleMinutes: parseMinuteSchedule($("telegram-alert-schedule").value),
+          alertMaxReminderMinutes: Math.max(1, Number($("telegram-alert-max").value || 1440)),
+          groupOfflineReminders: $("telegram-alert-group").checked,
           notifyRecovery: $("telegram-recovery").checked,
           timeoutSec: 20,
         };
@@ -751,7 +781,10 @@
         $("telegram-node-alerts").checked = cfg.nodeAlertsEnabled !== false;
         $("telegram-alert-check").value = cfg.alertCheckMinutes || 5;
         $("telegram-alert-failures").value = cfg.alertAfterFailures || 1;
-        $("telegram-alert-repeat").value = cfg.alertRepeatMinutes || 60;
+        $("telegram-alert-diagnostics").value = cfg.alertDiagnosticsMinutes || cfg.alertRepeatMinutes || 60;
+        $("telegram-alert-schedule").value = formatMinuteSchedule(cfg.alertReminderScheduleMinutes);
+        $("telegram-alert-max").value = cfg.alertMaxReminderMinutes || 1440;
+        $("telegram-alert-group").checked = cfg.groupOfflineReminders !== false;
         $("telegram-recovery").checked = cfg.notifyRecovery !== false;
       }
 
