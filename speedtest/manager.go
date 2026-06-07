@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -101,6 +102,14 @@ type RunReport struct {
 	Results    []Result
 }
 
+type resultStateFile struct {
+	Version   int                 `json:"version"`
+	UpdatedAt time.Time           `json:"updatedAt"`
+	LastRun   RunInfo             `json:"lastRun"`
+	Results   map[string]Result   `json:"results"`
+	History   map[string][]Result `json:"history"`
+}
+
 type Reporter interface {
 	NotifySpeedTest(report RunReport)
 }
@@ -109,6 +118,7 @@ type Manager struct {
 	proxyChecker *checker.ProxyChecker
 	startPort    int
 	statePath    string
+	resultPath   string
 	defaults     TestConfig
 
 	mu       sync.RWMutex
@@ -129,6 +139,7 @@ func NewManager(proxyChecker *checker.ProxyChecker, startPort int, statePath str
 		proxyChecker: proxyChecker,
 		startPort:    startPort,
 		statePath:    statePath,
+		resultPath:   resultStatePath(statePath),
 		defaults:     defaults,
 		results:      make(map[string]Result),
 		history:      make(map[string][]Result),
@@ -145,13 +156,13 @@ func (m *Manager) SetReporter(reporter Reporter) {
 
 func (m *Manager) Load() error {
 	if m.statePath == "" {
-		return nil
+		return m.loadResults()
 	}
 
 	data, err := os.ReadFile(m.statePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return m.loadResults()
 		}
 		return err
 	}
@@ -168,6 +179,77 @@ func (m *Manager) Load() error {
 	m.mu.Lock()
 	m.schedule = schedule
 	m.mu.Unlock()
+	return m.loadResults()
+}
+
+func (m *Manager) loadResults() error {
+	if m.resultPath == "" {
+		return nil
+	}
+
+	data, err := os.ReadFile(m.resultPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	var state resultStateFile
+	if err := json.Unmarshal(data, &state); err != nil {
+		return err
+	}
+
+	active := m.activeProxiesByID()
+	results := make(map[string]Result)
+	history := make(map[string][]Result)
+
+	for stableID, entries := range state.History {
+		stableID = strings.TrimSpace(stableID)
+		if stableID == "" {
+			continue
+		}
+		if _, ok := active[stableID]; !ok {
+			continue
+		}
+		entries = normalizeResultHistory(stableID, active[stableID], entries)
+		if len(entries) == 0 {
+			continue
+		}
+		history[stableID] = entries
+		results[stableID] = entries[0]
+	}
+
+	for stableID, result := range state.Results {
+		stableID = strings.TrimSpace(stableID)
+		if stableID == "" {
+			continue
+		}
+		if _, ok := active[stableID]; !ok {
+			continue
+		}
+		result = normalizeResult(stableID, active[stableID], result)
+		current, ok := results[stableID]
+		if !ok || result.CheckedAt.After(current.CheckedAt) {
+			results[stableID] = result
+			history[stableID] = append([]Result{result}, history[stableID]...)
+			history[stableID] = normalizeResultHistory(stableID, active[stableID], history[stableID])
+		}
+		if _, ok := history[stableID]; !ok {
+			history[stableID] = []Result{result}
+		}
+	}
+
+	lastRun := state.LastRun
+	lastRun.Running = false
+
+	m.mu.Lock()
+	m.results = results
+	m.history = history
+	m.lastRun = lastRun
+	m.mu.Unlock()
+
+	logger.Info("Loaded speed-test results: %d latest results, %d histories", len(results), len(history))
 	return nil
 }
 
@@ -351,7 +433,12 @@ func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source stri
 	m.lastRun.Running = false
 	m.lastRun.FinishedAt = &finishedAt
 	reporter := m.reporter
+	state := m.resultStateLocked()
 	m.mu.Unlock()
+
+	if err := m.saveResults(state); err != nil {
+		logger.Warn("Failed to save speed-test results: %v", err)
+	}
 
 	if reporter != nil {
 		go reporter.NotifySpeedTest(report)
@@ -512,6 +599,89 @@ func (m *Manager) selectProxies(req RunRequest) []*models.ProxyConfig {
 	return selected
 }
 
+func (m *Manager) resultStateLocked() resultStateFile {
+	results := make(map[string]Result, len(m.results))
+	for stableID, result := range m.results {
+		results[stableID] = result
+	}
+
+	history := make(map[string][]Result, len(m.history))
+	for stableID, entries := range m.history {
+		copied := make([]Result, len(entries))
+		copy(copied, entries)
+		if len(copied) > defaultHistoryLimit {
+			copied = copied[:defaultHistoryLimit]
+		}
+		history[stableID] = copied
+	}
+
+	lastRun := m.lastRun
+	lastRun.Running = false
+
+	return resultStateFile{
+		Version:   1,
+		UpdatedAt: time.Now(),
+		LastRun:   lastRun,
+		Results:   results,
+		History:   history,
+	}
+}
+
+func (m *Manager) saveResults(state resultStateFile) error {
+	if m.resultPath == "" {
+		return nil
+	}
+	if len(state.Results) == 0 && len(state.History) == 0 {
+		if err := os.Remove(m.resultPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(m.resultPath), 0755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(m.resultPath, data, 0644)
+}
+
+func (m *Manager) activeProxiesByID() map[string]*models.ProxyConfig {
+	result := make(map[string]*models.ProxyConfig)
+	for _, proxy := range m.proxyChecker.GetProxies() {
+		if proxy.StableID == "" {
+			proxy.StableID = proxy.GenerateStableID()
+		}
+		result[proxy.StableID] = proxy
+	}
+	return result
+}
+
+func normalizeResultHistory(stableID string, proxy *models.ProxyConfig, entries []Result) []Result {
+	result := make([]Result, 0, len(entries))
+	for _, entry := range entries {
+		result = append(result, normalizeResult(stableID, proxy, entry))
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CheckedAt.After(result[j].CheckedAt)
+	})
+	if len(result) > defaultHistoryLimit {
+		result = result[:defaultHistoryLimit]
+	}
+	return result
+}
+
+func normalizeResult(stableID string, proxy *models.ProxyConfig, result Result) Result {
+	result.StableID = stableID
+	if proxy != nil {
+		result.Name = proxy.Name
+		result.SubName = proxy.SubName
+		result.Protocol = proxy.Protocol
+	}
+	return result
+}
+
 func (m *Manager) saveSchedule(schedule ScheduleConfig) error {
 	if m.statePath == "" {
 		return nil
@@ -524,6 +694,13 @@ func (m *Manager) saveSchedule(schedule ScheduleConfig) error {
 		return err
 	}
 	return os.WriteFile(m.statePath, data, 0644)
+}
+
+func resultStatePath(schedulePath string) string {
+	if schedulePath == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(schedulePath), "speedtest_results.json")
 }
 
 func (m *Manager) signalScheduleChange() {
