@@ -39,11 +39,12 @@ type TestConfig struct {
 }
 
 type RunRequest struct {
-	ProxyIDs   []string   `json:"proxyIds"`
-	OnlyOnline bool       `json:"onlyOnline"`
-	SubName    string     `json:"subName"`
-	Protocol   string     `json:"protocol"`
-	Config     TestConfig `json:"config"`
+	ProxyIDs    []string   `json:"proxyIds"`
+	OnlyOnline  bool       `json:"onlyOnline"`
+	SkipOffline bool       `json:"skipOffline"`
+	SubName     string     `json:"subName"`
+	Protocol    string     `json:"protocol"`
+	Config      TestConfig `json:"config"`
 }
 
 type ScheduleConfig struct {
@@ -341,7 +342,7 @@ func (m *Manager) Run(req RunRequest, source string) error {
 	}
 	m.mu.Unlock()
 
-	go m.run(proxies, req.Config, source, startedAt)
+	go m.run(proxies, req.Config, source, startedAt, req.SkipOffline)
 	return nil
 }
 
@@ -362,11 +363,12 @@ func (m *Manager) schedulerLoop() {
 		select {
 		case <-timer.C:
 			req := RunRequest{
-				ProxyIDs:   schedule.ProxyIDs,
-				OnlyOnline: schedule.OnlyOnline,
-				SubName:    schedule.SubName,
-				Protocol:   schedule.Protocol,
-				Config:     schedule.Config,
+				ProxyIDs:    schedule.ProxyIDs,
+				OnlyOnline:  schedule.OnlyOnline,
+				SkipOffline: true,
+				SubName:     schedule.SubName,
+				Protocol:    schedule.Protocol,
+				Config:      schedule.Config,
 			}
 			if err := m.Run(req, "schedule"); err != nil {
 				logger.Warn("Scheduled speed test skipped: %v", err)
@@ -380,7 +382,7 @@ func (m *Manager) schedulerLoop() {
 	}
 }
 
-func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source string, startedAt time.Time) {
+func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source string, startedAt time.Time, skipOffline bool) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, cfg.Concurrency)
 	results := make(chan Result, len(proxies))
@@ -392,9 +394,11 @@ func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source stri
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			if result, offline := m.offlineResult(p, source); offline {
-				results <- result
-				return
+			if skipOffline {
+				if result, offline := m.offlineResult(p, source); offline {
+					results <- result
+					return
+				}
 			}
 			results <- m.testProxy(p, cfg, source)
 		}(proxy)
@@ -644,7 +648,7 @@ func (m *Manager) saveResults(state resultStateFile) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(m.resultPath, data, 0644)
+	return writeFileAtomic(m.resultPath, data, 0644)
 }
 
 func (m *Manager) activeProxiesByID() map[string]*models.ProxyConfig {
@@ -701,6 +705,38 @@ func resultStatePath(schedulePath string) string {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(schedulePath), "speedtest_results.json")
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
 }
 
 func (m *Manager) signalScheduleChange() {

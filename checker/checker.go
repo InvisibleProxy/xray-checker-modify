@@ -32,6 +32,7 @@ type ProxyChecker struct {
 	currentMetrics  sync.Map
 	latencyMetrics  sync.Map
 	statusDetails   sync.Map
+	statusMu        sync.Mutex
 	ipInitialized   bool
 	ipCheckTimeout  int
 	genMethodURL    string
@@ -375,6 +376,12 @@ func (pc *ProxyChecker) ClearMetrics() {
 }
 
 func (pc *ProxyChecker) storeStatusDetails(stableID string, online bool, latency time.Duration, hostCheck *HostCheckDetails, pingCheck *PingCheckDetails) {
+	pc.statusMu.Lock()
+	defer pc.statusMu.Unlock()
+	pc.storeStatusDetailsLocked(stableID, online, latency, hostCheck, pingCheck)
+}
+
+func (pc *ProxyChecker) storeStatusDetailsLocked(stableID string, online bool, latency time.Duration, hostCheck *HostCheckDetails, pingCheck *PingCheckDetails) {
 	if stableID == "" {
 		return
 	}
@@ -440,10 +447,27 @@ func (pc *ProxyChecker) RefreshHostDiagnosticsByStableID(stableID string) (Proxy
 
 	hostCheck := pc.tcpCheckHost(proxy.Server, proxy.Port)
 	pingCheck := pc.pingHost(proxy.Server)
-	pc.storeStatusDetails(proxy.StableID, false, 0, &hostCheck, &pingCheck)
 	logHostDiagnostics(proxy.Name, &hostCheck, &pingCheck)
 
-	return pc.GetProxyStatusDetailsByStableID(proxy.StableID)
+	pc.statusMu.Lock()
+	defer pc.statusMu.Unlock()
+
+	currentValue, ok := pc.statusDetails.Load(proxy.StableID)
+	if !ok {
+		return ProxyStatusDetails{}, fmt.Errorf("metric not found")
+	}
+
+	current := currentValue.(ProxyStatusDetails)
+	if current.Online {
+		return current, nil
+	}
+
+	pc.storeStatusDetailsLocked(proxy.StableID, false, 0, &hostCheck, &pingCheck)
+	updatedValue, ok := pc.statusDetails.Load(proxy.StableID)
+	if !ok {
+		return ProxyStatusDetails{}, fmt.Errorf("metric not found")
+	}
+	return updatedValue.(ProxyStatusDetails), nil
 }
 
 func logHostDiagnostics(proxyName string, hostCheck *HostCheckDetails, pingCheck *PingCheckDetails) {
@@ -657,6 +681,8 @@ func (pc *ProxyChecker) pruneStatusDetails(proxies []*models.ProxyConfig) {
 		active[proxy.StableID] = true
 	}
 
+	pc.statusMu.Lock()
+	defer pc.statusMu.Unlock()
 	pc.statusDetails.Range(func(key, _ interface{}) bool {
 		stableID, ok := key.(string)
 		if !ok || !active[stableID] {
@@ -697,6 +723,8 @@ func (pc *ProxyChecker) RestoreOfflineStatus(stableID string, downSince time.Tim
 	}
 
 	now := time.Now()
+	pc.statusMu.Lock()
+	defer pc.statusMu.Unlock()
 	pc.statusDetails.Store(stableID, ProxyStatusDetails{
 		Online:        false,
 		Latency:       0,

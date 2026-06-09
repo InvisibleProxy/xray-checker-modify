@@ -32,6 +32,7 @@ const (
 	defaultAlertReminderScheduleString = "15,60,180,360,720"
 	maxSpeedReportLimit                = 50
 	menuSpeedButtonLimit               = 8
+	maxDiagnosticsRefreshConcurrency   = 4
 )
 
 var defaultAlertReminderScheduleMinutes = parseMinuteSchedule(defaultAlertReminderScheduleString)
@@ -223,6 +224,18 @@ type nodeDownAlert struct {
 	Proxy     *models.ProxyConfig
 	State     nodeAlertState
 	NextAfter time.Duration
+}
+
+type diagnosticsRefreshRequest struct {
+	StableID string
+	Name     string
+}
+
+type diagnosticsRefreshResult struct {
+	StableID string
+	Name     string
+	Details  checker.ProxyStatusDetails
+	Err      error
 }
 
 type apiResponse struct {
@@ -474,8 +487,9 @@ func (s *Service) NotifyNodeStatuses() {
 	}
 	s.mu.Unlock()
 
-	var downAlerts []nodeDownAlert
 	var recoveryMessages []string
+	var refreshRequests []diagnosticsRefreshRequest
+	var dueAlertProxies []*models.ProxyConfig
 	for _, proxy := range proxies {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
@@ -484,7 +498,6 @@ func (s *Service) NotifyNodeStatuses() {
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
 		isDown := err != nil || !details.Online
 
-		var downMessageState nodeAlertState
 		var shouldSendDownAlert bool
 		var shouldRefreshDiagnostics bool
 		s.mu.Lock()
@@ -516,9 +529,6 @@ func (s *Service) NotifyNodeStatuses() {
 					}
 				}
 				if !now.Before(state.NextAlert) {
-					state.LastAlert = now
-					state.AlertCount++
-					state.NextAlert = nextAlertAt(now, state.AlertCount, cfg)
 					shouldSendDownAlert = true
 				}
 			}
@@ -536,58 +546,57 @@ func (s *Service) NotifyNodeStatuses() {
 		} else {
 			s.alerts[proxy.StableID] = state
 		}
-		downMessageState = state
 		s.mu.Unlock()
 
 		if isDown && shouldRefreshDiagnostics {
-			refreshed, err := s.proxyChecker.RefreshHostDiagnosticsByStableID(proxy.StableID)
-			if err != nil {
-				logger.Warn("Failed to refresh host diagnostics for %s: %v", proxy.Name, err)
-			} else {
-				s.mu.Lock()
-				state := s.alerts[proxy.StableID]
-				if state == (nodeAlertState{}) {
-					state = downMessageState
-				}
-				previous := state
-				if refreshed.HostCheck.Checked {
-					state.HostCheck = refreshed.HostCheck
-				}
-				if refreshed.PingCheck.Checked {
-					state.PingCheck = refreshed.PingCheck
-				}
-				state.LastDiagnostics = latestDiagnosticsAt(now, state.HostCheck, state.PingCheck)
-				if previous != state {
-					stateChanged = true
-				}
-				if state == (nodeAlertState{}) {
-					delete(s.alerts, proxy.StableID)
-				} else {
-					s.alerts[proxy.StableID] = state
-				}
-				downMessageState = state
-				s.mu.Unlock()
-			}
+			refreshRequests = append(refreshRequests, diagnosticsRefreshRequest{
+				StableID: proxy.StableID,
+				Name:     proxy.Name,
+			})
 		}
 
 		if shouldSendDownAlert {
-			downAlerts = append(downAlerts, nodeDownAlert{
-				Proxy:     proxy,
-				State:     downMessageState,
-				NextAfter: downMessageState.NextAlert.Sub(now),
-			})
+			dueAlertProxies = append(dueAlertProxies, proxy)
+		}
+	}
+
+	for _, result := range s.refreshHostDiagnostics(refreshRequests) {
+		if result.Err != nil {
+			logger.Warn("Failed to refresh host diagnostics for %s: %v", result.Name, result.Err)
+			continue
+		}
+		if result.Details.Online {
+			continue
+		}
+		if s.updateAlertDiagnostics(result.StableID, result.Details.HostCheck, result.Details.PingCheck) {
+			stateChanged = true
+		}
+	}
+
+	downAlerts := make([]nodeDownAlert, 0, len(dueAlertProxies))
+	for _, proxy := range dueAlertProxies {
+		if alert, ok := s.pendingNodeDownAlert(proxy, cfg, now); ok {
+			downAlerts = append(downAlerts, alert)
 		}
 	}
 
 	for _, text := range recoveryMessages {
-		s.sendNodeAlertMessage(cfg, text)
+		_ = s.sendNodeAlertMessage(cfg, text)
 	}
 
 	if cfg.GroupOfflineReminders && len(downAlerts) > 1 {
-		s.sendNodeAlertMessage(cfg, formatNodeDownGroup(downAlerts, now))
+		if err := s.sendNodeAlertMessage(cfg, formatNodeDownGroup(downAlerts, now)); err == nil {
+			if s.confirmNodeDownAlertsSent(downAlerts, time.Now(), cfg) {
+				stateChanged = true
+			}
+		}
 	} else {
 		for _, alert := range downAlerts {
-			s.sendNodeAlertMessage(cfg, formatNodeDown(alert.Proxy, alert.State, now))
+			if err := s.sendNodeAlertMessage(cfg, formatNodeDown(alert.Proxy, alert.State, now)); err == nil {
+				if s.confirmNodeDownAlertsSent([]nodeDownAlert{alert}, time.Now(), cfg) {
+					stateChanged = true
+				}
+			}
 		}
 	}
 
@@ -598,15 +607,126 @@ func (s *Service) NotifyNodeStatuses() {
 	}
 }
 
-func (s *Service) sendNodeAlertMessage(cfg Config, text string) {
+func (s *Service) sendNodeAlertMessage(cfg Config, text string) error {
 	if text == "" {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
 	defer cancel()
 	if _, err := s.sendHTMLToWithMarkup(ctx, cfg.ChatID, cfg.MessageThreadID, text, ""); err != nil {
 		logger.Warn("Failed to send Telegram node alert: %v", err)
+		return err
 	}
+	return nil
+}
+
+func (s *Service) pendingNodeDownAlert(proxy *models.ProxyConfig, cfg Config, now time.Time) (nodeDownAlert, bool) {
+	if proxy == nil || proxy.StableID == "" {
+		return nodeDownAlert{}, false
+	}
+
+	details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+	if err == nil && details.Online {
+		return nodeDownAlert{}, false
+	}
+
+	s.mu.RLock()
+	state := s.alerts[proxy.StableID]
+	s.mu.RUnlock()
+	if state == (nodeAlertState{}) {
+		return nodeDownAlert{}, false
+	}
+	if state.FailCount < cfg.AlertAfterFailures || state.NextAlert.IsZero() || now.Before(state.NextAlert) {
+		return nodeDownAlert{}, false
+	}
+
+	alertState := state
+	alertState.LastAlert = now
+	alertState.AlertCount++
+	alertState.NextAlert = nextAlertAt(now, alertState.AlertCount, cfg)
+
+	return nodeDownAlert{
+		Proxy:     proxy,
+		State:     alertState,
+		NextAfter: alertState.NextAlert.Sub(now),
+	}, true
+}
+
+func (s *Service) confirmNodeDownAlertsSent(alerts []nodeDownAlert, sentAt time.Time, cfg Config) bool {
+	if len(alerts) == 0 {
+		return false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	changed := false
+	for _, alert := range alerts {
+		if alert.Proxy == nil || alert.Proxy.StableID == "" {
+			continue
+		}
+		state := s.alerts[alert.Proxy.StableID]
+		if state == (nodeAlertState{}) || !state.WasDown {
+			continue
+		}
+
+		previous := state
+		state.LastAlert = sentAt
+		state.AlertCount++
+		state.NextAlert = nextAlertAt(sentAt, state.AlertCount, cfg)
+		if previous != state {
+			s.alerts[alert.Proxy.StableID] = state
+			changed = true
+		}
+	}
+	return changed
+}
+
+func (s *Service) refreshHostDiagnostics(requests []diagnosticsRefreshRequest) []diagnosticsRefreshResult {
+	if len(requests) == 0 {
+		return nil
+	}
+
+	workers := maxDiagnosticsRefreshConcurrency
+	if workers > len(requests) {
+		workers = len(requests)
+	}
+	if workers <= 0 {
+		workers = 1
+	}
+
+	jobs := make(chan diagnosticsRefreshRequest)
+	results := make(chan diagnosticsRefreshResult, len(requests))
+	var wg sync.WaitGroup
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for req := range jobs {
+				details, err := s.proxyChecker.RefreshHostDiagnosticsByStableID(req.StableID)
+				results <- diagnosticsRefreshResult{
+					StableID: req.StableID,
+					Name:     req.Name,
+					Details:  details,
+					Err:      err,
+				}
+			}
+		}()
+	}
+
+	for _, req := range requests {
+		jobs <- req
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+
+	collected := make([]diagnosticsRefreshResult, 0, len(requests))
+	for result := range results {
+		collected = append(collected, result)
+	}
+	return collected
 }
 
 func (s *Service) shouldRunNodeAlertCheck(cfg Config, now time.Time) bool {
@@ -876,34 +996,31 @@ func (s *Service) refreshHostDiagnosticsForStillOffline(stableIDs map[string]boo
 		return
 	}
 
-	var wg sync.WaitGroup
-	var changedMu sync.Mutex
-	stateChanged := false
+	requests := make([]diagnosticsRefreshRequest, 0, len(stableIDs))
 	for stableID := range stableIDs {
-		wg.Add(1)
-		go func(id string) {
-			defer wg.Done()
-
-			details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(id)
-			if err != nil || details.Online {
-				return
-			}
-
-			refreshed, err := s.proxyChecker.RefreshHostDiagnosticsByStableID(id)
-			if err != nil {
-				logger.Warn("Failed to refresh host diagnostics for %s: %v", id, err)
-				return
-			}
-
-			if s.updateAlertDiagnostics(id, refreshed.HostCheck, refreshed.PingCheck) {
-				changedMu.Lock()
-				stateChanged = true
-				changedMu.Unlock()
-			}
-		}(stableID)
+		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(stableID)
+		if err != nil || details.Online {
+			continue
+		}
+		requests = append(requests, diagnosticsRefreshRequest{
+			StableID: stableID,
+			Name:     stableID,
+		})
 	}
-	wg.Wait()
 
+	stateChanged := false
+	for _, result := range s.refreshHostDiagnostics(requests) {
+		if result.Err != nil {
+			logger.Warn("Failed to refresh host diagnostics for %s: %v", result.Name, result.Err)
+			continue
+		}
+		if result.Details.Online {
+			continue
+		}
+		if s.updateAlertDiagnostics(result.StableID, result.Details.HostCheck, result.Details.PingCheck) {
+			stateChanged = true
+		}
+	}
 	if stateChanged {
 		if err := s.saveAlertState(); err != nil {
 			logger.Warn("Failed to save Telegram node alert state: %v", err)
@@ -927,6 +1044,7 @@ func (s *Service) updateAlertDiagnostics(stableID string, hostCheck checker.Host
 	if pingCheck.Checked {
 		state.PingCheck = pingCheck
 	}
+	state.LastDiagnostics = latestDiagnosticsAt(state.LastDiagnostics, state.HostCheck, state.PingCheck)
 	if previous == state {
 		return false
 	}
