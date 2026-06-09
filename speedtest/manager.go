@@ -48,13 +48,14 @@ type RunRequest struct {
 }
 
 type ScheduleConfig struct {
-	Enabled     bool       `json:"enabled"`
-	IntervalSec int        `json:"intervalSec"`
-	ProxyIDs    []string   `json:"proxyIds"`
-	OnlyOnline  bool       `json:"onlyOnline"`
-	SubName     string     `json:"subName"`
-	Protocol    string     `json:"protocol"`
-	Config      TestConfig `json:"config"`
+	Enabled      bool              `json:"enabled"`
+	IntervalSec  int               `json:"intervalSec"`
+	ProxyIDs     []string          `json:"proxyIds"`
+	OnlyOnline   bool              `json:"onlyOnline"`
+	SubName      string            `json:"subName"`
+	Protocol     string            `json:"protocol"`
+	Config       TestConfig        `json:"config"`
+	NodeTestURLs map[string]string `json:"nodeTestUrls,omitempty"`
 }
 
 type Result struct {
@@ -88,10 +89,11 @@ type RunInfo struct {
 }
 
 type Snapshot struct {
-	Defaults TestConfig     `json:"defaults"`
-	Schedule ScheduleConfig `json:"schedule"`
-	LastRun  RunInfo        `json:"lastRun"`
-	Results  []Result       `json:"results"`
+	Defaults     TestConfig        `json:"defaults"`
+	Schedule     ScheduleConfig    `json:"schedule"`
+	NodeTestURLs map[string]string `json:"nodeTestUrls"`
+	LastRun      RunInfo           `json:"lastRun"`
+	Results      []Result          `json:"results"`
 }
 
 type RunReport struct {
@@ -173,6 +175,7 @@ func (m *Manager) Load() error {
 		return err
 	}
 	schedule.Config = m.normalizeConfig(schedule.Config)
+	schedule.NodeTestURLs = normalizeNodeTestURLs(schedule.NodeTestURLs, m.activeProxiesByID())
 	if schedule.IntervalSec < 60 {
 		schedule.IntervalSec = 3600
 	}
@@ -266,6 +269,9 @@ func (m *Manager) Snapshot() Snapshot {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	schedule := m.schedule
+	schedule.NodeTestURLs = copyStringMap(m.schedule.NodeTestURLs)
+
 	results := make([]Result, 0, len(m.results))
 	for _, result := range m.results {
 		results = append(results, result)
@@ -275,10 +281,11 @@ func (m *Manager) Snapshot() Snapshot {
 	})
 
 	return Snapshot{
-		Defaults: m.defaults,
-		Schedule: m.schedule,
-		LastRun:  m.lastRun,
-		Results:  results,
+		Defaults:     m.defaults,
+		Schedule:     schedule,
+		NodeTestURLs: copyStringMap(schedule.NodeTestURLs),
+		LastRun:      m.lastRun,
+		Results:      results,
 	}
 }
 
@@ -295,11 +302,21 @@ func (m *Manager) ResultHistory(stableID string) []Result {
 func (m *Manager) Schedule() ScheduleConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.schedule
+	schedule := m.schedule
+	schedule.NodeTestURLs = copyStringMap(m.schedule.NodeTestURLs)
+	return schedule
 }
 
 func (m *Manager) UpdateSchedule(schedule ScheduleConfig) error {
+	m.mu.RLock()
+	existingNodeTestURLs := copyStringMap(m.schedule.NodeTestURLs)
+	m.mu.RUnlock()
+
 	schedule.Config = m.normalizeConfig(schedule.Config)
+	if schedule.NodeTestURLs == nil {
+		schedule.NodeTestURLs = existingNodeTestURLs
+	}
+	schedule.NodeTestURLs = normalizeNodeTestURLs(schedule.NodeTestURLs, m.activeProxiesByID())
 	if schedule.Enabled && schedule.IntervalSec < 60 {
 		return fmt.Errorf("intervalSec must be at least 60 when schedule is enabled")
 	}
@@ -316,6 +333,52 @@ func (m *Manager) UpdateSchedule(schedule ScheduleConfig) error {
 	m.mu.Unlock()
 
 	m.signalScheduleChange()
+	return nil
+}
+
+func (m *Manager) UpdateNodeTestURL(stableID string, testURL string) error {
+	stableID = strings.TrimSpace(stableID)
+	if stableID == "" {
+		return fmt.Errorf("stableId is required")
+	}
+
+	active := m.activeProxiesByID()
+	if _, ok := active[stableID]; !ok {
+		return fmt.Errorf("proxy not found")
+	}
+
+	normalizedURL, err := normalizeNodeTestURL(testURL)
+	if err != nil {
+		return err
+	}
+
+	m.mu.RLock()
+	schedule := m.schedule
+	schedule.NodeTestURLs = copyStringMap(m.schedule.NodeTestURLs)
+	m.mu.RUnlock()
+
+	schedule.Config = m.normalizeConfig(schedule.Config)
+	if !schedule.Enabled && schedule.IntervalSec == 0 {
+		schedule.IntervalSec = 3600
+	}
+
+	if normalizedURL == "" {
+		delete(schedule.NodeTestURLs, stableID)
+	} else {
+		if schedule.NodeTestURLs == nil {
+			schedule.NodeTestURLs = make(map[string]string)
+		}
+		schedule.NodeTestURLs[stableID] = normalizedURL
+	}
+	schedule.NodeTestURLs = normalizeNodeTestURLs(schedule.NodeTestURLs, active)
+
+	if err := m.saveSchedule(schedule); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	m.schedule = schedule
+	m.mu.Unlock()
 	return nil
 }
 
@@ -394,13 +457,14 @@ func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source stri
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			proxyCfg := m.configForProxy(cfg, p)
 			if skipOffline {
-				if result, offline := m.offlineResult(p, source); offline {
+				if result, offline := m.offlineResult(p, proxyCfg, source); offline {
 					results <- result
 					return
 				}
 			}
-			results <- m.testProxy(p, cfg, source)
+			results <- m.testProxy(p, proxyCfg, source)
 		}(proxy)
 	}
 
@@ -539,7 +603,7 @@ func (m *Manager) testProxy(proxy *models.ProxyConfig, cfg TestConfig, source st
 	return result
 }
 
-func (m *Manager) offlineResult(proxy *models.ProxyConfig, source string) (Result, bool) {
+func (m *Manager) offlineResult(proxy *models.ProxyConfig, cfg TestConfig, source string) (Result, bool) {
 	if proxy.StableID == "" {
 		proxy.StableID = proxy.GenerateStableID()
 	}
@@ -554,6 +618,7 @@ func (m *Manager) offlineResult(proxy *models.ProxyConfig, source string) (Resul
 		Name:      proxy.Name,
 		SubName:   proxy.SubName,
 		Protocol:  proxy.Protocol,
+		URL:       cfg.URL,
 		Offline:   true,
 		CheckedAt: time.Now(),
 		Source:    source,
@@ -567,6 +632,23 @@ func (m *Manager) offlineResult(proxy *models.ProxyConfig, source string) (Resul
 		result.PingCheck = &pingCheck
 	}
 	return result, true
+}
+
+func (m *Manager) configForProxy(cfg TestConfig, proxy *models.ProxyConfig) TestConfig {
+	if proxy == nil {
+		return cfg
+	}
+	if proxy.StableID == "" {
+		proxy.StableID = proxy.GenerateStableID()
+	}
+
+	m.mu.RLock()
+	testURL := strings.TrimSpace(m.schedule.NodeTestURLs[proxy.StableID])
+	m.mu.RUnlock()
+	if testURL != "" {
+		cfg.URL = testURL
+	}
+	return cfg
 }
 
 func (m *Manager) selectProxies(req RunRequest) []*models.ProxyConfig {
@@ -697,7 +779,7 @@ func (m *Manager) saveSchedule(schedule ScheduleConfig) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(m.statePath, data, 0644)
+	return writeFileAtomic(m.statePath, data, 0644)
 }
 
 func resultStatePath(schedulePath string) string {
@@ -705,6 +787,62 @@ func resultStatePath(schedulePath string) string {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(schedulePath), "speedtest_results.json")
+}
+
+func normalizeNodeTestURL(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid test URL")
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", fmt.Errorf("test URL must use http or https")
+	}
+	return value, nil
+}
+
+func normalizeNodeTestURLs(values map[string]string, active map[string]*models.ProxyConfig) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	result := make(map[string]string, len(values))
+	for stableID, testURL := range values {
+		stableID = strings.TrimSpace(stableID)
+		if stableID == "" {
+			continue
+		}
+		if active != nil {
+			if _, ok := active[stableID]; !ok {
+				continue
+			}
+		}
+		normalizedURL, err := normalizeNodeTestURL(testURL)
+		if err != nil || normalizedURL == "" {
+			continue
+		}
+		result[stableID] = normalizedURL
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func copyStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
 }
 
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {

@@ -36,6 +36,11 @@ type AdminProxyInfo struct {
 	PingCheckError     string `json:"pingCheckError,omitempty"`
 }
 
+type AdminNodeTestURLRequest struct {
+	StableID string `json:"stableId"`
+	URL      string `json:"url"`
+}
+
 func AdminHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/admin" && r.URL.Path != "/admin/" {
@@ -99,6 +104,26 @@ func AdminSpeedTestRunHandler(manager *speedtest.Manager) http.HandlerFunc {
 				status = http.StatusConflict
 			}
 			writeError(w, err.Error(), status)
+			return
+		}
+		writeJSON(w, manager.Snapshot())
+	}
+}
+
+func AdminSpeedTestNodeURLHandler(manager *speedtest.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req AdminNodeTestURLRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, "Invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		if err := manager.UpdateNodeTestURL(req.StableID, req.URL); err != nil {
+			writeError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		writeJSON(w, manager.Snapshot())

@@ -260,6 +260,16 @@
           Concurrency
           <input id="concurrency" type="number" min="1" max="10" step="1" />
         </label>
+        <h2>Node Test URL</h2>
+        <label>
+          Selected node URL
+          <input id="node-url" type="url" autocomplete="off" disabled />
+        </label>
+        <div class="row">
+          <button id="save-node-url" class="secondary" type="button" disabled>Save Node URL</button>
+          <button id="clear-node-url" class="secondary" type="button" disabled>Clear Node URL</button>
+        </div>
+        <div id="node-url-state" class="muted">Select one node</div>
 
         <h2>Filters</h2>
         <label>
@@ -580,6 +590,18 @@
         return state.snapshot.results.find((result) => result.stableId === stableId) || null;
       }
 
+      function nodeTestURLs() {
+        return (state.snapshot && state.snapshot.nodeTestUrls) || {};
+      }
+
+      function nodeTestURL(stableId) {
+        return nodeTestURLs()[stableId] || "";
+      }
+
+      function selectedIDs() {
+        return [...state.selected];
+      }
+
       function formatBytes(bytes) {
         if (!bytes) return "0 B";
         if (bytes >= mb) return `${(bytes / mb).toFixed(1)} MB`;
@@ -669,6 +691,7 @@
         const rows = filteredProxies().map((proxy) => {
           const result = resultFor(proxy.stableId);
           const speed = formatNodeSpeed(result);
+          const customURL = nodeTestURL(proxy.stableId);
           const checked = state.selected.has(proxy.stableId) ? "checked" : "";
           const downSince = proxy.downSince ? formatTime(proxy.downSince) : "";
           const downtime = proxy.downSince ? formatDurationSec(proxy.downtimeSec) : "";
@@ -679,6 +702,7 @@
               <td class="node-name">
                 <div>${escapeHtml(proxy.name || "Unnamed")}</div>
                 <div class="muted mono">${escapeHtml(proxy.stableId)}</div>
+                ${customURL ? `<div class="muted">Custom Test URL</div>` : ""}
               </td>
               <td class="status-cell">
                 <span class="status">
@@ -735,6 +759,30 @@
 
       function renderSelectionCount() {
         $("selection-count").textContent = `${state.selected.size} selected`;
+        renderNodeURLForm();
+      }
+
+      function renderNodeURLForm() {
+        const ids = selectedIDs();
+        const input = $("node-url");
+        const save = $("save-node-url");
+        const clear = $("clear-node-url");
+        if (ids.length !== 1) {
+          input.value = "";
+          input.disabled = true;
+          save.disabled = true;
+          clear.disabled = true;
+          $("node-url-state").textContent = ids.length === 0 ? "Select one node" : "Select exactly one node";
+          return;
+        }
+
+        const stableId = ids[0];
+        const currentURL = nodeTestURL(stableId);
+        input.disabled = false;
+        save.disabled = false;
+        clear.disabled = !currentURL;
+        input.value = currentURL;
+        $("node-url-state").textContent = currentURL ? "Custom URL active" : "Using global Test URL";
       }
 
       function applyDefaults() {
@@ -832,6 +880,34 @@
         }
       }
 
+      async function saveNodeURL() {
+        $("message").textContent = "";
+        const ids = selectedIDs();
+        if (ids.length !== 1) {
+          $("message").textContent = "Select exactly one node";
+          return;
+        }
+        const url = $("node-url").value.trim();
+        try {
+          state.snapshot = await request("/speed-tests/node-url", {
+            method: "PUT",
+            body: JSON.stringify({
+              stableId: ids[0],
+              url,
+            }),
+          });
+          $("message").textContent = url ? "Node Test URL saved" : "Node Test URL cleared";
+          renderAll();
+        } catch (err) {
+          $("message").textContent = err.message;
+        }
+      }
+
+      async function clearNodeURL() {
+        $("node-url").value = "";
+        await saveNodeURL();
+      }
+
       async function saveSchedule() {
         $("message").textContent = "";
         try {
@@ -887,6 +963,8 @@
 
       $("refresh").addEventListener("click", () => load());
       $("run").addEventListener("click", runSelected);
+      $("save-node-url").addEventListener("click", saveNodeURL);
+      $("clear-node-url").addEventListener("click", clearNodeURL);
       $("save-schedule").addEventListener("click", saveSchedule);
       $("save-telegram").addEventListener("click", saveTelegram);
       $("test-telegram").addEventListener("click", testTelegram);
