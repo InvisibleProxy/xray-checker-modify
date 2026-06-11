@@ -29,6 +29,7 @@ const (
 	maxTimeoutSec       = 300
 	maxConcurrency      = 10
 	defaultHistoryLimit = 10
+	maxHistoryLimit     = 1000
 )
 
 type TestConfig struct {
@@ -56,6 +57,7 @@ type ScheduleConfig struct {
 	Protocol     string            `json:"protocol"`
 	Config       TestConfig        `json:"config"`
 	NodeTestURLs map[string]string `json:"nodeTestUrls,omitempty"`
+	HistoryLimit int               `json:"historyLimit,omitempty"`
 }
 
 type Result struct {
@@ -176,6 +178,7 @@ func (m *Manager) Load() error {
 	}
 	schedule.Config = m.normalizeConfig(schedule.Config)
 	schedule.NodeTestURLs = normalizeNodeTestURLs(schedule.NodeTestURLs, m.activeProxiesByID())
+	schedule.HistoryLimit = normalizeHistoryLimit(schedule.HistoryLimit)
 	if schedule.IntervalSec < 60 {
 		schedule.IntervalSec = 3600
 	}
@@ -205,6 +208,7 @@ func (m *Manager) loadResults() error {
 	}
 
 	active := m.activeProxiesByID()
+	historyLimit := m.historyLimit()
 	results := make(map[string]Result)
 	history := make(map[string][]Result)
 
@@ -216,7 +220,7 @@ func (m *Manager) loadResults() error {
 		if _, ok := active[stableID]; !ok {
 			continue
 		}
-		entries = normalizeResultHistory(stableID, active[stableID], entries)
+		entries = normalizeResultHistory(stableID, active[stableID], entries, historyLimit)
 		if len(entries) == 0 {
 			continue
 		}
@@ -237,7 +241,7 @@ func (m *Manager) loadResults() error {
 		if !ok || result.CheckedAt.After(current.CheckedAt) {
 			results[stableID] = result
 			history[stableID] = append([]Result{result}, history[stableID]...)
-			history[stableID] = normalizeResultHistory(stableID, active[stableID], history[stableID])
+			history[stableID] = normalizeResultHistory(stableID, active[stableID], history[stableID], historyLimit)
 		}
 		if _, ok := history[stableID]; !ok {
 			history[stableID] = []Result{result}
@@ -271,6 +275,7 @@ func (m *Manager) Snapshot() Snapshot {
 
 	schedule := m.schedule
 	schedule.NodeTestURLs = copyStringMap(m.schedule.NodeTestURLs)
+	schedule.HistoryLimit = normalizeHistoryLimit(schedule.HistoryLimit)
 
 	results := make([]Result, 0, len(m.results))
 	for _, result := range m.results {
@@ -294,6 +299,10 @@ func (m *Manager) ResultHistory(stableID string) []Result {
 	defer m.mu.RUnlock()
 
 	history := m.history[stableID]
+	historyLimit := m.historyLimitLocked()
+	if len(history) > historyLimit {
+		history = history[:historyLimit]
+	}
 	result := make([]Result, len(history))
 	copy(result, history)
 	return result
@@ -304,7 +313,31 @@ func (m *Manager) Schedule() ScheduleConfig {
 	defer m.mu.RUnlock()
 	schedule := m.schedule
 	schedule.NodeTestURLs = copyStringMap(m.schedule.NodeTestURLs)
+	schedule.HistoryLimit = normalizeHistoryLimit(schedule.HistoryLimit)
 	return schedule
+}
+
+func (m *Manager) historyLimit() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.historyLimitLocked()
+}
+
+func (m *Manager) historyLimitLocked() int {
+	return normalizeHistoryLimit(m.schedule.HistoryLimit)
+}
+
+func (m *Manager) pruneHistoryLocked(historyLimit int) bool {
+	historyLimit = normalizeHistoryLimit(historyLimit)
+	pruned := false
+	for stableID, entries := range m.history {
+		if len(entries) <= historyLimit {
+			continue
+		}
+		m.history[stableID] = entries[:historyLimit]
+		pruned = true
+	}
+	return pruned
 }
 
 func (m *Manager) UpdateSchedule(schedule ScheduleConfig) error {
@@ -317,6 +350,7 @@ func (m *Manager) UpdateSchedule(schedule ScheduleConfig) error {
 		schedule.NodeTestURLs = existingNodeTestURLs
 	}
 	schedule.NodeTestURLs = normalizeNodeTestURLs(schedule.NodeTestURLs, m.activeProxiesByID())
+	schedule.HistoryLimit = normalizeHistoryLimit(schedule.HistoryLimit)
 	if schedule.Enabled && schedule.IntervalSec < 60 {
 		return fmt.Errorf("intervalSec must be at least 60 when schedule is enabled")
 	}
@@ -328,9 +362,22 @@ func (m *Manager) UpdateSchedule(schedule ScheduleConfig) error {
 		return err
 	}
 
+	var resultState resultStateFile
+	saveResults := false
 	m.mu.Lock()
+	oldHistoryLimit := m.historyLimitLocked()
 	m.schedule = schedule
+	if m.pruneHistoryLocked(schedule.HistoryLimit) || normalizeHistoryLimit(schedule.HistoryLimit) < oldHistoryLimit {
+		resultState = m.resultStateLocked()
+		saveResults = true
+	}
 	m.mu.Unlock()
+
+	if saveResults {
+		if err := m.saveResults(resultState); err != nil {
+			logger.Warn("Failed to save pruned speed-test results: %v", err)
+		}
+	}
 
 	m.signalScheduleChange()
 	return nil
@@ -358,6 +405,7 @@ func (m *Manager) UpdateNodeTestURL(stableID string, testURL string) error {
 	m.mu.RUnlock()
 
 	schedule.Config = m.normalizeConfig(schedule.Config)
+	schedule.HistoryLimit = normalizeHistoryLimit(schedule.HistoryLimit)
 	if !schedule.Enabled && schedule.IntervalSec == 0 {
 		schedule.IntervalSec = 3600
 	}
@@ -477,10 +525,11 @@ func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source stri
 		runResults = append(runResults, result)
 
 		m.mu.Lock()
+		historyLimit := m.historyLimitLocked()
 		m.results[result.StableID] = result
 		m.history[result.StableID] = append([]Result{result}, m.history[result.StableID]...)
-		if len(m.history[result.StableID]) > defaultHistoryLimit {
-			m.history[result.StableID] = m.history[result.StableID][:defaultHistoryLimit]
+		if len(m.history[result.StableID]) > historyLimit {
+			m.history[result.StableID] = m.history[result.StableID][:historyLimit]
 		}
 		m.lastRun.Completed++
 		m.mu.Unlock()
@@ -686,6 +735,7 @@ func (m *Manager) selectProxies(req RunRequest) []*models.ProxyConfig {
 }
 
 func (m *Manager) resultStateLocked() resultStateFile {
+	historyLimit := m.historyLimitLocked()
 	results := make(map[string]Result, len(m.results))
 	for stableID, result := range m.results {
 		results[stableID] = result
@@ -695,8 +745,8 @@ func (m *Manager) resultStateLocked() resultStateFile {
 	for stableID, entries := range m.history {
 		copied := make([]Result, len(entries))
 		copy(copied, entries)
-		if len(copied) > defaultHistoryLimit {
-			copied = copied[:defaultHistoryLimit]
+		if len(copied) > historyLimit {
+			copied = copied[:historyLimit]
 		}
 		history[stableID] = copied
 	}
@@ -744,7 +794,8 @@ func (m *Manager) activeProxiesByID() map[string]*models.ProxyConfig {
 	return result
 }
 
-func normalizeResultHistory(stableID string, proxy *models.ProxyConfig, entries []Result) []Result {
+func normalizeResultHistory(stableID string, proxy *models.ProxyConfig, entries []Result, historyLimit int) []Result {
+	historyLimit = normalizeHistoryLimit(historyLimit)
 	result := make([]Result, 0, len(entries))
 	for _, entry := range entries {
 		result = append(result, normalizeResult(stableID, proxy, entry))
@@ -752,8 +803,8 @@ func normalizeResultHistory(stableID string, proxy *models.ProxyConfig, entries 
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].CheckedAt.After(result[j].CheckedAt)
 	})
-	if len(result) > defaultHistoryLimit {
-		result = result[:defaultHistoryLimit]
+	if len(result) > historyLimit {
+		result = result[:historyLimit]
 	}
 	return result
 }
@@ -787,6 +838,16 @@ func resultStatePath(schedulePath string) string {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(schedulePath), "speedtest_results.json")
+}
+
+func normalizeHistoryLimit(value int) int {
+	if value <= 0 {
+		return defaultHistoryLimit
+	}
+	if value > maxHistoryLimit {
+		return maxHistoryLimit
+	}
+	return value
 }
 
 func normalizeNodeTestURL(value string) (string, error) {

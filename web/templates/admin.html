@@ -260,6 +260,10 @@
           Concurrency
           <input id="concurrency" type="number" min="1" max="10" step="1" />
         </label>
+        <label>
+          Results per node
+          <input id="history-limit" type="number" min="1" max="1000" step="1" />
+        </label>
         <h2>Node Test URL</h2>
         <label>
           Selected node URL
@@ -471,6 +475,8 @@
       const $ = (id) => document.getElementById(id);
       const api = (path) => `${basePath}/api/v1/admin${path}`;
       const mb = 1024 * 1024;
+      const defaultHistoryLimit = 10;
+      const maxHistoryLimit = 1000;
       const speedDraftKey = "xray-checker-admin-speed-test";
 
       function escapeHtml(value) {
@@ -539,6 +545,11 @@
       function formatMinuteSchedule(values) {
         if (!Array.isArray(values) || values.length === 0) return "15,60,180,360,720";
         return values.join(",");
+      }
+
+      function historyLimitFromForm() {
+        const value = Math.round(Number($("history-limit").value || defaultHistoryLimit));
+        return Math.min(maxHistoryLimit, Math.max(1, value));
       }
 
       function telegramFromForm() {
@@ -798,6 +809,7 @@
         const schedule = state.snapshot.schedule || {};
         $("schedule-enabled").checked = !!schedule.enabled;
         $("schedule-minutes").value = Math.max(1, Math.round((schedule.intervalSec || 3600) / 60));
+        $("history-limit").value = Math.min(maxHistoryLimit, Math.max(1, Number(schedule.historyLimit || defaultHistoryLimit)));
         $("status-filter").value = schedule.onlyOnline ? "online" : "";
         $("protocol-filter").value = schedule.protocol || "";
         $("sub-filter").value = schedule.subName || "";
@@ -922,6 +934,7 @@
               onlyOnline: filters.status === "online",
               subName: filters.subName,
               protocol: filters.protocol,
+              historyLimit: historyLimitFromForm(),
               config: configFromForm(),
             }),
           });
