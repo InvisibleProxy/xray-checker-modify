@@ -435,26 +435,34 @@ func (s *Service) SendTestMessage() error {
 
 func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 	cfg := s.Config()
-	if !cfg.Enabled || cfg.ChatID == "" || !cfg.SpeedReportsEnabled || cfg.SpeedReportMode == "disabled" {
+	failed, slow, issuesOnly, shouldSend := speedReportDecision(report, cfg)
+	if !shouldSend {
 		return
 	}
 
-	failed, slow := countSpeedIssues(report.Results, cfg.LowSpeedThresholdMbps)
-	scheduleIssuesOnly := report.Source == "schedule"
-	if scheduleIssuesOnly && failed == 0 && slow == 0 {
-		return
-	}
-	if cfg.SpeedReportMode == "issues" && failed == 0 && slow == 0 {
-		return
-	}
-
-	text := s.formatSpeedReport(report, cfg, failed, slow, scheduleIssuesOnly)
+	text := s.formatSpeedReport(report, cfg, failed, slow, issuesOnly)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
 	defer cancel()
 
 	if _, err := s.sendHTMLToWithMarkup(ctx, cfg.ChatID, cfg.MessageThreadID, text, backToMenuMarkup()); err != nil {
 		logger.Warn("Failed to send Telegram speed-test report: %v", err)
 	}
+}
+
+func speedReportDecision(report speedtest.RunReport, cfg Config) (failed int, slow int, issuesOnly bool, shouldSend bool) {
+	if !cfg.Enabled || cfg.ChatID == "" || !cfg.SpeedReportsEnabled || cfg.SpeedReportMode == "disabled" {
+		return 0, 0, false, false
+	}
+
+	failed, slow = countSpeedIssues(report.Results, cfg.LowSpeedThresholdMbps)
+	issuesOnly = report.Source == "schedule"
+	if issuesOnly && failed == 0 && slow == 0 {
+		return failed, slow, issuesOnly, false
+	}
+	if cfg.SpeedReportMode == "issues" && failed == 0 && slow == 0 {
+		return failed, slow, issuesOnly, false
+	}
+	return failed, slow, issuesOnly, true
 }
 
 func (s *Service) NotifyNodeStatuses() {
@@ -2477,7 +2485,7 @@ func formatSpeedResultHTML(result speedtest.Result, threshold float64) string {
 	if result.TTFBMs > 0 {
 		ttfbText = fmt.Sprintf(" · TTFB %d ms", result.TTFBMs)
 	}
-	return fmt.Sprintf("• <b>%s</b>\n  ⚠️ <b>%.2f Mbps</b> · %s · %d ms%s", htmlEscape(result.Name), result.Mbps, htmlEscape(formatBytes(result.DownloadedBytes)), result.DurationMs, ttfbText)
+	return fmt.Sprintf("• <b>%s</b>\n  ⚠️ <b>LOW %.2f Mbps</b> · %s · %d ms%s", htmlEscape(result.Name), result.Mbps, htmlEscape(formatBytes(result.DownloadedBytes)), result.DurationMs, ttfbText)
 }
 
 func reportSourceLabel(source string) string {
@@ -2649,6 +2657,8 @@ func formatNodeDown(proxy *models.ProxyConfig, state nodeAlertState, now time.Ti
 	}
 	if diagnostics := formatHostDiagnosticsHTML(state.HostCheck, state.PingCheck); diagnostics != "" {
 		lines = append(lines, fmt.Sprintf("Диагностика: %s", diagnostics))
+	} else {
+		lines = append(lines, "Диагностика: <b>нет данных</b>")
 	}
 	if nextAfter := state.NextAlert.Sub(now); nextAfter > 0 {
 		lines = append(lines, fmt.Sprintf("Следующее напоминание: через <b>%s</b>", htmlEscape(formatDuration(nextAfter))))
@@ -2669,9 +2679,11 @@ func formatNodeDownGroup(alerts []nodeDownAlert, now time.Time) string {
 			downtime = formatDuration(now.Sub(state.DownSince))
 		}
 		parts := []string{fmt.Sprintf("простой %s", htmlEscape(downtime))}
-		if diagnostics := formatHostDiagnosticsHTML(state.HostCheck, state.PingCheck); diagnostics != "" {
-			parts = append(parts, diagnostics)
+		diagnostics := formatHostDiagnosticsHTML(state.HostCheck, state.PingCheck)
+		if diagnostics == "" {
+			diagnostics = "Диагностика: нет данных"
 		}
+		parts = append(parts, diagnostics)
 		if alert.NextAfter > 0 {
 			parts = append(parts, fmt.Sprintf("следующее через %s", htmlEscape(formatDuration(alert.NextAfter))))
 		}
@@ -2702,6 +2714,9 @@ func formatNodeRecovery(proxy *models.ProxyConfig, latency time.Duration, downSi
 func shouldRefreshNodeDiagnostics(state nodeAlertState, cfg Config, now time.Time) bool {
 	if cfg.AlertDiagnosticsMinutes <= 0 {
 		return false
+	}
+	if !state.HostCheck.Checked || !state.PingCheck.Checked {
+		return true
 	}
 	lastDiagnostics := latestDiagnosticsAt(state.LastDiagnostics, state.HostCheck, state.PingCheck)
 	if lastDiagnostics.IsZero() {

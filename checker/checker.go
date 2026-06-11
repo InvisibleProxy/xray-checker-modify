@@ -454,7 +454,15 @@ func (pc *ProxyChecker) RefreshHostDiagnosticsByStableID(stableID string) (Proxy
 
 	currentValue, ok := pc.statusDetails.Load(proxy.StableID)
 	if !ok {
-		return ProxyStatusDetails{}, fmt.Errorf("metric not found")
+		now := time.Now()
+		return ProxyStatusDetails{
+			Online:        false,
+			CheckedAt:     now,
+			LastChangedAt: now,
+			DownSince:     now,
+			HostCheck:     hostCheck,
+			PingCheck:     pingCheck,
+		}, nil
 	}
 
 	current := currentValue.(ProxyStatusDetails)
