@@ -72,6 +72,23 @@
         gap: 12px;
         align-content: start;
       }
+      .view[hidden] {
+        display: none;
+      }
+      .tabs {
+        display: flex;
+        gap: 8px;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 10px;
+      }
+      button.tab {
+        background: transparent;
+        color: var(--muted);
+      }
+      button.tab.active {
+        border-color: var(--green);
+        color: var(--green);
+      }
       label {
         display: grid;
         gap: 6px;
@@ -171,6 +188,15 @@
       .status-cell {
         white-space: nowrap;
       }
+      .history-table {
+        min-width: 980px;
+      }
+      .history-url {
+        min-width: 260px;
+      }
+      .history-error {
+        min-width: 130px;
+      }
       .pill {
         display: inline-flex;
         align-items: center;
@@ -239,7 +265,13 @@
       </div>
     </header>
 
-    <main class="grid">
+    <main class="stack">
+      <nav class="tabs" aria-label="Admin sections">
+        <button id="tab-dashboard" class="tab active" type="button">Dashboard</button>
+        <button id="tab-history" class="tab" type="button">Speed History</button>
+      </nav>
+
+      <section id="dashboard-view" class="view grid">
       <section class="panel stack">
         <h2>Speed Test</h2>
         <label>
@@ -457,6 +489,44 @@
           </div>
         </section>
       </section>
+      </section>
+
+      <section id="history-view" class="view stack" hidden>
+        <section class="panel stack">
+          <div class="row" style="justify-content: space-between">
+            <h2>Speed History</h2>
+            <span id="history-count" class="muted">0 results</span>
+          </div>
+          <label>
+            Node
+            <select id="history-node"></select>
+          </label>
+          <div class="row">
+            <button id="refresh-history" class="secondary" type="button">Refresh History</button>
+            <span id="history-state" class="muted"></span>
+          </div>
+        </section>
+
+        <section class="panel stack">
+          <div class="table-wrap">
+            <table class="history-table">
+              <thead>
+                <tr>
+                  <th>Checked</th>
+                  <th>Speed</th>
+                  <th>Downloaded</th>
+                  <th>Duration</th>
+                  <th>TTFB</th>
+                  <th>Source</th>
+                  <th>Test URL</th>
+                  <th>Error</th>
+                </tr>
+              </thead>
+              <tbody id="history-results"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
     </main>
 
     <script>
@@ -465,6 +535,9 @@
         snapshot: null,
         telegram: null,
         selected: new Set(),
+        activeTab: "dashboard",
+        historyStableId: "",
+        historyResults: [],
       };
 
       const basePath = (() => {
@@ -613,6 +686,14 @@
         return [...state.selected];
       }
 
+      function historyProxy() {
+        return state.proxies.find((proxy) => proxy.stableId === state.historyStableId) || null;
+      }
+
+      function proxyLabel(proxy) {
+        return [proxy.name || "Unnamed", proxy.subName, proxy.server].filter(Boolean).join(" / ");
+      }
+
       function formatBytes(bytes) {
         if (!bytes) return "0 B";
         if (bytes >= mb) return `${(bytes / mb).toFixed(1)} MB`;
@@ -757,6 +838,57 @@
         }).join("") || `<tr><td colspan="7" class="muted">No speed test results yet</td></tr>`;
       }
 
+      function renderHistoryNodeOptions() {
+        const select = $("history-node");
+        const proxies = [...state.proxies].sort((a, b) => proxyLabel(a).localeCompare(proxyLabel(b)));
+        if (proxies.length === 0) {
+          state.historyStableId = "";
+          select.innerHTML = `<option value="">No nodes</option>`;
+          select.disabled = true;
+          $("refresh-history").disabled = true;
+          $("history-state").textContent = "No nodes";
+          return;
+        }
+
+        if (!state.historyStableId || !proxies.some((proxy) => proxy.stableId === state.historyStableId)) {
+          state.historyStableId = proxies[0].stableId;
+        }
+
+        select.disabled = false;
+        $("refresh-history").disabled = false;
+        select.innerHTML = proxies.map((proxy) => {
+          const label = `${proxyLabel(proxy)} (${proxy.stableId})`;
+          return `<option value="${escapeHtml(proxy.stableId)}">${escapeHtml(label)}</option>`;
+        }).join("");
+        select.value = state.historyStableId;
+        $("history-state").textContent = state.historyStableId;
+      }
+
+      function renderHistoryResults() {
+        const results = state.historyResults || [];
+        $("history-count").textContent = `${results.length} results`;
+        if (!state.historyStableId) {
+          $("history-results").innerHTML = `<tr><td colspan="8" class="muted">Select a node</td></tr>`;
+          return;
+        }
+        $("history-results").innerHTML = results.map((result) => {
+          const diagnostics = formatSpeedDiagnostics(result);
+          const issue = result.error || diagnostics || "";
+          return `
+            <tr>
+              <td>${formatTime(result.checkedAt)}</td>
+              <td class="${speedStatusClass(result)}">${formatSpeedStatus(result)}</td>
+              <td>${result.offline ? "n/a" : formatBytes(result.downloadedBytes)}</td>
+              <td>${result.offline ? "n/a" : `${result.durationMs || 0} ms`}</td>
+              <td>${result.offline ? "n/a" : `${result.ttfbMs || 0} ms`}</td>
+              <td>${escapeHtml(result.source || "")}</td>
+              <td class="mono history-url">${escapeHtml(result.url || "")}</td>
+              <td class="history-error ${issue ? "error" : ""}">${escapeHtml(issue)}</td>
+            </tr>
+          `;
+        }).join("") || `<tr><td colspan="8" class="muted">No speed history for this node</td></tr>`;
+      }
+
       function renderRunState() {
         const run = state.snapshot && state.snapshot.lastRun;
         if (!run || !run.running) {
@@ -852,6 +984,44 @@
         renderRunState();
         renderNodes();
         renderResults();
+        renderHistoryNodeOptions();
+        renderHistoryResults();
+      }
+
+      async function loadHistory() {
+        renderHistoryNodeOptions();
+        if (!state.historyStableId) {
+          state.historyResults = [];
+          renderHistoryResults();
+          return;
+        }
+
+        $("history-state").textContent = "Loading";
+        try {
+          state.historyResults = await request(`/speed-tests/history?stableId=${encodeURIComponent(state.historyStableId)}`);
+          renderHistoryResults();
+          $("history-state").textContent = state.historyStableId;
+        } catch (err) {
+          state.historyResults = [];
+          renderHistoryResults();
+          $("history-state").textContent = err.message;
+        }
+      }
+
+      async function switchTab(tab) {
+        state.activeTab = tab;
+        $("dashboard-view").hidden = tab !== "dashboard";
+        $("history-view").hidden = tab !== "history";
+        $("tab-dashboard").classList.toggle("active", tab === "dashboard");
+        $("tab-history").classList.toggle("active", tab === "history");
+
+        if (tab === "history") {
+          const ids = selectedIDs();
+          if (ids.length === 1) {
+            state.historyStableId = ids[0];
+          }
+          await loadHistory();
+        }
       }
 
       async function load(initial = false) {
@@ -869,6 +1039,9 @@
           applyTelegram();
         }
         renderAll();
+        if (state.activeTab === "history") {
+          await loadHistory();
+        }
       }
 
       async function runSelected() {
@@ -974,7 +1147,14 @@
         }
       }
 
+      $("tab-dashboard").addEventListener("click", () => switchTab("dashboard"));
+      $("tab-history").addEventListener("click", () => switchTab("history"));
       $("refresh").addEventListener("click", () => load());
+      $("refresh-history").addEventListener("click", loadHistory);
+      $("history-node").addEventListener("change", () => {
+        state.historyStableId = $("history-node").value;
+        loadHistory();
+      });
       $("run").addEventListener("click", runSelected);
       $("save-node-url").addEventListener("click", saveNodeURL);
       $("clear-node-url").addEventListener("click", clearNodeURL);

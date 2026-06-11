@@ -82,6 +82,21 @@ func AdminSpeedTestSnapshotHandler(manager *speedtest.Manager) http.HandlerFunc 
 	}
 }
 
+func AdminSpeedTestHistoryHandler(manager *speedtest.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		stableID := strings.TrimSpace(r.URL.Query().Get("stableId"))
+		if stableID == "" {
+			writeError(w, "stableId is required", http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, manager.ResultHistory(stableID))
+	}
+}
+
 func AdminSpeedTestRunHandler(manager *speedtest.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
