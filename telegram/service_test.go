@@ -143,6 +143,21 @@ func TestSpeedReportDecisionScenarios(t *testing.T) {
 			wantIssuesOnly: true,
 			wantSend:       false,
 		},
+		{
+			name:     "schedule skips when only low node is muted",
+			cfg:      withMutedNodeIDs(baseCfg, []string{"muted-id"}),
+			source:   "schedule",
+			results:  []speedtest.Result{{Name: "muted low", StableID: "muted-id", Mbps: 1}},
+			wantSend: false,
+		},
+		{
+			name:       "manual issues mode skips when only low node is muted",
+			cfg:        withMutedNodeIDs(withReportMode(baseCfg, "issues"), []string{"muted-id"}),
+			source:     "manual",
+			results:    []speedtest.Result{{Name: "muted low", StableID: "muted-id", Mbps: 1}},
+			wantSend:   false,
+			wantFailed: 0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -211,6 +226,49 @@ func TestFormatSpeedReportLowSpeedModes(t *testing.T) {
 	}
 }
 
+func TestFormatSpeedReportSkipsMutedNodes(t *testing.T) {
+	service := &Service{}
+	cfg := DefaultConfig()
+	cfg.LowSpeedThresholdMbps = 10
+	cfg.SpeedReportLimit = 10
+	cfg.MutedNodeIDs = []string{"muted-id"}
+	report := filterMutedRunReport(speedtest.RunReport{
+		Source:     "manual",
+		FinishedAt: time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC),
+		Selected:   2,
+		Results: []speedtest.Result{
+			{Name: "muted low", StableID: "muted-id", Mbps: 1, DownloadedBytes: 1024, DurationMs: 1000},
+			{Name: "visible", StableID: "visible-id", Mbps: 50, DownloadedBytes: 10 * 1024 * 1024, DurationMs: 1000},
+		},
+	}, cfg)
+	failed, slow := countSpeedIssues(report.Results, cfg.LowSpeedThresholdMbps)
+
+	text := service.formatSpeedReport(report, cfg, failed, slow, false)
+	if strings.Contains(text, "muted low") || strings.Contains(text, "muted-id") {
+		t.Fatalf("report contains muted node:\n%s", text)
+	}
+	for _, want := range []string{
+		"Проверено: <b>1</b>",
+		"Успешно: <b>1</b>",
+		"Низкая скорость: <b>0</b>",
+		"visible",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("report does not contain %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestNormalizeMutedNodeIDs(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MutedNodeIDs = []string{" b ", "", "a", "a"}
+	cfg.Normalize()
+
+	if got := strings.Join(cfg.MutedNodeIDs, ","); got != "a,b" {
+		t.Fatalf("muted IDs = %q, want %q", got, "a,b")
+	}
+}
+
 func withReportMode(cfg Config, mode string) Config {
 	cfg.SpeedReportMode = mode
 	return cfg
@@ -223,5 +281,10 @@ func withChatID(cfg Config, chatID string) Config {
 
 func withLowSpeedThreshold(cfg Config, threshold float64) Config {
 	cfg.LowSpeedThresholdMbps = threshold
+	return cfg
+}
+
+func withMutedNodeIDs(cfg Config, ids []string) Config {
+	cfg.MutedNodeIDs = ids
 	return cfg
 }

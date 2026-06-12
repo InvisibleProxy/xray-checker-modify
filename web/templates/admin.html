@@ -442,6 +442,12 @@
           <input id="telegram-recovery" type="checkbox" />
           Recovery alerts
         </label>
+        <h2>Muted Telegram Nodes</h2>
+        <div class="row">
+          <button id="mute-selected" class="secondary" type="button" disabled>Mute Selected</button>
+          <button id="unmute-selected" class="secondary" type="button" disabled>Unmute Selected</button>
+        </div>
+        <div id="telegram-muted-state" class="muted">0 muted</div>
         <div class="row">
           <button id="save-telegram" class="secondary" type="button">Save Telegram</button>
           <button id="test-telegram" class="secondary" type="button">Test</button>
@@ -647,6 +653,7 @@
           alertMaxReminderMinutes: Math.max(1, Number($("telegram-alert-max").value || 1440)),
           groupOfflineReminders: $("telegram-alert-group").checked,
           notifyRecovery: $("telegram-recovery").checked,
+          mutedNodeIds: telegramMutedNodeIds(),
           timeoutSec: 20,
         };
       }
@@ -686,6 +693,15 @@
 
       function nodeTestURL(stableId) {
         return nodeTestURLs()[stableId] || "";
+      }
+
+      function telegramMutedNodeIds() {
+        if (!state.telegram || !Array.isArray(state.telegram.mutedNodeIds)) return [];
+        return [...new Set(state.telegram.mutedNodeIds.map((id) => String(id || "").trim()).filter(Boolean))].sort();
+      }
+
+      function telegramMutedNodeSet() {
+        return new Set(telegramMutedNodeIds());
       }
 
       function selectedIDs() {
@@ -794,6 +810,7 @@
           const result = resultFor(proxy.stableId);
           const speed = formatNodeSpeed(result);
           const customURL = nodeTestURL(proxy.stableId);
+          const muted = telegramMutedNodeSet().has(proxy.stableId);
           const checked = state.selected.has(proxy.stableId) ? "checked" : "";
           const downSince = proxy.downSince ? formatTime(proxy.downSince) : "";
           const downtime = proxy.downSince ? formatDurationSec(proxy.downtimeSec) : "";
@@ -805,6 +822,7 @@
                 <div>${escapeHtml(proxy.name || "Unnamed")}</div>
                 <div class="muted mono">${escapeHtml(proxy.stableId)}</div>
                 ${customURL ? `<div class="muted">Custom Test URL</div>` : ""}
+                ${muted ? `<div class="warn">Telegram muted</div>` : ""}
               </td>
               <td class="status-cell">
                 <span class="status">
@@ -913,6 +931,7 @@
       function renderSelectionCount() {
         $("selection-count").textContent = `${state.selected.size} selected`;
         renderNodeURLForm();
+        renderTelegramMuteControls();
       }
 
       function renderNodeURLForm() {
@@ -988,6 +1007,34 @@
         $("telegram-alert-max").value = cfg.alertMaxReminderMinutes || 1440;
         $("telegram-alert-group").checked = cfg.groupOfflineReminders !== false;
         $("telegram-recovery").checked = cfg.notifyRecovery !== false;
+        cfg.mutedNodeIds = telegramMutedNodeIds();
+        renderTelegramMuteControls();
+      }
+
+      function renderTelegramMuteControls() {
+        const ids = selectedIDs();
+        const muted = telegramMutedNodeSet();
+        const mute = $("mute-selected");
+        const unmute = $("unmute-selected");
+        const stateText = $("telegram-muted-state");
+
+        if (ids.length === 0) {
+          mute.disabled = true;
+          unmute.disabled = true;
+        } else {
+          mute.disabled = ids.every((id) => muted.has(id));
+          unmute.disabled = !ids.some((id) => muted.has(id));
+        }
+
+        const names = telegramMutedNodeIds()
+          .map((id) => state.proxies.find((proxy) => proxy.stableId === id))
+          .filter(Boolean)
+          .map((proxy) => proxy.name || proxy.stableId);
+        const unknownCount = telegramMutedNodeIds().length - names.length;
+        const suffix = unknownCount > 0 ? `, ${unknownCount} inactive` : "";
+        stateText.textContent = names.length > 0
+          ? `${telegramMutedNodeIds().length} muted: ${names.slice(0, 3).join(", ")}${names.length > 3 ? ", ..." : ""}${suffix}`
+          : `${telegramMutedNodeIds().length} muted${suffix}`;
       }
 
       function renderAll() {
@@ -1168,10 +1215,31 @@
             body: JSON.stringify(telegramFromForm()),
           });
           applyTelegram();
+          renderAll();
           $("message").textContent = "Telegram settings saved";
         } catch (err) {
           $("message").textContent = err.message;
         }
+      }
+
+      async function updateTelegramMute(mute) {
+        $("message").textContent = "";
+        const ids = selectedIDs();
+        if (ids.length === 0) {
+          $("message").textContent = "Select at least one node";
+          return;
+        }
+        const muted = telegramMutedNodeSet();
+        ids.forEach((id) => {
+          if (mute) {
+            muted.add(id);
+          } else {
+            muted.delete(id);
+          }
+        });
+        state.telegram = state.telegram || {};
+        state.telegram.mutedNodeIds = [...muted].sort();
+        await saveTelegram();
       }
 
       async function testTelegram() {
@@ -1203,6 +1271,8 @@
       $("clear-node-url").addEventListener("click", clearNodeURL);
       $("save-schedule").addEventListener("click", saveSchedule);
       $("save-telegram").addEventListener("click", saveTelegram);
+      $("mute-selected").addEventListener("click", () => updateTelegramMute(true));
+      $("unmute-selected").addEventListener("click", () => updateTelegramMute(false));
       $("test-telegram").addEventListener("click", testTelegram);
       $("select-visible").addEventListener("click", () => {
         filteredProxies().forEach((proxy) => state.selected.add(proxy.stableId));

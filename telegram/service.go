@@ -38,48 +38,50 @@ const (
 var defaultAlertReminderScheduleMinutes = parseMinuteSchedule(defaultAlertReminderScheduleString)
 
 type Config struct {
-	Enabled                      bool    `json:"enabled"`
-	BotToken                     string  `json:"botToken"`
-	ChatID                       string  `json:"chatId"`
-	MessageThreadID              int     `json:"messageThreadId"`
-	AdminUserIDs                 []int64 `json:"adminUserIds"`
-	CommandPollingEnabled        bool    `json:"commandPollingEnabled"`
-	SpeedReportsEnabled          bool    `json:"speedReportsEnabled"`
-	SpeedReportMode              string  `json:"speedReportMode"`
-	LowSpeedThresholdMbps        float64 `json:"lowSpeedThresholdMbps"`
-	SpeedReportLimit             int     `json:"speedReportLimit"`
-	NodeAlertsEnabled            bool    `json:"nodeAlertsEnabled"`
-	AlertCheckMinutes            int     `json:"alertCheckMinutes"`
-	AlertAfterFailures           int     `json:"alertAfterFailures"`
-	AlertRepeatMinutes           int     `json:"alertRepeatMinutes,omitempty"`
-	AlertDiagnosticsMinutes      int     `json:"alertDiagnosticsMinutes"`
-	AlertReminderScheduleMinutes []int   `json:"alertReminderScheduleMinutes"`
-	AlertMaxReminderMinutes      int     `json:"alertMaxReminderMinutes"`
-	GroupOfflineReminders        bool    `json:"groupOfflineReminders"`
-	NotifyRecovery               bool    `json:"notifyRecovery"`
-	TimeoutSec                   int     `json:"timeoutSec"`
+	Enabled                      bool     `json:"enabled"`
+	BotToken                     string   `json:"botToken"`
+	ChatID                       string   `json:"chatId"`
+	MessageThreadID              int      `json:"messageThreadId"`
+	AdminUserIDs                 []int64  `json:"adminUserIds"`
+	CommandPollingEnabled        bool     `json:"commandPollingEnabled"`
+	SpeedReportsEnabled          bool     `json:"speedReportsEnabled"`
+	SpeedReportMode              string   `json:"speedReportMode"`
+	LowSpeedThresholdMbps        float64  `json:"lowSpeedThresholdMbps"`
+	SpeedReportLimit             int      `json:"speedReportLimit"`
+	NodeAlertsEnabled            bool     `json:"nodeAlertsEnabled"`
+	AlertCheckMinutes            int      `json:"alertCheckMinutes"`
+	AlertAfterFailures           int      `json:"alertAfterFailures"`
+	AlertRepeatMinutes           int      `json:"alertRepeatMinutes,omitempty"`
+	AlertDiagnosticsMinutes      int      `json:"alertDiagnosticsMinutes"`
+	AlertReminderScheduleMinutes []int    `json:"alertReminderScheduleMinutes"`
+	AlertMaxReminderMinutes      int      `json:"alertMaxReminderMinutes"`
+	GroupOfflineReminders        bool     `json:"groupOfflineReminders"`
+	NotifyRecovery               bool     `json:"notifyRecovery"`
+	MutedNodeIDs                 []string `json:"mutedNodeIds,omitempty"`
+	TimeoutSec                   int      `json:"timeoutSec"`
 }
 
 type AdminConfig struct {
-	Enabled                      bool    `json:"enabled"`
-	CommandPollingEnabled        bool    `json:"commandPollingEnabled"`
-	SpeedReportsEnabled          bool    `json:"speedReportsEnabled"`
-	SpeedReportMode              string  `json:"speedReportMode"`
-	LowSpeedThresholdMbps        float64 `json:"lowSpeedThresholdMbps"`
-	SpeedReportLimit             int     `json:"speedReportLimit"`
-	NodeAlertsEnabled            bool    `json:"nodeAlertsEnabled"`
-	AlertCheckMinutes            int     `json:"alertCheckMinutes"`
-	AlertAfterFailures           int     `json:"alertAfterFailures"`
-	AlertRepeatMinutes           int     `json:"alertRepeatMinutes,omitempty"`
-	AlertDiagnosticsMinutes      int     `json:"alertDiagnosticsMinutes"`
-	AlertReminderScheduleMinutes []int   `json:"alertReminderScheduleMinutes"`
-	AlertMaxReminderMinutes      int     `json:"alertMaxReminderMinutes"`
-	GroupOfflineReminders        bool    `json:"groupOfflineReminders"`
-	NotifyRecovery               bool    `json:"notifyRecovery"`
-	BotTokenConfigured           bool    `json:"botTokenConfigured"`
-	ChatConfigured               bool    `json:"chatConfigured"`
-	MessageThreadConfigured      bool    `json:"messageThreadConfigured"`
-	AdminUserCount               int     `json:"adminUserCount"`
+	Enabled                      bool     `json:"enabled"`
+	CommandPollingEnabled        bool     `json:"commandPollingEnabled"`
+	SpeedReportsEnabled          bool     `json:"speedReportsEnabled"`
+	SpeedReportMode              string   `json:"speedReportMode"`
+	LowSpeedThresholdMbps        float64  `json:"lowSpeedThresholdMbps"`
+	SpeedReportLimit             int      `json:"speedReportLimit"`
+	NodeAlertsEnabled            bool     `json:"nodeAlertsEnabled"`
+	AlertCheckMinutes            int      `json:"alertCheckMinutes"`
+	AlertAfterFailures           int      `json:"alertAfterFailures"`
+	AlertRepeatMinutes           int      `json:"alertRepeatMinutes,omitempty"`
+	AlertDiagnosticsMinutes      int      `json:"alertDiagnosticsMinutes"`
+	AlertReminderScheduleMinutes []int    `json:"alertReminderScheduleMinutes"`
+	AlertMaxReminderMinutes      int      `json:"alertMaxReminderMinutes"`
+	GroupOfflineReminders        bool     `json:"groupOfflineReminders"`
+	NotifyRecovery               bool     `json:"notifyRecovery"`
+	MutedNodeIDs                 []string `json:"mutedNodeIds,omitempty"`
+	BotTokenConfigured           bool     `json:"botTokenConfigured"`
+	ChatConfigured               bool     `json:"chatConfigured"`
+	MessageThreadConfigured      bool     `json:"messageThreadConfigured"`
+	AdminUserCount               int      `json:"adminUserCount"`
 }
 
 func DefaultConfig() Config {
@@ -143,6 +145,7 @@ func (c *Config) Normalize() {
 	if c.AlertMaxReminderMinutes < c.AlertReminderScheduleMinutes[len(c.AlertReminderScheduleMinutes)-1] {
 		c.AlertMaxReminderMinutes = c.AlertReminderScheduleMinutes[len(c.AlertReminderScheduleMinutes)-1]
 	}
+	c.MutedNodeIDs = normalizeNodeIDs(c.MutedNodeIDs)
 	if c.TimeoutSec <= 0 {
 		c.TimeoutSec = defaultTimeoutSec
 	}
@@ -363,6 +366,7 @@ func (s *Service) AdminConfig() AdminConfig {
 		AlertMaxReminderMinutes:      cfg.AlertMaxReminderMinutes,
 		GroupOfflineReminders:        cfg.GroupOfflineReminders,
 		NotifyRecovery:               cfg.NotifyRecovery,
+		MutedNodeIDs:                 append([]string(nil), cfg.MutedNodeIDs...),
 		BotTokenConfigured:           cfg.BotToken != "",
 		ChatConfigured:               cfg.ChatID != "",
 		MessageThreadConfigured:      cfg.MessageThreadID > 0,
@@ -387,6 +391,7 @@ func (s *Service) UpdateAdminConfig(input AdminConfig) error {
 	cfg.AlertMaxReminderMinutes = input.AlertMaxReminderMinutes
 	cfg.GroupOfflineReminders = input.GroupOfflineReminders
 	cfg.NotifyRecovery = input.NotifyRecovery
+	cfg.MutedNodeIDs = append([]string(nil), input.MutedNodeIDs...)
 	cfg.Normalize()
 	if cfg.Enabled && cfg.BotToken == "" {
 		return fmt.Errorf("bot token is required when Telegram is enabled; set TELEGRAM_BOT_TOKEN")
@@ -435,6 +440,7 @@ func (s *Service) SendTestMessage() error {
 
 func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 	cfg := s.Config()
+	report = filterMutedRunReport(report, cfg)
 	failed, slow, issuesOnly, shouldSend := speedReportDecision(report, cfg)
 	if !shouldSend {
 		return
@@ -454,7 +460,12 @@ func speedReportDecision(report speedtest.RunReport, cfg Config) (failed int, sl
 		return 0, 0, false, false
 	}
 
-	failed, slow = countSpeedIssues(report.Results, cfg.LowSpeedThresholdMbps)
+	results := filterMutedSpeedResults(report.Results, cfg)
+	if len(results) == 0 {
+		return 0, 0, false, false
+	}
+
+	failed, slow = countSpeedIssues(results, cfg.LowSpeedThresholdMbps)
 	issuesOnly = report.Source == "schedule"
 	if issuesOnly && failed == 0 && slow == 0 {
 		return failed, slow, issuesOnly, false
@@ -484,11 +495,12 @@ func (s *Service) NotifyNodeStatuses() {
 		}
 		active[proxy.StableID] = true
 	}
+	muted := mutedNodeSet(cfg.MutedNodeIDs)
 
 	stateChanged := false
 	s.mu.Lock()
 	for stableID := range s.alerts {
-		if !active[stableID] {
+		if !active[stableID] || muted[stableID] {
 			delete(s.alerts, stableID)
 			stateChanged = true
 		}
@@ -501,6 +513,9 @@ func (s *Service) NotifyNodeStatuses() {
 	for _, proxy := range proxies {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
+		}
+		if muted[proxy.StableID] {
+			continue
 		}
 
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
@@ -1440,10 +1455,14 @@ func formatStatusRefreshStarted() string {
 
 func (s *Service) formatIssuesSummary() string {
 	cfg := s.Config()
+	muted := mutedNodeSet(cfg.MutedNodeIDs)
 	var offlineLines []string
 	for _, proxy := range s.proxyChecker.GetProxies() {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
+		}
+		if muted[proxy.StableID] {
+			continue
 		}
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
 		if err != nil || !details.Online {
@@ -1451,7 +1470,7 @@ func (s *Service) formatIssuesSummary() string {
 		}
 	}
 
-	speedLines := speedIssuesHTML(s.speedManager.Snapshot().Results, cfg.LowSpeedThresholdMbps)
+	speedLines := speedIssuesHTML(filterMutedSpeedResults(s.speedManager.Snapshot().Results, cfg), cfg.LowSpeedThresholdMbps)
 	lines := []string{
 		"<b>InvisibleProxyChecker</b>",
 		"",
@@ -2252,6 +2271,32 @@ func parseMinuteSchedule(value string) []int {
 	return normalizeMinuteSchedule(result)
 }
 
+func normalizeNodeIDs(values []string) []string {
+	seen := make(map[string]bool)
+	var result []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func mutedNodeSet(values []string) map[string]bool {
+	result := make(map[string]bool, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			result[value] = true
+		}
+	}
+	return result
+}
+
 func formatIntList(values []int) string {
 	if len(values) == 0 {
 		return ""
@@ -2290,6 +2335,27 @@ func countSpeedIssues(results []speedtest.Result, threshold float64) (failed int
 		}
 	}
 	return failed, slow
+}
+
+func filterMutedRunReport(report speedtest.RunReport, cfg Config) speedtest.RunReport {
+	report.Results = filterMutedSpeedResults(report.Results, cfg)
+	report.Selected = len(report.Results)
+	return report
+}
+
+func filterMutedSpeedResults(results []speedtest.Result, cfg Config) []speedtest.Result {
+	if len(results) == 0 || len(cfg.MutedNodeIDs) == 0 {
+		return results
+	}
+	muted := mutedNodeSet(cfg.MutedNodeIDs)
+	filtered := make([]speedtest.Result, 0, len(results))
+	for _, result := range results {
+		if result.StableID != "" && muted[result.StableID] {
+			continue
+		}
+		filtered = append(filtered, result)
+	}
+	return filtered
 }
 
 func speedIssuesHTML(results []speedtest.Result, threshold float64) []string {
