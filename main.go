@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -159,31 +160,59 @@ func main() {
 	})
 	checkScheduler.StartAsync()
 
+	subscriptionRefreshLock := make(chan struct{}, 1)
+	refreshSubscription := func(source string) (web.AdminSubscriptionRefreshResult, error) {
+		select {
+		case subscriptionRefreshLock <- struct{}{}:
+			defer func() { <-subscriptionRefreshLock }()
+		default:
+			return web.AdminSubscriptionRefreshResult{}, fmt.Errorf("subscription refresh already running")
+		}
+
+		logger.Info("Checking subscriptions for updates (%s)...", source)
+		newConfigs, err := subscription.ReadFromMultipleSources(config.CLIConfig.Subscription.URLs)
+		if err != nil {
+			return web.AdminSubscriptionRefreshResult{}, fmt.Errorf("fetch subscriptions: %w", err)
+		}
+
+		if config.CLIConfig.Proxy.ResolveDomains {
+			resolved, err := subscription.ResolveDomainsForConfigs(newConfigs)
+			if err != nil {
+				logger.Error("Error resolving domains: %v", err)
+			} else {
+				newConfigs = resolved
+			}
+		}
+
+		if preserved := xray.PreserveStableIDs(*proxyConfigs, newConfigs); preserved > 0 {
+			logger.Info("Preserved node statistics for %d refreshed proxies", preserved)
+		}
+
+		if xray.IsConfigsEqual(*proxyConfigs, newConfigs) {
+			logger.Info("Subscriptions checked, no changes")
+			return web.AdminSubscriptionRefreshResult{
+				Updated: false,
+				Count:   len(newConfigs),
+				Message: "Subscriptions checked, no changes",
+			}, nil
+		}
+
+		if err := updateConfiguration(newConfigs, proxyConfigs, xrayRunner, proxyChecker); err != nil {
+			return web.AdminSubscriptionRefreshResult{}, err
+		}
+
+		return web.AdminSubscriptionRefreshResult{
+			Updated: true,
+			Count:   len(newConfigs),
+			Message: "Configuration updated",
+		}, nil
+	}
+
 	if config.CLIConfig.Subscription.Update {
 		updateScheduler := gocron.NewScheduler(time.UTC)
 		updateScheduler.Every(config.CLIConfig.Subscription.UpdateInterval).Seconds().WaitForSchedule().Do(func() {
-			logger.Info("Checking subscriptions for updates...")
-			newConfigs, err := subscription.ReadFromMultipleSources(config.CLIConfig.Subscription.URLs)
-			if err != nil {
-				logger.Error("Error fetching subscriptions: %v", err)
-				return
-			}
-
-			if config.CLIConfig.Proxy.ResolveDomains {
-				resolved, err := subscription.ResolveDomainsForConfigs(newConfigs)
-				if err != nil {
-					logger.Error("Error resolving domains: %v", err)
-				} else {
-					newConfigs = resolved
-				}
-			}
-
-			if !xray.IsConfigsEqual(*proxyConfigs, newConfigs) {
-				if err := updateConfiguration(newConfigs, proxyConfigs, xrayRunner, proxyChecker); err != nil {
-					logger.Error("Error updating configuration: %v", err)
-				}
-			} else {
-				logger.Info("Subscriptions checked, no changes")
+			if _, err := refreshSubscription("scheduled"); err != nil {
+				logger.Error("Error updating subscriptions: %v", err)
 			}
 		})
 		updateScheduler.StartAsync()
@@ -213,6 +242,9 @@ func main() {
 	protectedHandler.Handle("/admin", web.AdminHandler())
 	protectedHandler.Handle("/admin/", web.AdminHandler())
 	protectedHandler.Handle("/api/v1/admin/proxies", web.AdminProxiesHandler(proxyChecker, config.CLIConfig.Xray.StartPort))
+	protectedHandler.Handle("/api/v1/admin/subscription/refresh", web.AdminSubscriptionRefreshHandler(func() (web.AdminSubscriptionRefreshResult, error) {
+		return refreshSubscription("manual")
+	}))
 	protectedHandler.Handle("/api/v1/admin/speed-tests/run", web.AdminSpeedTestRunHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/speed-tests/node-url", web.AdminSpeedTestNodeURLHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/speed-tests/history", web.AdminSpeedTestHistoryHandler(speedTestManager))

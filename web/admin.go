@@ -41,6 +41,14 @@ type AdminNodeTestURLRequest struct {
 	URL      string `json:"url"`
 }
 
+type AdminSubscriptionRefreshResult struct {
+	Updated bool   `json:"updated"`
+	Count   int    `json:"count"`
+	Message string `json:"message,omitempty"`
+}
+
+type AdminSubscriptionRefreshFunc func() (AdminSubscriptionRefreshResult, error)
+
 func AdminHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/admin" && r.URL.Path != "/admin/" {
@@ -53,6 +61,25 @@ func AdminHandler() http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+	}
+}
+
+func AdminSubscriptionRefreshHandler(refresh AdminSubscriptionRefreshFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		result, err := refresh()
+		if err != nil {
+			status := http.StatusBadRequest
+			if strings.Contains(err.Error(), "already running") {
+				status = http.StatusConflict
+			}
+			writeError(w, err.Error(), status)
+			return
+		}
+		writeJSON(w, result)
 	}
 }
 

@@ -273,6 +273,12 @@
 
       <section id="dashboard-view" class="view grid">
       <section class="panel stack">
+        <h2>Subscription</h2>
+        <div class="row">
+          <button id="refresh-subscription" class="secondary" type="button">Update Subscription</button>
+          <span id="subscription-state" class="muted"></span>
+        </div>
+
         <h2>Speed Test</h2>
         <label>
           Test URL
@@ -773,10 +779,14 @@
       }
 
       function renderFilters() {
+        const protocolValue = $("protocol-filter").value;
+        const subValue = $("sub-filter").value;
         const protocols = [...new Set(state.proxies.map((proxy) => proxy.protocol).filter(Boolean))].sort();
         const subs = [...new Set(state.proxies.map((proxy) => proxy.subName).filter(Boolean))].sort();
         $("protocol-filter").innerHTML = `<option value="">All</option>` + protocols.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join("");
         $("sub-filter").innerHTML = `<option value="">All</option>` + subs.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join("");
+        $("protocol-filter").value = protocols.includes(protocolValue) ? protocolValue : "";
+        $("sub-filter").value = subs.includes(subValue) ? subValue : "";
       }
 
       function renderNodes() {
@@ -988,6 +998,15 @@
         renderHistoryResults();
       }
 
+      function pruneSelection() {
+        const knownIds = new Set(state.proxies.map((proxy) => proxy.stableId));
+        state.selected = new Set([...state.selected].filter((id) => knownIds.has(id)));
+        if (state.historyStableId && !knownIds.has(state.historyStableId)) {
+          state.historyStableId = "";
+          state.historyResults = [];
+        }
+      }
+
       async function loadHistory() {
         renderHistoryNodeOptions();
         if (!state.historyStableId) {
@@ -1024,7 +1043,7 @@
         }
       }
 
-      async function load(initial = false) {
+      async function load(initial = false, refreshFilters = false) {
         const [proxies, snapshot, telegram] = await Promise.all([
           request("/proxies"),
           request("/speed-tests"),
@@ -1037,10 +1056,33 @@
           renderFilters();
           applyDefaults();
           applyTelegram();
+        } else if (refreshFilters) {
+          renderFilters();
         }
+        pruneSelection();
         renderAll();
         if (state.activeTab === "history") {
           await loadHistory();
+        }
+      }
+
+      async function refreshSubscription() {
+        $("message").textContent = "";
+        $("subscription-state").textContent = "Updating";
+        $("refresh-subscription").disabled = true;
+        try {
+          const result = await request("/subscription/refresh", { method: "POST", body: "{}" });
+          const suffix = result.count === 1 ? "node" : "nodes";
+          $("subscription-state").textContent = result.updated
+            ? `Updated ${result.count} ${suffix}`
+            : `No changes (${result.count} ${suffix})`;
+          $("message").textContent = result.message || $("subscription-state").textContent;
+          await load(false, true);
+        } catch (err) {
+          $("subscription-state").textContent = err.message;
+          $("message").textContent = err.message;
+        } finally {
+          $("refresh-subscription").disabled = false;
         }
       }
 
@@ -1150,6 +1192,7 @@
       $("tab-dashboard").addEventListener("click", () => switchTab("dashboard"));
       $("tab-history").addEventListener("click", () => switchTab("history"));
       $("refresh").addEventListener("click", () => load());
+      $("refresh-subscription").addEventListener("click", refreshSubscription);
       $("refresh-history").addEventListener("click", loadHistory);
       $("history-node").addEventListener("change", () => {
         state.historyStableId = $("history-node").value;
