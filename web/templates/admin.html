@@ -9,23 +9,29 @@
     <style>
       :root {
         color-scheme: dark;
-        --bg: #0f1114;
-        --panel: #1a1d21;
-        --panel-2: #23262b;
-        --border: #2d3138;
+        --bg: #0b0f13;
+        --panel: #151a20;
+        --panel-2: #20262e;
+        --panel-3: #10161d;
+        --border: #2c3743;
         --text: #e5e7eb;
-        --muted: #9ca3af;
-        --green: #3aff82;
-        --red: #ff5252;
-        --yellow: #ffbf47;
+        --muted: #a5b0bd;
+        --green: #35d878;
+        --red: #ff5d5d;
+        --yellow: #f2b84b;
         --blue: #6ea8fe;
+        --blue-strong: #2f80ed;
+        --green-soft: rgba(53, 216, 120, 0.12);
+        --red-soft: rgba(255, 93, 93, 0.12);
+        --yellow-soft: rgba(242, 184, 75, 0.14);
+        --blue-soft: rgba(110, 168, 254, 0.14);
       }
       * {
         box-sizing: border-box;
       }
       body {
         margin: 0;
-        background: var(--bg);
+        background: #0b0f13;
         color: var(--text);
         font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
@@ -42,6 +48,13 @@
         gap: 16px;
         border-bottom: 1px solid var(--border);
       }
+      .topbar-status {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
       h1,
       h2 {
         margin: 0;
@@ -54,9 +67,9 @@
       .muted {
         color: var(--muted);
       }
-      .grid {
+      .dashboard-grid {
         display: grid;
-        grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+        grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
         gap: 16px;
         align-items: start;
       }
@@ -67,6 +80,19 @@
         padding: 16px;
         min-width: 0;
       }
+      .control-panel {
+        position: sticky;
+        top: 20px;
+      }
+      .panel-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .panel-header h2 {
+        margin-top: 2px;
+      }
       .stack {
         display: grid;
         gap: 12px;
@@ -74,6 +100,44 @@
       }
       .view[hidden] {
         display: none;
+      }
+      .settings-nav {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+      button.settings-tab {
+        background: transparent;
+        color: var(--muted);
+      }
+      button.settings-tab.active {
+        border-color: var(--blue);
+        background: rgba(110, 168, 254, 0.12);
+        color: var(--text);
+      }
+      .settings-pane[hidden] {
+        display: none;
+      }
+      .control-group {
+        display: grid;
+        gap: 10px;
+        padding-top: 12px;
+        border-top: 1px solid var(--border);
+      }
+      .control-group:first-child {
+        padding-top: 0;
+        border-top: 0;
+      }
+      .group-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      h3 {
+        margin: 0;
+        font-size: 13px;
+        letter-spacing: 0;
       }
       .tabs {
         display: flex;
@@ -86,8 +150,9 @@
         color: var(--muted);
       }
       button.tab.active {
-        border-color: var(--green);
-        color: var(--green);
+        border-color: var(--blue);
+        background: var(--blue-soft);
+        color: var(--text);
       }
       label {
         display: grid;
@@ -105,6 +170,10 @@
         padding: 9px 10px;
         font: inherit;
       }
+      input:not([type="checkbox"]),
+      select {
+        width: 100%;
+      }
       input[type="checkbox"] {
         width: 16px;
         height: 16px;
@@ -115,9 +184,9 @@
         font-weight: 600;
       }
       button.primary {
-        background: var(--green);
-        color: #061009;
-        border-color: var(--green);
+        background: var(--blue-strong);
+        color: #ffffff;
+        border-color: #4d9bff;
       }
       button.secondary {
         background: transparent;
@@ -168,7 +237,6 @@
         border-bottom: 1px solid var(--border);
         text-align: left;
         vertical-align: middle;
-        overflow-wrap: anywhere;
       }
       th {
         color: var(--muted);
@@ -180,12 +248,29 @@
       }
       .node-name {
         min-width: 180px;
+        overflow-wrap: anywhere;
+      }
+      .nodes-table {
+        min-width: 900px;
+      }
+      .results-table {
+        min-width: 920px;
       }
       .server-cell {
-        min-width: 170px;
+        min-width: 155px;
+        white-space: nowrap;
+      }
+      .reason-cell {
+        min-width: 190px;
+        overflow-wrap: anywhere;
+      }
+      .reason-cell .chip {
+        max-width: 360px;
+        white-space: normal;
       }
       .speed-cell,
       .status-cell {
+        min-width: 110px;
         white-space: nowrap;
       }
       .history-table {
@@ -200,9 +285,138 @@
       .pill {
         display: inline-flex;
         align-items: center;
+        gap: 6px;
         border: 1px solid var(--border);
         border-radius: 999px;
         padding: 3px 8px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .pill:empty {
+        display: none;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 3px 8px;
+        font-size: 12px;
+        line-height: 1.2;
+        white-space: nowrap;
+      }
+      .chip.ok {
+        border-color: rgba(53, 216, 120, 0.35);
+        background: var(--green-soft);
+        color: var(--green);
+      }
+      .chip.error {
+        border-color: rgba(255, 93, 93, 0.35);
+        background: var(--red-soft);
+        color: var(--red);
+      }
+      .chip.warn {
+        border-color: rgba(242, 184, 75, 0.38);
+        background: var(--yellow-soft);
+        color: var(--yellow);
+      }
+      .chip.neutral {
+        background: var(--panel-2);
+        color: var(--muted);
+      }
+      .chip.blue {
+        border-color: rgba(110, 168, 254, 0.38);
+        background: var(--blue-soft);
+        color: var(--blue);
+      }
+      .state-chip.idle::before,
+      .chip.ok::before,
+      .chip.error::before,
+      .chip.warn::before {
+        content: "";
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: currentColor;
+      }
+      .state-chip.running {
+        border-color: rgba(110, 168, 254, 0.38);
+        background: var(--blue-soft);
+        color: var(--blue);
+      }
+      .state-chip.idle {
+        border-color: rgba(53, 216, 120, 0.35);
+        background: var(--green-soft);
+        color: var(--green);
+      }
+      .status-chips {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .overview-grid {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .kpi-card {
+        min-width: 0;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--panel-2);
+        padding: 14px;
+      }
+      .kpi-card span {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .kpi-card strong {
+        display: block;
+        margin-top: 7px;
+        font-size: 24px;
+        line-height: 1.1;
+      }
+      .kpi-card .metric-detail {
+        margin-top: 7px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .kpi-card.ok strong {
+        color: var(--green);
+      }
+      .kpi-card.error strong {
+        color: var(--red);
+      }
+      .kpi-card.warn strong {
+        color: var(--yellow);
+      }
+      .kpi-card.blue strong {
+        color: var(--blue);
+      }
+      .action-bar {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .action-bar[hidden] {
+        display: none;
+      }
+      .action-bar button {
+        padding: 6px 9px;
+      }
+      .panel-actions {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .table-meta {
         color: var(--muted);
         font-size: 12px;
       }
@@ -243,8 +457,14 @@
         line-height: 1.4;
       }
       @media (max-width: 960px) {
-        .grid {
+        .dashboard-grid {
           grid-template-columns: 1fr;
+        }
+        .overview-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .control-panel {
+          position: static;
         }
         header {
           align-items: flex-start;
@@ -259,8 +479,9 @@
         <h1>Xray Checker Admin</h1>
         <div class="muted">Manual speed tests and private schedule control</div>
       </div>
-      <div class="row">
-        <span id="run-state" class="pill">Idle</span>
+      <div class="topbar-status">
+        <span id="last-updated" class="muted">Last updated: n/a</span>
+        <span id="run-state" class="pill state-chip idle">Idle</span>
         <button id="refresh" class="secondary" type="button">Refresh</button>
       </div>
     </header>
@@ -271,198 +492,302 @@
         <button id="tab-history" class="tab" type="button">Speed History</button>
       </nav>
 
-      <section id="dashboard-view" class="view grid">
-      <section class="panel stack">
-        <h2>Subscription</h2>
-        <div class="row">
-          <button id="refresh-subscription" class="secondary" type="button">Update Subscription</button>
-          <span id="subscription-state" class="muted"></span>
-        </div>
-
-        <h2>Speed Test</h2>
-        <label>
-          Test URL
-          <input id="url" type="url" autocomplete="off" />
-        </label>
-        <div class="split">
-          <label>
-            Max MB
-            <input id="max-mb" type="number" min="1" max="100" step="1" />
-          </label>
-          <label>
-            Timeout sec
-            <input id="timeout" type="number" min="5" max="300" step="5" />
-          </label>
-        </div>
-        <label>
-          Concurrency
-          <input id="concurrency" type="number" min="1" max="10" step="1" />
-        </label>
-        <label>
-          Results per node
-          <input id="history-limit" type="number" min="1" max="1000" step="1" />
-        </label>
-        <h2>Node Test URL</h2>
-        <label>
-          Selected node URL
-          <input id="node-url" type="url" autocomplete="off" disabled />
-        </label>
-        <div class="row">
-          <button id="save-node-url" class="secondary" type="button" disabled>Save Node URL</button>
-          <button id="clear-node-url" class="secondary" type="button" disabled>Clear Node URL</button>
-        </div>
-        <div id="node-url-state" class="muted">Select one node</div>
-
-        <h2>Filters</h2>
-        <label>
-          Search
-          <input id="search" type="search" autocomplete="off" placeholder="Name, server, subscription" />
-        </label>
-        <div class="split">
-          <label>
-            Status
-            <select id="status-filter">
-              <option value="">All</option>
-              <option value="online">Online</option>
-              <option value="offline">Offline</option>
-            </select>
-          </label>
-          <label>
-            Protocol
-            <select id="protocol-filter">
-              <option value="">All</option>
-            </select>
-          </label>
-        </div>
-        <label>
-          Subscription
-          <select id="sub-filter">
-            <option value="">All</option>
-          </select>
-        </label>
-
-        <div class="row">
-          <button id="select-visible" class="secondary" type="button">Select Visible</button>
-          <button id="clear-selection" class="secondary" type="button">Clear</button>
-        </div>
-        <button id="run" class="primary" type="button">Run Selected</button>
-
-        <h2>Schedule</h2>
-        <label class="row">
-          <input id="schedule-enabled" type="checkbox" />
-          Enabled
-        </label>
-        <label>
-          Interval minutes
-          <input id="schedule-minutes" type="number" min="1" step="1" />
-        </label>
-        <button id="save-schedule" class="secondary" type="button">Save Schedule</button>
-
-        <h2>Telegram</h2>
-        <label class="row">
-          <input id="telegram-enabled" type="checkbox" />
-          Enabled
-        </label>
-        <div class="config-status">
+      <section id="dashboard-view" class="view dashboard-grid">
+      <aside class="panel stack control-panel">
+        <div class="panel-header">
           <div>
-            <span>Bot token</span>
-            <strong id="telegram-token-state">Not set</strong>
+            <h2>Controls</h2>
+            <div class="muted">Actions and settings</div>
           </div>
-          <div>
-            <span>Chat</span>
-            <strong id="telegram-chat-state">Not set</strong>
+          <span id="subscription-state" class="pill"></span>
+        </div>
+
+        <nav class="settings-nav" aria-label="Dashboard controls">
+          <button id="settings-tab-run" class="settings-tab active" type="button">Actions</button>
+          <button id="settings-tab-filters" class="settings-tab" type="button">Filters</button>
+          <button id="settings-tab-schedule" class="settings-tab" type="button">Schedule</button>
+          <button id="settings-tab-telegram" class="settings-tab" type="button">Telegram</button>
+        </nav>
+
+        <section id="settings-pane-run" class="settings-pane stack">
+          <div class="control-group">
+            <div class="group-title">
+              <h3>Subscription</h3>
+            </div>
+            <button id="refresh-subscription" class="secondary" type="button">Update Subscription</button>
           </div>
-          <div>
-            <span>Topic</span>
-            <strong id="telegram-topic-state">Not set</strong>
+
+          <div class="control-group">
+            <div class="group-title">
+              <h3>Speed Test</h3>
+            </div>
+            <label>
+              Test URL
+              <input id="url" type="url" autocomplete="off" />
+            </label>
+            <div class="split">
+              <label>
+                Max MB
+                <input id="max-mb" type="number" min="1" max="100" step="1" />
+              </label>
+              <label>
+                Timeout sec
+                <input id="timeout" type="number" min="5" max="300" step="5" />
+              </label>
+            </div>
+            <label>
+              Concurrency
+              <input id="concurrency" type="number" min="1" max="10" step="1" />
+            </label>
           </div>
-          <div>
-            <span>Admins</span>
-            <strong id="telegram-admin-state">0 users</strong>
+
+          <div class="control-group">
+            <div class="group-title">
+              <h3>Node Test URL</h3>
+              <span id="node-url-state" class="muted">Select one node</span>
+            </div>
+            <label>
+              Selected node URL
+              <input id="node-url" type="url" autocomplete="off" disabled />
+            </label>
+            <div class="row">
+              <button id="save-node-url" class="secondary" type="button" disabled>Save Node URL</button>
+              <button id="clear-node-url" class="secondary" type="button" disabled>Clear</button>
+            </div>
           </div>
-        </div>
-        <div class="hint">Sensitive Telegram values are read from environment variables only.</div>
-        <label class="row">
-          <input id="telegram-commands" type="checkbox" />
-          Bot commands
-        </label>
-        <label class="row">
-          <input id="telegram-speed-reports" type="checkbox" />
-          Speed reports
-        </label>
-        <div class="split">
-          <label>
-            Report mode
-            <select id="telegram-report-mode">
-              <option value="always">Always</option>
-              <option value="issues">Only issues</option>
-              <option value="disabled">Disabled</option>
-            </select>
-          </label>
-          <label>
-            Low Mbps
-            <input id="telegram-low-speed" type="number" min="0" step="0.1" />
-          </label>
-        </div>
-        <label>
-          Report rows
-          <input id="telegram-report-limit" type="number" min="1" max="50" step="1" />
-        </label>
-        <label class="row">
-          <input id="telegram-node-alerts" type="checkbox" />
-          Node down alerts
-        </label>
-        <label>
-          Availability check min
-          <input id="telegram-alert-check" type="number" min="1" step="1" />
-        </label>
-        <div class="split">
-          <label>
-            Failed checks
-            <input id="telegram-alert-failures" type="number" min="1" step="1" />
-          </label>
-          <label>
-            Diagnostics refresh min
-            <input id="telegram-alert-diagnostics" type="number" min="1" step="1" />
-          </label>
-        </div>
-        <label>
-          Reminder schedule min
-          <input id="telegram-alert-schedule" type="text" placeholder="15,60,180,360,720" />
-        </label>
-        <label>
-          Max reminder min
-          <input id="telegram-alert-max" type="number" min="1" step="1" />
-        </label>
-        <label class="row">
-          <input id="telegram-alert-group" type="checkbox" />
-          Group offline reminders
-        </label>
-        <label class="row">
-          <input id="telegram-recovery" type="checkbox" />
-          Recovery alerts
-        </label>
-        <h2>Muted Telegram Nodes</h2>
-        <div class="row">
-          <button id="mute-selected" class="secondary" type="button" disabled>Mute Selected</button>
-          <button id="unmute-selected" class="secondary" type="button" disabled>Unmute Selected</button>
-        </div>
-        <div id="telegram-muted-state" class="muted">0 muted</div>
-        <div class="row">
-          <button id="save-telegram" class="secondary" type="button">Save Telegram</button>
-          <button id="test-telegram" class="secondary" type="button">Test</button>
-        </div>
+
+          <button id="run" class="primary" type="button">Run Check</button>
+        </section>
+
+        <section id="settings-pane-filters" class="settings-pane stack" hidden>
+          <div class="control-group">
+            <div class="group-title">
+              <h3>Filters</h3>
+            </div>
+            <label>
+              Search
+              <input id="search" type="search" autocomplete="off" placeholder="Name, server, subscription" />
+            </label>
+            <div class="split">
+              <label>
+                Status
+                <select id="status-filter">
+                  <option value="">All</option>
+                  <option value="online">Online</option>
+                  <option value="offline">Offline</option>
+                </select>
+              </label>
+              <label>
+                Protocol
+                <select id="protocol-filter">
+                  <option value="">All</option>
+                </select>
+              </label>
+            </div>
+            <label>
+              Subscription
+              <select id="sub-filter">
+                <option value="">All</option>
+              </select>
+            </label>
+            <div class="row">
+              <button id="select-visible" class="secondary" type="button">Select Visible</button>
+              <button id="clear-selection" class="secondary" type="button">Clear</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="settings-pane-schedule" class="settings-pane stack" hidden>
+          <div class="control-group">
+            <div class="group-title">
+              <h3>Schedule</h3>
+            </div>
+            <label class="row">
+              <input id="schedule-enabled" type="checkbox" />
+              Enabled
+            </label>
+            <label>
+              Interval minutes
+              <input id="schedule-minutes" type="number" min="1" step="1" />
+            </label>
+            <label>
+              Results per node
+              <input id="history-limit" type="number" min="1" max="1000" step="1" />
+            </label>
+            <button id="save-schedule" class="secondary" type="button">Save Schedule</button>
+          </div>
+        </section>
+
+        <section id="settings-pane-telegram" class="settings-pane stack" hidden>
+          <div class="control-group">
+            <div class="group-title">
+              <h3>Telegram</h3>
+            </div>
+            <label class="row">
+              <input id="telegram-enabled" type="checkbox" />
+              Enabled
+            </label>
+            <div class="config-status">
+              <div>
+                <span>Bot token</span>
+                <strong id="telegram-token-state">Not set</strong>
+              </div>
+              <div>
+                <span>Chat</span>
+                <strong id="telegram-chat-state">Not set</strong>
+              </div>
+              <div>
+                <span>Topic</span>
+                <strong id="telegram-topic-state">Not set</strong>
+              </div>
+              <div>
+                <span>Admins</span>
+                <strong id="telegram-admin-state">0 users</strong>
+              </div>
+            </div>
+            <div class="hint">Sensitive Telegram values are read from environment variables only.</div>
+          </div>
+
+          <div class="control-group">
+            <div class="group-title">
+              <h3>Reports</h3>
+            </div>
+            <label class="row">
+              <input id="telegram-commands" type="checkbox" />
+              Bot commands
+            </label>
+            <label class="row">
+              <input id="telegram-speed-reports" type="checkbox" />
+              Speed reports
+            </label>
+            <div class="split">
+              <label>
+                Report mode
+                <select id="telegram-report-mode">
+                  <option value="always">Always</option>
+                  <option value="issues">Only issues</option>
+                  <option value="disabled">Disabled</option>
+                </select>
+              </label>
+              <label>
+                Low Mbps
+                <input id="telegram-low-speed" type="number" min="0" step="0.1" />
+              </label>
+            </div>
+            <label>
+              Report rows
+              <input id="telegram-report-limit" type="number" min="1" max="50" step="1" />
+            </label>
+          </div>
+
+          <div class="control-group">
+            <div class="group-title">
+              <h3>Alerts</h3>
+            </div>
+            <label class="row">
+              <input id="telegram-node-alerts" type="checkbox" />
+              Node down alerts
+            </label>
+            <label>
+              Availability check min
+              <input id="telegram-alert-check" type="number" min="1" step="1" />
+            </label>
+            <div class="split">
+              <label>
+                Failed checks
+                <input id="telegram-alert-failures" type="number" min="1" step="1" />
+              </label>
+              <label>
+                Diagnostics refresh min
+                <input id="telegram-alert-diagnostics" type="number" min="1" step="1" />
+              </label>
+            </div>
+            <label>
+              Reminder schedule min
+              <input id="telegram-alert-schedule" type="text" placeholder="15,60,180,360,720" />
+            </label>
+            <label>
+              Max reminder min
+              <input id="telegram-alert-max" type="number" min="1" step="1" />
+            </label>
+            <label class="row">
+              <input id="telegram-alert-group" type="checkbox" />
+              Group offline reminders
+            </label>
+            <label class="row">
+              <input id="telegram-recovery" type="checkbox" />
+              Recovery alerts
+            </label>
+          </div>
+
+          <div class="control-group">
+            <div class="group-title">
+              <h3>Muted</h3>
+              <span id="telegram-muted-state" class="muted">0 muted</span>
+            </div>
+            <div class="row">
+              <button id="mute-selected" class="secondary" type="button" disabled>Mute Selected</button>
+              <button id="unmute-selected" class="secondary" type="button" disabled>Unmute Selected</button>
+            </div>
+            <div class="row">
+              <button id="save-telegram" class="secondary" type="button">Save Telegram</button>
+              <button id="test-telegram" class="secondary" type="button">Test</button>
+            </div>
+          </div>
+        </section>
+
         <div id="message" class="muted"></div>
-      </section>
+      </aside>
 
       <section class="stack">
-        <section class="panel stack">
-          <div class="row" style="justify-content: space-between">
+        <section class="stack">
+          <div class="panel-actions">
+            <h2>Overview</h2>
+            <span id="overview-state" class="table-meta"></span>
+          </div>
+          <div class="overview-grid">
+            <div class="kpi-card ok">
+              <span>Online</span>
+              <strong id="kpi-online">0</strong>
+              <div id="kpi-online-detail" class="metric-detail">0%</div>
+            </div>
+            <div class="kpi-card error">
+              <span>Offline</span>
+              <strong id="kpi-offline">0</strong>
+              <div id="kpi-offline-detail" class="metric-detail">0%</div>
+            </div>
+            <div class="kpi-card warn">
+              <span>Muted</span>
+              <strong id="kpi-muted">0</strong>
+              <div class="metric-detail">Telegram alerts</div>
+            </div>
+            <div class="kpi-card blue">
+              <span>Avg speed</span>
+              <strong id="kpi-avg-speed">n/a</strong>
+              <div class="metric-detail">latest successful checks</div>
+            </div>
+            <div class="kpi-card">
+              <span>Last check</span>
+              <strong id="kpi-last-check">n/a</strong>
+              <div id="kpi-last-source" class="metric-detail">no results</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel panel-strong stack">
+          <div class="panel-actions">
             <h2>Nodes</h2>
-            <span id="selection-count" class="muted">0 selected</span>
+            <span id="nodes-summary" class="table-meta">0 nodes</span>
+            <div id="selection-action-bar" class="action-bar" hidden>
+              <span id="selection-count" class="muted">0 selected</span>
+              <button id="selection-run" class="primary" type="button">Run</button>
+              <button id="selection-mute" class="secondary" type="button">Mute</button>
+              <button id="selection-unmute" class="secondary" type="button">Unmute</button>
+              <button id="selection-history" class="secondary" type="button">History</button>
+            </div>
           </div>
           <div class="table-wrap">
-            <table>
+            <table class="nodes-table">
               <thead>
                 <tr>
                   <th></th>
@@ -470,8 +795,6 @@
                   <th>Status</th>
                   <th>Down Since</th>
                   <th>Host Check</th>
-                  <th>Protocol</th>
-                  <th>Subscription</th>
                   <th>Server</th>
                   <th>Last Speed</th>
                 </tr>
@@ -481,10 +804,10 @@
           </div>
         </section>
 
-        <section class="panel stack">
+        <section class="panel panel-strong stack">
           <h2>Results</h2>
           <div class="table-wrap">
-            <table>
+            <table class="results-table">
               <thead>
                 <tr>
                   <th>Node</th>
@@ -493,7 +816,7 @@
                   <th>Duration</th>
                   <th>TTFB</th>
                   <th>Checked</th>
-                  <th>Error</th>
+                  <th>Reason</th>
                 </tr>
               </thead>
               <tbody id="results"></tbody>
@@ -548,6 +871,8 @@
         telegram: null,
         selected: new Set(),
         activeTab: "dashboard",
+        settingsPane: "run",
+        lastUpdatedAt: null,
         historyStableId: "",
         historyResults: [],
       };
@@ -739,6 +1064,59 @@
         return `${minutes} min`;
       }
 
+      function formatShortTime(iso) {
+        if (!iso || iso.startsWith("0001-")) return "n/a";
+        return new Date(iso).toLocaleTimeString();
+      }
+
+      function percent(part, total) {
+        if (!total) return "0%";
+        return `${Math.round((part / total) * 100)}%`;
+      }
+
+      function latestResult() {
+        const results = state.snapshot ? state.snapshot.results || [] : [];
+        return [...results]
+          .filter((result) => result.checkedAt && !result.checkedAt.startsWith("0001-"))
+          .sort((a, b) => new Date(b.checkedAt) - new Date(a.checkedAt))[0] || null;
+      }
+
+      function lowSpeedThreshold() {
+        return Math.max(0, Number((state.telegram && state.telegram.lowSpeedThresholdMbps) || 0));
+      }
+
+      function isSuccessfulResult(result) {
+        return !!result && !result.offline && !result.error && Number(result.mbps || 0) > 0;
+      }
+
+      function isLowSpeed(result) {
+        const threshold = lowSpeedThreshold();
+        return isSuccessfulResult(result) && threshold > 0 && Number(result.mbps || 0) < threshold;
+      }
+
+      function compactReason(error) {
+        const text = String(error || "").trim();
+        if (!text) return "";
+        const lower = text.toLowerCase();
+        if (lower.includes("deadline") || lower.includes("timeout") || lower.includes("timed out")) return "Timeout";
+        if (lower.includes("tls") || lower.includes("certificate")) return "TLS error";
+        if (lower.includes("http status")) return text;
+        if (lower.includes("connection refused")) return "Connection refused";
+        if (lower.includes("connection reset")) return "Connection reset";
+        if (lower.includes("no such host") || lower.includes("lookup")) return "DNS error";
+        if (lower.includes("eof")) return "No response";
+        return text.length > 72 ? `${text.slice(0, 69)}...` : text;
+      }
+
+      function formatCheckText(prefix, checked, online, latencyMs, error) {
+        if (!checked) return "";
+        if (online) {
+          const latency = Number(latencyMs || 0);
+          return latency > 0 ? `${prefix} OK ${latency} ms` : `${prefix} OK`;
+        }
+        return `${prefix} failed`;
+      }
+
       function formatHostCheck(proxy) {
         if (proxy.online) return "";
         const parts = [];
@@ -766,7 +1144,7 @@
           const latency = latencyMs == null && rawLatency > 100000 ? Math.round(rawLatency / 1000000) : rawLatency;
           return latency > 0 ? `${prefix} OK ${latency} ms` : `${prefix} OK`;
         }
-        return `${prefix} No`;
+        return `${prefix} failed`;
       }
 
       function formatSpeedDiagnostics(result) {
@@ -780,18 +1158,69 @@
       function formatNodeSpeed(result) {
         if (!result) return "n/a";
         if (result.offline) return "Offline";
-        if (result.error) return "n/a";
+        if (result.error) return "Failed";
         return `${result.mbps.toFixed(2)} Mbps`;
       }
 
       function formatSpeedStatus(result) {
         if (result.offline) return "Offline";
         if (result.error) return "Failed";
+        if (isLowSpeed(result)) return `${result.mbps.toFixed(2)} Mbps`;
         return `${result.mbps.toFixed(2)} Mbps`;
       }
 
       function speedStatusClass(result) {
+        if (isLowSpeed(result)) return "warn";
         return result.offline || result.error ? "error" : "ok";
+      }
+
+      function resultSeverity(result) {
+        if (!result) return "neutral";
+        if (result.offline || result.error) return "error";
+        if (isLowSpeed(result)) return "warn";
+        return "ok";
+      }
+
+      function resultRowClass(result) {
+        const severity = resultSeverity(result);
+        if (severity === "ok") return "row-ok";
+        if (severity === "warn") return "row-warn";
+        if (severity === "error") return "row-error";
+        return "";
+      }
+
+      function formatReasonChip(reason, severity) {
+        const chipClass = severity === "error" ? "error" : severity === "warn" ? "warn" : severity === "ok" ? "ok" : "neutral";
+        return `<span class="chip ${chipClass}">${escapeHtml(reason || "n/a")}</span>`;
+      }
+
+      function resultReason(result) {
+        if (!result) return "No result";
+        if (result.offline) return formatSpeedDiagnostics(result) || "Offline";
+        if (result.error) return compactReason(result.error);
+        if (isLowSpeed(result)) return `Low speed < ${lowSpeedThreshold().toFixed(2)} Mbps`;
+        return "OK";
+      }
+
+      function formatSpeedChip(result) {
+        if (!result) return `<span class="chip neutral">n/a</span>`;
+        const severity = resultSeverity(result);
+        const chipClass = severity === "error" ? "error" : severity === "warn" ? "warn" : severity === "ok" ? "ok" : "neutral";
+        return `<span class="chip ${chipClass}">${escapeHtml(formatSpeedStatus(result))}</span>`;
+      }
+
+      function nodeRowClass(proxy, result, muted) {
+        if (!proxy.online || (result && (result.offline || result.error))) return "row-error";
+        if (muted || isLowSpeed(result)) return "row-warn";
+        return "";
+      }
+
+      function formatStatusChips(proxy, muted) {
+        const chips = [
+          `<span class="chip ${proxy.online ? "ok" : "error"}">${proxy.online ? "Online" : "Offline"}</span>`,
+        ];
+        if (muted) chips.push(`<span class="chip warn">Muted</span>`);
+        return `<div class="status-chips">${chips.join("")}</div>`;
       }
 
       function renderFilters() {
@@ -805,40 +1234,58 @@
         $("sub-filter").value = subs.includes(subValue) ? subValue : "";
       }
 
+      function renderOverview() {
+        const total = state.proxies.length;
+        const online = state.proxies.filter((proxy) => proxy.online).length;
+        const offline = total - online;
+        const muted = telegramMutedNodeIds().length;
+        const results = state.snapshot ? state.snapshot.results || [] : [];
+        const successful = results.filter(isSuccessfulResult);
+        const avgMbps = successful.length
+          ? successful.reduce((sum, result) => sum + Number(result.mbps || 0), 0) / successful.length
+          : 0;
+        const latest = latestResult();
+
+        $("kpi-online").textContent = online;
+        $("kpi-online-detail").textContent = `${percent(online, total)} of ${total}`;
+        $("kpi-offline").textContent = offline;
+        $("kpi-offline-detail").textContent = `${percent(offline, total)} of ${total}`;
+        $("kpi-muted").textContent = muted;
+        $("kpi-avg-speed").textContent = successful.length ? `${avgMbps.toFixed(2)} Mbps` : "n/a";
+        $("kpi-last-check").textContent = latest ? formatShortTime(latest.checkedAt) : "n/a";
+        $("kpi-last-source").textContent = latest ? (latest.source || "speed-test") : "no results";
+        $("overview-state").textContent = `${results.length} latest results`;
+        $("last-updated").textContent = state.lastUpdatedAt
+          ? `Last updated: ${state.lastUpdatedAt.toLocaleTimeString()}`
+          : "Last updated: n/a";
+      }
+
       function renderNodes() {
         const rows = filteredProxies().map((proxy) => {
           const result = resultFor(proxy.stableId);
-          const speed = formatNodeSpeed(result);
-          const customURL = nodeTestURL(proxy.stableId);
           const muted = telegramMutedNodeSet().has(proxy.stableId);
           const checked = state.selected.has(proxy.stableId) ? "checked" : "";
+          const rowClass = nodeRowClass(proxy, result, muted);
           const downSince = proxy.downSince ? formatTime(proxy.downSince) : "";
           const downtime = proxy.downSince ? formatDurationSec(proxy.downtimeSec) : "";
           const hostCheck = formatHostCheck(proxy);
           return `
-            <tr>
+            <tr class="${rowClass}">
               <td><input type="checkbox" data-id="${proxy.stableId}" ${checked}></td>
               <td class="node-name">
                 <div>${escapeHtml(proxy.name || "Unnamed")}</div>
                 <div class="muted mono">${escapeHtml(proxy.stableId)}</div>
-                ${customURL ? `<div class="muted">Custom Test URL</div>` : ""}
-                ${muted ? `<div class="warn">Telegram muted</div>` : ""}
               </td>
               <td class="status-cell">
-                <span class="status">
-                  <span class="dot ${proxy.online ? "online" : "offline"}"></span>
-                  ${proxy.online ? "Online" : "Offline"}
-                </span>
+                ${formatStatusChips(proxy, muted)}
               </td>
               <td>${proxy.online ? "" : `${escapeHtml(downSince || "n/a")}<div class="muted">${escapeHtml(downtime)}</div>`}</td>
               <td>${hostCheck}</td>
-              <td><span class="pill">${escapeHtml(proxy.protocol)}</span></td>
-              <td>${escapeHtml(proxy.subName || "")}</td>
               <td class="mono server-cell">${escapeHtml(proxy.server)}:${proxy.port}</td>
-              <td class="speed-cell">${speed}</td>
+              <td class="speed-cell">${formatSpeedChip(result)}</td>
             </tr>`;
         });
-        $("nodes").innerHTML = rows.join("") || `<tr><td colspan="9" class="muted">No nodes match filters</td></tr>`;
+        $("nodes").innerHTML = rows.join("") || `<tr><td colspan="7" class="muted">No nodes match filters</td></tr>`;
         $("nodes").querySelectorAll("input[type=checkbox]").forEach((input) => {
           input.addEventListener("change", () => {
             input.checked ? state.selected.add(input.dataset.id) : state.selected.delete(input.dataset.id);
@@ -851,16 +1298,17 @@
       function renderResults() {
         const results = state.snapshot ? state.snapshot.results : [];
         $("results").innerHTML = results.map((result) => {
-          const diagnostics = formatSpeedDiagnostics(result);
+          const severity = resultSeverity(result);
+          const reason = resultReason(result);
           return `
-            <tr>
+            <tr class="${resultRowClass(result)}">
               <td>${escapeHtml(result.name || "Unnamed")}</td>
-              <td class="${speedStatusClass(result)}">${formatSpeedStatus(result)}</td>
+              <td>${formatSpeedChip(result)}</td>
               <td>${result.offline ? "n/a" : formatBytes(result.downloadedBytes)}</td>
               <td>${result.offline ? "n/a" : `${result.durationMs || 0} ms`}</td>
               <td>${result.offline ? "n/a" : `${result.ttfbMs || 0} ms`}</td>
               <td>${formatTime(result.checkedAt)}</td>
-              <td class="${result.error || result.offline ? "error" : ""}">${escapeHtml(result.error || diagnostics || "")}</td>
+              <td class="reason-cell">${formatReasonChip(reason, severity)}</td>
             </tr>
           `;
         }).join("") || `<tr><td colspan="7" class="muted">No speed test results yet</td></tr>`;
@@ -921,15 +1369,28 @@
         const run = state.snapshot && state.snapshot.lastRun;
         if (!run || !run.running) {
           $("run-state").textContent = "Idle";
+          $("run-state").className = "pill state-chip idle";
           $("run").disabled = false;
           return;
         }
         $("run-state").textContent = `Running ${run.completed}/${run.selected}`;
+        $("run-state").className = "pill state-chip running";
         $("run").disabled = true;
       }
 
       function renderSelectionCount() {
-        $("selection-count").textContent = `${state.selected.size} selected`;
+        const count = state.selected.size;
+        const run = state.snapshot && state.snapshot.lastRun;
+        const muted = telegramMutedNodeSet();
+        const ids = selectedIDs();
+        $("selection-count").textContent = `${count} selected`;
+        $("selection-action-bar").hidden = count === 0;
+        $("nodes-summary").hidden = count > 0;
+        $("nodes-summary").textContent = `${filteredProxies().length} shown · ${state.proxies.length} total`;
+        $("selection-run").disabled = count === 0 || !!(run && run.running);
+        $("selection-mute").disabled = count === 0 || ids.every((id) => muted.has(id));
+        $("selection-unmute").disabled = count === 0 || !ids.some((id) => muted.has(id));
+        $("selection-history").disabled = count !== 1;
         renderNodeURLForm();
         renderTelegramMuteControls();
       }
@@ -1039,6 +1500,7 @@
 
       function renderAll() {
         renderRunState();
+        renderOverview();
         renderNodes();
         renderResults();
         renderHistoryNodeOptions();
@@ -1090,6 +1552,21 @@
         }
       }
 
+      function switchSettingsPane(pane) {
+        state.settingsPane = pane;
+        ["run", "filters", "schedule", "telegram"].forEach((name) => {
+          $(`settings-pane-${name}`).hidden = name !== pane;
+          $(`settings-tab-${name}`).classList.toggle("active", name === pane);
+        });
+      }
+
+      async function openSelectedHistory() {
+        const ids = selectedIDs();
+        if (ids.length !== 1) return;
+        state.historyStableId = ids[0];
+        await switchTab("history");
+      }
+
       async function load(initial = false, refreshFilters = false) {
         const [proxies, snapshot, telegram] = await Promise.all([
           request("/proxies"),
@@ -1099,6 +1576,7 @@
         state.proxies = proxies;
         state.snapshot = snapshot;
         state.telegram = telegram;
+        state.lastUpdatedAt = new Date();
         if (initial) {
           renderFilters();
           applyDefaults();
@@ -1259,6 +1737,9 @@
 
       $("tab-dashboard").addEventListener("click", () => switchTab("dashboard"));
       $("tab-history").addEventListener("click", () => switchTab("history"));
+      ["run", "filters", "schedule", "telegram"].forEach((pane) => {
+        $(`settings-tab-${pane}`).addEventListener("click", () => switchSettingsPane(pane));
+      });
       $("refresh").addEventListener("click", () => load());
       $("refresh-subscription").addEventListener("click", refreshSubscription);
       $("refresh-history").addEventListener("click", loadHistory);
@@ -1267,6 +1748,10 @@
         loadHistory();
       });
       $("run").addEventListener("click", runSelected);
+      $("selection-run").addEventListener("click", runSelected);
+      $("selection-mute").addEventListener("click", () => updateTelegramMute(true));
+      $("selection-unmute").addEventListener("click", () => updateTelegramMute(false));
+      $("selection-history").addEventListener("click", openSelectedHistory);
       $("save-node-url").addEventListener("click", saveNodeURL);
       $("clear-node-url").addEventListener("click", clearNodeURL);
       $("save-schedule").addEventListener("click", saveSchedule);
@@ -1291,6 +1776,7 @@
         $(id).addEventListener("change", saveSpeedDraft);
       });
 
+      switchSettingsPane(state.settingsPane);
       load(true).catch((err) => {
         $("message").textContent = err.message;
       });
