@@ -91,11 +91,12 @@ type RunInfo struct {
 }
 
 type Snapshot struct {
-	Defaults     TestConfig        `json:"defaults"`
-	Schedule     ScheduleConfig    `json:"schedule"`
-	NodeTestURLs map[string]string `json:"nodeTestUrls"`
-	LastRun      RunInfo           `json:"lastRun"`
-	Results      []Result          `json:"results"`
+	Defaults           TestConfig        `json:"defaults"`
+	Schedule           ScheduleConfig    `json:"schedule"`
+	NodeTestURLs       map[string]string `json:"nodeTestUrls"`
+	NextScheduledRunAt *time.Time        `json:"nextScheduledRunAt,omitempty"`
+	LastRun            RunInfo           `json:"lastRun"`
+	Results            []Result          `json:"results"`
 }
 
 type RunReport struct {
@@ -132,6 +133,7 @@ type Manager struct {
 	results  map[string]Result
 	history  map[string][]Result
 	schedule ScheduleConfig
+	nextRun  time.Time
 	reporter Reporter
 
 	stopCh     chan struct{}
@@ -285,12 +287,19 @@ func (m *Manager) Snapshot() Snapshot {
 		return results[i].Name < results[j].Name
 	})
 
+	var nextScheduledRunAt *time.Time
+	if !m.nextRun.IsZero() {
+		nextRun := m.nextRun
+		nextScheduledRunAt = &nextRun
+	}
+
 	return Snapshot{
-		Defaults:     m.defaults,
-		Schedule:     schedule,
-		NodeTestURLs: copyStringMap(schedule.NodeTestURLs),
-		LastRun:      m.lastRun,
-		Results:      results,
+		Defaults:           m.defaults,
+		Schedule:           schedule,
+		NodeTestURLs:       copyStringMap(schedule.NodeTestURLs),
+		NextScheduledRunAt: nextScheduledRunAt,
+		LastRun:            m.lastRun,
+		Results:            results,
 	}
 }
 
@@ -461,6 +470,7 @@ func (m *Manager) schedulerLoop() {
 	for {
 		schedule := m.Schedule()
 		if !schedule.Enabled {
+			m.setNextScheduledRunAt(time.Time{})
 			select {
 			case <-m.scheduleCh:
 				continue
@@ -470,6 +480,7 @@ func (m *Manager) schedulerLoop() {
 		}
 
 		interval := time.Duration(schedule.IntervalSec) * time.Second
+		m.setNextScheduledRunAt(time.Now().Add(interval))
 		timer := time.NewTimer(interval)
 		select {
 		case <-timer.C:
@@ -488,9 +499,16 @@ func (m *Manager) schedulerLoop() {
 			timer.Stop()
 		case <-m.stopCh:
 			timer.Stop()
+			m.setNextScheduledRunAt(time.Time{})
 			return
 		}
 	}
+}
+
+func (m *Manager) setNextScheduledRunAt(nextRun time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nextRun = nextRun
 }
 
 func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source string, startedAt time.Time, skipOffline bool) {

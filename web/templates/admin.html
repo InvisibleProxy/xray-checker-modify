@@ -358,8 +358,11 @@
       }
       .overview-grid {
         display: grid;
-        grid-template-columns: repeat(5, minmax(0, 1fr));
+        grid-template-columns: repeat(6, minmax(0, 1fr));
         gap: 12px;
+      }
+      .history-stats-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
       }
       .kpi-card {
         min-width: 0;
@@ -771,6 +774,11 @@
               <strong id="kpi-last-check">n/a</strong>
               <div id="kpi-last-source" class="metric-detail">no results</div>
             </div>
+            <div class="kpi-card">
+              <span>Next test</span>
+              <strong id="kpi-next-check">n/a</strong>
+              <div id="kpi-next-check-detail" class="metric-detail">schedule disabled</div>
+            </div>
           </div>
         </section>
 
@@ -839,6 +847,35 @@
           <div class="row">
             <button id="refresh-history" class="secondary" type="button">Refresh History</button>
             <span id="history-state" class="muted"></span>
+          </div>
+        </section>
+
+        <section class="panel stack">
+          <div class="panel-actions">
+            <h2>Speed Stats</h2>
+            <span id="history-stats-count" class="table-meta">0 successful results</span>
+          </div>
+          <div class="overview-grid history-stats-grid">
+            <div class="kpi-card blue">
+              <span>Average</span>
+              <strong id="history-avg-speed">n/a</strong>
+              <div class="metric-detail">successful results</div>
+            </div>
+            <div class="kpi-card ok">
+              <span>Maximum</span>
+              <strong id="history-max-speed">n/a</strong>
+              <div class="metric-detail">best result</div>
+            </div>
+            <div class="kpi-card warn">
+              <span>Minimum</span>
+              <strong id="history-min-speed">n/a</strong>
+              <div class="metric-detail">slowest result</div>
+            </div>
+            <div class="kpi-card">
+              <span>Total</span>
+              <strong id="history-total-results">0</strong>
+              <div class="metric-detail">stored measurements</div>
+            </div>
           </div>
         </section>
 
@@ -1069,6 +1106,17 @@
         return new Date(iso).toLocaleTimeString();
       }
 
+      function formatMbps(value) {
+        return `${Number(value || 0).toFixed(2)} Mbps`;
+      }
+
+      function formatTimeUntil(iso) {
+        if (!iso || iso.startsWith("0001-")) return "n/a";
+        const seconds = Math.round((new Date(iso) - new Date()) / 1000);
+        if (seconds <= 0) return "due now";
+        return `in ${formatDurationSec(seconds)}`;
+      }
+
       function percent(part, total) {
         if (!total) return "0%";
         return `${Math.round((part / total) * 100)}%`;
@@ -1079,6 +1127,11 @@
         return [...results]
           .filter((result) => result.checkedAt && !result.checkedAt.startsWith("0001-"))
           .sort((a, b) => new Date(b.checkedAt) - new Date(a.checkedAt))[0] || null;
+      }
+
+      function nextScheduledRunAt() {
+        const nextRun = state.snapshot && state.snapshot.nextScheduledRunAt;
+        return nextRun && !nextRun.startsWith("0001-") ? nextRun : "";
       }
 
       function lowSpeedThreshold() {
@@ -1092,6 +1145,20 @@
       function isLowSpeed(result) {
         const threshold = lowSpeedThreshold();
         return isSuccessfulResult(result) && threshold > 0 && Number(result.mbps || 0) < threshold;
+      }
+
+      function speedStats(results) {
+        const speeds = (results || [])
+          .filter(isSuccessfulResult)
+          .map((result) => Number(result.mbps || 0));
+        if (speeds.length === 0) return null;
+        const total = speeds.reduce((sum, value) => sum + value, 0);
+        return {
+          count: speeds.length,
+          avg: total / speeds.length,
+          min: Math.min(...speeds),
+          max: Math.max(...speeds),
+        };
       }
 
       function compactReason(error) {
@@ -1245,15 +1312,21 @@
           ? successful.reduce((sum, result) => sum + Number(result.mbps || 0), 0) / successful.length
           : 0;
         const latest = latestResult();
+        const nextRun = nextScheduledRunAt();
+        const schedule = state.snapshot ? state.snapshot.schedule || {} : {};
 
         $("kpi-online").textContent = online;
         $("kpi-online-detail").textContent = `${percent(online, total)} of ${total}`;
         $("kpi-offline").textContent = offline;
         $("kpi-offline-detail").textContent = `${percent(offline, total)} of ${total}`;
         $("kpi-muted").textContent = muted;
-        $("kpi-avg-speed").textContent = successful.length ? `${avgMbps.toFixed(2)} Mbps` : "n/a";
+        $("kpi-avg-speed").textContent = successful.length ? formatMbps(avgMbps) : "n/a";
         $("kpi-last-check").textContent = latest ? formatShortTime(latest.checkedAt) : "n/a";
         $("kpi-last-source").textContent = latest ? (latest.source || "speed-test") : "no results";
+        $("kpi-next-check").textContent = nextRun ? formatShortTime(nextRun) : "n/a";
+        $("kpi-next-check-detail").textContent = nextRun
+          ? formatTimeUntil(nextRun)
+          : (schedule.enabled ? "waiting for scheduler" : "schedule disabled");
         $("overview-state").textContent = `${results.length} latest results`;
         $("last-updated").textContent = state.lastUpdatedAt
           ? `Last updated: ${state.lastUpdatedAt.toLocaleTimeString()}`
@@ -1340,9 +1413,21 @@
         $("history-state").textContent = state.historyStableId;
       }
 
+      function renderHistoryStats(results) {
+        const stats = speedStats(results);
+        $("history-total-results").textContent = results.length;
+        $("history-stats-count").textContent = stats
+          ? `${stats.count} successful of ${results.length} results`
+          : `0 successful of ${results.length} results`;
+        $("history-avg-speed").textContent = stats ? formatMbps(stats.avg) : "n/a";
+        $("history-min-speed").textContent = stats ? formatMbps(stats.min) : "n/a";
+        $("history-max-speed").textContent = stats ? formatMbps(stats.max) : "n/a";
+      }
+
       function renderHistoryResults() {
         const results = state.historyResults || [];
         $("history-count").textContent = `${results.length} results`;
+        renderHistoryStats(results);
         if (!state.historyStableId) {
           $("history-results").innerHTML = `<tr><td colspan="8" class="muted">Select a node</td></tr>`;
           return;
@@ -1785,6 +1870,11 @@
           load().catch(() => {});
         }
       }, 2000);
+      setInterval(() => {
+        if (state.snapshot) {
+          renderOverview();
+        }
+      }, 30000);
     </script>
   </body>
 </html>
