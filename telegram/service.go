@@ -517,7 +517,7 @@ func (s *Service) NotifyNodeStatuses() {
 	stateChanged := false
 	s.mu.Lock()
 	for stableID := range s.alerts {
-		if !active[stableID] || muted[stableID] {
+		if !active[stableID] {
 			delete(s.alerts, stableID)
 			stateChanged = true
 		}
@@ -531,9 +531,7 @@ func (s *Service) NotifyNodeStatuses() {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
-		if muted[proxy.StableID] {
-			continue
-		}
+		isMuted := muted[proxy.StableID]
 
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
 		isDown := err != nil || !details.Online
@@ -560,7 +558,7 @@ func (s *Service) NotifyNodeStatuses() {
 				}
 			}
 			shouldRefreshDiagnostics = shouldRefreshNodeDiagnostics(state, cfg, now)
-			if state.FailCount >= cfg.AlertAfterFailures {
+			if !isMuted && state.FailCount >= cfg.AlertAfterFailures {
 				if state.NextAlert.IsZero() {
 					if state.LastAlert.IsZero() {
 						state.NextAlert = now
@@ -573,7 +571,7 @@ func (s *Service) NotifyNodeStatuses() {
 				}
 			}
 		} else {
-			if state.WasDown && cfg.NotifyRecovery {
+			if !isMuted && state.WasDown && cfg.NotifyRecovery {
 				recoveryMessages = append(recoveryMessages, formatNodeRecovery(proxy, details.Latency, state.DownSince, now))
 			}
 			state = nodeAlertState{}

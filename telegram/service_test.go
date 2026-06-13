@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"xray-checker/checker"
+	"xray-checker/models"
 	"xray-checker/speedtest"
 )
 
@@ -276,6 +278,82 @@ func TestFilterActiveNodeIDsPrunesInactiveIDs(t *testing.T) {
 
 	if got := strings.Join(filtered, ","); got != "active" {
 		t.Fatalf("filtered muted IDs = %q, want %q", got, "active")
+	}
+}
+
+func TestNotifyNodeStatusesPreservesMutedOfflineState(t *testing.T) {
+	proxy := &models.ProxyConfig{
+		Protocol: "vless",
+		Server:   "example.com",
+		Port:     443,
+		Name:     "US",
+		UUID:     "uuid",
+	}
+	proxy.StableID = proxy.GenerateStableID()
+	proxyChecker := checker.NewProxyChecker(
+		[]*models.ProxyConfig{proxy},
+		10000,
+		"",
+		1,
+		"",
+		"",
+		1,
+		0,
+		"status",
+	)
+
+	downSince := time.Now().Add(-7 * 24 * time.Hour).Truncate(time.Second)
+	hostCheck := checker.HostCheckDetails{
+		Checked:   true,
+		Online:    false,
+		CheckedAt: time.Now(),
+		Target:    "example.com:443",
+		Error:     "timeout",
+	}
+	pingCheck := checker.PingCheckDetails{
+		Checked:   true,
+		Online:    false,
+		CheckedAt: time.Now(),
+		Target:    "example.com",
+		Error:     "timeout",
+	}
+	if !proxyChecker.RestoreOfflineStatus(proxy.StableID, downSince, hostCheck, pingCheck) {
+		t.Fatal("failed to seed offline status")
+	}
+
+	service := NewService("", proxyChecker, nil, 10000)
+	service.setConfig(Config{
+		Enabled:                 true,
+		ChatID:                  "1",
+		NodeAlertsEnabled:       true,
+		AlertCheckMinutes:       1,
+		AlertAfterFailures:      1,
+		AlertDiagnosticsMinutes: 60,
+		MutedNodeIDs:            []string{proxy.StableID},
+		TimeoutSec:              1,
+	})
+	service.alerts[proxy.StableID] = nodeAlertState{
+		FailCount:       3,
+		WasDown:         true,
+		DownSince:       downSince,
+		LastDiagnostics: time.Now(),
+		HostCheck:       hostCheck,
+		PingCheck:       pingCheck,
+	}
+
+	service.NotifyNodeStatuses()
+
+	service.mu.RLock()
+	state, ok := service.alerts[proxy.StableID]
+	service.mu.RUnlock()
+	if !ok {
+		t.Fatal("muted offline state was removed")
+	}
+	if !state.DownSince.Equal(downSince) {
+		t.Fatalf("downSince = %s, want %s", state.DownSince, downSince)
+	}
+	if state.FailCount <= 3 {
+		t.Fatalf("failCount = %d, want incremented value", state.FailCount)
 	}
 }
 
