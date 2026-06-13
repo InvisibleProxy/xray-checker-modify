@@ -26,7 +26,8 @@ const (
 	defaultTimeoutSec                  = 20
 	defaultSpeedReportLimit            = 10
 	defaultAlertCheckMinutes           = 5
-	defaultAlertAfterFailures          = 1
+	minAlertAfterFailures              = 2
+	defaultAlertAfterFailures          = minAlertAfterFailures
 	defaultAlertDiagnosticsMinutes     = 60
 	defaultAlertMaxReminderMinutes     = 1440
 	defaultAlertReminderScheduleString = "15,60,180,360,720"
@@ -121,7 +122,7 @@ func (c *Config) Normalize() {
 	if c.AlertCheckMinutes <= 0 {
 		c.AlertCheckMinutes = defaultAlertCheckMinutes
 	}
-	if c.AlertAfterFailures <= 0 {
+	if c.AlertAfterFailures < minAlertAfterFailures {
 		c.AlertAfterFailures = defaultAlertAfterFailures
 	}
 	if c.AlertDiagnosticsMinutes <= 0 {
@@ -571,7 +572,7 @@ func (s *Service) NotifyNodeStatuses() {
 				}
 			}
 		} else {
-			if !isMuted && state.WasDown && cfg.NotifyRecovery {
+			if shouldNotifyNodeRecovery(state, cfg, isMuted) {
 				recoveryMessages = append(recoveryMessages, formatNodeRecovery(proxy, details.Latency, state.DownSince, now))
 			}
 			state = nodeAlertState{}
@@ -688,6 +689,17 @@ func (s *Service) pendingNodeDownAlert(proxy *models.ProxyConfig, cfg Config, no
 		State:     alertState,
 		NextAfter: alertState.NextAlert.Sub(now),
 	}, true
+}
+
+func shouldNotifyNodeRecovery(state nodeAlertState, cfg Config, isMuted bool) bool {
+	if isMuted || !cfg.NotifyRecovery || !state.WasDown {
+		return false
+	}
+	return nodeDownAlertWasSent(state)
+}
+
+func nodeDownAlertWasSent(state nodeAlertState) bool {
+	return state.AlertCount > 0 || !state.LastAlert.IsZero()
 }
 
 func (s *Service) confirmNodeDownAlertsSent(alerts []nodeDownAlert, sentAt time.Time, cfg Config) bool {

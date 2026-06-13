@@ -698,7 +698,7 @@
             <div class="split">
               <label>
                 Failed checks
-                <input id="telegram-alert-failures" type="number" min="1" step="1" />
+                <input id="telegram-alert-failures" type="number" min="2" step="1" />
               </label>
               <label>
                 Diagnostics refresh min
@@ -1009,7 +1009,7 @@
           speedReportLimit: Math.max(1, Number($("telegram-report-limit").value || 10)),
           nodeAlertsEnabled: $("telegram-node-alerts").checked,
           alertCheckMinutes: Math.max(1, Number($("telegram-alert-check").value || 5)),
-          alertAfterFailures: Math.max(1, Number($("telegram-alert-failures").value || 1)),
+          alertAfterFailures: Math.max(2, Number($("telegram-alert-failures").value || 2)),
           alertDiagnosticsMinutes: Math.max(1, Number($("telegram-alert-diagnostics").value || 60)),
           alertReminderScheduleMinutes: parseMinuteSchedule($("telegram-alert-schedule").value),
           alertMaxReminderMinutes: Math.max(1, Number($("telegram-alert-max").value || 1440)),
@@ -1552,7 +1552,7 @@
         $("telegram-report-limit").value = cfg.speedReportLimit || 10;
         $("telegram-node-alerts").checked = cfg.nodeAlertsEnabled !== false;
         $("telegram-alert-check").value = cfg.alertCheckMinutes || 5;
-        $("telegram-alert-failures").value = cfg.alertAfterFailures || 1;
+        $("telegram-alert-failures").value = Math.max(2, cfg.alertAfterFailures || 2);
         $("telegram-alert-diagnostics").value = cfg.alertDiagnosticsMinutes || cfg.alertRepeatMinutes || 60;
         $("telegram-alert-schedule").value = formatMinuteSchedule(cfg.alertReminderScheduleMinutes);
         $("telegram-alert-max").value = cfg.alertMaxReminderMinutes || 1440;

@@ -281,6 +281,115 @@ func TestFilterActiveNodeIDsPrunesInactiveIDs(t *testing.T) {
 	}
 }
 
+func TestConfigNormalizeRequiresConfirmedNodeAlert(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.AlertAfterFailures != 2 {
+		t.Fatalf("default alertAfterFailures = %d, want 2", cfg.AlertAfterFailures)
+	}
+
+	cfg.AlertAfterFailures = 1
+	cfg.Normalize()
+	if cfg.AlertAfterFailures != 2 {
+		t.Fatalf("normalized alertAfterFailures = %d, want 2", cfg.AlertAfterFailures)
+	}
+}
+
+func TestShouldNotifyNodeRecoveryRequiresSentDownAlert(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.NotifyRecovery = true
+
+	pending := nodeAlertState{
+		FailCount: 1,
+		WasDown:   true,
+		DownSince: time.Now().Add(-time.Minute),
+	}
+	if shouldNotifyNodeRecovery(pending, cfg, false) {
+		t.Fatal("recovery was allowed before a down alert was sent")
+	}
+
+	confirmed := pending
+	confirmed.AlertCount = 1
+	if !shouldNotifyNodeRecovery(confirmed, cfg, false) {
+		t.Fatal("recovery was not allowed after a down alert was sent")
+	}
+	if shouldNotifyNodeRecovery(confirmed, cfg, true) {
+		t.Fatal("recovery was allowed for a muted node")
+	}
+
+	cfg.NotifyRecovery = false
+	if shouldNotifyNodeRecovery(confirmed, cfg, false) {
+		t.Fatal("recovery was allowed while notifyRecovery is disabled")
+	}
+}
+
+func TestPendingNodeDownAlertRequiresRepeatedFailure(t *testing.T) {
+	proxy := &models.ProxyConfig{
+		Protocol: "vless",
+		Server:   "example.com",
+		Port:     443,
+		Name:     "US",
+		UUID:     "uuid",
+	}
+	proxy.StableID = proxy.GenerateStableID()
+	proxyChecker := checker.NewProxyChecker(
+		[]*models.ProxyConfig{proxy},
+		10000,
+		"",
+		1,
+		"",
+		"",
+		1,
+		0,
+		"status",
+	)
+
+	downSince := time.Now().Add(-time.Minute).Truncate(time.Second)
+	hostCheck := checker.HostCheckDetails{
+		Checked:   true,
+		Online:    false,
+		CheckedAt: time.Now(),
+		Target:    "example.com:443",
+		Error:     "timeout",
+	}
+	pingCheck := checker.PingCheckDetails{
+		Checked:   true,
+		Online:    false,
+		CheckedAt: time.Now(),
+		Target:    "example.com",
+		Error:     "timeout",
+	}
+	if !proxyChecker.RestoreOfflineStatus(proxy.StableID, downSince, hostCheck, pingCheck) {
+		t.Fatal("failed to seed offline status")
+	}
+
+	service := NewService("", proxyChecker, nil, 10000)
+	cfg := DefaultConfig()
+	now := time.Now().Truncate(time.Second)
+	state := nodeAlertState{
+		FailCount: 1,
+		WasDown:   true,
+		DownSince: downSince,
+		NextAlert: now,
+	}
+	service.alerts[proxy.StableID] = state
+	if _, ok := service.pendingNodeDownAlert(proxy, cfg, now); ok {
+		t.Fatal("down alert was allowed after the first failed check")
+	}
+
+	state.FailCount = 2
+	service.alerts[proxy.StableID] = state
+	alert, ok := service.pendingNodeDownAlert(proxy, cfg, now)
+	if !ok {
+		t.Fatal("down alert was not allowed after the repeated failed check")
+	}
+	if !alert.State.DownSince.Equal(downSince) {
+		t.Fatalf("downSince = %s, want %s", alert.State.DownSince, downSince)
+	}
+	if alert.State.AlertCount != 1 {
+		t.Fatalf("alert count = %d, want 1", alert.State.AlertCount)
+	}
+}
+
 func TestNotifyNodeStatusesPreservesMutedOfflineState(t *testing.T) {
 	proxy := &models.ProxyConfig{
 		Protocol: "vless",
@@ -327,7 +436,7 @@ func TestNotifyNodeStatusesPreservesMutedOfflineState(t *testing.T) {
 		ChatID:                  "1",
 		NodeAlertsEnabled:       true,
 		AlertCheckMinutes:       1,
-		AlertAfterFailures:      1,
+		AlertAfterFailures:      2,
 		AlertDiagnosticsMinutes: 60,
 		MutedNodeIDs:            []string{proxy.StableID},
 		TimeoutSec:              1,
