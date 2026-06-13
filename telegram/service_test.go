@@ -269,6 +269,16 @@ func TestNormalizeMutedNodeIDs(t *testing.T) {
 	}
 }
 
+func TestFilterActiveNodeIDsPrunesInactiveIDs(t *testing.T) {
+	filtered := filterActiveNodeIDs([]string{" stale ", "active", "active"}, map[string]bool{
+		"active": true,
+	})
+
+	if got := strings.Join(filtered, ","); got != "active" {
+		t.Fatalf("filtered muted IDs = %q, want %q", got, "active")
+	}
+}
+
 func withReportMode(cfg Config, mode string) Config {
 	cfg.SpeedReportMode = mode
 	return cfg

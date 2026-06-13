@@ -350,6 +350,7 @@ func (s *Service) Config() Config {
 
 func (s *Service) AdminConfig() AdminConfig {
 	cfg := s.Config()
+	mutedNodeIDs := s.activeMutedNodeIDs(cfg.MutedNodeIDs)
 	return AdminConfig{
 		Enabled:                      cfg.Enabled,
 		CommandPollingEnabled:        cfg.CommandPollingEnabled,
@@ -366,7 +367,7 @@ func (s *Service) AdminConfig() AdminConfig {
 		AlertMaxReminderMinutes:      cfg.AlertMaxReminderMinutes,
 		GroupOfflineReminders:        cfg.GroupOfflineReminders,
 		NotifyRecovery:               cfg.NotifyRecovery,
-		MutedNodeIDs:                 append([]string(nil), cfg.MutedNodeIDs...),
+		MutedNodeIDs:                 mutedNodeIDs,
 		BotTokenConfigured:           cfg.BotToken != "",
 		ChatConfigured:               cfg.ChatID != "",
 		MessageThreadConfigured:      cfg.MessageThreadID > 0,
@@ -391,12 +392,28 @@ func (s *Service) UpdateAdminConfig(input AdminConfig) error {
 	cfg.AlertMaxReminderMinutes = input.AlertMaxReminderMinutes
 	cfg.GroupOfflineReminders = input.GroupOfflineReminders
 	cfg.NotifyRecovery = input.NotifyRecovery
-	cfg.MutedNodeIDs = append([]string(nil), input.MutedNodeIDs...)
+	cfg.MutedNodeIDs = s.activeMutedNodeIDs(input.MutedNodeIDs)
 	cfg.Normalize()
 	if cfg.Enabled && cfg.BotToken == "" {
 		return fmt.Errorf("bot token is required when Telegram is enabled; set TELEGRAM_BOT_TOKEN")
 	}
 
+	if err := s.saveEditableConfig(cfg); err != nil {
+		return err
+	}
+	s.setConfig(cfg)
+	return nil
+}
+
+func (s *Service) PruneInactiveMutedNodes() error {
+	cfg := s.Config()
+	current := normalizeNodeIDs(cfg.MutedNodeIDs)
+	pruned := s.activeMutedNodeIDs(current)
+	if strings.Join(current, "\x00") == strings.Join(pruned, "\x00") {
+		return nil
+	}
+
+	cfg.MutedNodeIDs = pruned
 	if err := s.saveEditableConfig(cfg); err != nil {
 		return err
 	}
@@ -2283,6 +2300,54 @@ func normalizeNodeIDs(values []string) []string {
 		result = append(result, value)
 	}
 	sort.Strings(result)
+	return result
+}
+
+func (s *Service) activeMutedNodeIDs(values []string) []string {
+	active := s.activeNodeIDs()
+	if len(active) == 0 {
+		return normalizeNodeIDs(values)
+	}
+	return filterActiveNodeIDs(values, active)
+}
+
+func (s *Service) activeNodeIDs() map[string]bool {
+	if s.proxyChecker == nil {
+		return nil
+	}
+
+	proxies := s.proxyChecker.GetProxies()
+	if len(proxies) == 0 {
+		return nil
+	}
+
+	active := make(map[string]bool, len(proxies))
+	for _, proxy := range proxies {
+		if proxy == nil {
+			continue
+		}
+		if proxy.StableID == "" {
+			proxy.StableID = proxy.GenerateStableID()
+		}
+		if proxy.StableID != "" {
+			active[proxy.StableID] = true
+		}
+	}
+	return active
+}
+
+func filterActiveNodeIDs(values []string, active map[string]bool) []string {
+	values = normalizeNodeIDs(values)
+	if len(active) == 0 {
+		return values
+	}
+
+	result := values[:0]
+	for _, value := range values {
+		if active[value] {
+			result = append(result, value)
+		}
+	}
 	return result
 }
 

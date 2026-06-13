@@ -200,6 +200,9 @@ func main() {
 		if err := updateConfiguration(newConfigs, proxyConfigs, xrayRunner, proxyChecker); err != nil {
 			return web.AdminSubscriptionRefreshResult{}, err
 		}
+		if err := telegramService.PruneInactiveMutedNodes(); err != nil {
+			logger.Warn("Failed to prune inactive muted Telegram nodes: %v", err)
+		}
 
 		return web.AdminSubscriptionRefreshResult{
 			Updated: true,

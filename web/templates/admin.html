@@ -1015,7 +1015,7 @@
           alertMaxReminderMinutes: Math.max(1, Number($("telegram-alert-max").value || 1440)),
           groupOfflineReminders: $("telegram-alert-group").checked,
           notifyRecovery: $("telegram-recovery").checked,
-          mutedNodeIds: telegramMutedNodeIds(),
+          mutedNodeIds: activeTelegramMutedNodeIds(),
           timeoutSec: 20,
         };
       }
@@ -1062,8 +1062,13 @@
         return [...new Set(state.telegram.mutedNodeIds.map((id) => String(id || "").trim()).filter(Boolean))].sort();
       }
 
+      function activeTelegramMutedNodeIds() {
+        const knownIds = new Set(state.proxies.map((proxy) => proxy.stableId));
+        return telegramMutedNodeIds().filter((id) => knownIds.has(id));
+      }
+
       function telegramMutedNodeSet() {
-        return new Set(telegramMutedNodeIds());
+        return new Set(activeTelegramMutedNodeIds());
       }
 
       function selectedIDs() {
@@ -1305,7 +1310,7 @@
         const total = state.proxies.length;
         const online = state.proxies.filter((proxy) => proxy.online).length;
         const offline = total - online;
-        const muted = telegramMutedNodeIds().length;
+        const muted = activeTelegramMutedNodeIds().length;
         const results = state.snapshot ? state.snapshot.results || [] : [];
         const successful = results.filter(isSuccessfulResult);
         const avgMbps = successful.length
@@ -1553,7 +1558,7 @@
         $("telegram-alert-max").value = cfg.alertMaxReminderMinutes || 1440;
         $("telegram-alert-group").checked = cfg.groupOfflineReminders !== false;
         $("telegram-recovery").checked = cfg.notifyRecovery !== false;
-        cfg.mutedNodeIds = telegramMutedNodeIds();
+        cfg.mutedNodeIds = activeTelegramMutedNodeIds();
         renderTelegramMuteControls();
       }
 
@@ -1572,15 +1577,14 @@
           unmute.disabled = !ids.some((id) => muted.has(id));
         }
 
-        const names = telegramMutedNodeIds()
+        const activeMutedIds = activeTelegramMutedNodeIds();
+        const names = activeMutedIds
           .map((id) => state.proxies.find((proxy) => proxy.stableId === id))
           .filter(Boolean)
           .map((proxy) => proxy.name || proxy.stableId);
-        const unknownCount = telegramMutedNodeIds().length - names.length;
-        const suffix = unknownCount > 0 ? `, ${unknownCount} inactive` : "";
         stateText.textContent = names.length > 0
-          ? `${telegramMutedNodeIds().length} muted: ${names.slice(0, 3).join(", ")}${names.length > 3 ? ", ..." : ""}${suffix}`
-          : `${telegramMutedNodeIds().length} muted${suffix}`;
+          ? `${activeMutedIds.length} muted: ${names.slice(0, 3).join(", ")}${names.length > 3 ? ", ..." : ""}`
+          : `${activeMutedIds.length} muted`;
       }
 
       function renderAll() {
