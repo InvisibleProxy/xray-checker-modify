@@ -261,13 +261,61 @@ func TestFormatSpeedReportSkipsMutedNodes(t *testing.T) {
 	}
 }
 
+func TestScopedMuteFiltersOnlySelectedTelegramReports(t *testing.T) {
+	results := []speedtest.Result{
+		{Name: "muted", StableID: "muted-id", Mbps: 1, DownloadedBytes: 1024, DurationMs: 1000},
+		{Name: "visible", StableID: "visible-id", Mbps: 50, DownloadedBytes: 10 * 1024 * 1024, DurationMs: 1000},
+	}
+
+	cfg := DefaultConfig()
+	cfg.MutedAlertNodeIDs = []string{"muted-id"}
+	filtered := filterMutedSpeedResults(results, cfg)
+	if len(filtered) != 2 {
+		t.Fatalf("alert-only mute filtered speed results: got %d, want 2", len(filtered))
+	}
+	if !mutedAlertNodeSet(cfg)["muted-id"] {
+		t.Fatal("alert-only mute did not mute availability alerts")
+	}
+	if mutedSpeedNodeSet(cfg)["muted-id"] {
+		t.Fatal("alert-only mute muted speed reports")
+	}
+
+	cfg = DefaultConfig()
+	cfg.MutedSpeedNodeIDs = []string{"muted-id"}
+	filtered = filterMutedSpeedResults(results, cfg)
+	if len(filtered) != 1 || filtered[0].StableID != "visible-id" {
+		t.Fatalf("speed-only mute did not filter only speed results: %#v", filtered)
+	}
+	if mutedAlertNodeSet(cfg)["muted-id"] {
+		t.Fatal("speed-only mute muted availability alerts")
+	}
+
+	cfg = DefaultConfig()
+	cfg.MutedNodeIDs = []string{"muted-id"}
+	filtered = filterMutedSpeedResults(results, cfg)
+	if len(filtered) != 1 || filtered[0].StableID != "visible-id" {
+		t.Fatalf("global mute did not filter speed results: %#v", filtered)
+	}
+	if !mutedAlertNodeSet(cfg)["muted-id"] {
+		t.Fatal("global mute did not mute availability alerts")
+	}
+}
+
 func TestNormalizeMutedNodeIDs(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MutedNodeIDs = []string{" b ", "", "a", "a"}
+	cfg.MutedSpeedNodeIDs = []string{" speed ", "", "speed"}
+	cfg.MutedAlertNodeIDs = []string{" alert ", "", "alert"}
 	cfg.Normalize()
 
 	if got := strings.Join(cfg.MutedNodeIDs, ","); got != "a,b" {
 		t.Fatalf("muted IDs = %q, want %q", got, "a,b")
+	}
+	if got := strings.Join(cfg.MutedSpeedNodeIDs, ","); got != "speed" {
+		t.Fatalf("muted speed IDs = %q, want %q", got, "speed")
+	}
+	if got := strings.Join(cfg.MutedAlertNodeIDs, ","); got != "alert" {
+		t.Fatalf("muted alert IDs = %q, want %q", got, "alert")
 	}
 }
 

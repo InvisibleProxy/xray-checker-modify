@@ -728,6 +728,14 @@
               <h3>Muted</h3>
               <span id="telegram-muted-state" class="muted">0 muted</span>
             </div>
+            <label>
+              Scope
+              <select id="mute-scope">
+                <option value="all">All Telegram</option>
+                <option value="alerts">Availability alerts</option>
+                <option value="speed">Speed reports</option>
+              </select>
+            </label>
             <div class="row">
               <button id="mute-selected" class="secondary" type="button" disabled>Mute Selected</button>
               <button id="unmute-selected" class="secondary" type="button" disabled>Unmute Selected</button>
@@ -762,7 +770,7 @@
             <div class="kpi-card warn">
               <span>Muted</span>
               <strong id="kpi-muted">0</strong>
-              <div class="metric-detail">Telegram alerts</div>
+              <div class="metric-detail">Telegram rules</div>
             </div>
             <div class="kpi-card blue">
               <span>Avg speed</span>
@@ -1015,7 +1023,9 @@
           alertMaxReminderMinutes: Math.max(1, Number($("telegram-alert-max").value || 1440)),
           groupOfflineReminders: $("telegram-alert-group").checked,
           notifyRecovery: $("telegram-recovery").checked,
-          mutedNodeIds: activeTelegramMutedNodeIds(),
+          mutedNodeIds: activeTelegramMuteNodeIds("all"),
+          mutedSpeedNodeIds: activeTelegramMuteNodeIds("speed"),
+          mutedAlertNodeIds: activeTelegramMuteNodeIds("alerts"),
           timeoutSec: 20,
         };
       }
@@ -1057,18 +1067,58 @@
         return nodeTestURLs()[stableId] || "";
       }
 
-      function telegramMutedNodeIds() {
-        if (!state.telegram || !Array.isArray(state.telegram.mutedNodeIds)) return [];
-        return [...new Set(state.telegram.mutedNodeIds.map((id) => String(id || "").trim()).filter(Boolean))].sort();
+      function normalizeNodeIdList(values) {
+        if (!Array.isArray(values)) return [];
+        return [...new Set(values.map((id) => String(id || "").trim()).filter(Boolean))].sort();
       }
 
-      function activeTelegramMutedNodeIds() {
+      function telegramMuteNodeIds(scope) {
+        const cfg = state.telegram || {};
+        if (scope === "speed") return normalizeNodeIdList(cfg.mutedSpeedNodeIds);
+        if (scope === "alerts") return normalizeNodeIdList(cfg.mutedAlertNodeIds);
+        return normalizeNodeIdList(cfg.mutedNodeIds);
+      }
+
+      function activeTelegramMuteNodeIds(scope) {
         const knownIds = new Set(state.proxies.map((proxy) => proxy.stableId));
-        return telegramMutedNodeIds().filter((id) => knownIds.has(id));
+        return telegramMuteNodeIds(scope).filter((id) => knownIds.has(id));
       }
 
-      function telegramMutedNodeSet() {
-        return new Set(activeTelegramMutedNodeIds());
+      function telegramMuteNodeSet(scope) {
+        return new Set(activeTelegramMuteNodeIds(scope));
+      }
+
+      function unionSets(...sets) {
+        const result = new Set();
+        sets.forEach((set) => set.forEach((value) => result.add(value)));
+        return result;
+      }
+
+      function telegramAnyMutedNodeSet() {
+        return unionSets(telegramMuteNodeSet("all"), telegramMuteNodeSet("speed"), telegramMuteNodeSet("alerts"));
+      }
+
+      function telegramMuteStatus(stableId) {
+        const all = telegramMuteNodeSet("all").has(stableId);
+        return {
+          all,
+          alerts: all || telegramMuteNodeSet("alerts").has(stableId),
+          speed: all || telegramMuteNodeSet("speed").has(stableId),
+        };
+      }
+
+      function isMutedForScope(stableId, scope) {
+        const status = telegramMuteStatus(stableId);
+        if (scope === "alerts") return status.alerts;
+        if (scope === "speed") return status.speed;
+        return status.all || (status.alerts && status.speed);
+      }
+
+      function setTelegramMuteLists(all, alerts, speed) {
+        state.telegram = state.telegram || {};
+        state.telegram.mutedNodeIds = [...all].sort();
+        state.telegram.mutedAlertNodeIds = [...alerts].sort();
+        state.telegram.mutedSpeedNodeIds = [...speed].sort();
       }
 
       function selectedIDs() {
@@ -1287,11 +1337,17 @@
         return "";
       }
 
-      function formatStatusChips(proxy, muted) {
+      function formatStatusChips(proxy) {
+        const muted = telegramMuteStatus(proxy.stableId);
         const chips = [
           `<span class="chip ${proxy.online ? "ok" : "error"}">${proxy.online ? "Online" : "Offline"}</span>`,
         ];
-        if (muted) chips.push(`<span class="chip warn">Muted</span>`);
+        if (muted.all) {
+          chips.push(`<span class="chip warn">Muted all</span>`);
+        } else {
+          if (muted.alerts) chips.push(`<span class="chip warn">Muted alerts</span>`);
+          if (muted.speed) chips.push(`<span class="chip warn">Muted speed</span>`);
+        }
         return `<div class="status-chips">${chips.join("")}</div>`;
       }
 
@@ -1310,7 +1366,7 @@
         const total = state.proxies.length;
         const online = state.proxies.filter((proxy) => proxy.online).length;
         const offline = total - online;
-        const muted = activeTelegramMutedNodeIds().length;
+        const muted = telegramAnyMutedNodeSet().size;
         const results = state.snapshot ? state.snapshot.results || [] : [];
         const successful = results.filter(isSuccessfulResult);
         const avgMbps = successful.length
@@ -1341,7 +1397,7 @@
       function renderNodes() {
         const rows = filteredProxies().map((proxy) => {
           const result = resultFor(proxy.stableId);
-          const muted = telegramMutedNodeSet().has(proxy.stableId);
+          const muted = telegramAnyMutedNodeSet().has(proxy.stableId);
           const checked = state.selected.has(proxy.stableId) ? "checked" : "";
           const rowClass = nodeRowClass(proxy, result, muted);
           const downSince = proxy.downSince ? formatTime(proxy.downSince) : "";
@@ -1355,7 +1411,7 @@
                 <div class="muted mono">${escapeHtml(proxy.stableId)}</div>
               </td>
               <td class="status-cell">
-                ${formatStatusChips(proxy, muted)}
+                ${formatStatusChips(proxy)}
               </td>
               <td>${proxy.online ? "" : `${escapeHtml(downSince || "n/a")}<div class="muted">${escapeHtml(downtime)}</div>`}</td>
               <td>${hostCheck}</td>
@@ -1471,7 +1527,8 @@
       function renderSelectionCount() {
         const count = state.selected.size;
         const run = state.snapshot && state.snapshot.lastRun;
-        const muted = telegramMutedNodeSet();
+        const muted = telegramMuteNodeSet("all");
+        const anyMuted = telegramAnyMutedNodeSet();
         const ids = selectedIDs();
         $("selection-count").textContent = `${count} selected`;
         $("selection-action-bar").hidden = count === 0;
@@ -1479,7 +1536,7 @@
         $("nodes-summary").textContent = `${filteredProxies().length} shown · ${state.proxies.length} total`;
         $("selection-run").disabled = count === 0 || !!(run && run.running);
         $("selection-mute").disabled = count === 0 || ids.every((id) => muted.has(id));
-        $("selection-unmute").disabled = count === 0 || !ids.some((id) => muted.has(id));
+        $("selection-unmute").disabled = count === 0 || !ids.some((id) => anyMuted.has(id));
         $("selection-history").disabled = count !== 1;
         renderNodeURLForm();
         renderTelegramMuteControls();
@@ -1558,13 +1615,15 @@
         $("telegram-alert-max").value = cfg.alertMaxReminderMinutes || 1440;
         $("telegram-alert-group").checked = cfg.groupOfflineReminders !== false;
         $("telegram-recovery").checked = cfg.notifyRecovery !== false;
-        cfg.mutedNodeIds = activeTelegramMutedNodeIds();
+        cfg.mutedNodeIds = activeTelegramMuteNodeIds("all");
+        cfg.mutedSpeedNodeIds = activeTelegramMuteNodeIds("speed");
+        cfg.mutedAlertNodeIds = activeTelegramMuteNodeIds("alerts");
         renderTelegramMuteControls();
       }
 
       function renderTelegramMuteControls() {
         const ids = selectedIDs();
-        const muted = telegramMutedNodeSet();
+        const scope = $("mute-scope").value || "all";
         const mute = $("mute-selected");
         const unmute = $("unmute-selected");
         const stateText = $("telegram-muted-state");
@@ -1573,18 +1632,11 @@
           mute.disabled = true;
           unmute.disabled = true;
         } else {
-          mute.disabled = ids.every((id) => muted.has(id));
-          unmute.disabled = !ids.some((id) => muted.has(id));
+          mute.disabled = ids.every((id) => isMutedForScope(id, scope));
+          unmute.disabled = !ids.some((id) => isMutedForScope(id, scope));
         }
 
-        const activeMutedIds = activeTelegramMutedNodeIds();
-        const names = activeMutedIds
-          .map((id) => state.proxies.find((proxy) => proxy.stableId === id))
-          .filter(Boolean)
-          .map((proxy) => proxy.name || proxy.stableId);
-        stateText.textContent = names.length > 0
-          ? `${activeMutedIds.length} muted: ${names.slice(0, 3).join(", ")}${names.length > 3 ? ", ..." : ""}`
-          : `${activeMutedIds.length} muted`;
+        stateText.textContent = `All ${activeTelegramMuteNodeIds("all").length} · Alerts ${activeTelegramMuteNodeIds("alerts").length} · Speed ${activeTelegramMuteNodeIds("speed").length}`;
       }
 
       function renderAll() {
@@ -1789,23 +1841,50 @@
         }
       }
 
-      async function updateTelegramMute(mute) {
+      async function updateTelegramMute(scope, mute) {
         $("message").textContent = "";
         const ids = selectedIDs();
         if (ids.length === 0) {
           $("message").textContent = "Select at least one node";
           return;
         }
-        const muted = telegramMutedNodeSet();
+        const all = telegramMuteNodeSet("all");
+        const alerts = telegramMuteNodeSet("alerts");
+        const speed = telegramMuteNodeSet("speed");
         ids.forEach((id) => {
           if (mute) {
-            muted.add(id);
+            if (scope === "alerts") {
+              all.delete(id);
+              alerts.add(id);
+            } else if (scope === "speed") {
+              all.delete(id);
+              speed.add(id);
+            } else {
+              all.add(id);
+              alerts.delete(id);
+              speed.delete(id);
+            }
           } else {
-            muted.delete(id);
+            if (scope === "alerts") {
+              if (all.has(id)) {
+                all.delete(id);
+                speed.add(id);
+              }
+              alerts.delete(id);
+            } else if (scope === "speed") {
+              if (all.has(id)) {
+                all.delete(id);
+                alerts.add(id);
+              }
+              speed.delete(id);
+            } else {
+              all.delete(id);
+              alerts.delete(id);
+              speed.delete(id);
+            }
           }
         });
-        state.telegram = state.telegram || {};
-        state.telegram.mutedNodeIds = [...muted].sort();
+        setTelegramMuteLists(all, alerts, speed);
         await saveTelegram();
       }
 
@@ -1838,15 +1917,16 @@
       });
       $("run").addEventListener("click", runSelected);
       $("selection-run").addEventListener("click", runSelected);
-      $("selection-mute").addEventListener("click", () => updateTelegramMute(true));
-      $("selection-unmute").addEventListener("click", () => updateTelegramMute(false));
+      $("selection-mute").addEventListener("click", () => updateTelegramMute("all", true));
+      $("selection-unmute").addEventListener("click", () => updateTelegramMute("all", false));
       $("selection-history").addEventListener("click", openSelectedHistory);
       $("save-node-url").addEventListener("click", saveNodeURL);
       $("clear-node-url").addEventListener("click", clearNodeURL);
       $("save-schedule").addEventListener("click", saveSchedule);
       $("save-telegram").addEventListener("click", saveTelegram);
-      $("mute-selected").addEventListener("click", () => updateTelegramMute(true));
-      $("unmute-selected").addEventListener("click", () => updateTelegramMute(false));
+      $("mute-selected").addEventListener("click", () => updateTelegramMute($("mute-scope").value || "all", true));
+      $("unmute-selected").addEventListener("click", () => updateTelegramMute($("mute-scope").value || "all", false));
+      $("mute-scope").addEventListener("change", renderTelegramMuteControls);
       $("test-telegram").addEventListener("click", testTelegram);
       $("select-visible").addEventListener("click", () => {
         filteredProxies().forEach((proxy) => state.selected.add(proxy.stableId));

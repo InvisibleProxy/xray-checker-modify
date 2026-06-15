@@ -59,6 +59,8 @@ type Config struct {
 	GroupOfflineReminders        bool     `json:"groupOfflineReminders"`
 	NotifyRecovery               bool     `json:"notifyRecovery"`
 	MutedNodeIDs                 []string `json:"mutedNodeIds,omitempty"`
+	MutedSpeedNodeIDs            []string `json:"mutedSpeedNodeIds,omitempty"`
+	MutedAlertNodeIDs            []string `json:"mutedAlertNodeIds,omitempty"`
 	TimeoutSec                   int      `json:"timeoutSec"`
 }
 
@@ -79,6 +81,8 @@ type AdminConfig struct {
 	GroupOfflineReminders        bool     `json:"groupOfflineReminders"`
 	NotifyRecovery               bool     `json:"notifyRecovery"`
 	MutedNodeIDs                 []string `json:"mutedNodeIds,omitempty"`
+	MutedSpeedNodeIDs            []string `json:"mutedSpeedNodeIds,omitempty"`
+	MutedAlertNodeIDs            []string `json:"mutedAlertNodeIds,omitempty"`
 	BotTokenConfigured           bool     `json:"botTokenConfigured"`
 	ChatConfigured               bool     `json:"chatConfigured"`
 	MessageThreadConfigured      bool     `json:"messageThreadConfigured"`
@@ -147,6 +151,8 @@ func (c *Config) Normalize() {
 		c.AlertMaxReminderMinutes = c.AlertReminderScheduleMinutes[len(c.AlertReminderScheduleMinutes)-1]
 	}
 	c.MutedNodeIDs = normalizeNodeIDs(c.MutedNodeIDs)
+	c.MutedSpeedNodeIDs = normalizeNodeIDs(c.MutedSpeedNodeIDs)
+	c.MutedAlertNodeIDs = normalizeNodeIDs(c.MutedAlertNodeIDs)
 	if c.TimeoutSec <= 0 {
 		c.TimeoutSec = defaultTimeoutSec
 	}
@@ -352,6 +358,8 @@ func (s *Service) Config() Config {
 func (s *Service) AdminConfig() AdminConfig {
 	cfg := s.Config()
 	mutedNodeIDs := s.activeMutedNodeIDs(cfg.MutedNodeIDs)
+	mutedSpeedNodeIDs := s.activeMutedNodeIDs(cfg.MutedSpeedNodeIDs)
+	mutedAlertNodeIDs := s.activeMutedNodeIDs(cfg.MutedAlertNodeIDs)
 	return AdminConfig{
 		Enabled:                      cfg.Enabled,
 		CommandPollingEnabled:        cfg.CommandPollingEnabled,
@@ -369,6 +377,8 @@ func (s *Service) AdminConfig() AdminConfig {
 		GroupOfflineReminders:        cfg.GroupOfflineReminders,
 		NotifyRecovery:               cfg.NotifyRecovery,
 		MutedNodeIDs:                 mutedNodeIDs,
+		MutedSpeedNodeIDs:            mutedSpeedNodeIDs,
+		MutedAlertNodeIDs:            mutedAlertNodeIDs,
 		BotTokenConfigured:           cfg.BotToken != "",
 		ChatConfigured:               cfg.ChatID != "",
 		MessageThreadConfigured:      cfg.MessageThreadID > 0,
@@ -394,6 +404,8 @@ func (s *Service) UpdateAdminConfig(input AdminConfig) error {
 	cfg.GroupOfflineReminders = input.GroupOfflineReminders
 	cfg.NotifyRecovery = input.NotifyRecovery
 	cfg.MutedNodeIDs = s.activeMutedNodeIDs(input.MutedNodeIDs)
+	cfg.MutedSpeedNodeIDs = s.activeMutedNodeIDs(input.MutedSpeedNodeIDs)
+	cfg.MutedAlertNodeIDs = s.activeMutedNodeIDs(input.MutedAlertNodeIDs)
 	cfg.Normalize()
 	if cfg.Enabled && cfg.BotToken == "" {
 		return fmt.Errorf("bot token is required when Telegram is enabled; set TELEGRAM_BOT_TOKEN")
@@ -408,13 +420,19 @@ func (s *Service) UpdateAdminConfig(input AdminConfig) error {
 
 func (s *Service) PruneInactiveMutedNodes() error {
 	cfg := s.Config()
-	current := normalizeNodeIDs(cfg.MutedNodeIDs)
-	pruned := s.activeMutedNodeIDs(current)
-	if strings.Join(current, "\x00") == strings.Join(pruned, "\x00") {
+	currentAll := normalizeNodeIDs(cfg.MutedNodeIDs)
+	currentSpeed := normalizeNodeIDs(cfg.MutedSpeedNodeIDs)
+	currentAlert := normalizeNodeIDs(cfg.MutedAlertNodeIDs)
+	prunedAll := s.activeMutedNodeIDs(currentAll)
+	prunedSpeed := s.activeMutedNodeIDs(currentSpeed)
+	prunedAlert := s.activeMutedNodeIDs(currentAlert)
+	if sameNodeIDs(currentAll, prunedAll) && sameNodeIDs(currentSpeed, prunedSpeed) && sameNodeIDs(currentAlert, prunedAlert) {
 		return nil
 	}
 
-	cfg.MutedNodeIDs = pruned
+	cfg.MutedNodeIDs = prunedAll
+	cfg.MutedSpeedNodeIDs = prunedSpeed
+	cfg.MutedAlertNodeIDs = prunedAlert
 	if err := s.saveEditableConfig(cfg); err != nil {
 		return err
 	}
@@ -513,7 +531,7 @@ func (s *Service) NotifyNodeStatuses() {
 		}
 		active[proxy.StableID] = true
 	}
-	muted := mutedNodeSet(cfg.MutedNodeIDs)
+	muted := mutedAlertNodeSet(cfg)
 
 	stateChanged := false
 	s.mu.Lock()
@@ -1482,7 +1500,7 @@ func formatStatusRefreshStarted() string {
 
 func (s *Service) formatIssuesSummary() string {
 	cfg := s.Config()
-	muted := mutedNodeSet(cfg.MutedNodeIDs)
+	muted := mutedAlertNodeSet(cfg)
 	var offlineLines []string
 	for _, proxy := range s.proxyChecker.GetProxies() {
 		if proxy.StableID == "" {
@@ -2361,15 +2379,37 @@ func filterActiveNodeIDs(values []string, active map[string]bool) []string {
 	return result
 }
 
-func mutedNodeSet(values []string) map[string]bool {
-	result := make(map[string]bool, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			result[value] = true
+func sameNodeIDs(a []string, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func mutedNodeSet(groups ...[]string) map[string]bool {
+	result := make(map[string]bool)
+	for _, values := range groups {
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				result[value] = true
+			}
 		}
 	}
 	return result
+}
+
+func mutedSpeedNodeSet(cfg Config) map[string]bool {
+	return mutedNodeSet(cfg.MutedNodeIDs, cfg.MutedSpeedNodeIDs)
+}
+
+func mutedAlertNodeSet(cfg Config) map[string]bool {
+	return mutedNodeSet(cfg.MutedNodeIDs, cfg.MutedAlertNodeIDs)
 }
 
 func formatIntList(values []int) string {
@@ -2419,10 +2459,10 @@ func filterMutedRunReport(report speedtest.RunReport, cfg Config) speedtest.RunR
 }
 
 func filterMutedSpeedResults(results []speedtest.Result, cfg Config) []speedtest.Result {
-	if len(results) == 0 || len(cfg.MutedNodeIDs) == 0 {
+	if len(results) == 0 || (len(cfg.MutedNodeIDs) == 0 && len(cfg.MutedSpeedNodeIDs) == 0) {
 		return results
 	}
-	muted := mutedNodeSet(cfg.MutedNodeIDs)
+	muted := mutedSpeedNodeSet(cfg)
 	filtered := make([]speedtest.Result, 0, len(results))
 	for _, result := range results {
 		if result.StableID != "" && muted[result.StableID] {

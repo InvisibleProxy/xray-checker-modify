@@ -122,6 +122,9 @@ User ID: 123456789
 | `Max reminder min` | Максимальный интервал повторных уведомлений после окончания расписания. |
 | `Group offline reminders` | Объединяет несколько due-уведомлений о недоступных нодах в одно сообщение. |
 | `Recovery alerts` | Отправлять сообщение, когда нода восстановилась. |
+| `Muted` / `Scope: All Telegram` | Отключает для выбранных нод и speed-test reports, и availability down/recovery alerts. Сохраняется в `mutedNodeIds`. |
+| `Muted` / `Scope: Availability alerts` | Отключает только down/recovery alerts и offline-блок в issues summary. Speed-test reports остаются включены. Сохраняется в `mutedAlertNodeIds`. |
+| `Muted` / `Scope: Speed reports` | Отключает только строки этой ноды в speed-test reports. Down/recovery alerts остаются включены. Сохраняется в `mutedSpeedNodeIds`. |
 
 Нечувствительные настройки сохраняются в:
 
