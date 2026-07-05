@@ -214,3 +214,18 @@ func TestCountryMatchUsesMultipleGeoSources(t *testing.T) {
 		})
 	}
 }
+
+func TestGeoBlacklistHitsUsesSuccessfulSourcesOnly(t *testing.T) {
+	hits := geoBlacklistHits([]GeoSource{
+		{Source: "ipinfo.io", Country: "Iran", CountryCode: "IR"},
+		{Source: "ifconfig.net", Country: "Germany", CountryCode: "DE"},
+		{Source: "cached", Country: "Russia", CountryCode: "RU", Error: "timeout"},
+	})
+
+	if len(hits) != 1 {
+		t.Fatalf("hits length = %d, want 1", len(hits))
+	}
+	if hits[0].CountryCode != "IR" || hits[0].Source != "ipinfo.io" {
+		t.Fatalf("hit = %+v, want ipinfo.io IR", hits[0])
+	}
+}

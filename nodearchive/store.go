@@ -73,19 +73,21 @@ type NodeRecord struct {
 
 type Summary struct {
 	NodeRecord
-	IPInfoURL         string      `json:"ipInfoUrl"`
-	CountryMatch      string      `json:"countryMatch"`
-	GeoSources        []GeoSource `json:"geoSources"`
-	ResultCount       int         `json:"resultCount"`
-	SuccessfulResults int         `json:"successfulResults"`
-	FailedResults     int         `json:"failedResults"`
-	AvgMbps           float64     `json:"avgMbps"`
-	MinMbps           float64     `json:"minMbps"`
-	MaxMbps           float64     `json:"maxMbps"`
-	LastMbps          float64     `json:"lastMbps"`
-	LastSpeedAt       time.Time   `json:"lastSpeedAt,omitempty"`
-	LastSpeedError    string      `json:"lastSpeedError,omitempty"`
-	LastSpeedOffline  bool        `json:"lastSpeedOffline"`
+	IPInfoURL         string            `json:"ipInfoUrl"`
+	CountryMatch      string            `json:"countryMatch"`
+	GeoSources        []GeoSource       `json:"geoSources"`
+	GeoBlacklistHits  []GeoBlacklistHit `json:"geoBlacklistHits,omitempty"`
+	GeoBlacklisted    bool              `json:"geoBlacklisted"`
+	ResultCount       int               `json:"resultCount"`
+	SuccessfulResults int               `json:"successfulResults"`
+	FailedResults     int               `json:"failedResults"`
+	AvgMbps           float64           `json:"avgMbps"`
+	MinMbps           float64           `json:"minMbps"`
+	MaxMbps           float64           `json:"maxMbps"`
+	LastMbps          float64           `json:"lastMbps"`
+	LastSpeedAt       time.Time         `json:"lastSpeedAt,omitempty"`
+	LastSpeedError    string            `json:"lastSpeedError,omitempty"`
+	LastSpeedOffline  bool              `json:"lastSpeedOffline"`
 }
 
 type GeoSource struct {
@@ -97,6 +99,12 @@ type GeoSource struct {
 	ASN         string    `json:"asn,omitempty"`
 	UpdatedAt   time.Time `json:"updatedAt,omitempty"`
 	Error       string    `json:"error,omitempty"`
+}
+
+type GeoBlacklistHit struct {
+	Source      string `json:"source"`
+	Country     string `json:"country"`
+	CountryCode string `json:"countryCode"`
 }
 
 type GeoRefreshResult struct {
@@ -375,6 +383,8 @@ func (s *Store) Summaries(history map[string][]speedtest.Result) []Summary {
 		summary := Summary{NodeRecord: record}
 		summary.IPInfoURL = ipInfoURL(record.Server)
 		summary.GeoSources = geoSources(record)
+		summary.GeoBlacklistHits = geoBlacklistHits(summary.GeoSources)
+		summary.GeoBlacklisted = len(summary.GeoBlacklistHits) > 0
 		summary.CountryMatch = countryMatch(record)
 		applySpeedStats(&summary, history[stableID])
 		result = append(result, summary)
@@ -798,6 +808,30 @@ func geoSources(record NodeRecord) []GeoSource {
 	return sources
 }
 
+func geoBlacklistHits(sources []GeoSource) []GeoBlacklistHit {
+	var hits []GeoBlacklistHit
+	for _, source := range sources {
+		if strings.TrimSpace(source.Error) != "" {
+			continue
+		}
+		code := strings.ToUpper(strings.TrimSpace(source.CountryCode))
+		entry, ok := geoBlacklistCountries[code]
+		if !ok {
+			continue
+		}
+		country := strings.TrimSpace(source.Country)
+		if country == "" {
+			country = entry
+		}
+		hits = append(hits, GeoBlacklistHit{
+			Source:      source.Source,
+			Country:     country,
+			CountryCode: code,
+		})
+	}
+	return hits
+}
+
 func normalizeGeoCountryCode(code string, country string) string {
 	code = strings.ToUpper(strings.TrimSpace(code))
 	if code != "" {
@@ -887,18 +921,39 @@ var countryCandidates = []countryCandidate{
 }
 
 var countryNames = map[string]string{
+	"BY": "Belarus",
+	"CN": "China",
+	"CU": "Cuba",
 	"DE": "Germany",
 	"EE": "Estonia",
 	"FI": "Finland",
 	"FR": "France",
 	"GB": "United Kingdom",
 	"IR": "Iran",
+	"KP": "North Korea",
 	"LT": "Lithuania",
 	"LV": "Latvia",
+	"MM": "Myanmar",
 	"NL": "Netherlands",
 	"NO": "Norway",
 	"PL": "Poland",
 	"RU": "Russia",
 	"SE": "Sweden",
+	"SY": "Syria",
+	"TM": "Turkmenistan",
 	"US": "United States",
+	"VE": "Venezuela",
+}
+
+var geoBlacklistCountries = map[string]string{
+	"BY": "Belarus",
+	"CN": "China",
+	"CU": "Cuba",
+	"IR": "Iran",
+	"KP": "North Korea",
+	"MM": "Myanmar",
+	"RU": "Russia",
+	"SY": "Syria",
+	"TM": "Turkmenistan",
+	"VE": "Venezuela",
 }

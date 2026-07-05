@@ -914,6 +914,7 @@
               Geo
               <select id="nodes-overview-geo">
                 <option value="">All</option>
+                <option value="blacklist">Blacklisted</option>
                 <option value="match">Match</option>
                 <option value="partial">Partial</option>
                 <option value="conflict">Conflict</option>
@@ -1512,6 +1513,32 @@
         return `<span class="chip neutral">Unknown</span>`;
       }
 
+      function countryMatchLabel(node) {
+        const match = node.countryMatch || "unknown";
+        if (match === "match") return "Match";
+        if (match === "partial") return "Partial";
+        if (match === "conflict") return "Conflict";
+        if (match === "mismatch") return "Mismatch";
+        return "Unknown";
+      }
+
+      function geoBlacklistHits(node) {
+        return Array.isArray(node.geoBlacklistHits) ? node.geoBlacklistHits : [];
+      }
+
+      function hasGeoBlacklistHit(node) {
+        return !!node.geoBlacklisted || geoBlacklistHits(node).length > 0;
+      }
+
+      function geoBlacklistChip(node) {
+        const hits = geoBlacklistHits(node);
+        if (!hasGeoBlacklistHit(node)) return "";
+        const label = hits.length > 0
+          ? `Blacklisted ${[...new Set(hits.map((hit) => hit.countryCode || hit.country).filter(Boolean))].join(", ")}`
+          : "Blacklisted";
+        return `<span class="chip error">${escapeHtml(label)}</span>`;
+      }
+
       function geoSources(node) {
         if (Array.isArray(node.geoSources) && node.geoSources.length > 0) {
           return node.geoSources;
@@ -1551,14 +1578,24 @@
         return `${country}${code}${org}`;
       }
 
-      function geoDetails(node) {
+      function geoTooltipText(node) {
         const sources = geoSources(node);
-        if (sources.length === 0) {
-          return `<div class="muted">Unknown</div>`;
+        const lines = [countryMatchLabel(node)];
+        if (sources.length === 0) lines.push("Geo data not loaded");
+        sources.forEach((source) => {
+          lines.push(`${source.source || "geo"}: ${geoSourceText(source)}`);
+        });
+        const hits = geoBlacklistHits(node);
+        if (hits.length > 0) {
+          const labels = hits.map((hit) => `${hit.source || "geo"}: ${hit.country || hit.countryCode || "unknown"}`);
+          lines.push(`Blacklisted: ${labels.join("; ")}`);
         }
-        return sources.map((source) => `
-          <div class="muted">${escapeHtml(source.source || "geo")}: ${escapeHtml(geoSourceText(source))}</div>
-        `).join("");
+        return lines.join("\n");
+      }
+
+      function geoCell(node) {
+        const tooltip = escapeHtml(geoTooltipText(node));
+        return `<div class="status-chips" title="${tooltip}" aria-label="${tooltip}">${countryMatchChip(node)}${geoBlacklistChip(node)}</div>`;
       }
 
       function geoSearchTerms(node) {
@@ -1570,6 +1607,15 @@
           source.org,
           source.asn,
           source.error,
+        ]);
+      }
+
+      function geoBlacklistSearchTerms(node) {
+        return geoBlacklistHits(node).flatMap((hit) => [
+          "blacklisted",
+          hit.source,
+          hit.country,
+          hit.countryCode,
         ]);
       }
 
@@ -1609,7 +1655,8 @@
           if (filters.status === "retired" && node.active) return false;
           if (filters.country && filters.country !== (node.claimedCountryCode || node.claimedCountry || "")) return false;
           if (filters.subName && filters.subName !== (node.subName || "")) return false;
-          if (filters.geo && filters.geo !== (node.countryMatch || "unknown")) return false;
+          if (filters.geo === "blacklist" && !hasGeoBlacklistHit(node)) return false;
+          if (filters.geo && filters.geo !== "blacklist" && filters.geo !== (node.countryMatch || "unknown")) return false;
           if (filters.search) {
             const haystack = [
               node.name,
@@ -1627,6 +1674,7 @@
               node.ifconfigOrg,
               node.ifconfigAsn,
               ...geoSearchTerms(node),
+              ...geoBlacklistSearchTerms(node),
             ].join(" ").toLowerCase();
             if (!haystack.includes(filters.search)) return false;
           }
@@ -1680,7 +1728,7 @@
               <td>${statusChip}</td>
               <td class="mono">${ipLink}${node.port ? `:${escapeHtml(node.port)}` : ""}</td>
               <td>${escapeHtml(countryText(node))}</td>
-              <td>${countryMatchChip(node)}${geoDetails(node)}</td>
+              <td>${geoCell(node)}</td>
               <td class="${speedClass}">${node.successfulResults ? formatMbps(node.avgMbps) : "n/a"}</td>
               <td>${node.successfulResults ? formatMbps(node.minMbps) : "n/a"}</td>
               <td>${node.successfulResults ? formatMbps(node.maxMbps) : "n/a"}</td>
