@@ -11,6 +11,7 @@ import (
 	"xray-checker/logger"
 	"xray-checker/metrics"
 	"xray-checker/models"
+	"xray-checker/nodearchive"
 	"xray-checker/speedtest"
 	"xray-checker/subscription"
 	"xray-checker/telegram"
@@ -112,6 +113,17 @@ func main() {
 		logger.Warn("Failed to load speed test schedule: %v", err)
 	}
 
+	nodeArchive := nodearchive.NewStore("data/node_registry.json", proxyChecker)
+	if err := nodeArchive.Load(); err != nil {
+		logger.Warn("Failed to load node registry: %v", err)
+	}
+	if err := nodeArchive.SyncProxies(*proxyConfigs); err != nil {
+		logger.Warn("Failed to sync node registry: %v", err)
+	}
+	if err := nodeArchive.SyncSpeedHistory(speedTestManager.AllResultHistory()); err != nil {
+		logger.Warn("Failed to sync speed history into node registry: %v", err)
+	}
+
 	telegramService := telegram.NewService(
 		"data/telegram_config.json",
 		proxyChecker,
@@ -120,6 +132,9 @@ func main() {
 	)
 	if err := telegramService.Load(); err != nil {
 		logger.Warn("Failed to load Telegram settings: %v", err)
+	}
+	if err := nodeArchive.RecordAvailability(); err != nil {
+		logger.Warn("Failed to record restored node availability: %v", err)
 	}
 	speedTestManager.SetReporter(telegramService)
 	telegramService.Start()
@@ -131,6 +146,9 @@ func main() {
 	runCheckIteration := func() {
 		logger.Info("Starting proxy check iteration")
 		proxyChecker.CheckAllProxies()
+		if err := nodeArchive.RecordAvailability(); err != nil {
+			logger.Warn("Failed to record node availability: %v", err)
+		}
 		go telegramService.NotifyNodeStatuses()
 
 		if config.CLIConfig.Metrics.PushURL != "" {
@@ -200,6 +218,9 @@ func main() {
 		if err := updateConfiguration(newConfigs, proxyConfigs, xrayRunner, proxyChecker); err != nil {
 			return web.AdminSubscriptionRefreshResult{}, err
 		}
+		if err := nodeArchive.SyncProxies(*proxyConfigs); err != nil {
+			logger.Warn("Failed to sync node registry after subscription update: %v", err)
+		}
 		if err := telegramService.PruneInactiveMutedNodes(); err != nil {
 			logger.Warn("Failed to prune inactive muted Telegram nodes: %v", err)
 		}
@@ -252,6 +273,9 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/speed-tests/node-url", web.AdminSpeedTestNodeURLHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/speed-tests/history", web.AdminSpeedTestHistoryHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/speed-tests", web.AdminSpeedTestSnapshotHandler(speedTestManager))
+	protectedHandler.Handle("/api/v1/admin/nodes-overview/geo", web.AdminNodesOverviewGeoHandler(nodeArchive))
+	protectedHandler.Handle("/api/v1/admin/nodes-overview/delete", web.AdminNodesOverviewDeleteHandler(nodeArchive, speedTestManager))
+	protectedHandler.Handle("/api/v1/admin/nodes-overview", web.AdminNodesOverviewHandler(nodeArchive, speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/schedules", web.AdminScheduleHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/telegram/test", web.AdminTelegramTestHandler(telegramService))
 	protectedHandler.Handle("/api/v1/admin/telegram", web.AdminTelegramHandler(telegramService))

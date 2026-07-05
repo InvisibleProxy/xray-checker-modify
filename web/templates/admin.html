@@ -191,6 +191,15 @@
       button.secondary {
         background: transparent;
       }
+      button.danger {
+        border-color: rgba(255, 93, 93, 0.45);
+        background: var(--red-soft);
+        color: var(--red);
+      }
+      button.small {
+        padding: 5px 8px;
+        font-size: 12px;
+      }
       button:disabled {
         cursor: not-allowed;
         opacity: 0.55;
@@ -205,6 +214,16 @@
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 10px;
+      }
+      .overview-controls {
+        display: grid;
+        grid-template-columns: 1.7fr repeat(5, minmax(130px, 1fr));
+        gap: 10px;
+        align-items: end;
+      }
+      .sortable {
+        cursor: pointer;
+        user-select: none;
       }
       .status {
         display: inline-flex;
@@ -249,6 +268,17 @@
       .node-name {
         min-width: 180px;
         overflow-wrap: anywhere;
+      }
+      .node-title-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .country-chip {
+        min-width: 34px;
+        justify-content: center;
+        font-weight: 700;
       }
       .nodes-table {
         min-width: 900px;
@@ -492,6 +522,7 @@
     <main class="stack">
       <nav class="tabs" aria-label="Admin sections">
         <button id="tab-dashboard" class="tab active" type="button">Dashboard</button>
+        <button id="tab-nodes-overview" class="tab" type="button">Nodes Overview</button>
         <button id="tab-history" class="tab" type="button">Speed History</button>
       </nav>
 
@@ -842,6 +873,98 @@
       </section>
       </section>
 
+      <section id="nodes-overview-view" class="view stack" hidden>
+        <section class="panel stack">
+          <div class="panel-actions">
+            <div>
+              <h2>Nodes Overview</h2>
+              <div id="nodes-overview-summary" class="muted">0 nodes</div>
+            </div>
+            <div class="row">
+              <button id="refresh-nodes-overview" class="secondary" type="button">Refresh Overview</button>
+              <button id="refresh-node-geo" class="secondary" type="button">Refresh Geo</button>
+            </div>
+          </div>
+          <div class="overview-controls">
+            <label>
+              Search
+              <input id="nodes-overview-search" type="search" autocomplete="off" placeholder="Name, server, country, subscription" />
+            </label>
+            <label>
+              Status
+              <select id="nodes-overview-status">
+                <option value="">All</option>
+                <option value="active">Active</option>
+                <option value="retired">Retired</option>
+              </select>
+            </label>
+            <label>
+              Country
+              <select id="nodes-overview-country">
+                <option value="">All</option>
+              </select>
+            </label>
+            <label>
+              Subscription
+              <select id="nodes-overview-sub">
+                <option value="">All</option>
+              </select>
+            </label>
+            <label>
+              Geo
+              <select id="nodes-overview-geo">
+                <option value="">All</option>
+                <option value="match">Match</option>
+                <option value="mismatch">Mismatch</option>
+                <option value="unknown">Unknown</option>
+              </select>
+            </label>
+            <label>
+              Sort
+              <select id="nodes-overview-sort">
+                <option value="name">Name</option>
+                <option value="active">Status</option>
+                <option value="server">IP / Server</option>
+                <option value="avgMbps" selected>Avg speed</option>
+                <option value="minMbps">Min speed</option>
+                <option value="maxMbps">Max speed</option>
+                <option value="failedResults">Failures</option>
+                <option value="totalDowntimeSec">Downtime</option>
+                <option value="lastSeenAt">Last seen</option>
+                <option value="subName">Subscription</option>
+                <option value="claimedCountry">Country</option>
+                <option value="countryMatch">Geo match</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <section class="panel panel-strong stack">
+          <div class="table-wrap">
+            <table class="nodes-overview-table">
+              <thead>
+                <tr>
+                  <th class="sortable" data-sort="name">Node</th>
+                  <th class="sortable" data-sort="active">Status</th>
+                  <th class="sortable" data-sort="server">IP / Server</th>
+                  <th class="sortable" data-sort="claimedCountry">Country</th>
+                  <th class="sortable" data-sort="countryMatch">Geo</th>
+                  <th class="sortable" data-sort="avgMbps">Avg</th>
+                  <th class="sortable" data-sort="minMbps">Min</th>
+                  <th class="sortable" data-sort="maxMbps">Max</th>
+                  <th class="sortable" data-sort="failedResults">Failures</th>
+                  <th class="sortable" data-sort="totalDowntimeSec">Downtime</th>
+                  <th class="sortable" data-sort="lastSeenAt">Last seen</th>
+                  <th class="sortable" data-sort="subName">Subscription</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="nodes-overview"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
       <section id="history-view" class="view stack" hidden>
         <section class="panel stack">
           <div class="row" style="justify-content: space-between">
@@ -920,6 +1043,9 @@
         lastUpdatedAt: null,
         historyStableId: "",
         historyResults: [],
+        nodesOverview: [],
+        nodesOverviewSort: "avgMbps",
+        nodesOverviewSortDir: "desc",
       };
 
       const basePath = (() => {
@@ -1324,6 +1450,189 @@
         return "OK";
       }
 
+      function historyNodes() {
+        if (Array.isArray(state.nodesOverview) && state.nodesOverview.length > 0) {
+          return [...state.nodesOverview].sort((a, b) => nodeOverviewLabel(a).localeCompare(nodeOverviewLabel(b)));
+        }
+        return [...state.proxies].map((proxy) => ({
+          stableId: proxy.stableId,
+          name: proxy.name,
+          subName: proxy.subName,
+          server: proxy.server,
+          active: true,
+        })).sort((a, b) => nodeOverviewLabel(a).localeCompare(nodeOverviewLabel(b)));
+      }
+
+      function nodeOverviewLabel(node) {
+        return [node.name || "Unnamed", node.subName, node.server].filter(Boolean).join(" / ");
+      }
+
+      function effectiveDowntimeSec(node) {
+        let total = Number(node.totalDowntimeSec || 0);
+        if (node.currentDownSince && !node.currentDownSince.startsWith("0001-")) {
+          const current = Math.max(0, Math.round((new Date() - new Date(node.currentDownSince)) / 1000));
+          total += current;
+        }
+        return total;
+      }
+
+      function countryText(node) {
+        const claimed = node.claimedCountry || node.claimedCountryCode || "Unknown";
+        const code = node.claimedCountryCode ? ` (${node.claimedCountryCode})` : "";
+        return `${claimed}${code}`;
+      }
+
+      function escapeRegExp(value) {
+        return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      }
+
+      function countryChip(node) {
+        const code = String(node.claimedCountryCode || "").trim().toUpperCase();
+        return `<span class="chip blue country-chip">${escapeHtml(code || "--")}</span>`;
+      }
+
+      function displayNodeName(node) {
+        const code = String(node.claimedCountryCode || "").trim().toUpperCase();
+        let name = String(node.name || "Unnamed").trim();
+        name = name.replace(/^[\u{1F1E6}-\u{1F1FF}]{2}\s*/u, "");
+        if (code) {
+          name = name.replace(new RegExp(`^${escapeRegExp(code)}\\s+`, "i"), "");
+        }
+        return name || "Unnamed";
+      }
+
+      function geoText(node) {
+        if (node.geoCountry || node.geoCountryCode) {
+          const geo = node.geoCountry || node.geoCountryCode;
+          const code = node.geoCountryCode ? ` (${node.geoCountryCode})` : "";
+          return `${geo}${code}`;
+        }
+        return node.geoError ? "Lookup failed" : "Unknown";
+      }
+
+      function countryMatchChip(node) {
+        const match = node.countryMatch || "unknown";
+        if (match === "match") return `<span class="chip ok">Match</span>`;
+        if (match === "mismatch") return `<span class="chip error">Mismatch</span>`;
+        return `<span class="chip neutral">Unknown</span>`;
+      }
+
+      function nodesOverviewFilters() {
+        return {
+          search: $("nodes-overview-search").value.trim().toLowerCase(),
+          status: $("nodes-overview-status").value,
+          country: $("nodes-overview-country").value,
+          subName: $("nodes-overview-sub").value,
+          geo: $("nodes-overview-geo").value,
+          sort: $("nodes-overview-sort").value,
+        };
+      }
+
+      function renderNodesOverviewFilters() {
+        const countryValue = $("nodes-overview-country").value;
+        const subValue = $("nodes-overview-sub").value;
+        const countries = [...new Map((state.nodesOverview || [])
+          .filter((node) => node.claimedCountryCode || node.claimedCountry)
+          .map((node) => [node.claimedCountryCode || node.claimedCountry, countryText(node)]))]
+          .sort((a, b) => a[1].localeCompare(b[1]));
+        const subs = [...new Set((state.nodesOverview || []).map((node) => node.subName).filter(Boolean))].sort();
+        $("nodes-overview-country").innerHTML = `<option value="">All</option>` + countries
+          .map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`)
+          .join("");
+        $("nodes-overview-sub").innerHTML = `<option value="">All</option>` + subs
+          .map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`)
+          .join("");
+        $("nodes-overview-country").value = countries.some(([value]) => value === countryValue) ? countryValue : "";
+        $("nodes-overview-sub").value = subs.includes(subValue) ? subValue : "";
+      }
+
+      function filteredNodesOverview() {
+        const filters = nodesOverviewFilters();
+        const rows = (state.nodesOverview || []).filter((node) => {
+          if (filters.status === "active" && !node.active) return false;
+          if (filters.status === "retired" && node.active) return false;
+          if (filters.country && filters.country !== (node.claimedCountryCode || node.claimedCountry || "")) return false;
+          if (filters.subName && filters.subName !== (node.subName || "")) return false;
+          if (filters.geo && filters.geo !== (node.countryMatch || "unknown")) return false;
+          if (filters.search) {
+            const haystack = [
+              node.name,
+              node.stableId,
+              node.server,
+              node.subName,
+              node.protocol,
+              node.claimedCountry,
+              node.claimedCountryCode,
+              node.geoCountry,
+              node.geoCountryCode,
+              node.geoOrg,
+            ].join(" ").toLowerCase();
+            if (!haystack.includes(filters.search)) return false;
+          }
+          return true;
+        });
+        return sortNodesOverview(rows, filters.sort);
+      }
+
+      function overviewSortValue(node, key) {
+        if (key === "totalDowntimeSec") return effectiveDowntimeSec(node);
+        if (key === "lastSeenAt") return node.lastSeenAt ? new Date(node.lastSeenAt).getTime() : 0;
+        if (key === "active") return node.active ? 1 : 0;
+        if (["avgMbps", "minMbps", "maxMbps", "failedResults"].includes(key)) return Number(node[key] || 0);
+        return String(node[key] || "").toLowerCase();
+      }
+
+      function sortNodesOverview(rows, key) {
+        state.nodesOverviewSort = key || state.nodesOverviewSort;
+        const dir = state.nodesOverviewSortDir === "asc" ? 1 : -1;
+        return [...rows].sort((a, b) => {
+          const av = overviewSortValue(a, state.nodesOverviewSort);
+          const bv = overviewSortValue(b, state.nodesOverviewSort);
+          if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
+          return String(av).localeCompare(String(bv)) * dir;
+        });
+      }
+
+      function renderNodesOverview() {
+        renderNodesOverviewFilters();
+        const rows = filteredNodesOverview();
+        const active = (state.nodesOverview || []).filter((node) => node.active).length;
+        const retired = (state.nodesOverview || []).length - active;
+        $("nodes-overview-summary").textContent = `${rows.length} shown · ${active} active · ${retired} retired`;
+        $("nodes-overview").innerHTML = rows.map((node) => {
+          const ipLink = node.ipInfoUrl
+            ? `<a href="${escapeHtml(node.ipInfoUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(node.server || "n/a")}</a>`
+            : escapeHtml(node.server || "n/a");
+          const speedClass = node.successfulResults > 0 ? "ok" : node.failedResults > 0 ? "error" : "neutral";
+          const statusChip = node.active
+            ? `<span class="chip ok">Active</span>`
+            : `<span class="chip neutral">Retired</span>`;
+          const deleteAction = node.active
+            ? `<button class="secondary small" type="button" disabled title="Active nodes are managed by subscription">Delete</button>`
+            : `<button class="secondary danger small" type="button" data-delete-node="${escapeHtml(node.stableId || "")}">Delete</button>`;
+          return `
+            <tr>
+              <td class="node-name">
+                <div class="node-title-row">${countryChip(node)}<span>${escapeHtml(displayNodeName(node))}</span></div>
+                <div class="muted mono">${escapeHtml(node.stableId || "")}</div>
+              </td>
+              <td>${statusChip}</td>
+              <td class="mono">${ipLink}${node.port ? `:${escapeHtml(node.port)}` : ""}</td>
+              <td>${escapeHtml(countryText(node))}</td>
+              <td>${countryMatchChip(node)}<div class="muted">${escapeHtml(geoText(node))}</div></td>
+              <td class="${speedClass}">${node.successfulResults ? formatMbps(node.avgMbps) : "n/a"}</td>
+              <td>${node.successfulResults ? formatMbps(node.minMbps) : "n/a"}</td>
+              <td>${node.successfulResults ? formatMbps(node.maxMbps) : "n/a"}</td>
+              <td>${Number(node.failedResults || 0)}<div class="muted">${Number(node.resultCount || 0)} total</div></td>
+              <td>${formatDurationSec(effectiveDowntimeSec(node))}<div class="muted">${Number(node.incidentCount || 0)} incidents</div></td>
+              <td>${formatTime(node.lastSeenAt) || "n/a"}</td>
+              <td>${escapeHtml(node.subName || "n/a")}</td>
+              <td>${deleteAction}</td>
+            </tr>
+          `;
+        }).join("") || `<tr><td colspan="13" class="muted">No nodes found</td></tr>`;
+      }
+
       function formatSpeedChip(result) {
         if (!result) return `<span class="chip neutral">n/a</span>`;
         const severity = resultSeverity(result);
@@ -1450,8 +1759,8 @@
 
       function renderHistoryNodeOptions() {
         const select = $("history-node");
-        const proxies = [...state.proxies].sort((a, b) => proxyLabel(a).localeCompare(proxyLabel(b)));
-        if (proxies.length === 0) {
+        const nodes = historyNodes();
+        if (nodes.length === 0) {
           state.historyStableId = "";
           select.innerHTML = `<option value="">No nodes</option>`;
           select.disabled = true;
@@ -1460,15 +1769,16 @@
           return;
         }
 
-        if (!state.historyStableId || !proxies.some((proxy) => proxy.stableId === state.historyStableId)) {
-          state.historyStableId = proxies[0].stableId;
+        if (!state.historyStableId || !nodes.some((node) => node.stableId === state.historyStableId)) {
+          state.historyStableId = nodes[0].stableId;
         }
 
         select.disabled = false;
         $("refresh-history").disabled = false;
-        select.innerHTML = proxies.map((proxy) => {
-          const label = `${proxyLabel(proxy)} (${proxy.stableId})`;
-          return `<option value="${escapeHtml(proxy.stableId)}">${escapeHtml(label)}</option>`;
+        select.innerHTML = nodes.map((node) => {
+          const suffix = node.active === false ? " · retired" : "";
+          const label = `${nodeOverviewLabel(node)} (${node.stableId})${suffix}`;
+          return `<option value="${escapeHtml(node.stableId)}">${escapeHtml(label)}</option>`;
         }).join("");
         select.value = state.historyStableId;
         $("history-state").textContent = state.historyStableId;
@@ -1644,14 +1954,16 @@
         renderOverview();
         renderNodes();
         renderResults();
+        renderNodesOverview();
         renderHistoryNodeOptions();
         renderHistoryResults();
       }
 
       function pruneSelection() {
         const knownIds = new Set(state.proxies.map((proxy) => proxy.stableId));
+        const knownHistoryIds = new Set(historyNodes().map((node) => node.stableId));
         state.selected = new Set([...state.selected].filter((id) => knownIds.has(id)));
-        if (state.historyStableId && !knownIds.has(state.historyStableId)) {
+        if (state.historyStableId && !knownHistoryIds.has(state.historyStableId)) {
           state.historyStableId = "";
           state.historyResults = [];
         }
@@ -1677,11 +1989,75 @@
         }
       }
 
+      async function loadNodesOverview() {
+        $("nodes-overview-summary").textContent = "Loading";
+        try {
+          state.nodesOverview = await request("/nodes-overview");
+          renderNodesOverview();
+        } catch (err) {
+          $("nodes-overview-summary").textContent = err.message;
+        }
+      }
+
+      async function refreshNodeGeo() {
+        $("nodes-overview-summary").textContent = "Refreshing Geo";
+        const stableIds = filteredNodesOverview().map((node) => node.stableId).filter(Boolean);
+        if (stableIds.length === 0) {
+          $("nodes-overview-summary").textContent = "No nodes to refresh";
+          return;
+        }
+        try {
+          const result = await request("/nodes-overview/geo", {
+            method: "POST",
+            body: JSON.stringify({ stableIds }),
+          });
+          $("nodes-overview-summary").textContent = `Geo updated: ${result.updated || 0}, failed: ${result.failed || 0}`;
+          await loadNodesOverview();
+        } catch (err) {
+          $("nodes-overview-summary").textContent = err.message;
+        }
+      }
+
+      async function deleteOverviewNode(stableId) {
+        stableId = String(stableId || "").trim();
+        const node = (state.nodesOverview || []).find((item) => item.stableId === stableId);
+        if (!node) {
+          $("nodes-overview-summary").textContent = "Node not found";
+          return;
+        }
+        if (node.active) {
+          $("nodes-overview-summary").textContent = "Active nodes are managed by subscription and cannot be deleted";
+          return;
+        }
+
+        const label = nodeOverviewLabel(node) || stableId;
+        const confirmed = window.confirm(`Delete archived node "${label}"?\n\nThis removes the node registry entry and saved speed-test history.`);
+        if (!confirmed) return;
+
+        $("nodes-overview-summary").textContent = "Deleting node";
+        try {
+          await request("/nodes-overview/delete", {
+            method: "POST",
+            body: JSON.stringify({ stableId }),
+          });
+          if (state.historyStableId === stableId) {
+            state.historyStableId = "";
+            state.historyResults = [];
+          }
+          await loadNodesOverview();
+          renderHistoryNodeOptions();
+        } catch (err) {
+          $("nodes-overview-summary").textContent = err.message;
+        }
+      }
+
       async function switchTab(tab) {
         state.activeTab = tab;
         $("dashboard-view").hidden = tab !== "dashboard";
+        $("nodes-overview-view").hidden = tab !== "nodes-overview";
         $("history-view").hidden = tab !== "history";
         $("tab-dashboard").classList.toggle("active", tab === "dashboard");
+        $("tab-nodes-overview").classList.toggle("active", tab === "nodes-overview");
         $("tab-history").classList.toggle("active", tab === "history");
 
         if (tab === "history") {
@@ -1690,6 +2066,9 @@
             state.historyStableId = ids[0];
           }
           await loadHistory();
+        }
+        if (tab === "nodes-overview") {
+          await loadNodesOverview();
         }
       }
 
@@ -1709,14 +2088,16 @@
       }
 
       async function load(initial = false, refreshFilters = false) {
-        const [proxies, snapshot, telegram] = await Promise.all([
+        const [proxies, snapshot, telegram, nodesOverview] = await Promise.all([
           request("/proxies"),
           request("/speed-tests"),
           request("/telegram"),
+          request("/nodes-overview"),
         ]);
         state.proxies = proxies;
         state.snapshot = snapshot;
         state.telegram = telegram;
+        state.nodesOverview = nodesOverview;
         state.lastUpdatedAt = new Date();
         if (initial) {
           renderFilters();
@@ -1904,12 +2285,20 @@
       }
 
       $("tab-dashboard").addEventListener("click", () => switchTab("dashboard"));
+      $("tab-nodes-overview").addEventListener("click", () => switchTab("nodes-overview"));
       $("tab-history").addEventListener("click", () => switchTab("history"));
       ["run", "filters", "schedule", "telegram"].forEach((pane) => {
         $(`settings-tab-${pane}`).addEventListener("click", () => switchSettingsPane(pane));
       });
       $("refresh").addEventListener("click", () => load());
       $("refresh-subscription").addEventListener("click", refreshSubscription);
+      $("refresh-nodes-overview").addEventListener("click", loadNodesOverview);
+      $("refresh-node-geo").addEventListener("click", refreshNodeGeo);
+      $("nodes-overview").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-delete-node]");
+        if (!button) return;
+        deleteOverviewNode(button.dataset.deleteNode);
+      });
       $("refresh-history").addEventListener("click", loadHistory);
       $("history-node").addEventListener("change", () => {
         state.historyStableId = $("history-node").value;
@@ -1939,6 +2328,23 @@
       ["search", "status-filter", "protocol-filter", "sub-filter"].forEach((id) => {
         $(id).addEventListener("input", renderNodes);
         $(id).addEventListener("change", renderNodes);
+      });
+      ["nodes-overview-search", "nodes-overview-status", "nodes-overview-country", "nodes-overview-sub", "nodes-overview-geo", "nodes-overview-sort"].forEach((id) => {
+        $(id).addEventListener("input", renderNodesOverview);
+        $(id).addEventListener("change", renderNodesOverview);
+      });
+      document.querySelectorAll(".nodes-overview-table th.sortable").forEach((th) => {
+        th.addEventListener("click", () => {
+          const sort = th.dataset.sort;
+          if (state.nodesOverviewSort === sort) {
+            state.nodesOverviewSortDir = state.nodesOverviewSortDir === "asc" ? "desc" : "asc";
+          } else {
+            state.nodesOverviewSort = sort;
+            state.nodesOverviewSortDir = ["name", "server", "subName", "claimedCountry", "countryMatch"].includes(sort) ? "asc" : "desc";
+          }
+          $("nodes-overview-sort").value = sort;
+          renderNodesOverview();
+        });
       });
       ["url", "max-mb", "timeout", "concurrency"].forEach((id) => {
         $(id).addEventListener("input", saveSpeedDraft);

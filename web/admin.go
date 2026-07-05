@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"xray-checker/checker"
 	"xray-checker/models"
+	"xray-checker/nodearchive"
 	"xray-checker/speedtest"
 	"xray-checker/telegram"
 )
@@ -48,6 +50,14 @@ type AdminSubscriptionRefreshResult struct {
 }
 
 type AdminSubscriptionRefreshFunc func() (AdminSubscriptionRefreshResult, error)
+
+type AdminNodesOverviewGeoRequest struct {
+	StableIDs []string `json:"stableIds"`
+}
+
+type AdminNodesOverviewDeleteRequest struct {
+	StableID string `json:"stableId"`
+}
 
 func AdminHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -169,6 +179,68 @@ func AdminSpeedTestNodeURLHandler(manager *speedtest.Manager) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, manager.Snapshot())
+	}
+}
+
+func AdminNodesOverviewHandler(store *nodearchive.Store, manager *speedtest.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSON(w, store.Summaries(manager.AllResultHistory()))
+	}
+}
+
+func AdminNodesOverviewGeoHandler(store *nodearchive.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req AdminNodesOverviewGeoRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, "Invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+		defer cancel()
+		result, err := store.RefreshGeo(ctx, req.StableIDs)
+		if err != nil {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, result)
+	}
+}
+
+func AdminNodesOverviewDeleteHandler(store *nodearchive.Store, manager *speedtest.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req AdminNodesOverviewDeleteRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, "Invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		stableID := strings.TrimSpace(req.StableID)
+		if stableID == "" {
+			writeError(w, "stableId is required", http.StatusBadRequest)
+			return
+		}
+		if err := store.DeleteArchived(stableID); err != nil {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := manager.DeleteHistory(stableID); err != nil {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "deleted"})
 	}
 }
 

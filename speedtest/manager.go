@@ -219,9 +219,6 @@ func (m *Manager) loadResults() error {
 		if stableID == "" {
 			continue
 		}
-		if _, ok := active[stableID]; !ok {
-			continue
-		}
 		entries = normalizeResultHistory(stableID, active[stableID], entries, historyLimit)
 		if len(entries) == 0 {
 			continue
@@ -233,9 +230,6 @@ func (m *Manager) loadResults() error {
 	for stableID, result := range state.Results {
 		stableID = strings.TrimSpace(stableID)
 		if stableID == "" {
-			continue
-		}
-		if _, ok := active[stableID]; !ok {
 			continue
 		}
 		result = normalizeResult(stableID, active[stableID], result)
@@ -315,6 +309,38 @@ func (m *Manager) ResultHistory(stableID string) []Result {
 	result := make([]Result, len(history))
 	copy(result, history)
 	return result
+}
+
+func (m *Manager) AllResultHistory() map[string][]Result {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	historyLimit := m.historyLimitLocked()
+	result := make(map[string][]Result, len(m.history))
+	for stableID, entries := range m.history {
+		if len(entries) > historyLimit {
+			entries = entries[:historyLimit]
+		}
+		copied := make([]Result, len(entries))
+		copy(copied, entries)
+		result[stableID] = copied
+	}
+	return result
+}
+
+func (m *Manager) DeleteHistory(stableID string) error {
+	stableID = strings.TrimSpace(stableID)
+	if stableID == "" {
+		return fmt.Errorf("stableId is required")
+	}
+
+	m.mu.Lock()
+	delete(m.results, stableID)
+	delete(m.history, stableID)
+	state := m.resultStateLocked()
+	m.mu.Unlock()
+
+	return m.saveResults(state)
 }
 
 func (m *Manager) Schedule() ScheduleConfig {
