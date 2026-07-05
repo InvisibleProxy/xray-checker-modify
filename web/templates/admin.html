@@ -915,6 +915,8 @@
               <select id="nodes-overview-geo">
                 <option value="">All</option>
                 <option value="match">Match</option>
+                <option value="partial">Partial</option>
+                <option value="conflict">Conflict</option>
                 <option value="mismatch">Mismatch</option>
                 <option value="unknown">Unknown</option>
               </select>
@@ -1501,20 +1503,74 @@
         return name || "Unnamed";
       }
 
-      function geoText(node) {
-        if (node.geoCountry || node.geoCountryCode) {
-          const geo = node.geoCountry || node.geoCountryCode;
-          const code = node.geoCountryCode ? ` (${node.geoCountryCode})` : "";
-          return `${geo}${code}`;
-        }
-        return node.geoError ? "Lookup failed" : "Unknown";
-      }
-
       function countryMatchChip(node) {
         const match = node.countryMatch || "unknown";
         if (match === "match") return `<span class="chip ok">Match</span>`;
+        if (match === "partial") return `<span class="chip warn">Partial</span>`;
+        if (match === "conflict") return `<span class="chip warn">Conflict</span>`;
         if (match === "mismatch") return `<span class="chip error">Mismatch</span>`;
         return `<span class="chip neutral">Unknown</span>`;
+      }
+
+      function geoSources(node) {
+        if (Array.isArray(node.geoSources) && node.geoSources.length > 0) {
+          return node.geoSources;
+        }
+        const sources = [];
+        if (node.geoCountry || node.geoCountryCode || node.geoIp || node.geoOrg || node.geoError) {
+          sources.push({
+            source: "ipinfo.io",
+            ip: node.geoIp,
+            country: node.geoCountry,
+            countryCode: node.geoCountryCode,
+            org: node.geoOrg,
+            error: node.geoError,
+          });
+        }
+        if (node.ifconfigCountry || node.ifconfigCountryCode || node.ifconfigIp || node.ifconfigOrg || node.ifconfigAsn || node.ifconfigError) {
+          sources.push({
+            source: "ifconfig.net",
+            ip: node.ifconfigIp,
+            country: node.ifconfigCountry,
+            countryCode: node.ifconfigCountryCode,
+            org: node.ifconfigOrg,
+            asn: node.ifconfigAsn,
+            error: node.ifconfigError,
+          });
+        }
+        return sources;
+      }
+
+      function geoSourceText(source) {
+        if (source.error) {
+          return `Error: ${source.error}`;
+        }
+        const country = source.country || source.countryCode || "Unknown";
+        const code = source.countryCode ? ` (${source.countryCode})` : "";
+        const org = source.org || source.asn ? ` · ${[source.asn, source.org].filter(Boolean).join(" ")}` : "";
+        return `${country}${code}${org}`;
+      }
+
+      function geoDetails(node) {
+        const sources = geoSources(node);
+        if (sources.length === 0) {
+          return `<div class="muted">Unknown</div>`;
+        }
+        return sources.map((source) => `
+          <div class="muted">${escapeHtml(source.source || "geo")}: ${escapeHtml(geoSourceText(source))}</div>
+        `).join("");
+      }
+
+      function geoSearchTerms(node) {
+        return geoSources(node).flatMap((source) => [
+          source.source,
+          source.ip,
+          source.country,
+          source.countryCode,
+          source.org,
+          source.asn,
+          source.error,
+        ]);
       }
 
       function nodesOverviewFilters() {
@@ -1566,6 +1622,11 @@
               node.geoCountry,
               node.geoCountryCode,
               node.geoOrg,
+              node.ifconfigCountry,
+              node.ifconfigCountryCode,
+              node.ifconfigOrg,
+              node.ifconfigAsn,
+              ...geoSearchTerms(node),
             ].join(" ").toLowerCase();
             if (!haystack.includes(filters.search)) return false;
           }
@@ -1619,7 +1680,7 @@
               <td>${statusChip}</td>
               <td class="mono">${ipLink}${node.port ? `:${escapeHtml(node.port)}` : ""}</td>
               <td>${escapeHtml(countryText(node))}</td>
-              <td>${countryMatchChip(node)}<div class="muted">${escapeHtml(geoText(node))}</div></td>
+              <td>${countryMatchChip(node)}${geoDetails(node)}</td>
               <td class="${speedClass}">${node.successfulResults ? formatMbps(node.avgMbps) : "n/a"}</td>
               <td>${node.successfulResults ? formatMbps(node.minMbps) : "n/a"}</td>
               <td>${node.successfulResults ? formatMbps(node.maxMbps) : "n/a"}</td>
@@ -2011,7 +2072,7 @@
             method: "POST",
             body: JSON.stringify({ stableIds }),
           });
-          $("nodes-overview-summary").textContent = `Geo updated: ${result.updated || 0}, failed: ${result.failed || 0}`;
+          $("nodes-overview-summary").textContent = `Geo updated: ${result.updated || 0} nodes, failed: ${result.failed || 0}`;
           await loadNodesOverview();
         } catch (err) {
           $("nodes-overview-summary").textContent = err.message;

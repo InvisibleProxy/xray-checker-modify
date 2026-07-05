@@ -152,3 +152,65 @@ func TestDeleteArchivedRejectsActiveAndDeletesRetired(t *testing.T) {
 		t.Fatal("retired node was not deleted")
 	}
 }
+
+func TestCountryMatchUsesMultipleGeoSources(t *testing.T) {
+	tests := []struct {
+		name   string
+		record NodeRecord
+		want   string
+	}{
+		{
+			name: "both sources match claimed country",
+			record: NodeRecord{
+				ClaimedCountryCode:  "NL",
+				GeoCountryCode:      "NL",
+				IfconfigCountryCode: "NL",
+			},
+			want: "match",
+		},
+		{
+			name: "single matching source is partial",
+			record: NodeRecord{
+				ClaimedCountryCode: "NL",
+				GeoCountryCode:     "NL",
+			},
+			want: "partial",
+		},
+		{
+			name: "failed source does not make a full match",
+			record: NodeRecord{
+				ClaimedCountryCode:  "NL",
+				GeoCountryCode:      "NL",
+				IfconfigCountryCode: "NL",
+				IfconfigError:       "timeout",
+			},
+			want: "partial",
+		},
+		{
+			name: "sources disagree",
+			record: NodeRecord{
+				ClaimedCountryCode:  "NL",
+				GeoCountryCode:      "NL",
+				IfconfigCountryCode: "DE",
+			},
+			want: "conflict",
+		},
+		{
+			name: "sources agree but differ from claimed country",
+			record: NodeRecord{
+				ClaimedCountryCode:  "NL",
+				GeoCountryCode:      "DE",
+				IfconfigCountryCode: "DE",
+			},
+			want: "mismatch",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := countryMatch(tt.record); got != tt.want {
+				t.Fatalf("countryMatch() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

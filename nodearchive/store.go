@@ -37,47 +37,66 @@ type StateFile struct {
 }
 
 type NodeRecord struct {
-	StableID           string    `json:"stableId"`
-	Name               string    `json:"name"`
-	SubName            string    `json:"subName"`
-	Server             string    `json:"server"`
-	Port               int       `json:"port"`
-	Protocol           string    `json:"protocol"`
-	Active             bool      `json:"active"`
-	FirstSeenAt        time.Time `json:"firstSeenAt"`
-	LastSeenAt         time.Time `json:"lastSeenAt"`
-	RetiredAt          time.Time `json:"retiredAt,omitempty"`
-	ClaimedCountry     string    `json:"claimedCountry,omitempty"`
-	ClaimedCountryCode string    `json:"claimedCountryCode,omitempty"`
-	GeoIP              string    `json:"geoIp,omitempty"`
-	GeoCountry         string    `json:"geoCountry,omitempty"`
-	GeoCountryCode     string    `json:"geoCountryCode,omitempty"`
-	GeoOrg             string    `json:"geoOrg,omitempty"`
-	GeoUpdatedAt       time.Time `json:"geoUpdatedAt,omitempty"`
-	GeoError           string    `json:"geoError,omitempty"`
-	TotalDowntimeSec   int64     `json:"totalDowntimeSec"`
-	IncidentCount      int       `json:"incidentCount"`
-	LongestDowntimeSec int64     `json:"longestDowntimeSec"`
-	CurrentDownSince   time.Time `json:"currentDownSince,omitempty"`
-	LastOfflineAt      time.Time `json:"lastOfflineAt,omitempty"`
-	LastOnlineAt       time.Time `json:"lastOnlineAt,omitempty"`
-	LastStatusAt       time.Time `json:"lastStatusAt,omitempty"`
+	StableID            string    `json:"stableId"`
+	Name                string    `json:"name"`
+	SubName             string    `json:"subName"`
+	Server              string    `json:"server"`
+	Port                int       `json:"port"`
+	Protocol            string    `json:"protocol"`
+	Active              bool      `json:"active"`
+	FirstSeenAt         time.Time `json:"firstSeenAt"`
+	LastSeenAt          time.Time `json:"lastSeenAt"`
+	RetiredAt           time.Time `json:"retiredAt,omitempty"`
+	ClaimedCountry      string    `json:"claimedCountry,omitempty"`
+	ClaimedCountryCode  string    `json:"claimedCountryCode,omitempty"`
+	GeoIP               string    `json:"geoIp,omitempty"`
+	GeoCountry          string    `json:"geoCountry,omitempty"`
+	GeoCountryCode      string    `json:"geoCountryCode,omitempty"`
+	GeoOrg              string    `json:"geoOrg,omitempty"`
+	GeoUpdatedAt        time.Time `json:"geoUpdatedAt,omitempty"`
+	GeoError            string    `json:"geoError,omitempty"`
+	IfconfigIP          string    `json:"ifconfigIp,omitempty"`
+	IfconfigCountry     string    `json:"ifconfigCountry,omitempty"`
+	IfconfigCountryCode string    `json:"ifconfigCountryCode,omitempty"`
+	IfconfigASN         string    `json:"ifconfigAsn,omitempty"`
+	IfconfigOrg         string    `json:"ifconfigOrg,omitempty"`
+	IfconfigUpdatedAt   time.Time `json:"ifconfigUpdatedAt,omitempty"`
+	IfconfigError       string    `json:"ifconfigError,omitempty"`
+	TotalDowntimeSec    int64     `json:"totalDowntimeSec"`
+	IncidentCount       int       `json:"incidentCount"`
+	LongestDowntimeSec  int64     `json:"longestDowntimeSec"`
+	CurrentDownSince    time.Time `json:"currentDownSince,omitempty"`
+	LastOfflineAt       time.Time `json:"lastOfflineAt,omitempty"`
+	LastOnlineAt        time.Time `json:"lastOnlineAt,omitempty"`
+	LastStatusAt        time.Time `json:"lastStatusAt,omitempty"`
 }
 
 type Summary struct {
 	NodeRecord
-	IPInfoURL         string    `json:"ipInfoUrl"`
-	CountryMatch      string    `json:"countryMatch"`
-	ResultCount       int       `json:"resultCount"`
-	SuccessfulResults int       `json:"successfulResults"`
-	FailedResults     int       `json:"failedResults"`
-	AvgMbps           float64   `json:"avgMbps"`
-	MinMbps           float64   `json:"minMbps"`
-	MaxMbps           float64   `json:"maxMbps"`
-	LastMbps          float64   `json:"lastMbps"`
-	LastSpeedAt       time.Time `json:"lastSpeedAt,omitempty"`
-	LastSpeedError    string    `json:"lastSpeedError,omitempty"`
-	LastSpeedOffline  bool      `json:"lastSpeedOffline"`
+	IPInfoURL         string      `json:"ipInfoUrl"`
+	CountryMatch      string      `json:"countryMatch"`
+	GeoSources        []GeoSource `json:"geoSources"`
+	ResultCount       int         `json:"resultCount"`
+	SuccessfulResults int         `json:"successfulResults"`
+	FailedResults     int         `json:"failedResults"`
+	AvgMbps           float64     `json:"avgMbps"`
+	MinMbps           float64     `json:"minMbps"`
+	MaxMbps           float64     `json:"maxMbps"`
+	LastMbps          float64     `json:"lastMbps"`
+	LastSpeedAt       time.Time   `json:"lastSpeedAt,omitempty"`
+	LastSpeedError    string      `json:"lastSpeedError,omitempty"`
+	LastSpeedOffline  bool        `json:"lastSpeedOffline"`
+}
+
+type GeoSource struct {
+	Source      string    `json:"source"`
+	IP          string    `json:"ip,omitempty"`
+	Country     string    `json:"country,omitempty"`
+	CountryCode string    `json:"countryCode,omitempty"`
+	Org         string    `json:"org,omitempty"`
+	ASN         string    `json:"asn,omitempty"`
+	UpdatedAt   time.Time `json:"updatedAt,omitempty"`
+	Error       string    `json:"error,omitempty"`
 }
 
 type GeoRefreshResult struct {
@@ -91,6 +110,14 @@ type ipInfoResponse struct {
 	Country string `json:"country"`
 	Org     string `json:"org"`
 	Error   any    `json:"error"`
+}
+
+type ifconfigResponse struct {
+	IP         string `json:"ip"`
+	Country    string `json:"country"`
+	CountryISO string `json:"country_iso"`
+	ASN        string `json:"asn"`
+	ASNOrg     string `json:"asn_org"`
 }
 
 func NewStore(path string, proxyChecker *checker.ProxyChecker) *Store {
@@ -347,6 +374,7 @@ func (s *Store) Summaries(history map[string][]speedtest.Result) []Summary {
 	for stableID, record := range records {
 		summary := Summary{NodeRecord: record}
 		summary.IPInfoURL = ipInfoURL(record.Server)
+		summary.GeoSources = geoSources(record)
 		summary.CountryMatch = countryMatch(record)
 		applySpeedStats(&summary, history[stableID])
 		result = append(result, summary)
@@ -385,18 +413,17 @@ func (s *Store) RefreshGeo(ctx context.Context, stableIDs []string) (GeoRefreshR
 		if strings.TrimSpace(record.Server) == "" {
 			continue
 		}
-		updated, err := s.lookupGeo(ctx, record)
-		if err != nil {
+		updated, successes, errs := s.lookupGeo(ctx, record)
+		if successes == 0 {
 			result.Failed++
+		} else {
+			result.Updated++
+		}
+		for _, err := range errs {
 			if len(result.Errors) < 5 {
 				result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", stableID, err))
 			}
-			updated.GeoError = err.Error()
-			updated.GeoUpdatedAt = time.Now()
-			updates[stableID] = updated
-			continue
 		}
-		result.Updated++
 		updates[stableID] = updated
 	}
 
@@ -433,12 +460,39 @@ func (s *Store) DeleteArchived(stableID string) error {
 	return s.saveLocked()
 }
 
-func (s *Store) lookupGeo(ctx context.Context, record NodeRecord) (NodeRecord, error) {
-	target := strings.TrimSpace(record.Server)
+func (s *Store) lookupGeo(ctx context.Context, record NodeRecord) (NodeRecord, int, []error) {
+	target := serverHost(record.Server)
 	if target == "" {
-		return record, fmt.Errorf("server is empty")
+		return record, 0, []error{fmt.Errorf("server is empty")}
 	}
 
+	now := time.Now()
+	successes := 0
+	var errors []error
+	updated, err := s.lookupIPInfo(ctx, record, target, now)
+	if err != nil {
+		record.GeoError = err.Error()
+		record.GeoUpdatedAt = now
+		errors = append(errors, err)
+	} else {
+		record = updated
+		successes++
+	}
+
+	updated, err = s.lookupIfconfig(ctx, record, target, now)
+	if err != nil {
+		record.IfconfigError = err.Error()
+		record.IfconfigUpdatedAt = now
+		errors = append(errors, err)
+	} else {
+		record = updated
+		successes++
+	}
+
+	return record, successes, errors
+}
+
+func (s *Store) lookupIPInfo(ctx context.Context, record NodeRecord, target string, now time.Time) (NodeRecord, error) {
 	reqURL := "https://ipinfo.io/" + url.PathEscape(target) + "/json"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
@@ -462,13 +516,59 @@ func (s *Store) lookupGeo(ctx context.Context, record NodeRecord) (NodeRecord, e
 		return record, fmt.Errorf("ipinfo error")
 	}
 
-	countryCode := strings.ToUpper(strings.TrimSpace(payload.Country))
+	countryCode := normalizeGeoCountryCode(payload.Country, "")
+	if countryCode == "" {
+		return record, fmt.Errorf("ipinfo country missing")
+	}
 	record.GeoIP = strings.TrimSpace(payload.IP)
 	record.GeoCountryCode = countryCode
 	record.GeoCountry = countryName(countryCode)
 	record.GeoOrg = strings.TrimSpace(payload.Org)
-	record.GeoUpdatedAt = time.Now()
+	record.GeoUpdatedAt = now
 	record.GeoError = ""
+	return record, nil
+}
+
+func (s *Store) lookupIfconfig(ctx context.Context, record NodeRecord, target string, now time.Time) (NodeRecord, error) {
+	values := url.Values{}
+	values.Set("ip", target)
+	reqURL := "https://ifconfig.net/?" + values.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return record, err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return record, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return record, fmt.Errorf("ifconfig status %d", resp.StatusCode)
+	}
+
+	var payload ifconfigResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return record, err
+	}
+
+	countryCode := normalizeGeoCountryCode(payload.CountryISO, payload.Country)
+	if countryCode == "" {
+		return record, fmt.Errorf("ifconfig country missing")
+	}
+	record.IfconfigIP = strings.TrimSpace(payload.IP)
+	record.IfconfigCountryCode = countryCode
+	if strings.TrimSpace(payload.Country) != "" {
+		record.IfconfigCountry = strings.TrimSpace(payload.Country)
+	} else {
+		record.IfconfigCountry = countryName(countryCode)
+	}
+	record.IfconfigASN = strings.TrimSpace(payload.ASN)
+	record.IfconfigOrg = strings.TrimSpace(payload.ASNOrg)
+	record.IfconfigUpdatedAt = now
+	record.IfconfigError = ""
 	return record, nil
 }
 
@@ -567,8 +667,13 @@ func normalizeRecordCountries(record *NodeRecord) {
 	}
 	record.ClaimedCountryCode = countryCode
 	record.ClaimedCountry = country
+	record.GeoCountryCode = strings.ToUpper(strings.TrimSpace(record.GeoCountryCode))
 	if record.GeoCountryCode != "" && record.GeoCountry == "" {
 		record.GeoCountry = countryName(record.GeoCountryCode)
+	}
+	record.IfconfigCountryCode = strings.ToUpper(strings.TrimSpace(record.IfconfigCountryCode))
+	if record.IfconfigCountryCode != "" && record.IfconfigCountry == "" {
+		record.IfconfigCountry = countryName(record.IfconfigCountryCode)
 	}
 }
 
@@ -620,24 +725,109 @@ func countryCodeFromFlag(value string) string {
 }
 
 func countryMatch(record NodeRecord) string {
-	if record.ClaimedCountryCode == "" || record.GeoCountryCode == "" {
+	claimed := strings.ToUpper(strings.TrimSpace(record.ClaimedCountryCode))
+	if claimed == "" {
 		return "unknown"
 	}
-	if strings.EqualFold(record.ClaimedCountryCode, record.GeoCountryCode) {
+
+	codes := geoCountryCodes(record)
+	if len(codes) == 0 {
+		return "unknown"
+	}
+	unique := make(map[string]bool, len(codes))
+	for _, code := range codes {
+		unique[code] = true
+	}
+	if len(unique) > 1 {
+		return "conflict"
+	}
+
+	if codes[0] == claimed {
+		if len(codes) < 2 {
+			return "partial"
+		}
 		return "match"
 	}
 	return "mismatch"
 }
 
 func ipInfoURL(server string) string {
+	server = serverHost(server)
+	if server == "" {
+		return ""
+	}
+	return "https://ipinfo.io/" + url.PathEscape(server)
+}
+
+func geoCountryCodes(record NodeRecord) []string {
+	result := make([]string, 0, 2)
+	if code := strings.ToUpper(strings.TrimSpace(record.GeoCountryCode)); code != "" && strings.TrimSpace(record.GeoError) == "" {
+		result = append(result, code)
+	}
+	if code := strings.ToUpper(strings.TrimSpace(record.IfconfigCountryCode)); code != "" && strings.TrimSpace(record.IfconfigError) == "" {
+		result = append(result, code)
+	}
+	return result
+}
+
+func geoSources(record NodeRecord) []GeoSource {
+	sources := make([]GeoSource, 0, 2)
+	if record.GeoCountryCode != "" || record.GeoCountry != "" || record.GeoIP != "" || record.GeoOrg != "" || record.GeoError != "" {
+		sources = append(sources, GeoSource{
+			Source:      "ipinfo.io",
+			IP:          record.GeoIP,
+			Country:     record.GeoCountry,
+			CountryCode: record.GeoCountryCode,
+			Org:         record.GeoOrg,
+			UpdatedAt:   record.GeoUpdatedAt,
+			Error:       record.GeoError,
+		})
+	}
+	if record.IfconfigCountryCode != "" || record.IfconfigCountry != "" || record.IfconfigIP != "" || record.IfconfigOrg != "" || record.IfconfigASN != "" || record.IfconfigError != "" {
+		sources = append(sources, GeoSource{
+			Source:      "ifconfig.net",
+			IP:          record.IfconfigIP,
+			Country:     record.IfconfigCountry,
+			CountryCode: record.IfconfigCountryCode,
+			Org:         record.IfconfigOrg,
+			ASN:         record.IfconfigASN,
+			UpdatedAt:   record.IfconfigUpdatedAt,
+			Error:       record.IfconfigError,
+		})
+	}
+	return sources
+}
+
+func normalizeGeoCountryCode(code string, country string) string {
+	code = strings.ToUpper(strings.TrimSpace(code))
+	if code != "" {
+		return code
+	}
+	return countryCodeFromName(country)
+}
+
+func countryCodeFromName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	for code, country := range countryNames {
+		if strings.EqualFold(country, name) {
+			return code
+		}
+	}
+	return ""
+}
+
+func serverHost(server string) string {
 	server = strings.TrimSpace(server)
 	if server == "" {
 		return ""
 	}
 	if host, _, err := net.SplitHostPort(server); err == nil {
-		server = host
+		return host
 	}
-	return "https://ipinfo.io/" + url.PathEscape(server)
+	return server
 }
 
 func countryName(code string) string {
@@ -702,6 +892,7 @@ var countryNames = map[string]string{
 	"FI": "Finland",
 	"FR": "France",
 	"GB": "United Kingdom",
+	"IR": "Iran",
 	"LT": "Lithuania",
 	"LV": "Latvia",
 	"NL": "Netherlands",
