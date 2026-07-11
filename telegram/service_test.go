@@ -1,14 +1,52 @@
 package telegram
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"xray-checker/checker"
 	"xray-checker/models"
 	"xray-checker/speedtest"
 )
+
+func TestTelegramAPIErrorTextRedactsBotToken(t *testing.T) {
+	token := "123456:secret-token"
+	err := fmt.Errorf("Post https://api.telegram.org/bot%s/getUpdates: connection reset", token)
+	text := telegramAPIErrorText(err, token)
+	if strings.Contains(text, token) {
+		t.Fatalf("redacted error still contains bot token: %q", text)
+	}
+	if !strings.Contains(text, "[REDACTED]") {
+		t.Fatalf("redacted marker missing: %q", text)
+	}
+}
+
+func TestTrimMessageKeepsValidUTF8(t *testing.T) {
+	trimmed := trimMessage(strings.Repeat("я", 5000))
+	if !utf8.ValidString(trimmed) {
+		t.Fatal("trimmed message is not valid UTF-8")
+	}
+	if utf8.RuneCountInString(trimmed) > 3900 {
+		t.Fatalf("trimmed message has %d runes, want at most 3900", utf8.RuneCountInString(trimmed))
+	}
+}
+
+func TestTrimHTMLMessageKeepsCompleteLinesAndTags(t *testing.T) {
+	message := "<b>Report</b>\n" + strings.Repeat("<code>длинная строка</code>\n", 400)
+	trimmed := trimHTMLMessage(message)
+	if !utf8.ValidString(trimmed) {
+		t.Fatal("trimmed HTML message is not valid UTF-8")
+	}
+	if strings.Count(trimmed, "<code>") != strings.Count(trimmed, "</code>") {
+		t.Fatalf("trimmed HTML contains an unclosed code tag: %q", trimmed)
+	}
+	if !strings.HasSuffix(trimmed, "...truncated") {
+		t.Fatalf("trimmed HTML does not contain truncation suffix: %q", trimmed)
+	}
+}
 
 func TestCountSpeedIssuesLowSpeedScenarios(t *testing.T) {
 	results := []speedtest.Result{

@@ -229,3 +229,37 @@ func TestGeoBlacklistHitsUsesSuccessfulSourcesOnly(t *testing.T) {
 		t.Fatalf("hit = %+v, want ipinfo.io IR", hits[0])
 	}
 }
+
+func TestMergeGeoFieldsPreservesConcurrentAvailabilityChanges(t *testing.T) {
+	downSince := time.Now().Add(-30 * time.Minute).Truncate(time.Second)
+	current := NodeRecord{
+		StableID:         "node-1",
+		Server:           "node.example.com",
+		Active:           false,
+		RetiredAt:        time.Now().Truncate(time.Second),
+		CurrentDownSince: downSince,
+		IncidentCount:    3,
+		TotalDowntimeSec: 120,
+	}
+	staleGeoResult := NodeRecord{
+		StableID:            "node-1",
+		Server:              "node.example.com",
+		Active:              true,
+		IncidentCount:       1,
+		GeoIP:               "203.0.113.10",
+		GeoCountry:          "Germany",
+		GeoCountryCode:      "DE",
+		IfconfigCountryCode: "DE",
+	}
+
+	merged := mergeGeoFields(current, staleGeoResult)
+	if merged.Active || merged.RetiredAt.IsZero() {
+		t.Fatalf("availability fields were overwritten: %+v", merged)
+	}
+	if !merged.CurrentDownSince.Equal(downSince) || merged.IncidentCount != 3 || merged.TotalDowntimeSec != 120 {
+		t.Fatalf("downtime fields were overwritten: %+v", merged)
+	}
+	if merged.GeoCountryCode != "DE" || merged.IfconfigCountryCode != "DE" {
+		t.Fatalf("geo fields were not applied: %+v", merged)
+	}
+}

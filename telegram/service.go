@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"xray-checker/checker"
 	"xray-checker/logger"
@@ -1303,7 +1304,7 @@ func (s *Service) formatNodeList() string {
 	if len(proxies) == 0 {
 		lines = append(lines, "", "Ноды не найдены.")
 	}
-	return trimMessage(strings.Join(lines, "\n"))
+	return trimHTMLMessage(strings.Join(lines, "\n"))
 }
 
 func (s *Service) formatNodeDetails(stableID string) string {
@@ -1361,7 +1362,7 @@ func (s *Service) formatNodeDetails(stableID string) string {
 			lines = append(lines, formatSpeedHistoryLine(result, cfg.LowSpeedThresholdMbps))
 		}
 	}
-	return trimMessage(strings.Join(lines, "\n"))
+	return trimHTMLMessage(strings.Join(lines, "\n"))
 }
 
 func (s *Service) latestSpeedResult(stableID string) *speedtest.Result {
@@ -1486,7 +1487,7 @@ func (s *Service) formatStatus() string {
 		lines = append(lines, "", "<b>Онлайн</b>")
 		lines = append(lines, limitLines(onlineLines, 12)...)
 	}
-	return trimMessage(strings.Join(lines, "\n"))
+	return trimHTMLMessage(strings.Join(lines, "\n"))
 }
 
 func formatStatusRefreshStarted() string {
@@ -1533,7 +1534,7 @@ func (s *Service) formatIssuesSummary() string {
 		lines = append(lines, "", "<b>Speed-test ниже порога или с ошибками</b>")
 		lines = append(lines, limitLines(speedLines, cfg.SpeedReportLimit)...)
 	}
-	return trimMessage(strings.Join(lines, "\n"))
+	return trimHTMLMessage(strings.Join(lines, "\n"))
 }
 
 func (s *Service) formatSpeedHistory(query string) string {
@@ -1571,7 +1572,7 @@ func (s *Service) formatSpeedHistory(query string) string {
 	for _, result := range limitResults(history, 5) {
 		lines = append(lines, formatSpeedHistoryLine(result, cfg.LowSpeedThresholdMbps))
 	}
-	return trimMessage(strings.Join(lines, "\n"))
+	return trimHTMLMessage(strings.Join(lines, "\n"))
 }
 
 func (s *Service) formatRecentSpeedOverview() string {
@@ -1601,7 +1602,7 @@ func (s *Service) formatRecentSpeedOverview() string {
 		lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  <code>%s</code> · %s · %s", htmlEscape(result.Name), htmlEscape(result.StableID), status, htmlEscape(formatCheckedAt(result.CheckedAt))))
 	}
 	lines = append(lines, "", "Нажмите на ноду ниже, чтобы открыть историю.")
-	return trimMessage(strings.Join(lines, "\n"))
+	return trimHTMLMessage(strings.Join(lines, "\n"))
 }
 
 func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, failed int, slow int, issuesOnly bool) string {
@@ -1625,7 +1626,7 @@ func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, fail
 		}
 		lines = append(lines, "", "<b>Требует внимания</b>")
 		lines = append(lines, limitLines(issues, cfg.SpeedReportLimit)...)
-		return trimMessage(strings.Join(lines, "\n"))
+		return trimHTMLMessage(strings.Join(lines, "\n"))
 	}
 
 	lines := []string{
@@ -1655,7 +1656,7 @@ func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, fail
 		}
 	}
 
-	return trimMessage(strings.Join(lines, "\n"))
+	return trimHTMLMessage(strings.Join(lines, "\n"))
 }
 
 func (s *Service) sendText(ctx context.Context, text string) error {
@@ -1714,7 +1715,7 @@ func (s *Service) sendTextToWithMarkup(ctx context.Context, chatID string, threa
 func (s *Service) sendHTMLToWithMarkup(ctx context.Context, chatID string, threadID int, text string, replyMarkup string) (*message, error) {
 	values := url.Values{}
 	values.Set("chat_id", chatID)
-	values.Set("text", trimMessage(text))
+	values.Set("text", trimHTMLMessage(text))
 	values.Set("parse_mode", "HTML")
 	values.Set("disable_web_page_preview", "true")
 	if threadID > 0 {
@@ -1743,7 +1744,7 @@ func (s *Service) editTextWithMarkup(ctx context.Context, chatID string, message
 	values := url.Values{}
 	values.Set("chat_id", chatID)
 	values.Set("message_id", strconv.Itoa(messageID))
-	values.Set("text", trimMessage(text))
+	values.Set("text", trimHTMLMessage(text))
 	values.Set("parse_mode", "HTML")
 	values.Set("disable_web_page_preview", "true")
 	if replyMarkup != "" {
@@ -1792,13 +1793,13 @@ func (s *Service) doAPI(ctx context.Context, method string, values url.Values) (
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(values.Encode()))
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("build Telegram request: %s", telegramAPIErrorText(err, cfg.BotToken))
 		}
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 		resp, err := client.Do(req)
 		if err != nil {
-			lastErr = fmt.Errorf("%s: %v", candidate.Proxy.Name, err)
+			lastErr = fmt.Errorf("%s: %s", candidate.Proxy.Name, telegramAPIErrorText(err, cfg.BotToken))
 			continue
 		}
 
@@ -2870,7 +2871,7 @@ func formatNodeDownGroup(alerts []nodeDownAlert, now time.Time) string {
 		}
 		lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  %s", htmlEscape(alert.Proxy.Name), strings.Join(parts, " · ")))
 	}
-	return trimMessage(strings.Join(lines, "\n"))
+	return trimHTMLMessage(strings.Join(lines, "\n"))
 }
 
 func formatNodeRecovery(proxy *models.ProxyConfig, latency time.Duration, downSince time.Time, now time.Time) string {
@@ -2982,8 +2983,96 @@ func formatCheckedAt(value time.Time) string {
 
 func trimMessage(text string) string {
 	text = strings.TrimSpace(text)
-	if len(text) <= 3900 {
+	if utf8.RuneCountInString(text) <= 3900 {
 		return text
 	}
-	return text[:3900] + "\n...truncated"
+	runes := []rune(text)
+	suffix := "\n...truncated"
+	limit := 3900 - utf8.RuneCountInString(suffix)
+	return string(runes[:limit]) + suffix
+}
+
+func trimHTMLMessage(text string) string {
+	text = strings.TrimSpace(text)
+	if utf8.RuneCountInString(text) <= 3900 {
+		return text
+	}
+
+	suffix := "\n...truncated"
+	limit := 3900 - utf8.RuneCountInString(suffix)
+	visible := 0
+	truncated := false
+	openTags := make([]string, 0, 2)
+	var result strings.Builder
+	for offset := 0; offset < len(text); {
+		rest := text[offset:]
+		switch {
+		case strings.HasPrefix(rest, "<b>"):
+			result.WriteString("<b>")
+			openTags = append(openTags, "b")
+			offset += len("<b>")
+			continue
+		case strings.HasPrefix(rest, "</b>"):
+			result.WriteString("</b>")
+			openTags = removeLastOpenTag(openTags, "b")
+			offset += len("</b>")
+			continue
+		case strings.HasPrefix(rest, "<code>"):
+			result.WriteString("<code>")
+			openTags = append(openTags, "code")
+			offset += len("<code>")
+			continue
+		case strings.HasPrefix(rest, "</code>"):
+			result.WriteString("</code>")
+			openTags = removeLastOpenTag(openTags, "code")
+			offset += len("</code>")
+			continue
+		}
+
+		if visible >= limit {
+			truncated = true
+			break
+		}
+		if rest[0] == '&' {
+			if end := strings.IndexByte(rest, ';'); end > 0 {
+				result.WriteString(rest[:end+1])
+				offset += end + 1
+				visible++
+				continue
+			}
+		}
+
+		_, size := utf8.DecodeRuneInString(rest)
+		result.WriteString(rest[:size])
+		offset += size
+		visible++
+	}
+
+	if !truncated {
+		return text
+	}
+	for i := len(openTags) - 1; i >= 0; i-- {
+		result.WriteString("</" + openTags[i] + ">")
+	}
+	return strings.TrimSpace(result.String()) + suffix
+}
+
+func removeLastOpenTag(openTags []string, tag string) []string {
+	for i := len(openTags) - 1; i >= 0; i-- {
+		if openTags[i] == tag {
+			return append(openTags[:i], openTags[i+1:]...)
+		}
+	}
+	return openTags
+}
+
+func telegramAPIErrorText(err error, botToken string) string {
+	if err == nil {
+		return ""
+	}
+	text := err.Error()
+	if botToken != "" {
+		text = strings.ReplaceAll(text, botToken, "[REDACTED]")
+	}
+	return text
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"xray-checker/checker"
+	"xray-checker/models"
 )
 
 func TestLoadResultsKeepsInactiveHistory(t *testing.T) {
@@ -88,5 +89,89 @@ func TestDeleteHistoryRemovesLatestAndHistory(t *testing.T) {
 	}
 	if len(reloaded.ResultHistory("retired")) != 0 {
 		t.Fatal("deleted history was restored from disk")
+	}
+}
+
+func TestUpdatedTestURLIsUsedByScheduledConfig(t *testing.T) {
+	dir := t.TempDir()
+	proxy := &models.ProxyConfig{
+		StableID: "node-1",
+		Name:     "Node 1",
+		Protocol: "vless",
+		Server:   "node.example.com",
+		Port:     443,
+		UUID:     "uuid",
+	}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "", "", 1, 0, "status")
+	manager := NewManager(proxyChecker, 10000, filepath.Join(dir, "speedtest_schedule.json"), TestConfig{
+		URL: "https://old.example.com/test.bin",
+	})
+	manager.schedule = ScheduleConfig{
+		Enabled:     true,
+		IntervalSec: 3600,
+		Config: TestConfig{
+			URL: "https://old.example.com/test.bin",
+		},
+	}
+
+	if err := manager.updateScheduleTestURL("https://new.example.com/test.bin"); err != nil {
+		t.Fatal(err)
+	}
+
+	schedule := manager.Schedule()
+	if schedule.Config.URL != "https://new.example.com/test.bin" {
+		t.Fatalf("scheduled URL = %q, want updated URL", schedule.Config.URL)
+	}
+	if !proxyChecker.RestoreOfflineStatus(proxy.StableID, time.Now().Add(-time.Minute), checker.HostCheckDetails{}, checker.PingCheckDetails{}) {
+		t.Fatal("failed to prepare offline proxy state")
+	}
+	if err := manager.Run(RunRequest{
+		ProxyIDs:    []string{proxy.StableID},
+		SkipOffline: true,
+		Config:      schedule.Config,
+	}, "schedule"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for manager.Snapshot().LastRun.Running && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	results := manager.Snapshot().Results
+	if len(results) != 1 || results[0].URL != "https://new.example.com/test.bin" {
+		t.Fatalf("scheduled result = %+v, want updated URL", results)
+	}
+
+	reloaded := NewManager(proxyChecker, 10000, manager.statePath, TestConfig{})
+	if err := reloaded.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Schedule().Config.URL != "https://new.example.com/test.bin" {
+		t.Fatalf("reloaded scheduled URL = %q, want updated URL", reloaded.Schedule().Config.URL)
+	}
+}
+
+func TestNodeTestURLOverridesUpdatedScheduledURL(t *testing.T) {
+	proxy := &models.ProxyConfig{
+		StableID: "node-1",
+		Name:     "Node 1",
+		Protocol: "vless",
+		Server:   "node.example.com",
+		Port:     443,
+		UUID:     "uuid",
+	}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "", "", 1, 0, "status")
+	manager := NewManager(proxyChecker, 10000, "", TestConfig{})
+	manager.schedule = ScheduleConfig{Config: TestConfig{URL: "https://old.example.com/test.bin"}}
+
+	if err := manager.UpdateNodeTestURL(proxy.StableID, "https://node.example.com/current.bin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.updateScheduleTestURL("https://global.example.com/current.bin"); err != nil {
+		t.Fatal(err)
+	}
+
+	effective := manager.configForProxy(manager.Schedule().Config, proxy)
+	if effective.URL != "https://node.example.com/current.bin" {
+		t.Fatalf("effective URL = %q, want per-node URL", effective.URL)
 	}
 }

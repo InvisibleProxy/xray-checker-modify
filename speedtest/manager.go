@@ -136,6 +136,9 @@ type Manager struct {
 	nextRun  time.Time
 	reporter Reporter
 
+	resultPersistMu   sync.Mutex
+	schedulePersistMu sync.Mutex
+
 	stopCh     chan struct{}
 	scheduleCh chan struct{}
 }
@@ -337,10 +340,9 @@ func (m *Manager) DeleteHistory(stableID string) error {
 	m.mu.Lock()
 	delete(m.results, stableID)
 	delete(m.history, stableID)
-	state := m.resultStateLocked()
 	m.mu.Unlock()
 
-	return m.saveResults(state)
+	return m.persistResults()
 }
 
 func (m *Manager) Schedule() ScheduleConfig {
@@ -376,6 +378,9 @@ func (m *Manager) pruneHistoryLocked(historyLimit int) bool {
 }
 
 func (m *Manager) UpdateSchedule(schedule ScheduleConfig) error {
+	m.schedulePersistMu.Lock()
+	defer m.schedulePersistMu.Unlock()
+
 	m.mu.RLock()
 	existingNodeTestURLs := copyStringMap(m.schedule.NodeTestURLs)
 	m.mu.RUnlock()
@@ -397,19 +402,17 @@ func (m *Manager) UpdateSchedule(schedule ScheduleConfig) error {
 		return err
 	}
 
-	var resultState resultStateFile
 	saveResults := false
 	m.mu.Lock()
 	oldHistoryLimit := m.historyLimitLocked()
 	m.schedule = schedule
 	if m.pruneHistoryLocked(schedule.HistoryLimit) || normalizeHistoryLimit(schedule.HistoryLimit) < oldHistoryLimit {
-		resultState = m.resultStateLocked()
 		saveResults = true
 	}
 	m.mu.Unlock()
 
 	if saveResults {
-		if err := m.saveResults(resultState); err != nil {
+		if err := m.persistResults(); err != nil {
 			logger.Warn("Failed to save pruned speed-test results: %v", err)
 		}
 	}
@@ -419,6 +422,9 @@ func (m *Manager) UpdateSchedule(schedule ScheduleConfig) error {
 }
 
 func (m *Manager) UpdateNodeTestURL(stableID string, testURL string) error {
+	m.schedulePersistMu.Lock()
+	defer m.schedulePersistMu.Unlock()
+
 	stableID = strings.TrimSpace(stableID)
 	if stableID == "" {
 		return fmt.Errorf("stableId is required")
@@ -465,8 +471,46 @@ func (m *Manager) UpdateNodeTestURL(stableID string, testURL string) error {
 	return nil
 }
 
+func (m *Manager) updateScheduleTestURL(testURL string) error {
+	testURL = strings.TrimSpace(testURL)
+	if testURL == "" {
+		return nil
+	}
+
+	m.schedulePersistMu.Lock()
+	defer m.schedulePersistMu.Unlock()
+
+	m.mu.RLock()
+	schedule := m.schedule
+	schedule.NodeTestURLs = copyStringMap(m.schedule.NodeTestURLs)
+	m.mu.RUnlock()
+
+	schedule.Config = m.normalizeConfig(schedule.Config)
+	if schedule.Config.URL == testURL {
+		return nil
+	}
+	schedule.Config.URL = testURL
+	if !schedule.Enabled && schedule.IntervalSec == 0 {
+		schedule.IntervalSec = 3600
+	}
+
+	if err := m.saveSchedule(schedule); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	m.schedule = schedule
+	m.mu.Unlock()
+	return nil
+}
+
 func (m *Manager) Run(req RunRequest, source string) error {
 	req.Config = m.normalizeConfig(req.Config)
+	if source == "manual" {
+		if err := m.updateScheduleTestURL(req.Config.URL); err != nil {
+			return fmt.Errorf("save test URL: %w", err)
+		}
+	}
 	proxies := m.selectProxies(req)
 	if len(proxies) == 0 {
 		return fmt.Errorf("no proxies selected")
@@ -510,6 +554,12 @@ func (m *Manager) schedulerLoop() {
 		timer := time.NewTimer(interval)
 		select {
 		case <-timer.C:
+			// Configuration may have changed without resetting the interval,
+			// for example when a manual run saves a new shared Test URL.
+			schedule = m.Schedule()
+			if !schedule.Enabled {
+				continue
+			}
 			req := RunRequest{
 				ProxyIDs:    schedule.ProxyIDs,
 				OnlyOnline:  schedule.OnlyOnline,
@@ -594,10 +644,9 @@ func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source stri
 	m.lastRun.Running = false
 	m.lastRun.FinishedAt = &finishedAt
 	reporter := m.reporter
-	state := m.resultStateLocked()
 	m.mu.Unlock()
 
-	if err := m.saveResults(state); err != nil {
+	if err := m.persistResults(); err != nil {
 		logger.Warn("Failed to save speed-test results: %v", err)
 	}
 
@@ -805,6 +854,16 @@ func (m *Manager) resultStateLocked() resultStateFile {
 		Results:   results,
 		History:   history,
 	}
+}
+
+func (m *Manager) persistResults() error {
+	m.resultPersistMu.Lock()
+	defer m.resultPersistMu.Unlock()
+
+	m.mu.RLock()
+	state := m.resultStateLocked()
+	m.mu.RUnlock()
+	return m.saveResults(state)
 }
 
 func (m *Manager) saveResults(state resultStateFile) error {

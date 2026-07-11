@@ -443,11 +443,37 @@ func (s *Store) RefreshGeo(ctx context.Context, stableIDs []string) (GeoRefreshR
 
 	s.mu.Lock()
 	for stableID, record := range updates {
-		s.nodes[stableID] = record
+		current, ok := s.nodes[stableID]
+		if !ok {
+			continue
+		}
+		// The server may have changed while the external lookups were in
+		// flight. In that case their result no longer describes this node.
+		if serverHost(current.Server) != serverHost(record.Server) {
+			continue
+		}
+		s.nodes[stableID] = mergeGeoFields(current, record)
 	}
 	err := s.saveLocked()
 	s.mu.Unlock()
 	return result, err
+}
+
+func mergeGeoFields(current NodeRecord, geo NodeRecord) NodeRecord {
+	current.GeoIP = geo.GeoIP
+	current.GeoCountry = geo.GeoCountry
+	current.GeoCountryCode = geo.GeoCountryCode
+	current.GeoOrg = geo.GeoOrg
+	current.GeoUpdatedAt = geo.GeoUpdatedAt
+	current.GeoError = geo.GeoError
+	current.IfconfigIP = geo.IfconfigIP
+	current.IfconfigCountry = geo.IfconfigCountry
+	current.IfconfigCountryCode = geo.IfconfigCountryCode
+	current.IfconfigASN = geo.IfconfigASN
+	current.IfconfigOrg = geo.IfconfigOrg
+	current.IfconfigUpdatedAt = geo.IfconfigUpdatedAt
+	current.IfconfigError = geo.IfconfigError
+	return current
 }
 
 func (s *Store) DeleteArchived(stableID string) error {
