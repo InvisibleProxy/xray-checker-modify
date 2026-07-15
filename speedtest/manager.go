@@ -21,15 +21,15 @@ import (
 )
 
 const (
-	defaultURL          = "https://proof.ovh.net/files/100Mb.dat"
-	defaultMaxBytes     = int64(100 * 1024 * 1024)
-	defaultTimeoutSec   = 120
-	defaultConcurrency  = 2
-	maxBytesLimit       = int64(100 * 1024 * 1024)
-	maxTimeoutSec       = 300
-	maxConcurrency      = 10
-	defaultHistoryLimit = 10
-	maxHistoryLimit     = 1000
+	defaultURL                  = "https://proof.ovh.net/files/100Mb.dat"
+	defaultMaxBytes             = int64(100 * 1024 * 1024)
+	defaultTimeoutSec           = 120
+	defaultConcurrency          = 2
+	maxBytesLimit               = int64(100 * 1024 * 1024)
+	maxTimeoutSec               = 300
+	maxConcurrency              = 10
+	defaultHistoryRetentionDays = 60
+	maxHistoryRetentionDays     = 3650
 )
 
 type TestConfig struct {
@@ -49,15 +49,15 @@ type RunRequest struct {
 }
 
 type ScheduleConfig struct {
-	Enabled      bool              `json:"enabled"`
-	IntervalSec  int               `json:"intervalSec"`
-	ProxyIDs     []string          `json:"proxyIds"`
-	OnlyOnline   bool              `json:"onlyOnline"`
-	SubName      string            `json:"subName"`
-	Protocol     string            `json:"protocol"`
-	Config       TestConfig        `json:"config"`
-	NodeTestURLs map[string]string `json:"nodeTestUrls,omitempty"`
-	HistoryLimit int               `json:"historyLimit,omitempty"`
+	Enabled              bool              `json:"enabled"`
+	IntervalSec          int               `json:"intervalSec"`
+	ProxyIDs             []string          `json:"proxyIds"`
+	OnlyOnline           bool              `json:"onlyOnline"`
+	SubName              string            `json:"subName"`
+	Protocol             string            `json:"protocol"`
+	Config               TestConfig        `json:"config"`
+	NodeTestURLs         map[string]string `json:"nodeTestUrls,omitempty"`
+	HistoryRetentionDays int               `json:"historyRetentionDays,omitempty"`
 }
 
 type Result struct {
@@ -183,7 +183,7 @@ func (m *Manager) Load() error {
 	}
 	schedule.Config = m.normalizeConfig(schedule.Config)
 	schedule.NodeTestURLs = normalizeNodeTestURLs(schedule.NodeTestURLs, m.activeProxiesByID())
-	schedule.HistoryLimit = normalizeHistoryLimit(schedule.HistoryLimit)
+	schedule.HistoryRetentionDays = normalizeHistoryRetentionDays(schedule.HistoryRetentionDays)
 	if schedule.IntervalSec < 60 {
 		schedule.IntervalSec = 3600
 	}
@@ -213,7 +213,8 @@ func (m *Manager) loadResults() error {
 	}
 
 	active := m.activeProxiesByID()
-	historyLimit := m.historyLimit()
+	historyRetentionDays := m.historyRetentionDays()
+	now := time.Now()
 	results := make(map[string]Result)
 	history := make(map[string][]Result)
 
@@ -222,7 +223,7 @@ func (m *Manager) loadResults() error {
 		if stableID == "" {
 			continue
 		}
-		entries = normalizeResultHistory(stableID, active[stableID], entries, historyLimit)
+		entries = normalizeResultHistory(stableID, active[stableID], entries, historyRetentionDays, now)
 		if len(entries) == 0 {
 			continue
 		}
@@ -239,11 +240,10 @@ func (m *Manager) loadResults() error {
 		current, ok := results[stableID]
 		if !ok || result.CheckedAt.After(current.CheckedAt) {
 			results[stableID] = result
-			history[stableID] = append([]Result{result}, history[stableID]...)
-			history[stableID] = normalizeResultHistory(stableID, active[stableID], history[stableID], historyLimit)
-		}
-		if _, ok := history[stableID]; !ok {
-			history[stableID] = []Result{result}
+			if resultWithinRetention(result, historyRetentionDays, now) {
+				history[stableID] = append([]Result{result}, history[stableID]...)
+				history[stableID] = normalizeResultHistory(stableID, active[stableID], history[stableID], historyRetentionDays, now)
+			}
 		}
 	}
 
@@ -274,7 +274,7 @@ func (m *Manager) Snapshot() Snapshot {
 
 	schedule := m.schedule
 	schedule.NodeTestURLs = copyStringMap(m.schedule.NodeTestURLs)
-	schedule.HistoryLimit = normalizeHistoryLimit(schedule.HistoryLimit)
+	schedule.HistoryRetentionDays = normalizeHistoryRetentionDays(schedule.HistoryRetentionDays)
 
 	results := make([]Result, 0, len(m.results))
 	for _, result := range m.results {
@@ -304,29 +304,19 @@ func (m *Manager) ResultHistory(stableID string) []Result {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	history := m.history[stableID]
-	historyLimit := m.historyLimitLocked()
-	if len(history) > historyLimit {
-		history = history[:historyLimit]
-	}
-	result := make([]Result, len(history))
-	copy(result, history)
-	return result
+	history := retainResultHistory(m.history[stableID], historyCutoff(m.historyRetentionDaysLocked(), time.Now()))
+	return history
 }
 
 func (m *Manager) AllResultHistory() map[string][]Result {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	historyLimit := m.historyLimitLocked()
+	cutoff := historyCutoff(m.historyRetentionDaysLocked(), time.Now())
 	result := make(map[string][]Result, len(m.history))
 	for stableID, entries := range m.history {
-		if len(entries) > historyLimit {
-			entries = entries[:historyLimit]
-		}
-		copied := make([]Result, len(entries))
-		copy(copied, entries)
-		result[stableID] = copied
+		entries = retainResultHistory(entries, cutoff)
+		result[stableID] = entries
 	}
 	return result
 }
@@ -350,28 +340,33 @@ func (m *Manager) Schedule() ScheduleConfig {
 	defer m.mu.RUnlock()
 	schedule := m.schedule
 	schedule.NodeTestURLs = copyStringMap(m.schedule.NodeTestURLs)
-	schedule.HistoryLimit = normalizeHistoryLimit(schedule.HistoryLimit)
+	schedule.HistoryRetentionDays = normalizeHistoryRetentionDays(schedule.HistoryRetentionDays)
 	return schedule
 }
 
-func (m *Manager) historyLimit() int {
+func (m *Manager) historyRetentionDays() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.historyLimitLocked()
+	return m.historyRetentionDaysLocked()
 }
 
-func (m *Manager) historyLimitLocked() int {
-	return normalizeHistoryLimit(m.schedule.HistoryLimit)
+func (m *Manager) historyRetentionDaysLocked() int {
+	return normalizeHistoryRetentionDays(m.schedule.HistoryRetentionDays)
 }
 
-func (m *Manager) pruneHistoryLocked(historyLimit int) bool {
-	historyLimit = normalizeHistoryLimit(historyLimit)
+func (m *Manager) pruneHistoryLocked(historyRetentionDays int, now time.Time) bool {
+	cutoff := historyCutoff(historyRetentionDays, now)
 	pruned := false
 	for stableID, entries := range m.history {
-		if len(entries) <= historyLimit {
+		retained := retainResultHistory(entries, cutoff)
+		if len(retained) == len(entries) {
 			continue
 		}
-		m.history[stableID] = entries[:historyLimit]
+		if len(retained) == 0 {
+			delete(m.history, stableID)
+		} else {
+			m.history[stableID] = retained
+		}
 		pruned = true
 	}
 	return pruned
@@ -390,7 +385,7 @@ func (m *Manager) UpdateSchedule(schedule ScheduleConfig) error {
 		schedule.NodeTestURLs = existingNodeTestURLs
 	}
 	schedule.NodeTestURLs = normalizeNodeTestURLs(schedule.NodeTestURLs, m.activeProxiesByID())
-	schedule.HistoryLimit = normalizeHistoryLimit(schedule.HistoryLimit)
+	schedule.HistoryRetentionDays = normalizeHistoryRetentionDays(schedule.HistoryRetentionDays)
 	if schedule.Enabled && schedule.IntervalSec < 60 {
 		return fmt.Errorf("intervalSec must be at least 60 when schedule is enabled")
 	}
@@ -404,9 +399,8 @@ func (m *Manager) UpdateSchedule(schedule ScheduleConfig) error {
 
 	saveResults := false
 	m.mu.Lock()
-	oldHistoryLimit := m.historyLimitLocked()
 	m.schedule = schedule
-	if m.pruneHistoryLocked(schedule.HistoryLimit) || normalizeHistoryLimit(schedule.HistoryLimit) < oldHistoryLimit {
+	if m.pruneHistoryLocked(schedule.HistoryRetentionDays, time.Now()) {
 		saveResults = true
 	}
 	m.mu.Unlock()
@@ -446,7 +440,7 @@ func (m *Manager) UpdateNodeTestURL(stableID string, testURL string) error {
 	m.mu.RUnlock()
 
 	schedule.Config = m.normalizeConfig(schedule.Config)
-	schedule.HistoryLimit = normalizeHistoryLimit(schedule.HistoryLimit)
+	schedule.HistoryRetentionDays = normalizeHistoryRetentionDays(schedule.HistoryRetentionDays)
 	if !schedule.Enabled && schedule.IntervalSec == 0 {
 		schedule.IntervalSec = 3600
 	}
@@ -486,6 +480,7 @@ func (m *Manager) updateScheduleTestURL(testURL string) error {
 	m.mu.RUnlock()
 
 	schedule.Config = m.normalizeConfig(schedule.Config)
+	schedule.HistoryRetentionDays = normalizeHistoryRetentionDays(schedule.HistoryRetentionDays)
 	if schedule.Config.URL == testURL {
 		return nil
 	}
@@ -619,12 +614,12 @@ func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source stri
 		runResults = append(runResults, result)
 
 		m.mu.Lock()
-		historyLimit := m.historyLimitLocked()
 		m.results[result.StableID] = result
 		m.history[result.StableID] = append([]Result{result}, m.history[result.StableID]...)
-		if len(m.history[result.StableID]) > historyLimit {
-			m.history[result.StableID] = m.history[result.StableID][:historyLimit]
-		}
+		m.history[result.StableID] = retainResultHistory(
+			m.history[result.StableID],
+			historyCutoff(m.historyRetentionDaysLocked(), time.Now()),
+		)
 		m.lastRun.Completed++
 		m.mu.Unlock()
 	}
@@ -828,7 +823,7 @@ func (m *Manager) selectProxies(req RunRequest) []*models.ProxyConfig {
 }
 
 func (m *Manager) resultStateLocked() resultStateFile {
-	historyLimit := m.historyLimitLocked()
+	cutoff := historyCutoff(m.historyRetentionDaysLocked(), time.Now())
 	results := make(map[string]Result, len(m.results))
 	for stableID, result := range m.results {
 		results[stableID] = result
@@ -836,12 +831,10 @@ func (m *Manager) resultStateLocked() resultStateFile {
 
 	history := make(map[string][]Result, len(m.history))
 	for stableID, entries := range m.history {
-		copied := make([]Result, len(entries))
-		copy(copied, entries)
-		if len(copied) > historyLimit {
-			copied = copied[:historyLimit]
+		retained := retainResultHistory(entries, cutoff)
+		if len(retained) > 0 {
+			history[stableID] = retained
 		}
-		history[stableID] = copied
 	}
 
 	lastRun := m.lastRun
@@ -897,8 +890,7 @@ func (m *Manager) activeProxiesByID() map[string]*models.ProxyConfig {
 	return result
 }
 
-func normalizeResultHistory(stableID string, proxy *models.ProxyConfig, entries []Result, historyLimit int) []Result {
-	historyLimit = normalizeHistoryLimit(historyLimit)
+func normalizeResultHistory(stableID string, proxy *models.ProxyConfig, entries []Result, historyRetentionDays int, now time.Time) []Result {
 	result := make([]Result, 0, len(entries))
 	for _, entry := range entries {
 		result = append(result, normalizeResult(stableID, proxy, entry))
@@ -906,10 +898,7 @@ func normalizeResultHistory(stableID string, proxy *models.ProxyConfig, entries 
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].CheckedAt.After(result[j].CheckedAt)
 	})
-	if len(result) > historyLimit {
-		result = result[:historyLimit]
-	}
-	return result
+	return retainResultHistory(result, historyCutoff(historyRetentionDays, now))
 }
 
 func normalizeResult(stableID string, proxy *models.ProxyConfig, result Result) Result {
@@ -943,14 +932,34 @@ func resultStatePath(schedulePath string) string {
 	return filepath.Join(filepath.Dir(schedulePath), "speedtest_results.json")
 }
 
-func normalizeHistoryLimit(value int) int {
+func normalizeHistoryRetentionDays(value int) int {
 	if value <= 0 {
-		return defaultHistoryLimit
+		return defaultHistoryRetentionDays
 	}
-	if value > maxHistoryLimit {
-		return maxHistoryLimit
+	if value > maxHistoryRetentionDays {
+		return maxHistoryRetentionDays
 	}
 	return value
+}
+
+func historyCutoff(historyRetentionDays int, now time.Time) time.Time {
+	days := normalizeHistoryRetentionDays(historyRetentionDays)
+	return now.Add(-time.Duration(days) * 24 * time.Hour)
+}
+
+func resultWithinRetention(result Result, historyRetentionDays int, now time.Time) bool {
+	return !result.CheckedAt.IsZero() && !result.CheckedAt.Before(historyCutoff(historyRetentionDays, now))
+}
+
+func retainResultHistory(entries []Result, cutoff time.Time) []Result {
+	retained := make([]Result, 0, len(entries))
+	for _, entry := range entries {
+		if entry.CheckedAt.IsZero() || entry.CheckedAt.Before(cutoff) {
+			continue
+		}
+		retained = append(retained, entry)
+	}
+	return retained
 }
 
 func normalizeNodeTestURL(value string) (string, error) {

@@ -15,7 +15,7 @@ func TestLoadResultsKeepsInactiveHistory(t *testing.T) {
 	dir := t.TempDir()
 	schedulePath := filepath.Join(dir, "speedtest_schedule.json")
 	resultPath := filepath.Join(dir, "speedtest_results.json")
-	checkedAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	checkedAt := time.Now().UTC().Add(-time.Hour)
 	state := resultStateFile{
 		Version:   1,
 		UpdatedAt: checkedAt,
@@ -66,7 +66,7 @@ func TestDeleteHistoryRemovesLatestAndHistory(t *testing.T) {
 	schedulePath := filepath.Join(dir, "speedtest_schedule.json")
 	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
 	manager := NewManager(proxyChecker, 10000, schedulePath, TestConfig{})
-	checkedAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	checkedAt := time.Now().UTC().Add(-time.Hour)
 	manager.results["retired"] = Result{StableID: "retired", Name: "Retired", Mbps: 50, CheckedAt: checkedAt}
 	manager.history["retired"] = []Result{{StableID: "retired", Name: "Retired", Mbps: 50, CheckedAt: checkedAt}}
 
@@ -173,5 +173,66 @@ func TestNodeTestURLOverridesUpdatedScheduledURL(t *testing.T) {
 	effective := manager.configForProxy(manager.Schedule().Config, proxy)
 	if effective.URL != "https://node.example.com/current.bin" {
 		t.Fatalf("effective URL = %q, want per-node URL", effective.URL)
+	}
+}
+
+func TestHistoryRetentionDefaultsToSixtyDaysForLegacySchedule(t *testing.T) {
+	dir := t.TempDir()
+	schedulePath := filepath.Join(dir, "speedtest_schedule.json")
+	legacySchedule := []byte(`{"enabled":false,"intervalSec":7200,"historyLimit":1000,"config":{}}`)
+	if err := os.WriteFile(schedulePath, legacySchedule, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
+	manager := NewManager(proxyChecker, 10000, schedulePath, TestConfig{})
+	if err := manager.Load(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := manager.Schedule().HistoryRetentionDays; got != defaultHistoryRetentionDays {
+		t.Fatalf("history retention = %d days, want %d", got, defaultHistoryRetentionDays)
+	}
+}
+
+func TestResultHistoryRetainsOnlyConfiguredDays(t *testing.T) {
+	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
+	manager := NewManager(proxyChecker, 10000, "", TestConfig{})
+	manager.schedule.HistoryRetentionDays = 60
+	now := time.Now().UTC()
+	manager.history["node-1"] = []Result{
+		{StableID: "node-1", CheckedAt: now.Add(-59 * 24 * time.Hour)},
+		{StableID: "node-1", CheckedAt: now.Add(-61 * 24 * time.Hour)},
+		{StableID: "node-1"},
+	}
+
+	history := manager.ResultHistory("node-1")
+	if len(history) != 1 {
+		t.Fatalf("history length = %d, want 1", len(history))
+	}
+	if history[0].CheckedAt.Before(now.Add(-60 * 24 * time.Hour)) {
+		t.Fatalf("retained result is older than 60 days: %s", history[0].CheckedAt)
+	}
+}
+
+func TestUpdateSchedulePrunesHistoryOutsideRetention(t *testing.T) {
+	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
+	manager := NewManager(proxyChecker, 10000, "", TestConfig{})
+	manager.schedule.HistoryRetentionDays = 60
+	now := time.Now().UTC()
+	manager.history["node-1"] = []Result{
+		{StableID: "node-1", CheckedAt: now.Add(-20 * 24 * time.Hour)},
+		{StableID: "node-1", CheckedAt: now.Add(-40 * 24 * time.Hour)},
+	}
+
+	if err := manager.UpdateSchedule(ScheduleConfig{IntervalSec: 7200, HistoryRetentionDays: 30}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := manager.Schedule().HistoryRetentionDays; got != 30 {
+		t.Fatalf("history retention = %d days, want 30", got)
+	}
+	if got := len(manager.ResultHistory("node-1")); got != 1 {
+		t.Fatalf("history length after pruning = %d, want 1", got)
 	}
 }

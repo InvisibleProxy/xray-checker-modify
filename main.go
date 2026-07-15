@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"xray-checker/backup"
 	"xray-checker/checker"
 	"xray-checker/config"
 	"xray-checker/logger"
@@ -37,6 +38,11 @@ func main() {
 	logger.Startup("Xray Checker %s", version)
 	if logLevel == logger.LevelNone {
 		logger.Startup("Log level: none (silent mode)")
+	}
+	if applied, err := backup.ApplyPendingRestore("data"); err != nil {
+		logger.Warn("Failed to apply pending backup restore: %v", err)
+	} else if applied {
+		logger.Startup("Applied pending backup restore")
 	}
 
 	if err := web.InitAssetLoader(config.CLIConfig.Web.CustomAssetsPath); err != nil {
@@ -90,6 +96,8 @@ func main() {
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(metrics.GetProxyStatusMetric())
 	registry.MustRegister(metrics.GetProxyLatencyMetric())
+	backupCreator := backup.NewCreator("data", version)
+	backupRestorer := backup.NewRestorer("data")
 
 	proxyChecker := checker.NewProxyChecker(
 		*proxyConfigs,
@@ -136,6 +144,9 @@ func main() {
 	if err := nodeArchive.RecordAvailability(); err != nil {
 		logger.Warn("Failed to record restored node availability: %v", err)
 	}
+	automaticBackups := backup.NewAutomaticScheduler(backupCreator, "data/backups")
+	automaticBackups.Start()
+	defer automaticBackups.Stop()
 	speedTestManager.SetReporter(telegramService)
 	telegramService.Start()
 	defer telegramService.Stop()
@@ -269,6 +280,8 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/subscription/refresh", web.AdminSubscriptionRefreshHandler(func() (web.AdminSubscriptionRefreshResult, error) {
 		return refreshSubscription("manual")
 	}))
+	protectedHandler.Handle("/api/v1/admin/backup", web.AdminBackupHandler(backupCreator))
+	protectedHandler.Handle("/api/v1/admin/backup/restore", web.AdminBackupRestoreHandler(backupRestorer))
 	protectedHandler.Handle("/api/v1/admin/speed-tests/run", web.AdminSpeedTestRunHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/speed-tests/node-url", web.AdminSpeedTestNodeURLHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/speed-tests/history", web.AdminSpeedTestHistoryHandler(speedTestManager))

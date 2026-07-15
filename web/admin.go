@@ -3,10 +3,16 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"mime"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"xray-checker/backup"
 	"xray-checker/checker"
 	"xray-checker/models"
 	"xray-checker/nodearchive"
@@ -87,6 +93,102 @@ func AdminSubscriptionRefreshHandler(refresh AdminSubscriptionRefreshFunc) http.
 				status = http.StatusConflict
 			}
 			writeError(w, err.Error(), status)
+			return
+		}
+		writeJSON(w, result)
+	}
+}
+
+func AdminBackupHandler(creator *backup.Creator) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		tmp, err := os.CreateTemp("", "xray-checker-backup-*.zip")
+		if err != nil {
+			writeError(w, "Failed to prepare backup", http.StatusInternalServerError)
+			return
+		}
+		tmpPath := tmp.Name()
+		defer func() {
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
+		}()
+
+		result, err := creator.Create(tmp)
+		if err != nil {
+			writeError(w, "Failed to create backup: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+			writeError(w, "Failed to prepare backup download", http.StatusInternalServerError)
+			return
+		}
+		info, err := tmp.Stat()
+		if err != nil {
+			writeError(w, "Failed to prepare backup download", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": result.Filename}))
+		w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+		w.Header().Set("Cache-Control", "no-store, private")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if _, err := io.Copy(w, tmp); err != nil {
+			return
+		}
+	}
+}
+
+func AdminBackupRestoreHandler(restorer *backup.Restorer) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.Header.Get("X-Xray-Checker-Action") != "restore-backup" {
+			writeError(w, "Restore confirmation header is required", http.StatusForbidden)
+			return
+		}
+
+		r.Body = http.MaxBytesReader(w, r.Body, backup.MaxArchiveSize+1024*1024)
+		if err := r.ParseMultipartForm(32 * 1024 * 1024); err != nil {
+			var maxBytesError *http.MaxBytesError
+			if errors.As(err, &maxBytesError) {
+				writeError(w, "Backup archive is too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			writeError(w, "Invalid backup upload", http.StatusBadRequest)
+			return
+		}
+		if r.MultipartForm != nil {
+			defer r.MultipartForm.RemoveAll()
+		}
+
+		file, _, err := r.FormFile("backup")
+		if err != nil {
+			writeError(w, "Backup archive is required", http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+
+		size, err := file.Seek(0, io.SeekEnd)
+		if err != nil {
+			writeError(w, "Failed to read backup archive", http.StatusBadRequest)
+			return
+		}
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			writeError(w, "Failed to read backup archive", http.StatusBadRequest)
+			return
+		}
+
+		result, err := restorer.Stage(file, size)
+		if err != nil {
+			writeError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		writeJSON(w, result)

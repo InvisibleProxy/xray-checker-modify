@@ -510,7 +510,7 @@
     <header>
       <div>
         <h1>Xray Checker Admin</h1>
-        <div class="muted">Manual speed tests and private schedule control</div>
+        <div class="muted">Manual speed tests, private schedule and backups</div>
       </div>
       <div class="topbar-status">
         <span id="last-updated" class="muted">Last updated: n/a</span>
@@ -541,6 +541,7 @@
           <button id="settings-tab-filters" class="settings-tab" type="button">Filters</button>
           <button id="settings-tab-schedule" class="settings-tab" type="button">Schedule</button>
           <button id="settings-tab-telegram" class="settings-tab" type="button">Telegram</button>
+          <button id="settings-tab-backup" class="settings-tab" type="button">Backup</button>
         </nav>
 
         <section id="settings-pane-run" class="settings-pane stack">
@@ -645,8 +646,8 @@
               <input id="schedule-minutes" type="number" min="1" step="1" />
             </label>
             <label>
-              Results per node
-              <input id="history-limit" type="number" min="1" max="1000" step="1" />
+              History retention days
+              <input id="history-retention-days" type="number" min="1" max="3650" step="1" />
             </label>
             <button id="save-schedule" class="secondary" type="button">Save Schedule</button>
           </div>
@@ -775,6 +776,41 @@
               <button id="save-telegram" class="secondary" type="button">Save Telegram</button>
               <button id="test-telegram" class="secondary" type="button">Test</button>
             </div>
+          </div>
+        </section>
+
+        <section id="settings-pane-backup" class="settings-pane stack" hidden>
+          <div class="control-group">
+            <div class="group-title">
+              <h3>Download Backup</h3>
+            </div>
+            <div class="hint">
+              Download persisted settings, node statistics and speed-test history as a ZIP archive.
+              Environment variables, generated Xray configuration, geo files and Telegram credentials are excluded.
+            </div>
+            <button id="download-backup" class="secondary" type="button">Download Backup</button>
+          </div>
+
+          <div class="control-group">
+            <div class="group-title">
+              <h3>Automatic Backups</h3>
+            </div>
+            <div class="hint">
+              One archive is created per UTC day in <code>data/backups</code>.
+              Archives older than 7 days and files beyond the newest 7 are removed automatically.
+            </div>
+          </div>
+
+          <div class="control-group">
+            <div class="group-title">
+              <h3>Restore</h3>
+            </div>
+            <div class="hint">
+              Upload an Xray Checker backup. It will be verified and applied on the next application restart.
+              Files missing from the archive will be removed during restoration.
+            </div>
+            <input id="restore-backup-file" type="file" accept=".zip,application/zip" />
+            <button id="restore-backup" class="secondary" type="button" disabled>Restore on Restart</button>
           </div>
         </section>
 
@@ -1059,8 +1095,8 @@
       const $ = (id) => document.getElementById(id);
       const api = (path) => `${basePath}/api/v1/admin${path}`;
       const mb = 1024 * 1024;
-      const defaultHistoryLimit = 10;
-      const maxHistoryLimit = 1000;
+      const defaultHistoryRetentionDays = 60;
+      const maxHistoryRetentionDays = 3650;
       const speedDraftKey = "xray-checker-admin-speed-test";
 
       function escapeHtml(value) {
@@ -1131,9 +1167,9 @@
         return values.join(",");
       }
 
-      function historyLimitFromForm() {
-        const value = Math.round(Number($("history-limit").value || defaultHistoryLimit));
-        return Math.min(maxHistoryLimit, Math.max(1, value));
+      function historyRetentionDaysFromForm() {
+        const value = Math.round(Number($("history-retention-days").value || defaultHistoryRetentionDays));
+        return Math.min(maxHistoryRetentionDays, Math.max(1, value));
       }
 
       function telegramFromForm() {
@@ -1997,7 +2033,10 @@
         const schedule = state.snapshot.schedule || {};
         $("schedule-enabled").checked = !!schedule.enabled;
         $("schedule-minutes").value = Math.max(1, Math.round((schedule.intervalSec || 3600) / 60));
-        $("history-limit").value = Math.min(maxHistoryLimit, Math.max(1, Number(schedule.historyLimit || defaultHistoryLimit)));
+        $("history-retention-days").value = Math.min(
+          maxHistoryRetentionDays,
+          Math.max(1, Number(schedule.historyRetentionDays || defaultHistoryRetentionDays)),
+        );
         $("status-filter").value = schedule.onlyOnline ? "online" : "";
         $("protocol-filter").value = schedule.protocol || "";
         $("sub-filter").value = schedule.subName || "";
@@ -2183,7 +2222,7 @@
 
       function switchSettingsPane(pane) {
         state.settingsPane = pane;
-        ["run", "filters", "schedule", "telegram"].forEach((name) => {
+        ["run", "filters", "schedule", "telegram", "backup"].forEach((name) => {
           $(`settings-pane-${name}`).hidden = name !== pane;
           $(`settings-tab-${name}`).classList.toggle("active", name === pane);
         });
@@ -2305,7 +2344,7 @@
               onlyOnline: filters.status === "online",
               subName: filters.subName,
               protocol: filters.protocol,
-              historyLimit: historyLimitFromForm(),
+              historyRetentionDays: historyRetentionDaysFromForm(),
               config: configFromForm(),
             }),
           });
@@ -2328,6 +2367,52 @@
           $("message").textContent = "Telegram settings saved";
         } catch (err) {
           $("message").textContent = err.message;
+        }
+      }
+
+      function downloadBackup() {
+        const link = document.createElement("a");
+        link.href = api("/backup");
+        link.hidden = true;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        $("message").textContent = "Backup download started";
+      }
+
+      function updateRestoreBackupButton() {
+        $("restore-backup").disabled = $("restore-backup-file").files.length === 0;
+      }
+
+      async function restoreBackup() {
+        const input = $("restore-backup-file");
+        const file = input.files[0];
+        if (!file) return;
+        if (!window.confirm("Restore this backup on the next application restart?\n\nCurrent persisted data will be replaced.")) {
+          return;
+        }
+
+        const button = $("restore-backup");
+        button.disabled = true;
+        $("message").textContent = "Verifying backup...";
+        try {
+          const form = new FormData();
+          form.append("backup", file);
+          const response = await fetch(api("/backup/restore"), {
+            method: "POST",
+            headers: { "X-Xray-Checker-Action": "restore-backup" },
+            body: form,
+          });
+          const payload = await response.json().catch(() => null);
+          if (!response.ok || !payload || !payload.success) {
+            throw new Error((payload && payload.error) || `HTTP ${response.status}`);
+          }
+          input.value = "";
+          $("message").textContent = `Backup verified (${payload.data.files.length} files). Restart the application to apply it.`;
+        } catch (err) {
+          $("message").textContent = err.message;
+        } finally {
+          updateRestoreBackupButton();
         }
       }
 
@@ -2396,7 +2481,7 @@
       $("tab-dashboard").addEventListener("click", () => switchTab("dashboard"));
       $("tab-nodes-overview").addEventListener("click", () => switchTab("nodes-overview"));
       $("tab-history").addEventListener("click", () => switchTab("history"));
-      ["run", "filters", "schedule", "telegram"].forEach((pane) => {
+      ["run", "filters", "schedule", "telegram", "backup"].forEach((pane) => {
         $(`settings-tab-${pane}`).addEventListener("click", () => switchSettingsPane(pane));
       });
       $("refresh").addEventListener("click", () => load());
@@ -2422,6 +2507,9 @@
       $("clear-node-url").addEventListener("click", clearNodeURL);
       $("save-schedule").addEventListener("click", saveSchedule);
       $("save-telegram").addEventListener("click", saveTelegram);
+      $("download-backup").addEventListener("click", downloadBackup);
+      $("restore-backup-file").addEventListener("change", updateRestoreBackupButton);
+      $("restore-backup").addEventListener("click", restoreBackup);
       $("mute-selected").addEventListener("click", () => updateTelegramMute($("mute-scope").value || "all", true));
       $("unmute-selected").addEventListener("click", () => updateTelegramMute($("mute-scope").value || "all", false));
       $("mute-scope").addEventListener("change", renderTelegramMuteControls);
