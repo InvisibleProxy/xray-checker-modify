@@ -129,6 +129,186 @@ func TestRestorerRejectsUnsupportedEntry(t *testing.T) {
 	}
 }
 
+func TestRestorerRejectsDuplicateManifestKeys(t *testing.T) {
+	var archive bytes.Buffer
+	writer := zip.NewWriter(&archive)
+	entry, err := writer.Create("manifest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"formatVersion":1,"FormatVersion":1,"createdAt":"2026-08-03T00:00:00Z","files":[]}`
+	if _, err := entry.Write([]byte(manifest)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewRestorer(t.TempDir()).Stage(bytes.NewReader(archive.Bytes()), int64(archive.Len())); err == nil {
+		t.Fatal("manifest with case-folded duplicate keys was accepted")
+	}
+}
+
+func TestAppliedRestoreCanBeRolledBackAfterLoaderFailure(t *testing.T) {
+	archive := buildRegistryBackup(t, `{"version":1,"nodes":{"restored":{}}}`)
+	targetDir := t.TempDir()
+	original := []byte(`{"version":1,"nodes":{"original":{}}}`)
+	writeTestFile(t, filepath.Join(targetDir, "node_registry.json"), original)
+
+	if _, err := NewRestorer(targetDir).Stage(bytes.NewReader(archive), int64(len(archive))); err != nil {
+		t.Fatalf("stage restore: %v", err)
+	}
+	if applied, err := ApplyPendingRestore(targetDir); err != nil || !applied {
+		t.Fatalf("ApplyPendingRestore() = %v, %v; want true, nil", applied, err)
+	}
+	if err := RollbackAppliedRestore(targetDir); err != nil {
+		t.Fatalf("RollbackAppliedRestore() error = %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(targetDir, "node_registry.json"))
+	if err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("rolled-back registry = %s, %v; want original %s", got, err, original)
+	}
+	assertRestoreTransactionRemoved(t, targetDir)
+}
+
+func TestConfirmedRestoreKeepsInstalledState(t *testing.T) {
+	restored := []byte(`{"version":1,"nodes":{"restored":{}}}`)
+	archive := buildRegistryBackup(t, string(restored))
+	targetDir := t.TempDir()
+	writeTestFile(t, filepath.Join(targetDir, "node_registry.json"), []byte(`{"version":1,"nodes":{"original":{}}}`))
+
+	if _, err := NewRestorer(targetDir).Stage(bytes.NewReader(archive), int64(len(archive))); err != nil {
+		t.Fatalf("stage restore: %v", err)
+	}
+	if applied, err := ApplyPendingRestore(targetDir); err != nil || !applied {
+		t.Fatalf("ApplyPendingRestore() = %v, %v; want true, nil", applied, err)
+	}
+	if err := ConfirmAppliedRestore(targetDir); err != nil {
+		t.Fatalf("ConfirmAppliedRestore() error = %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(targetDir, "node_registry.json"))
+	if err != nil || !bytes.Equal(got, restored) {
+		t.Fatalf("confirmed registry = %s, %v; want restored %s", got, err, restored)
+	}
+	assertRestoreTransactionRemoved(t, targetDir)
+	if recovered, err := RecoverUnconfirmedRestore(targetDir); err != nil || recovered {
+		t.Fatalf("RecoverUnconfirmedRestore() = %v, %v after confirmation; want false, nil", recovered, err)
+	}
+}
+
+func TestStartupRecoversUnconfirmedRestore(t *testing.T) {
+	archive := buildRegistryBackup(t, `{"version":1,"nodes":{"restored":{}}}`)
+	targetDir := t.TempDir()
+	original := []byte(`{"version":1,"nodes":{"original":{}}}`)
+	writeTestFile(t, filepath.Join(targetDir, "node_registry.json"), original)
+
+	if _, err := NewRestorer(targetDir).Stage(bytes.NewReader(archive), int64(len(archive))); err != nil {
+		t.Fatalf("stage restore: %v", err)
+	}
+	if applied, err := ApplyPendingRestore(targetDir); err != nil || !applied {
+		t.Fatalf("ApplyPendingRestore() = %v, %v; want true, nil", applied, err)
+	}
+	if recovered, err := RecoverUnconfirmedRestore(targetDir); err != nil || !recovered {
+		t.Fatalf("RecoverUnconfirmedRestore() = %v, %v; want true, nil", recovered, err)
+	}
+	got, err := os.ReadFile(filepath.Join(targetDir, "node_registry.json"))
+	if err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("startup-recovered registry = %s, %v; want original %s", got, err, original)
+	}
+	assertRestoreTransactionRemoved(t, targetDir)
+}
+
+func TestStartupFinishesPartialRestoreConfirmationCleanup(t *testing.T) {
+	tests := []struct {
+		remainingDir string
+		confirmed    bool
+	}{
+		{remainingDir: appliedRestoreDir},
+		{remainingDir: rollbackRestoreDir, confirmed: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.remainingDir, func(t *testing.T) {
+			dataDir := t.TempDir()
+			remainingPath := filepath.Join(dataDir, tt.remainingDir)
+			if err := os.Mkdir(remainingPath, 0700); err != nil {
+				t.Fatalf("create partial transaction: %v", err)
+			}
+			if tt.confirmed {
+				writeTestFile(t, filepath.Join(remainingPath, restoreCommitMarker), []byte("confirmed\n"))
+			}
+			if recovered, err := RecoverUnconfirmedRestore(dataDir); err != nil || !recovered {
+				t.Fatalf("RecoverUnconfirmedRestore() = %v, %v; want true, nil", recovered, err)
+			}
+			assertRestoreTransactionRemoved(t, dataDir)
+		})
+	}
+}
+
+func TestStartupRollsBackInterruptedApplyAndKeepsPendingRestore(t *testing.T) {
+	archive := buildRegistryBackup(t, `{"version":1,"nodes":{"restored":{}}}`)
+	dataDir := t.TempDir()
+	original := []byte(`{"version":1,"nodes":{"original":{}}}`)
+	writeTestFile(t, filepath.Join(dataDir, "node_registry.json"), original)
+	if _, err := NewRestorer(dataDir).Stage(bytes.NewReader(archive), int64(len(archive))); err != nil {
+		t.Fatalf("stage restore: %v", err)
+	}
+
+	rollbackPath := filepath.Join(dataDir, rollbackRestoreDir)
+	if err := os.Mkdir(rollbackPath, 0700); err != nil {
+		t.Fatalf("create rollback directory: %v", err)
+	}
+	if err := os.Rename(filepath.Join(dataDir, "node_registry.json"), filepath.Join(rollbackPath, "node_registry.json")); err != nil {
+		t.Fatalf("stage original file: %v", err)
+	}
+	if err := os.Rename(filepath.Join(dataDir, pendingRestoreDir, "node_registry.json"), filepath.Join(dataDir, "node_registry.json")); err != nil {
+		t.Fatalf("install restored file: %v", err)
+	}
+
+	if recovered, err := RecoverUnconfirmedRestore(dataDir); err != nil || !recovered {
+		t.Fatalf("RecoverUnconfirmedRestore() = %v, %v; want true, nil", recovered, err)
+	}
+	got, err := os.ReadFile(filepath.Join(dataDir, "node_registry.json"))
+	if err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("recovered registry = %s, %v; want original %s", got, err, original)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, pendingRestoreDir, "node_registry.json")); err != nil {
+		t.Fatalf("restored payload was not returned to pending state: %v", err)
+	}
+	if applied, err := ApplyPendingRestore(dataDir); err != nil || !applied {
+		t.Fatalf("reapplying recovered pending restore = %v, %v; want true, nil", applied, err)
+	}
+}
+
+func TestStartupRejectsUnexplainedRollbackDirectory(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dataDir, rollbackRestoreDir), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if recovered, err := RecoverUnconfirmedRestore(dataDir); err == nil || recovered {
+		t.Fatalf("RecoverUnconfirmedRestore() = %v, %v; want false and an error", recovered, err)
+	}
+}
+
+func buildRegistryBackup(t *testing.T, registry string) []byte {
+	t.Helper()
+	sourceDir := t.TempDir()
+	writeTestFile(t, filepath.Join(sourceDir, "node_registry.json"), []byte(registry))
+	var archive bytes.Buffer
+	if _, err := NewCreator(sourceDir, "test").Create(&archive); err != nil {
+		t.Fatalf("create registry backup: %v", err)
+	}
+	return archive.Bytes()
+}
+
+func assertRestoreTransactionRemoved(t *testing.T, dataDir string) {
+	t.Helper()
+	for _, name := range []string{appliedRestoreDir, rollbackRestoreDir} {
+		if _, err := os.Lstat(filepath.Join(dataDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("restore transaction directory %s still exists: %v", name, err)
+		}
+	}
+}
+
 func buildRestoreTestArchive(t *testing.T, manifest Manifest, files map[string][]byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer

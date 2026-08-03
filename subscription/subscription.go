@@ -51,6 +51,9 @@ func InitializeConfiguration(configFile string, version string) (*[]*models.Prox
 	}
 
 	xray.PrepareProxyConfigs(proxyConfigs)
+	if err := xray.ValidateStableIDs(proxyConfigs); err != nil {
+		return nil, fmt.Errorf("invalid proxy identity: %w", err)
+	}
 
 	configGenerator := xray.NewConfigGenerator()
 	if err := configGenerator.GenerateAndSaveConfig(

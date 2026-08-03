@@ -12,8 +12,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"xray-checker/backup"
+	"xray-checker/checker"
+	"xray-checker/nodearchive"
+	"xray-checker/speedtest"
 )
 
 func TestAdminSubscriptionRefreshHandler(t *testing.T) {
@@ -192,5 +196,85 @@ func TestAdminBackupRestoreHandlerRequiresConfirmationHeader(t *testing.T) {
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected status %d, got %d", http.StatusForbidden, rec.Code)
+	}
+}
+
+func TestAdminReadHandlersRejectMutatingMethods(t *testing.T) {
+	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
+	manager := speedtest.NewManager(proxyChecker, 10000, "", speedtest.TestConfig{})
+	tests := []struct {
+		name    string
+		handler http.Handler
+		path    string
+	}{
+		{name: "proxies", handler: AdminProxiesHandler(proxyChecker, 10000), path: "/api/v1/admin/proxies"},
+		{name: "speed snapshot", handler: AdminSpeedTestSnapshotHandler(manager), path: "/api/v1/admin/speed-tests"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, tt.path, nil)
+			tt.handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("expected status %d, got %d", http.StatusMethodNotAllowed, rec.Code)
+			}
+		})
+	}
+}
+
+func TestAdminRetiredNodeDeleteRollsBackArchiveWhenSpeedHistorySaveFails(t *testing.T) {
+	root := t.TempDir()
+	speedDir := filepath.Join(root, "speed")
+	if err := os.Mkdir(speedDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	checkedAt := time.Now().UTC()
+	result := speedtest.Result{StableID: "retired", Name: "Retired", Mbps: 50, CheckedAt: checkedAt}
+	state := map[string]any{
+		"version":   1,
+		"updatedAt": checkedAt,
+		"lastRun":   map[string]any{},
+		"results":   map[string]speedtest.Result{"retired": result},
+		"history":   map[string][]speedtest.Result{"retired": {result}},
+	}
+	stateData, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(speedDir, "speedtest_results.json"), stateData, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
+	manager := speedtest.NewManager(proxyChecker, 10000, filepath.Join(speedDir, "speedtest_schedule.json"), speedtest.TestConfig{})
+	if err := manager.Load(); err != nil {
+		t.Fatalf("load speed history: %v", err)
+	}
+	store := nodearchive.NewStore(filepath.Join(root, "node_registry.json"), proxyChecker)
+	if err := store.SyncSpeedHistory(manager.AllResultHistory()); err != nil {
+		t.Fatalf("seed retired node: %v", err)
+	}
+
+	movedSpeedDir := filepath.Join(root, "speed-loaded")
+	if err := os.Rename(speedDir, movedSpeedDir); err != nil {
+		t.Fatalf("move speed state directory: %v", err)
+	}
+	if err := os.WriteFile(speedDir, []byte("block persistence"), 0600); err != nil {
+		t.Fatalf("create persistence blocker: %v", err)
+	}
+
+	handler := AdminNodesOverviewDeleteHandler(store, manager)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/nodes-overview/delete", strings.NewReader(`{"stableId":"retired"}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, rec.Code, rec.Body.String())
+	}
+	if _, err := store.ArchivedRecord("retired"); err != nil {
+		t.Fatalf("retired archive record was not rolled back: %v", err)
+	}
+	if history := manager.ResultHistory("retired"); len(history) != 1 {
+		t.Fatalf("speed history was not rolled back: %+v", history)
 	}
 }

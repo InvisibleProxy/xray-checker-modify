@@ -35,6 +35,7 @@ const (
 	maxSpeedReportLimit                = 50
 	menuSpeedButtonLimit               = 8
 	maxDiagnosticsRefreshConcurrency   = 4
+	maxRichMessageRunes                = 32768
 )
 
 var defaultAlertReminderScheduleMinutes = parseMinuteSchedule(defaultAlertReminderScheduleString)
@@ -173,6 +174,7 @@ type Service struct {
 	statusCheck  bool
 	lastAlertRun time.Time
 	lastUpdateID int
+	richMessages int
 
 	stopCh   chan struct{}
 	stopOnce sync.Once
@@ -188,6 +190,9 @@ type nodeAlertState struct {
 	LastDiagnostics time.Time
 	HostCheck       checker.HostCheckDetails
 	PingCheck       checker.PingCheckDetails
+	RecoveryPending bool
+	RecoveredAt     time.Time
+	RecoveryLatency time.Duration
 }
 
 type nodeAlertStateFile struct {
@@ -206,6 +211,9 @@ type persistedNodeAlertState struct {
 	LastDiagnostics time.Time           `json:"lastDiagnostics"`
 	HostCheck       *persistedHostCheck `json:"hostCheck,omitempty"`
 	PingCheck       *persistedPingCheck `json:"pingCheck,omitempty"`
+	RecoveryPending bool                `json:"recoveryPending,omitempty"`
+	RecoveredAt     time.Time           `json:"recoveredAt,omitempty"`
+	RecoveryLatency int64               `json:"recoveryLatencyMs,omitempty"`
 }
 
 type persistedHostCheck struct {
@@ -235,6 +243,22 @@ type nodeDownAlert struct {
 	Proxy     *models.ProxyConfig
 	State     nodeAlertState
 	NextAfter time.Duration
+}
+
+type nodeRecoveryAlert struct {
+	StableID    string
+	RecoveredAt time.Time
+	Message     formattedMessage
+}
+
+type formattedMessage struct {
+	HTML     string
+	RichHTML string
+}
+
+type inputRichMessage struct {
+	HTML                string `json:"html"`
+	SkipEntityDetection bool   `json:"skip_entity_detection,omitempty"`
 }
 
 type diagnosticsRefreshRequest struct {
@@ -472,7 +496,14 @@ func (s *Service) SendTestMessage() error {
 	if cfg.ChatID == "" {
 		return fmt.Errorf("chat ID is required for test messages")
 	}
-	return s.sendText(context.Background(), "Xray Checker Telegram notifications are configured.")
+	content := formattedMessage{
+		HTML:     "✅ <b>Telegram подключён</b>\n\nТестовое сообщение доставлено. Уведомления настроены.",
+		RichHTML: "<h2>✅ Telegram подключён</h2><p>Тестовое сообщение доставлено. Уведомления настроены.</p>",
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
+	defer cancel()
+	_, err := s.sendFormattedToWithMarkup(ctx, cfg.ChatID, cfg.MessageThreadID, content, "")
+	return err
 }
 
 func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
@@ -483,11 +514,11 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 		return
 	}
 
-	text := s.formatSpeedReport(report, cfg, failed, slow, issuesOnly)
+	content := s.formatSpeedReportMessage(report, cfg, failed, slow, issuesOnly)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
 	defer cancel()
 
-	if _, err := s.sendHTMLToWithMarkup(ctx, cfg.ChatID, cfg.MessageThreadID, text, backToMenuMarkup()); err != nil {
+	if _, err := s.sendFormattedToWithMarkup(ctx, cfg.ChatID, cfg.MessageThreadID, content, backToMenuMarkup()); err != nil {
 		logger.Warn("Failed to send Telegram speed-test report: %v", err)
 	}
 }
@@ -503,11 +534,8 @@ func speedReportDecision(report speedtest.RunReport, cfg Config) (failed int, sl
 	}
 
 	failed, slow = countSpeedIssues(results, cfg.LowSpeedThresholdMbps)
-	issuesOnly = report.Source == "schedule"
+	issuesOnly = cfg.SpeedReportMode == "issues"
 	if issuesOnly && failed == 0 && slow == 0 {
-		return failed, slow, issuesOnly, false
-	}
-	if cfg.SpeedReportMode == "issues" && failed == 0 && slow == 0 {
 		return failed, slow, issuesOnly, false
 	}
 	return failed, slow, issuesOnly, true
@@ -544,7 +572,7 @@ func (s *Service) NotifyNodeStatuses() {
 	}
 	s.mu.Unlock()
 
-	var recoveryMessages []string
+	var recoveryAlerts []nodeRecoveryAlert
 	var refreshRequests []diagnosticsRefreshRequest
 	var dueAlertProxies []*models.ProxyConfig
 	for _, proxy := range proxies {
@@ -562,6 +590,9 @@ func (s *Service) NotifyNodeStatuses() {
 		state := s.alerts[proxy.StableID]
 		previous := state
 		if isDown {
+			state.RecoveryPending = false
+			state.RecoveredAt = time.Time{}
+			state.RecoveryLatency = 0
 			state.FailCount++
 			state.WasDown = true
 			if details.HostCheck.Checked {
@@ -592,9 +623,19 @@ func (s *Service) NotifyNodeStatuses() {
 			}
 		} else {
 			if shouldNotifyNodeRecovery(state, cfg, isMuted) {
-				recoveryMessages = append(recoveryMessages, formatNodeRecovery(proxy, details.Latency, state.DownSince, now))
+				if !state.RecoveryPending {
+					state.RecoveryPending = true
+					state.RecoveredAt = now
+					state.RecoveryLatency = details.Latency
+				}
+				recoveryAlerts = append(recoveryAlerts, nodeRecoveryAlert{
+					StableID:    proxy.StableID,
+					RecoveredAt: state.RecoveredAt,
+					Message:     formatNodeRecoveryMessage(proxy, state.RecoveryLatency, state.DownSince, state.RecoveredAt),
+				})
+			} else {
+				state = nodeAlertState{}
 			}
-			state = nodeAlertState{}
 		}
 		if previous != state {
 			stateChanged = true
@@ -638,19 +679,23 @@ func (s *Service) NotifyNodeStatuses() {
 		}
 	}
 
-	for _, text := range recoveryMessages {
-		_ = s.sendNodeAlertMessage(cfg, text)
+	for _, alert := range recoveryAlerts {
+		if err := s.sendNodeAlertMessage(cfg, alert.Message); err == nil {
+			if s.confirmNodeRecoverySent(alert.StableID, alert.RecoveredAt) {
+				stateChanged = true
+			}
+		}
 	}
 
 	if cfg.GroupOfflineReminders && len(downAlerts) > 1 {
-		if err := s.sendNodeAlertMessage(cfg, formatNodeDownGroup(downAlerts, now)); err == nil {
+		if err := s.sendNodeAlertMessage(cfg, formatNodeDownGroupMessage(downAlerts, now)); err == nil {
 			if s.confirmNodeDownAlertsSent(downAlerts, time.Now(), cfg) {
 				stateChanged = true
 			}
 		}
 	} else {
 		for _, alert := range downAlerts {
-			if err := s.sendNodeAlertMessage(cfg, formatNodeDown(alert.Proxy, alert.State, now)); err == nil {
+			if err := s.sendNodeAlertMessage(cfg, formatNodeDownMessage(alert.Proxy, alert.State, now)); err == nil {
 				if s.confirmNodeDownAlertsSent([]nodeDownAlert{alert}, time.Now(), cfg) {
 					stateChanged = true
 				}
@@ -665,13 +710,13 @@ func (s *Service) NotifyNodeStatuses() {
 	}
 }
 
-func (s *Service) sendNodeAlertMessage(cfg Config, text string) error {
-	if text == "" {
+func (s *Service) sendNodeAlertMessage(cfg Config, content formattedMessage) error {
+	if content.HTML == "" && content.RichHTML == "" {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
 	defer cancel()
-	if _, err := s.sendHTMLToWithMarkup(ctx, cfg.ChatID, cfg.MessageThreadID, text, ""); err != nil {
+	if _, err := s.sendFormattedToWithMarkup(ctx, cfg.ChatID, cfg.MessageThreadID, content, ""); err != nil {
 		logger.Warn("Failed to send Telegram node alert: %v", err)
 		return err
 	}
@@ -749,6 +794,20 @@ func (s *Service) confirmNodeDownAlertsSent(alerts []nodeDownAlert, sentAt time.
 		}
 	}
 	return changed
+}
+
+func (s *Service) confirmNodeRecoverySent(stableID string, recoveredAt time.Time) bool {
+	if stableID == "" || recoveredAt.IsZero() {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, ok := s.alerts[stableID]
+	if !ok || !state.RecoveryPending || !state.RecoveredAt.Equal(recoveredAt) {
+		return false
+	}
+	delete(s.alerts, stableID)
+	return true
 }
 
 func (s *Service) refreshHostDiagnostics(requests []diagnosticsRefreshRequest) []diagnosticsRefreshResult {
@@ -888,21 +947,21 @@ func (s *Service) handleUpdate(upd update) {
 
 	switch cmd {
 	case "help":
-		s.sendCommandReplyWithMarkup(msg, s.formatHelp(cfg), backToMenuMarkup())
+		s.sendFormattedCommandReplyWithMarkup(msg, s.formatHelpMessage(cfg), backToMenuMarkup())
 	case "start", "menu":
 		s.sendMenu(msg)
 	case "status", "statuses":
-		s.sendCommandReplyWithMarkup(msg, s.formatStatus(), statusMarkup())
+		s.sendFormattedCommandReplyWithMarkup(msg, s.formatStatusMessage(), statusMarkup())
 	case "speed", "speedresult", "speedhistory":
-		s.sendCommandReplyWithMarkup(msg, s.formatSpeedHistory(strings.Join(args, " ")), backToMenuMarkup())
+		s.sendFormattedCommandReplyWithMarkup(msg, s.formatSpeedHistoryMessage(strings.Join(args, " ")), backToMenuMarkup())
 	case "speedtest":
 		if !s.isAdmin(msg, cfg) {
-			s.sendCommandReply(msg, "This command is admin-only.")
+			s.sendCommandReply(msg, "<b>Нет доступа</b>\n\nSpeed-test может запускать только администратор.")
 			return
 		}
 		s.handleSpeedTestCommand(msg, args)
 	default:
-		s.sendCommandReply(msg, "Unknown command. Use /help.")
+		s.sendCommandReply(msg, "<b>Неизвестная команда</b>\n\nИспользуйте /help или откройте /menu.")
 	}
 }
 
@@ -932,32 +991,32 @@ func (s *Service) handleCallback(cb *callbackQuery) {
 		s.editMenuMessage(cb.Message, cb.From)
 	case data == "status":
 		s.answerCallback(cb.ID, "")
-		s.editCommandMessage(cb.Message, s.formatStatus(), statusMarkup())
+		s.editFormattedCommandMessage(cb.Message, s.formatStatusMessage(), statusMarkup())
 	case data == "status:refresh":
 		s.handleStatusRefreshCallback(cb)
 	case data == "issues":
 		s.answerCallback(cb.ID, "")
-		s.editCommandMessage(cb.Message, s.formatIssuesSummary(), backToMenuMarkup())
+		s.editFormattedCommandMessage(cb.Message, s.formatIssuesSummaryMessage(), backToMenuMarkup())
 	case data == "nodes:list":
 		s.answerCallback(cb.ID, "")
-		s.editCommandMessage(cb.Message, s.formatNodeList(), s.nodeListMarkup())
+		s.editFormattedCommandMessage(cb.Message, s.formatNodeListMessage(), s.nodeListMarkup())
 	case data == "help":
 		s.answerCallback(cb.ID, "")
-		s.editCommandMessage(cb.Message, s.formatHelp(cfg), backToMenuMarkup())
+		s.editFormattedCommandMessage(cb.Message, s.formatHelpMessage(cfg), backToMenuMarkup())
 	case data == "speed:list":
 		s.answerCallback(cb.ID, "")
-		s.editCommandMessage(cb.Message, s.formatRecentSpeedOverview(), s.speedHistoryMarkup())
+		s.editFormattedCommandMessage(cb.Message, s.formatRecentSpeedOverviewMessage(), s.speedHistoryMarkup())
 	case strings.HasPrefix(data, "node:test:"):
 		stableID := strings.TrimPrefix(data, "node:test:")
 		s.handleNodeSpeedTestCallback(cb, stableID)
 	case strings.HasPrefix(data, "node:"):
 		s.answerCallback(cb.ID, "")
 		stableID := strings.TrimPrefix(data, "node:")
-		s.editCommandMessage(cb.Message, s.formatNodeDetails(stableID), s.nodeDetailMarkup(stableID, s.isAdminUser(cb.From, cfg)))
+		s.editFormattedCommandMessage(cb.Message, s.formatNodeDetailsMessage(stableID), s.nodeDetailMarkup(stableID, s.isAdminUser(cb.From, cfg)))
 	case strings.HasPrefix(data, "speed:"):
 		s.answerCallback(cb.ID, "")
 		query := strings.TrimPrefix(data, "speed:")
-		s.editCommandMessage(cb.Message, s.formatSpeedHistory(query), backToMenuMarkup())
+		s.editFormattedCommandMessage(cb.Message, s.formatSpeedHistoryMessage(query), backToMenuMarkup())
 	case data == "speedtest:online":
 		s.handleSpeedTestCallback(cb, true)
 	case data == "speedtest:all":
@@ -982,10 +1041,9 @@ func (s *Service) handleNodeSpeedTestCallback(cb *callbackQuery, stableID string
 		return
 	}
 
-	req := speedtest.RunRequest{
-		ProxyIDs:   []string{proxy.StableID},
-		OnlyOnline: false,
-	}
+	req := s.newSpeedTestRunRequest()
+	req.ProxyIDs = []string{proxy.StableID}
+	req.OnlyOnline = false
 	if err := s.speedManager.Run(req, "telegram"); err != nil {
 		s.answerCallback(cb.ID, "Не запущено")
 		if cb.Message != nil {
@@ -996,7 +1054,7 @@ func (s *Service) handleNodeSpeedTestCallback(cb *callbackQuery, stableID string
 
 	s.answerCallback(cb.ID, "Speed-test запущен")
 	if cb.Message != nil {
-		s.editCommandMessage(cb.Message, fmt.Sprintf("<b>Speed-test запущен</b>\n\nНода: <b>%s</b>\nОтчет будет отправлен после завершения проверки.", htmlEscape(proxy.Name)), s.nodeDetailMarkup(proxy.StableID, true))
+		s.editCommandMessage(cb.Message, fmt.Sprintf("<b>Speed-test запущен</b>\n\nНода: <b>%s</b>\nОтчёт придёт после завершения проверки.", htmlEscape(proxy.Name)), s.nodeDetailMarkup(proxy.StableID, true))
 	}
 }
 
@@ -1006,7 +1064,8 @@ func (s *Service) handleSpeedTestCallback(cb *callbackQuery, onlyOnline bool) {
 		s.answerCallback(cb.ID, "Только для администратора")
 		return
 	}
-	req := speedtest.RunRequest{OnlyOnline: onlyOnline}
+	req := s.newSpeedTestRunRequest()
+	req.OnlyOnline = onlyOnline
 	if err := s.speedManager.Run(req, "telegram"); err != nil {
 		s.answerCallback(cb.ID, "Не запущено")
 		if cb.Message != nil {
@@ -1014,21 +1073,21 @@ func (s *Service) handleSpeedTestCallback(cb *callbackQuery, onlyOnline bool) {
 		}
 		return
 	}
-	s.answerCallback(cb.ID, "Speed test запущен")
+	s.answerCallback(cb.ID, "Speed-test запущен")
 	if cb.Message != nil {
-		s.editCommandMessage(cb.Message, "<b>Speed-test запущен</b>\n\nОтчет будет отправлен после завершения проверки.", backToMenuMarkup())
+		s.editCommandMessage(cb.Message, "<b>Speed-test запущен</b>\n\nОтчёт придёт после завершения проверки.", backToMenuMarkup())
 	}
 }
 
 func (s *Service) handleStatusRefreshCallback(cb *callbackQuery) {
 	if !s.beginStatusCheck() {
-		s.answerCallback(cb.ID, "Проверка уже идет")
+		s.answerCallback(cb.ID, "Проверка уже идёт")
 		return
 	}
 
 	s.answerCallback(cb.ID, "Проверка запущена")
 	if cb.Message != nil {
-		s.editCommandMessage(cb.Message, formatStatusRefreshStarted(), statusRefreshMarkup())
+		s.editFormattedCommandMessage(cb.Message, formatStatusRefreshStartedMessage(), statusRefreshMarkup())
 	}
 
 	msg := cb.Message
@@ -1040,7 +1099,7 @@ func (s *Service) handleStatusRefreshCallback(cb *callbackQuery) {
 		s.refreshHostDiagnosticsForStillOffline(offlineBefore)
 
 		if msg != nil {
-			s.editCommandMessage(msg, s.formatStatus(), statusMarkup())
+			s.editFormattedCommandMessage(msg, s.formatStatusMessage(), statusMarkup())
 		}
 	}()
 }
@@ -1146,13 +1205,13 @@ func (s *Service) sendMenuToMessage(msg *message, from *user) {
 	cfg := s.Config()
 	threadID := replyThreadID(msg, cfg)
 	userID := userIDFrom(from)
-	text := s.formatMenu(cfg, s.isAdminUser(from, cfg))
+	content := s.formatMenuMessage(cfg, s.isAdminUser(from, cfg))
 	replyMarkup := mainMenuMarkup(s.isAdminUser(from, cfg))
 	chatID := strconv.FormatInt(msg.Chat.ID, 10)
 
 	if messageID, ok := s.lastMenuMessageID(msg.Chat.ID, threadID, userID); ok {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
-		err := s.editTextWithMarkup(ctx, chatID, messageID, text, replyMarkup)
+		err := s.editFormattedWithMarkup(ctx, chatID, messageID, content, replyMarkup)
 		cancel()
 		if err == nil || isMessageNotModified(err) {
 			return
@@ -1163,7 +1222,7 @@ func (s *Service) sendMenuToMessage(msg *message, from *user) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
 	defer cancel()
-	sent, err := s.sendHTMLToWithMarkup(ctx, chatID, threadID, text, replyMarkup)
+	sent, err := s.sendFormattedToWithMarkup(ctx, chatID, threadID, content, replyMarkup)
 	if err != nil {
 		logger.Warn("Failed to send Telegram menu: %v", err)
 		return
@@ -1175,15 +1234,14 @@ func (s *Service) sendMenuToMessage(msg *message, from *user) {
 
 func (s *Service) editMenuMessage(msg *message, from *user) {
 	cfg := s.Config()
-	if s.editCommandMessage(msg, s.formatMenu(cfg, s.isAdminUser(from, cfg)), mainMenuMarkup(s.isAdminUser(from, cfg))) {
+	if s.editFormattedCommandMessage(msg, s.formatMenuMessage(cfg, s.isAdminUser(from, cfg)), mainMenuMarkup(s.isAdminUser(from, cfg))) {
 		s.rememberMenuMessage(msg.Chat.ID, msg.MessageThreadID, userIDFrom(from), msg.MessageID)
 	}
 }
 
 func (s *Service) handleSpeedTestCommand(msg *message, args []string) {
-	req := speedtest.RunRequest{
-		OnlyOnline: true,
-	}
+	req := s.newSpeedTestRunRequest()
+	req.OnlyOnline = true
 
 	var queryParts []string
 	for _, arg := range args {
@@ -1215,7 +1273,11 @@ func (s *Service) handleSpeedTestCommand(msg *message, args []string) {
 		s.sendCommandReply(msg, fmt.Sprintf("<b>Speed-test не запущен</b>\n\n%s", htmlEscape(err.Error())))
 		return
 	}
-	s.sendCommandReply(msg, "<b>Speed-test запущен</b>\n\nОтчет будет отправлен после завершения проверки.")
+	s.sendCommandReply(msg, "<b>Speed-test запущен</b>\n\nОтчёт придёт после завершения проверки.")
+}
+
+func (s *Service) newSpeedTestRunRequest() speedtest.RunRequest {
+	return speedtest.RunRequest{Config: s.speedManager.Schedule().Config}
 }
 
 func (s *Service) formatHelp(cfg Config) string {
@@ -1233,12 +1295,31 @@ func (s *Service) formatHelp(cfg Config) string {
 	)
 	if len(cfg.AdminUserIDs) > 0 {
 		lines = append(lines,
-			"• <code>/speedtest</code> — speed-test online-нод",
+			"• <code>/speedtest</code> — speed-test доступных нод",
 			"• <code>/speedtest all</code> — speed-test всех нод",
 			"• <code>/speedtest &lt;id или имя&gt;</code> — speed-test одной ноды",
 		)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (s *Service) formatHelpMessage(cfg Config) formattedMessage {
+	fallback := s.formatHelp(cfg)
+	items := []string{
+		"<li><code>/start</code> — главное меню</li>",
+		"<li><code>/status</code> — состояние нод</li>",
+		"<li><code>/speed &lt;ID или имя&gt;</code> — история замеров</li>",
+		"<li><code>/id</code> — ID чата, топика и пользователя</li>",
+	}
+	if len(cfg.AdminUserIDs) > 0 {
+		items = append(items,
+			"<li><code>/speedtest</code> — проверить доступные ноды</li>",
+			"<li><code>/speedtest all</code> — проверить все ноды</li>",
+			"<li><code>/speedtest &lt;ID или имя&gt;</code> — проверить одну ноду</li>",
+		)
+	}
+	rich := "<h2>Команды</h2><p>Основное управление — кнопками под сообщением.</p><ul>" + strings.Join(items, "") + "</ul>"
+	return formattedMessage{HTML: fallback, RichHTML: rich}
 }
 
 func (s *Service) formatMenu(cfg Config, isAdmin bool) string {
@@ -1252,52 +1333,65 @@ func (s *Service) formatMenu(cfg Config, isAdmin bool) string {
 	}
 	alerts := "выключены"
 	if cfg.NodeAlertsEnabled {
-		alerts = fmt.Sprintf(
-			"проверка %d мин, после %d провалов, диагностика %d мин, напоминания %s мин, максимум %d мин",
-			cfg.AlertCheckMinutes,
-			cfg.AlertAfterFailures,
-			cfg.AlertDiagnosticsMinutes,
-			formatIntList(cfg.AlertReminderScheduleMinutes),
-			cfg.AlertMaxReminderMinutes,
-		)
-	}
-	adminText := "нет"
-	if isAdmin {
-		adminText = "да"
+		alerts = "включены"
 	}
 	thresholdText := "не задан"
 	if cfg.LowSpeedThresholdMbps > 0 {
 		thresholdText = fmt.Sprintf("%.2f Mbps", cfg.LowSpeedThresholdMbps)
 	}
+	adminHint := ""
+	if isAdmin {
+		adminHint = " · доступны ручные проверки"
+	}
 
 	return strings.Join([]string{
 		"<b>InvisibleProxyChecker</b>",
 		"",
-		"<b>Панель управления</b>",
-		fmt.Sprintf("Ноды: <b>%d</b> всего | <b>%d</b> online | <b>%d</b> offline", total, online, offline),
+		fmt.Sprintf("🟢 <b>%d</b> из %d · 🔴 <b>%d</b>", online, total, offline),
+		fmt.Sprintf("⚡ Отчёты: <b>%s</b> · порог %s", htmlEscape(speedReports), htmlEscape(thresholdText)),
+		fmt.Sprintf("🔔 Алерты: <b>%s</b>%s", htmlEscape(alerts), htmlEscape(adminHint)),
 		"",
-		"<b>Speed-test</b>",
-		fmt.Sprintf("Отчеты: <b>%s</b>", htmlEscape(speedReports)),
-		fmt.Sprintf("Порог низкой скорости: <b>%s</b>", htmlEscape(thresholdText)),
-		"",
-		"<b>Оповещения</b>",
-		fmt.Sprintf("Недоступность нод: <b>%s</b>", htmlEscape(alerts)),
-		"",
-		"<b>Доступ</b>",
-		fmt.Sprintf("Текущий пользователь админ: <b>%s</b>", htmlEscape(adminText)),
-		"",
-		"Выберите действие:",
+		"Выберите раздел:",
 	}, "\n")
+}
+
+func (s *Service) formatMenuMessage(cfg Config, isAdmin bool) formattedMessage {
+	fallback := s.formatMenu(cfg, isAdmin)
+	total, online, offline := s.nodeCounts()
+	speedReports := "выключены"
+	if cfg.SpeedReportsEnabled && cfg.SpeedReportMode != "disabled" {
+		speedReports = "все"
+		if cfg.SpeedReportMode == "issues" {
+			speedReports = "только проблемы"
+		}
+	}
+	threshold := "не задан"
+	if cfg.LowSpeedThresholdMbps > 0 {
+		threshold = fmt.Sprintf("%.2f Mbps", cfg.LowSpeedThresholdMbps)
+	}
+	alerts := "выключены"
+	if cfg.NodeAlertsEnabled {
+		alerts = "включены"
+	}
+
+	rich := strings.Join([]string{
+		"<h2>InvisibleProxyChecker</h2>",
+		"<table bordered>",
+		"<tr><th>Ноды</th><td>🟢 " + strconv.Itoa(online) + " / " + strconv.Itoa(total) + " · 🔴 " + strconv.Itoa(offline) + "</td></tr>",
+		"<tr><th>Speed-test</th><td>" + htmlEscape(speedReports) + " · " + htmlEscape(threshold) + "</td></tr>",
+		"<tr><th>Алерты</th><td>" + htmlEscape(alerts) + "</td></tr>",
+		"</table>",
+		"<footer>Выберите раздел кнопкой ниже.</footer>",
+	}, "")
+	return formattedMessage{HTML: fallback, RichHTML: rich}
 }
 
 func (s *Service) formatNodeList() string {
 	proxies := s.sortedProxies()
 	total, online, offline := s.nodeCounts()
 	lines := []string{
-		"<b>InvisibleProxyChecker</b>",
-		"",
 		"<b>Ноды</b>",
-		fmt.Sprintf("Всего: <b>%d</b> | Online: <b>%d</b> | Offline: <b>%d</b>", total, online, offline),
+		fmt.Sprintf("🟢 <b>%d</b> из %d · 🔴 <b>%d</b>", online, total, offline),
 		"",
 		"Выберите ноду кнопкой ниже, чтобы открыть статус, последние замеры и действия.",
 	}
@@ -1307,35 +1401,48 @@ func (s *Service) formatNodeList() string {
 	return trimHTMLMessage(strings.Join(lines, "\n"))
 }
 
+func (s *Service) formatNodeListMessage() formattedMessage {
+	fallback := s.formatNodeList()
+	total, online, offline := s.nodeCounts()
+	rich := fmt.Sprintf(
+		"<h2>Ноды</h2><p>🟢 <b>%d</b> из %d · 🔴 <b>%d</b></p><footer>Откройте ноду кнопкой ниже — там статус, замеры и действия.</footer>",
+		online,
+		total,
+		offline,
+	)
+	if total == 0 {
+		rich = "<h2>Ноды</h2><p>Список пуст.</p>"
+	}
+	return formattedMessage{HTML: fallback, RichHTML: rich}
+}
+
 func (s *Service) formatNodeDetails(stableID string) string {
 	proxy, matches := s.findProxy(stableID)
 	if proxy == nil {
 		return formatProxySearchMiss(matches)
 	}
 	details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
-	status := "ONLINE"
-	if err != nil || !details.Online {
-		status = "OFFLINE"
+	online := err == nil && details.Online
+	status := "🟢 доступна"
+	if !online {
+		status = "🔴 недоступна"
 	}
-	latencyText := "n/a"
+	latencyText := "—"
 	if details.Latency > 0 {
 		latencyText = fmt.Sprintf("%d ms", details.Latency.Milliseconds())
 	}
 
 	lines := []string{
-		"<b>InvisibleProxyChecker</b>",
-		"",
-		"<b>Нода</b>",
 		fmt.Sprintf("<b>%s</b>", htmlEscape(proxy.Name)),
 		fmt.Sprintf("ID: %s", htmlCode(proxy.StableID)),
 		fmt.Sprintf("Статус: <b>%s</b> · %s", htmlEscape(status), htmlEscape(latencyText)),
 		fmt.Sprintf("Протокол: %s", htmlCode(proxy.Protocol)),
 	}
-	if status == "OFFLINE" && !details.DownSince.IsZero() {
+	if !online && !details.DownSince.IsZero() {
 		lines = append(lines, fmt.Sprintf("Недоступна с: <b>%s</b>", htmlEscape(formatCheckedAt(details.DownSince))))
 		lines = append(lines, fmt.Sprintf("Простой: <b>%s</b>", htmlEscape(formatDuration(time.Since(details.DownSince)))))
 	}
-	if status == "OFFLINE" {
+	if !online {
 		if diagnostics := formatHostDiagnosticsHTML(details.HostCheck, details.PingCheck); diagnostics != "" {
 			lines = append(lines, fmt.Sprintf("Диагностика: %s", diagnostics))
 		}
@@ -1363,6 +1470,63 @@ func (s *Service) formatNodeDetails(stableID string) string {
 		}
 	}
 	return trimHTMLMessage(strings.Join(lines, "\n"))
+}
+
+func (s *Service) formatNodeDetailsMessage(stableID string) formattedMessage {
+	fallback := s.formatNodeDetails(stableID)
+	proxy, matches := s.findProxy(stableID)
+	if proxy == nil {
+		return formattedMessage{HTML: fallback, RichHTML: formatProxySearchMissRich(matches)}
+	}
+
+	details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+	online := err == nil && details.Online
+	status := "🔴 недоступна"
+	if online {
+		status = "🟢 доступна"
+	}
+	latency := "—"
+	if details.Latency > 0 {
+		latency = fmt.Sprintf("%d ms", details.Latency.Milliseconds())
+	}
+
+	var rich strings.Builder
+	fmt.Fprintf(&rich, "<h2>%s</h2>", htmlEscape(proxy.Name))
+	fmt.Fprintf(&rich, "<p><b>%s</b> · %s · %s</p>", htmlEscape(status), htmlEscape(strings.ToUpper(proxy.Protocol)), htmlEscape(latency))
+	if !online && !details.DownSince.IsZero() {
+		fmt.Fprintf(&rich, "<p>Простой: <b>%s</b> · с %s</p>", htmlEscape(formatDuration(time.Since(details.DownSince))), htmlEscape(formatCheckedAt(details.DownSince)))
+	}
+	if !online {
+		if diagnostics := formatHostDiagnosticsHTML(details.HostCheck, details.PingCheck); diagnostics != "" {
+			fmt.Fprintf(&rich, "<blockquote>%s</blockquote>", diagnostics)
+		}
+	}
+
+	rich.WriteString("<details><summary>Технические данные</summary><table bordered>")
+	fmt.Fprintf(&rich, "<tr><th>StableID</th><td><code>%s</code></td></tr>", htmlEscape(proxy.StableID))
+	if proxy.SubName != "" {
+		fmt.Fprintf(&rich, "<tr><th>Подписка</th><td>%s</td></tr>", htmlEscape(proxy.SubName))
+	}
+	if proxy.Server != "" {
+		fmt.Fprintf(&rich, "<tr><th>Сервер</th><td><code>%s</code></td></tr>", htmlEscape(fmt.Sprintf("%s:%d", proxy.Server, proxy.Port)))
+	}
+	rich.WriteString("</table></details>")
+
+	history := s.speedManager.ResultHistory(proxy.StableID)
+	if len(history) == 0 {
+		if result := s.latestSpeedResult(proxy.StableID); result != nil {
+			history = []speedtest.Result{*result}
+		}
+	}
+	if len(history) == 0 {
+		rich.WriteString("<h3>Последние замеры</h3><p>Результатов пока нет.</p>")
+	} else {
+		cfg := s.Config()
+		rich.WriteString("<h3>Последние замеры</h3>")
+		rich.WriteString(formatSpeedHistoryRichTable(limitResults(history, 5), cfg.LowSpeedThresholdMbps))
+	}
+
+	return formattedMessage{HTML: fallback, RichHTML: rich.String()}
 }
 
 func (s *Service) latestSpeedResult(stableID string) *speedtest.Result {
@@ -1474,29 +1638,60 @@ func (s *Service) formatStatus() string {
 	}
 
 	lines := []string{
-		"<b>InvisibleProxyChecker</b>",
-		"",
 		"<b>Статусы нод</b>",
-		fmt.Sprintf("Всего: <b>%d</b> | Online: <b>%d</b> | Offline: <b>%d</b>", len(proxies), len(onlineLines), len(offlineLines)),
+		fmt.Sprintf("🟢 <b>%d</b> из %d · 🔴 <b>%d</b>", len(onlineLines), len(proxies), len(offlineLines)),
 	}
 	if len(offlineLines) > 0 {
-		lines = append(lines, "", "<b>Недоступны</b>")
+		lines = append(lines, "", "<b>Требуют внимания</b>")
 		lines = append(lines, limitLines(offlineLines, 12)...)
-	}
-	if len(onlineLines) > 0 {
-		lines = append(lines, "", "<b>Онлайн</b>")
-		lines = append(lines, limitLines(onlineLines, 12)...)
 	}
 	return trimHTMLMessage(strings.Join(lines, "\n"))
 }
 
+func (s *Service) formatStatusMessage() formattedMessage {
+	fallback := s.formatStatus()
+	proxies := s.sortedProxies()
+	var onlineItems []string
+	var offlineItems []string
+	for _, proxy := range proxies {
+		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+		online := err == nil && details.Online
+		item := formatProxyRichItem(proxy, online, details.Latency, details.DownSince, details.HostCheck, details.PingCheck)
+		if online {
+			onlineItems = append(onlineItems, item)
+		} else {
+			offlineItems = append(offlineItems, item)
+		}
+	}
+
+	var rich strings.Builder
+	rich.WriteString("<h2>Статусы нод</h2>")
+	fmt.Fprintf(&rich, "<p>🟢 <b>%d</b> из %d · 🔴 <b>%d</b></p>", len(onlineItems), len(proxies), len(offlineItems))
+	if len(offlineItems) > 0 {
+		rich.WriteString("<h3>Требуют внимания</h3><ul>")
+		rich.WriteString(strings.Join(limitRichItems(offlineItems, 12), ""))
+		rich.WriteString("</ul>")
+	}
+	if len(onlineItems) > 0 {
+		fmt.Fprintf(&rich, "<details><summary>Доступны: %d</summary><ul>", len(onlineItems))
+		rich.WriteString(strings.Join(limitRichItems(onlineItems, 20), ""))
+		rich.WriteString("</ul></details>")
+	}
+	return formattedMessage{HTML: fallback, RichHTML: rich.String()}
+}
+
 func formatStatusRefreshStarted() string {
 	return strings.Join([]string{
-		"<b>InvisibleProxyChecker</b>",
-		"",
 		"<b>Статусы нод</b>",
 		"Проверяю доступность нод. Сообщение обновится после завершения.",
 	}, "\n")
+}
+
+func formatStatusRefreshStartedMessage() formattedMessage {
+	return formattedMessage{
+		HTML:     formatStatusRefreshStarted(),
+		RichHTML: "<h2>Статусы нод</h2><p>Проверяю доступность. Это сообщение обновится автоматически.</p>",
+	}
 }
 
 func (s *Service) formatIssuesSummary() string {
@@ -1518,8 +1713,6 @@ func (s *Service) formatIssuesSummary() string {
 
 	speedLines := speedIssuesHTML(filterMutedSpeedResults(s.speedManager.Snapshot().Results, cfg), cfg.LowSpeedThresholdMbps)
 	lines := []string{
-		"<b>InvisibleProxyChecker</b>",
-		"",
 		"<b>Проблемные ноды</b>",
 	}
 	if len(offlineLines) == 0 && len(speedLines) == 0 {
@@ -1535,6 +1728,45 @@ func (s *Service) formatIssuesSummary() string {
 		lines = append(lines, limitLines(speedLines, cfg.SpeedReportLimit)...)
 	}
 	return trimHTMLMessage(strings.Join(lines, "\n"))
+}
+
+func (s *Service) formatIssuesSummaryMessage() formattedMessage {
+	fallback := s.formatIssuesSummary()
+	cfg := s.Config()
+	muted := mutedAlertNodeSet(cfg)
+	var offlineItems []string
+	for _, proxy := range s.sortedProxies() {
+		if muted[proxy.StableID] {
+			continue
+		}
+		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+		if err != nil || !details.Online {
+			offlineItems = append(offlineItems, formatProxyRichItem(proxy, false, details.Latency, details.DownSince, details.HostCheck, details.PingCheck))
+		}
+	}
+	speedResults := speedIssueResults(filterMutedSpeedResults(s.speedManager.Snapshot().Results, cfg), cfg.LowSpeedThresholdMbps)
+
+	var rich strings.Builder
+	rich.WriteString("<h2>Проблемные ноды</h2>")
+	if len(offlineItems) == 0 && len(speedResults) == 0 {
+		rich.WriteString("<p>✅ Проблем не найдено.</p>")
+		return formattedMessage{HTML: fallback, RichHTML: rich.String()}
+	}
+	fmt.Fprintf(&rich, "<p>🔴 Недоступны: <b>%d</b> · ⚡ Speed-test: <b>%d</b></p>", len(offlineItems), len(speedResults))
+	if len(offlineItems) > 0 {
+		rich.WriteString("<h3>Недоступны</h3><ul>")
+		rich.WriteString(strings.Join(limitRichItems(offlineItems, 12), ""))
+		rich.WriteString("</ul>")
+	}
+	if len(speedResults) > 0 {
+		rich.WriteString("<h3>Speed-test</h3><ul>")
+		for _, result := range limitResults(speedResults, cfg.SpeedReportLimit) {
+			rich.WriteString(formatSpeedIssueRichItem(result, cfg.LowSpeedThresholdMbps))
+		}
+		rich.WriteString("</ul>")
+		rich.WriteString(formatSpeedDiagnosticsRichDetails(speedResults, cfg.SpeedReportLimit))
+	}
+	return formattedMessage{HTML: fallback, RichHTML: rich.String()}
 }
 
 func (s *Service) formatSpeedHistory(query string) string {
@@ -1562,17 +1794,45 @@ func (s *Service) formatSpeedHistory(query string) string {
 	}
 
 	lines := []string{
-		"<b>InvisibleProxyChecker</b>",
-		"",
 		"<b>История замеров</b>",
 		fmt.Sprintf("<b>%s</b>", htmlEscape(proxy.Name)),
-		fmt.Sprintf("ID: <code>%s</code>", htmlEscape(proxy.StableID)),
 	}
 	cfg := s.Config()
 	for _, result := range limitResults(history, 5) {
 		lines = append(lines, formatSpeedHistoryLine(result, cfg.LowSpeedThresholdMbps))
 	}
 	return trimHTMLMessage(strings.Join(lines, "\n"))
+}
+
+func (s *Service) formatSpeedHistoryMessage(query string) formattedMessage {
+	fallback := s.formatSpeedHistory(query)
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return formattedMessage{HTML: fallback, RichHTML: "<h2>История замеров</h2><p>Укажите <code>/speed &lt;ID или имя&gt;</code>.</p>"}
+	}
+	proxy, matches := s.findProxy(query)
+	if proxy == nil {
+		return formattedMessage{HTML: fallback, RichHTML: formatProxySearchMissRich(matches)}
+	}
+	history := s.speedManager.ResultHistory(proxy.StableID)
+	if len(history) == 0 {
+		if result := s.latestSpeedResult(proxy.StableID); result != nil {
+			history = []speedtest.Result{*result}
+		}
+	}
+	if len(history) == 0 {
+		return formattedMessage{
+			HTML:     fallback,
+			RichHTML: fmt.Sprintf("<h2>История замеров</h2><p><b>%s</b>: результатов пока нет.</p>", htmlEscape(proxy.Name)),
+		}
+	}
+	cfg := s.Config()
+	rich := fmt.Sprintf("<h2>История замеров</h2><p><b>%s</b></p>%s<details><summary>StableID</summary><p><code>%s</code></p></details>",
+		htmlEscape(proxy.Name),
+		formatSpeedHistoryRichTable(limitResults(history, 5), cfg.LowSpeedThresholdMbps),
+		htmlEscape(proxy.StableID),
+	)
+	return formattedMessage{HTML: fallback, RichHTML: rich}
 }
 
 func (s *Service) formatRecentSpeedOverview() string {
@@ -1586,23 +1846,43 @@ func (s *Service) formatRecentSpeedOverview() string {
 
 	cfg := s.Config()
 	lines := []string{
-		"<b>InvisibleProxyChecker</b>",
-		"",
 		"<b>Последние замеры speed-test</b>",
 	}
 	for _, result := range limitResults(results, 10) {
 		status := fmt.Sprintf("<b>%.2f Mbps</b>", result.Mbps)
 		if result.Offline {
-			status = "<b>OFFLINE</b>"
+			status = "🔴 <b>недоступна</b>"
 		} else if result.Error != "" {
-			status = "<b>FAILED</b>"
+			status = "❌ <b>ошибка</b>"
 		} else if cfg.LowSpeedThresholdMbps > 0 && result.Mbps < cfg.LowSpeedThresholdMbps {
-			status = fmt.Sprintf("<b>LOW %.2f Mbps</b>", result.Mbps)
+			status = fmt.Sprintf("⚠️ <b>%.2f Mbps</b>", result.Mbps)
 		}
-		lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  <code>%s</code> · %s · %s", htmlEscape(result.Name), htmlEscape(result.StableID), status, htmlEscape(formatCheckedAt(result.CheckedAt))))
+		lines = append(lines, fmt.Sprintf("• <b>%s</b> · %s · %s", htmlEscape(result.Name), status, htmlEscape(formatCheckedAt(result.CheckedAt))))
 	}
 	lines = append(lines, "", "Нажмите на ноду ниже, чтобы открыть историю.")
 	return trimHTMLMessage(strings.Join(lines, "\n"))
+}
+
+func (s *Service) formatRecentSpeedOverviewMessage() formattedMessage {
+	fallback := s.formatRecentSpeedOverview()
+	results := s.speedManager.Snapshot().Results
+	if len(results) == 0 {
+		return formattedMessage{HTML: fallback, RichHTML: "<h2>Последние замеры</h2><p>Результатов пока нет.</p>"}
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].CheckedAt.After(results[j].CheckedAt)
+	})
+	cfg := s.Config()
+	var items []string
+	for _, result := range limitResults(results, 10) {
+		items = append(items, fmt.Sprintf("<li><b>%s</b> — %s · %s</li>",
+			htmlEscape(result.Name),
+			formatSpeedStatusRich(result, cfg.LowSpeedThresholdMbps),
+			htmlEscape(formatCheckedAt(result.CheckedAt)),
+		))
+	}
+	rich := "<h2>Последние замеры</h2><ul>" + strings.Join(items, "") + "</ul><footer>Откройте ноду кнопкой ниже, чтобы посмотреть историю.</footer>"
+	return formattedMessage{HTML: fallback, RichHTML: rich}
 }
 
 func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, failed int, slow int, issuesOnly bool) string {
@@ -1616,10 +1896,8 @@ func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, fail
 	issues := speedIssuesHTML(report.Results, cfg.LowSpeedThresholdMbps)
 	if issuesOnly {
 		lines := []string{
-			"<b>InvisibleProxyChecker</b>",
-			"",
-			"<b>Speed-test по расписанию: проблемы</b>",
-			fmt.Sprintf("Завершен: %s", htmlCode(report.FinishedAt.Format("2006-01-02 15:04:05"))),
+			"<b>Speed-test: есть проблемы</b>",
+			fmt.Sprintf("%s · %s", htmlEscape(reportSourceLabel(report.Source)), htmlEscape(formatCheckedAt(report.FinishedAt))),
 		}
 		if cfg.LowSpeedThresholdMbps > 0 {
 			lines = append(lines, fmt.Sprintf("Порог низкой скорости: <b>%.2f Mbps</b>", cfg.LowSpeedThresholdMbps))
@@ -1630,13 +1908,9 @@ func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, fail
 	}
 
 	lines := []string{
-		"<b>InvisibleProxyChecker</b>",
+		"<b>Speed-test завершён</b>",
+		fmt.Sprintf("%s · %s", htmlEscape(reportSourceLabel(report.Source)), htmlEscape(formatCheckedAt(report.FinishedAt))),
 		"",
-		"<b>Speed-test завершен</b>",
-		fmt.Sprintf("Источник: <b>%s</b>", htmlEscape(reportSourceLabel(report.Source))),
-		fmt.Sprintf("Завершен: %s", htmlCode(report.FinishedAt.Format("2006-01-02 15:04:05"))),
-		"",
-		"<b>Сводка</b>",
 		fmt.Sprintf("Проверено: <b>%d</b> · Успешно: <b>%d</b> · Низкая скорость: <b>%d</b> · Ошибки: <b>%d</b>", report.Selected, successful, slow, failed),
 	}
 	if cfg.LowSpeedThresholdMbps > 0 {
@@ -1648,7 +1922,7 @@ func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, fail
 		lines = append(lines, limitLines(issues, cfg.SpeedReportLimit)...)
 	}
 
-	top := successfulResults(report.Results)
+	top := healthySpeedResults(report.Results, cfg.LowSpeedThresholdMbps)
 	if len(top) > 0 {
 		lines = append(lines, "", "<b>Лучшие результаты</b>")
 		for _, result := range limitResults(top, cfg.SpeedReportLimit) {
@@ -1659,9 +1933,39 @@ func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, fail
 	return trimHTMLMessage(strings.Join(lines, "\n"))
 }
 
-func (s *Service) sendText(ctx context.Context, text string) error {
-	cfg := s.Config()
-	return s.sendTextTo(ctx, cfg.ChatID, cfg.MessageThreadID, text)
+func (s *Service) formatSpeedReportMessage(report speedtest.RunReport, cfg Config, failed int, slow int, issuesOnly bool) formattedMessage {
+	fallback := s.formatSpeedReport(report, cfg, failed, slow, issuesOnly)
+	successful := successfulResults(report.Results)
+	healthy := healthySpeedResults(report.Results, cfg.LowSpeedThresholdMbps)
+	issues := speedIssueResults(report.Results, cfg.LowSpeedThresholdMbps)
+	title := "Speed-test завершён"
+	if issuesOnly {
+		title = "Speed-test: есть проблемы"
+	}
+
+	var rich strings.Builder
+	fmt.Fprintf(&rich, "<h2>%s</h2>", htmlEscape(title))
+	fmt.Fprintf(&rich, "<p>%s · %s</p>", htmlEscape(reportSourceLabel(report.Source)), htmlEscape(formatCheckedAt(report.FinishedAt)))
+	rich.WriteString("<table bordered><tr><th>Проверено</th><th>Успешно</th><th>Низкая</th><th>Ошибки</th></tr>")
+	fmt.Fprintf(&rich, "<tr><td>%d</td><td>%d</td><td>%d</td><td>%d</td></tr></table>", report.Selected, len(successful), slow, failed)
+	if cfg.LowSpeedThresholdMbps > 0 {
+		fmt.Fprintf(&rich, "<footer>Порог низкой скорости: %.2f Mbps</footer>", cfg.LowSpeedThresholdMbps)
+	}
+	if len(issues) > 0 {
+		rich.WriteString("<h3>Требуют внимания</h3><ul>")
+		for _, result := range limitResults(issues, cfg.SpeedReportLimit) {
+			rich.WriteString(formatSpeedIssueRichItem(result, cfg.LowSpeedThresholdMbps))
+		}
+		rich.WriteString("</ul>")
+		rich.WriteString(formatSpeedDiagnosticsRichDetails(issues, cfg.SpeedReportLimit))
+	}
+	if !issuesOnly && len(healthy) > 0 {
+		visible := limitResults(healthy, cfg.SpeedReportLimit)
+		fmt.Fprintf(&rich, "<details><summary>Без проблем: %d</summary>", len(healthy))
+		rich.WriteString(formatSpeedResultsRichTable(visible))
+		rich.WriteString("</details>")
+	}
+	return formattedMessage{HTML: fallback, RichHTML: rich.String()}
 }
 
 func (s *Service) sendCommandReply(msg *message, text string) {
@@ -1679,6 +1983,17 @@ func (s *Service) sendCommandReplyWithMarkup(msg *message, text string, replyMar
 	}
 }
 
+func (s *Service) sendFormattedCommandReplyWithMarkup(msg *message, content formattedMessage, replyMarkup string) {
+	cfg := s.Config()
+	threadID := replyThreadID(msg, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
+	defer cancel()
+	if _, err := s.sendFormattedToWithMarkup(ctx, strconv.FormatInt(msg.Chat.ID, 10), threadID, content, replyMarkup); err != nil {
+		logger.Warn("Failed to send Telegram command reply: %v", err)
+	}
+}
+
 func (s *Service) editCommandMessage(msg *message, text string, replyMarkup string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.Config().TimeoutSec)*time.Second)
 	defer cancel()
@@ -1692,24 +2007,17 @@ func (s *Service) editCommandMessage(msg *message, text string, replyMarkup stri
 	return true
 }
 
-func (s *Service) sendTextTo(ctx context.Context, chatID string, threadID int, text string) error {
-	return s.sendTextToWithMarkup(ctx, chatID, threadID, text, "")
-}
-
-func (s *Service) sendTextToWithMarkup(ctx context.Context, chatID string, threadID int, text string, replyMarkup string) error {
-	values := url.Values{}
-	values.Set("chat_id", chatID)
-	values.Set("text", trimMessage(text))
-	values.Set("disable_web_page_preview", "true")
-	if threadID > 0 {
-		values.Set("message_thread_id", strconv.Itoa(threadID))
+func (s *Service) editFormattedCommandMessage(msg *message, content formattedMessage, replyMarkup string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.Config().TimeoutSec)*time.Second)
+	defer cancel()
+	if err := s.editFormattedWithMarkup(ctx, strconv.FormatInt(msg.Chat.ID, 10), msg.MessageID, content, replyMarkup); err != nil {
+		if isMessageNotModified(err) {
+			return true
+		}
+		logger.Warn("Failed to edit Telegram command message: %v", err)
+		return false
 	}
-	if replyMarkup != "" {
-		values.Set("reply_markup", replyMarkup)
-	}
-
-	_, err := s.doAPI(ctx, "sendMessage", values)
-	return err
+	return true
 }
 
 func (s *Service) sendHTMLToWithMarkup(ctx context.Context, chatID string, threadID int, text string, replyMarkup string) (*message, error) {
@@ -1726,6 +2034,56 @@ func (s *Service) sendHTMLToWithMarkup(ctx context.Context, chatID string, threa
 	}
 
 	result, err := s.doAPI(ctx, "sendMessage", values)
+	if err != nil {
+		return nil, err
+	}
+	var sent message
+	if err := json.Unmarshal(result, &sent); err != nil {
+		return nil, nil
+	}
+	return &sent, nil
+}
+
+func (s *Service) sendFormattedToWithMarkup(ctx context.Context, chatID string, threadID int, content formattedMessage, replyMarkup string) (*message, error) {
+	if canSendRichMessage(content.RichHTML) && s.richMessageSupport() >= 0 {
+		result, err := s.sendRichHTMLToWithMarkup(ctx, chatID, threadID, content.RichHTML, replyMarkup)
+		if err == nil {
+			s.setRichMessageSupport(1)
+			return result, nil
+		}
+		if !shouldFallbackRichMessage(err) {
+			return nil, err
+		}
+		if richMessageUnsupported(err) {
+			s.setRichMessageSupport(-1)
+			logger.Warn("Telegram Rich Messages are unavailable; using compact HTML fallback: %v", err)
+		} else {
+			logger.Warn("Telegram rejected rich message; using compact HTML fallback: %v", err)
+		}
+	}
+	return s.sendHTMLToWithMarkup(ctx, chatID, threadID, content.HTML, replyMarkup)
+}
+
+func (s *Service) sendRichHTMLToWithMarkup(ctx context.Context, chatID string, threadID int, richHTML string, replyMarkup string) (*message, error) {
+	richMessage, err := json.Marshal(inputRichMessage{
+		HTML:                strings.TrimSpace(richHTML),
+		SkipEntityDetection: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode Telegram rich message: %w", err)
+	}
+
+	values := url.Values{}
+	values.Set("chat_id", chatID)
+	values.Set("rich_message", string(richMessage))
+	if threadID > 0 {
+		values.Set("message_thread_id", strconv.Itoa(threadID))
+	}
+	if replyMarkup != "" {
+		values.Set("reply_markup", replyMarkup)
+	}
+
+	result, err := s.doAPI(ctx, "sendRichMessage", values)
 	if err != nil {
 		return nil, err
 	}
@@ -1753,6 +2111,85 @@ func (s *Service) editTextWithMarkup(ctx context.Context, chatID string, message
 
 	_, err := s.doAPI(ctx, "editMessageText", values)
 	return err
+}
+
+func (s *Service) editFormattedWithMarkup(ctx context.Context, chatID string, messageID int, content formattedMessage, replyMarkup string) error {
+	if canSendRichMessage(content.RichHTML) && s.richMessageSupport() >= 0 {
+		err := s.editRichHTMLWithMarkup(ctx, chatID, messageID, content.RichHTML, replyMarkup)
+		if err == nil {
+			s.setRichMessageSupport(1)
+			return nil
+		}
+		if !shouldFallbackRichMessage(err) {
+			return err
+		}
+		if richMessageUnsupported(err) {
+			s.setRichMessageSupport(-1)
+			logger.Warn("Telegram Rich Messages are unavailable; using compact HTML fallback: %v", err)
+		} else {
+			logger.Warn("Telegram rejected rich message edit; using compact HTML fallback: %v", err)
+		}
+	}
+	return s.editTextWithMarkup(ctx, chatID, messageID, content.HTML, replyMarkup)
+}
+
+func (s *Service) editRichHTMLWithMarkup(ctx context.Context, chatID string, messageID int, richHTML string, replyMarkup string) error {
+	richMessage, err := json.Marshal(inputRichMessage{
+		HTML:                strings.TrimSpace(richHTML),
+		SkipEntityDetection: true,
+	})
+	if err != nil {
+		return fmt.Errorf("encode Telegram rich message: %w", err)
+	}
+
+	values := url.Values{}
+	values.Set("chat_id", chatID)
+	values.Set("message_id", strconv.Itoa(messageID))
+	values.Set("rich_message", string(richMessage))
+	if replyMarkup != "" {
+		values.Set("reply_markup", replyMarkup)
+	}
+
+	_, err = s.doAPI(ctx, "editMessageText", values)
+	return err
+}
+
+func (s *Service) richMessageSupport() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.richMessages
+}
+
+func (s *Service) setRichMessageSupport(value int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.richMessages = value
+}
+
+func canSendRichMessage(value string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" && utf8.RuneCountInString(value) <= maxRichMessageRunes
+}
+
+func shouldFallbackRichMessage(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "http 400") ||
+		strings.Contains(text, "http 404") ||
+		strings.Contains(text, "bad request") ||
+		strings.Contains(text, "telegram api error")
+}
+
+func richMessageUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "http 404") ||
+		strings.Contains(text, "method not found") ||
+		strings.Contains(text, "unknown method")
 }
 
 func (s *Service) answerCallback(callbackID string, text string) {
@@ -1920,7 +2357,7 @@ func (s *Service) isChatAllowed(msg *message, cfg Config) bool {
 
 func (s *Service) isChatAllowedFor(chatID int64, from *user, cfg Config) bool {
 	if cfg.ChatID == "" {
-		return true
+		return false
 	}
 	if cfg.ChatID == strconv.FormatInt(chatID, 10) {
 		return true
@@ -2030,7 +2467,7 @@ func (s *Service) loadAlertState() error {
 
 	restored := 0
 	for stableID, state := range loaded {
-		if state.WasDown && !state.DownSince.IsZero() {
+		if state.WasDown && !state.RecoveryPending && !state.DownSince.IsZero() {
 			if s.proxyChecker.RestoreOfflineStatus(stableID, state.DownSince, state.HostCheck, state.PingCheck) {
 				restored++
 			}
@@ -2097,6 +2534,9 @@ func persistedNodeAlertStateFrom(state nodeAlertState) persistedNodeAlertState {
 		AlertCount:      state.AlertCount,
 		NextAlert:       state.NextAlert,
 		LastDiagnostics: state.LastDiagnostics,
+		RecoveryPending: state.RecoveryPending,
+		RecoveredAt:     state.RecoveredAt,
+		RecoveryLatency: state.RecoveryLatency.Milliseconds(),
 	}
 	if state.HostCheck.Checked {
 		hostCheck := persistedHostCheckFrom(state.HostCheck)
@@ -2118,6 +2558,9 @@ func (p persistedNodeAlertState) toNodeAlertState() nodeAlertState {
 		AlertCount:      p.AlertCount,
 		NextAlert:       p.NextAlert,
 		LastDiagnostics: p.LastDiagnostics,
+		RecoveryPending: p.RecoveryPending,
+		RecoveredAt:     p.RecoveredAt,
+		RecoveryLatency: time.Duration(p.RecoveryLatency) * time.Millisecond,
 	}
 	if p.HostCheck != nil {
 		state.HostCheck = p.HostCheck.toHostCheckDetails()
@@ -2480,20 +2923,108 @@ func speedIssuesHTML(results []speedtest.Result, threshold float64) []string {
 		if result.Offline {
 			diagnostics := formatSpeedResultDiagnosticsHTML(result)
 			if diagnostics == "" {
-				diagnostics = "Диагностика: нет данных"
+				diagnostics = "диагностики нет"
 			}
-			lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  ⚠️ <b>Нода offline</b> · %s\n  %s", htmlEscape(result.Name), htmlCode(result.StableID), diagnostics))
+			lines = append(lines, fmt.Sprintf("• 🔴 <b>%s</b> · недоступна · %s", htmlEscape(result.Name), diagnostics))
 			continue
 		}
 		if result.Error != "" {
-			lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  ❌ <b>Ошибка</b> · %s\n  %s", htmlEscape(result.Name), htmlCode(result.StableID), htmlEscape(result.Error)))
+			lines = append(lines, fmt.Sprintf("• ❌ <b>%s</b> · %s", htmlEscape(result.Name), htmlEscape(compactText(result.Error, 120))))
 			continue
 		}
 		if threshold > 0 && result.Mbps < threshold {
-			lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  ⚠️ <b>%.2f Mbps</b> · порог %.2f Mbps · %s\n  %s · %d ms", htmlEscape(result.Name), result.Mbps, threshold, htmlCode(result.StableID), htmlEscape(formatBytes(result.DownloadedBytes)), result.DurationMs))
+			lines = append(lines, fmt.Sprintf("• ⚠️ <b>%s</b> · <b>%.2f Mbps</b>", htmlEscape(result.Name), result.Mbps))
 		}
 	}
 	return lines
+}
+
+func speedIssueResults(results []speedtest.Result, threshold float64) []speedtest.Result {
+	issues := make([]speedtest.Result, 0)
+	for _, result := range results {
+		if result.Offline || result.Error != "" || (threshold > 0 && result.Mbps < threshold) {
+			issues = append(issues, result)
+		}
+	}
+	return issues
+}
+
+func formatSpeedIssueRichItem(result speedtest.Result, threshold float64) string {
+	return fmt.Sprintf("<li><b>%s</b> — %s</li>", htmlEscape(result.Name), formatSpeedStatusRich(result, threshold))
+}
+
+func formatSpeedStatusRich(result speedtest.Result, threshold float64) string {
+	if result.Offline {
+		return "🔴 недоступна"
+	}
+	if result.Error != "" {
+		return "❌ " + htmlEscape(compactText(result.Error, 120))
+	}
+	if threshold > 0 && result.Mbps < threshold {
+		return fmt.Sprintf("⚠️ <b>%.2f Mbps</b>", result.Mbps)
+	}
+	return fmt.Sprintf("✅ <b>%.2f Mbps</b>", result.Mbps)
+}
+
+func formatSpeedDiagnosticsRichDetails(results []speedtest.Result, limit int) string {
+	results = limitResults(results, limit)
+	if len(results) == 0 {
+		return ""
+	}
+	var items []string
+	for _, result := range results {
+		parts := []string{htmlCode(result.StableID)}
+		switch {
+		case result.Offline:
+			if diagnostics := formatSpeedResultDiagnosticsHTML(result); diagnostics != "" {
+				parts = append(parts, diagnostics)
+			}
+		case result.Error != "":
+			parts = append(parts, htmlEscape(result.Error))
+		default:
+			parts = append(parts,
+				htmlEscape(formatBytes(result.DownloadedBytes)),
+				fmt.Sprintf("%d ms", result.DurationMs),
+				fmt.Sprintf("TTFB %d ms", result.TTFBMs),
+			)
+		}
+		items = append(items, fmt.Sprintf("<li><b>%s</b> — %s</li>", htmlEscape(result.Name), strings.Join(parts, " · ")))
+	}
+	return "<details><summary>Технические детали</summary><ul>" + strings.Join(items, "") + "</ul></details>"
+}
+
+func formatSpeedResultsRichTable(results []speedtest.Result) string {
+	if len(results) == 0 {
+		return "<p>Нет результатов.</p>"
+	}
+	var rows strings.Builder
+	rows.WriteString("<table bordered striped><tr><th>Нода</th><th>Mbps</th><th>TTFB</th></tr>")
+	for _, result := range results {
+		fmt.Fprintf(&rows, "<tr><td>%s</td><td>%.2f</td><td>%d ms</td></tr>", htmlEscape(result.Name), result.Mbps, result.TTFBMs)
+	}
+	rows.WriteString("</table>")
+	return rows.String()
+}
+
+func formatSpeedHistoryRichTable(results []speedtest.Result, threshold float64) string {
+	if len(results) == 0 {
+		return "<p>Нет результатов.</p>"
+	}
+	var rows strings.Builder
+	rows.WriteString("<table bordered striped><tr><th>Время</th><th>Результат</th><th>TTFB</th></tr>")
+	for _, result := range results {
+		ttfb := "—"
+		if result.TTFBMs > 0 {
+			ttfb = fmt.Sprintf("%d ms", result.TTFBMs)
+		}
+		fmt.Fprintf(&rows, "<tr><td>%s</td><td>%s</td><td>%s</td></tr>",
+			htmlEscape(formatCheckedAt(result.CheckedAt)),
+			formatSpeedStatusRich(result, threshold),
+			htmlEscape(ttfb),
+		)
+	}
+	rows.WriteString("</table>")
+	return rows.String()
 }
 
 func successfulResults(results []speedtest.Result) []speedtest.Result {
@@ -2507,6 +3038,20 @@ func successfulResults(results []speedtest.Result) []speedtest.Result {
 		return successful[i].Mbps > successful[j].Mbps
 	})
 	return successful
+}
+
+func healthySpeedResults(results []speedtest.Result, threshold float64) []speedtest.Result {
+	healthy := successfulResults(results)
+	if threshold <= 0 {
+		return healthy
+	}
+	result := healthy[:0]
+	for _, item := range healthy {
+		if item.Mbps >= threshold {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 func mainMenuMarkup(isAdmin bool) string {
@@ -2549,7 +3094,7 @@ func statusMarkup() string {
 
 func statusRefreshMarkup() string {
 	return encodeMarkup([][]inlineKeyboardButton{
-		{{Text: "Проверка идет...", CallbackData: "status:refresh"}},
+		{{Text: "Проверка идёт…", CallbackData: "status:refresh"}},
 		{{Text: "Меню", CallbackData: "back_to_menu"}},
 	})
 }
@@ -2639,7 +3184,16 @@ func limitLines(lines []string, limit int) []string {
 		return lines
 	}
 	result := append([]string{}, lines[:limit]...)
-	result = append(result, fmt.Sprintf("...and %d more", len(lines)-limit))
+	result = append(result, fmt.Sprintf("…и ещё %d", len(lines)-limit))
+	return result
+}
+
+func limitRichItems(items []string, limit int) []string {
+	if limit <= 0 || len(items) <= limit {
+		return items
+	}
+	result := append([]string{}, items[:limit]...)
+	result = append(result, fmt.Sprintf("<li>И ещё %d…</li>", len(items)-limit))
 	return result
 }
 
@@ -2654,20 +3208,18 @@ func formatSpeedResultHTML(result speedtest.Result, threshold float64) string {
 	if result.Offline {
 		diagnostics := formatSpeedResultDiagnosticsHTML(result)
 		if diagnostics == "" {
-			diagnostics = "Диагностика: нет данных"
+			diagnostics = "диагностики нет"
 		}
-		return fmt.Sprintf("• <b>%s</b>\n  ⚠️ <b>Нода offline</b> · %s", htmlEscape(result.Name), diagnostics)
+		return fmt.Sprintf("• 🔴 <b>%s</b> · %s", htmlEscape(result.Name), diagnostics)
+	}
+	if result.Error != "" {
+		return fmt.Sprintf("• ❌ <b>%s</b> · %s", htmlEscape(result.Name), htmlEscape(compactText(result.Error, 120)))
 	}
 
 	if threshold <= 0 || result.Mbps >= threshold {
-		return fmt.Sprintf("• <b>%s</b>\n  ✅ <b>%.2f Mbps</b>", htmlEscape(result.Name), result.Mbps)
+		return fmt.Sprintf("• ✅ <b>%s</b> · <b>%.2f Mbps</b>", htmlEscape(result.Name), result.Mbps)
 	}
-
-	ttfbText := ""
-	if result.TTFBMs > 0 {
-		ttfbText = fmt.Sprintf(" · TTFB %d ms", result.TTFBMs)
-	}
-	return fmt.Sprintf("• <b>%s</b>\n  ⚠️ <b>LOW %.2f Mbps</b> · %s · %d ms%s", htmlEscape(result.Name), result.Mbps, htmlEscape(formatBytes(result.DownloadedBytes)), result.DurationMs, ttfbText)
+	return fmt.Sprintf("• ⚠️ <b>%s</b> · <b>%.2f Mbps</b>", htmlEscape(result.Name), result.Mbps)
 }
 
 func reportSourceLabel(source string) string {
@@ -2691,18 +3243,22 @@ func formatSpeedHistoryLine(result speedtest.Result, threshold float64) string {
 	if result.Offline {
 		diagnostics := formatSpeedResultDiagnosticsHTML(result)
 		if diagnostics == "" {
-			return fmt.Sprintf("• %s\n  <b>OFFLINE</b>", htmlCode(prefix))
+			return fmt.Sprintf("• %s · 🔴 <b>недоступна</b>", htmlCode(prefix))
 		}
-		return fmt.Sprintf("• %s\n  <b>OFFLINE</b> · %s", htmlCode(prefix), diagnostics)
+		return fmt.Sprintf("• %s · 🔴 <b>недоступна</b> · %s", htmlCode(prefix), diagnostics)
 	}
 	if result.Error != "" {
-		return fmt.Sprintf("• %s\n  <b>FAILED</b> · %s", htmlCode(prefix), htmlEscape(result.Error))
+		return fmt.Sprintf("• %s · ❌ %s", htmlCode(prefix), htmlEscape(compactText(result.Error, 120)))
 	}
-	marker := "OK"
+	marker := "✅"
 	if threshold > 0 && result.Mbps < threshold {
-		marker = "LOW"
+		marker = "⚠️"
 	}
-	return fmt.Sprintf("• %s\n  <b>%s %.2f Mbps</b> · %s · %d ms · TTFB %d ms", htmlCode(prefix), marker, result.Mbps, htmlEscape(formatBytes(result.DownloadedBytes)), result.DurationMs, result.TTFBMs)
+	ttfb := ""
+	if result.TTFBMs > 0 {
+		ttfb = fmt.Sprintf(" · TTFB %d ms", result.TTFBMs)
+	}
+	return fmt.Sprintf("• %s · %s <b>%.2f Mbps</b>%s", htmlCode(prefix), marker, result.Mbps, ttfb)
 }
 
 func formatSpeedResultDiagnosticsHTML(result speedtest.Result) string {
@@ -2782,39 +3338,40 @@ func formatPingCheckHTML(pingCheck checker.PingCheckDetails) string {
 	return "Ping 🔴"
 }
 
-func formatProxyLine(proxy *models.ProxyConfig, online bool, latency time.Duration) string {
-	status := "OFFLINE"
-	if online {
-		status = "ONLINE"
-	}
-	latencyText := "n/a"
+func formatProxyLineHTML(proxy *models.ProxyConfig, online bool, latency time.Duration, downSince time.Time, hostCheck checker.HostCheckDetails, pingCheck checker.PingCheckDetails) string {
+	latencyText := "—"
 	if latency > 0 {
 		latencyText = fmt.Sprintf("%d ms", latency.Milliseconds())
 	}
-	return fmt.Sprintf("- %s %s [%s] (%s, %s)", status, proxy.Name, proxy.StableID, proxy.Protocol, latencyText)
+	if online {
+		return fmt.Sprintf("• 🟢 <b>%s</b> · %s", htmlEscape(proxy.Name), htmlEscape(latencyText))
+	}
+	parts := []string{"🔴 <b>" + htmlEscape(proxy.Name) + "</b>"}
+	if !downSince.IsZero() {
+		parts = append(parts, "простой "+htmlEscape(formatDuration(time.Since(downSince))))
+	}
+	if diagnostics := formatHostDiagnosticsHTML(hostCheck, pingCheck); diagnostics != "" {
+		parts = append(parts, diagnostics)
+	}
+	return "• " + strings.Join(parts, " · ")
 }
 
-func formatProxyLineHTML(proxy *models.ProxyConfig, online bool, latency time.Duration, downSince time.Time, hostCheck checker.HostCheckDetails, pingCheck checker.PingCheckDetails) string {
-	status := "OFFLINE"
+func formatProxyRichItem(proxy *models.ProxyConfig, online bool, latency time.Duration, downSince time.Time, hostCheck checker.HostCheckDetails, pingCheck checker.PingCheckDetails) string {
 	if online {
-		status = "ONLINE"
-	}
-	latencyText := "n/a"
-	if latency > 0 {
-		latencyText = fmt.Sprintf("%d ms", latency.Milliseconds())
-	}
-
-	parts := []string{htmlCode(proxy.StableID), htmlCode(proxy.Protocol), htmlEscape(latencyText)}
-	if !online && !downSince.IsZero() {
-		parts = append(parts, fmt.Sprintf("с %s", htmlEscape(formatCheckedAt(downSince))))
-		parts = append(parts, fmt.Sprintf("простой %s", htmlEscape(formatDuration(time.Since(downSince)))))
-	}
-	if !online {
-		if diagnostics := formatHostDiagnosticsHTML(hostCheck, pingCheck); diagnostics != "" {
-			parts = append(parts, diagnostics)
+		latencyText := "—"
+		if latency > 0 {
+			latencyText = fmt.Sprintf("%d ms", latency.Milliseconds())
 		}
+		return fmt.Sprintf("<li>🟢 <b>%s</b> — %s</li>", htmlEscape(proxy.Name), htmlEscape(latencyText))
 	}
-	return fmt.Sprintf("• <b>%s</b> <b>%s</b>\n  %s", htmlEscape(status), htmlEscape(proxy.Name), strings.Join(parts, " · "))
+	parts := []string{"🔴 <b>" + htmlEscape(proxy.Name) + "</b>"}
+	if !downSince.IsZero() {
+		parts = append(parts, "простой "+htmlEscape(formatDuration(time.Since(downSince))))
+	}
+	if diagnostics := formatHostDiagnosticsHTML(hostCheck, pingCheck); diagnostics != "" {
+		parts = append(parts, diagnostics)
+	}
+	return "<li>" + strings.Join(parts, " · ") + "</li>"
 }
 
 func formatNodeDown(proxy *models.ProxyConfig, state nodeAlertState, now time.Time) string {
@@ -2825,28 +3382,44 @@ func formatNodeDown(proxy *models.ProxyConfig, state nodeAlertState, now time.Ti
 
 	lines := []string{
 		fmt.Sprintf("<b>%s</b>", htmlEscape(title)),
-		"",
-		fmt.Sprintf("<b>%s</b>", htmlEscape(proxy.Name)),
-		fmt.Sprintf("ID: %s", htmlCode(proxy.StableID)),
-		fmt.Sprintf("Протокол: %s", htmlCode(proxy.Protocol)),
-	}
-	if proxy.SubName != "" {
-		lines = append(lines, fmt.Sprintf("Подписка: <b>%s</b>", htmlEscape(proxy.SubName)))
+		fmt.Sprintf("🔴 <b>%s</b>", htmlEscape(proxy.Name)),
 	}
 	if !state.DownSince.IsZero() {
-		lines = append(lines, fmt.Sprintf("Недоступна с: <b>%s</b>", htmlEscape(formatCheckedAt(state.DownSince))))
-		lines = append(lines, fmt.Sprintf("Простой: <b>%s</b>", htmlEscape(formatDuration(now.Sub(state.DownSince)))))
+		lines = append(lines, fmt.Sprintf("Простой: <b>%s</b> · с %s", htmlEscape(formatDuration(now.Sub(state.DownSince))), htmlEscape(formatCheckedAt(state.DownSince))))
 	}
 	if diagnostics := formatHostDiagnosticsHTML(state.HostCheck, state.PingCheck); diagnostics != "" {
-		lines = append(lines, fmt.Sprintf("Диагностика: %s", diagnostics))
+		lines = append(lines, diagnostics)
 	} else {
-		lines = append(lines, "Диагностика: <b>нет данных</b>")
+		lines = append(lines, "Диагностики пока нет")
 	}
 	if nextAfter := state.NextAlert.Sub(now); nextAfter > 0 {
-		lines = append(lines, fmt.Sprintf("Следующее напоминание: через <b>%s</b>", htmlEscape(formatDuration(nextAfter))))
+		lines = append(lines, fmt.Sprintf("Следующее напоминание через <b>%s</b>", htmlEscape(formatDuration(nextAfter))))
 	}
-	lines = append(lines, fmt.Sprintf("Провалов подряд: <b>%d</b>", state.FailCount))
 	return strings.Join(lines, "\n")
+}
+
+func formatNodeDownMessage(proxy *models.ProxyConfig, state nodeAlertState, now time.Time) formattedMessage {
+	fallback := formatNodeDown(proxy, state, now)
+	title := "Нода недоступна"
+	if state.AlertCount > 1 {
+		title = "Нода всё ещё недоступна"
+	}
+	var rich strings.Builder
+	fmt.Fprintf(&rich, "<h2>⚠️ %s</h2><p>🔴 <b>%s</b></p>", htmlEscape(title), htmlEscape(proxy.Name))
+	if !state.DownSince.IsZero() {
+		fmt.Fprintf(&rich, "<p>Простой: <b>%s</b> · с %s</p>", htmlEscape(formatDuration(now.Sub(state.DownSince))), htmlEscape(formatCheckedAt(state.DownSince)))
+	}
+	if diagnostics := formatHostDiagnosticsHTML(state.HostCheck, state.PingCheck); diagnostics != "" {
+		fmt.Fprintf(&rich, "<blockquote>%s</blockquote>", diagnostics)
+	}
+	rich.WriteString("<details><summary>Технические данные</summary><table bordered>")
+	fmt.Fprintf(&rich, "<tr><th>StableID</th><td><code>%s</code></td></tr><tr><th>Протокол</th><td>%s</td></tr><tr><th>Провалов подряд</th><td>%d</td></tr>",
+		htmlEscape(proxy.StableID), htmlEscape(strings.ToUpper(proxy.Protocol)), state.FailCount)
+	if proxy.SubName != "" {
+		fmt.Fprintf(&rich, "<tr><th>Подписка</th><td>%s</td></tr>", htmlEscape(proxy.SubName))
+	}
+	rich.WriteString("</table></details>")
+	return formattedMessage{HTML: fallback, RichHTML: rich.String()}
 }
 
 func formatNodeDownGroup(alerts []nodeDownAlert, now time.Time) string {
@@ -2856,7 +3429,7 @@ func formatNodeDownGroup(alerts []nodeDownAlert, now time.Time) string {
 	}
 	for _, alert := range alerts {
 		state := alert.State
-		downtime := "n/a"
+		downtime := "—"
 		if !state.DownSince.IsZero() {
 			downtime = formatDuration(now.Sub(state.DownSince))
 		}
@@ -2866,31 +3439,61 @@ func formatNodeDownGroup(alerts []nodeDownAlert, now time.Time) string {
 			diagnostics = "Диагностика: нет данных"
 		}
 		parts = append(parts, diagnostics)
-		if alert.NextAfter > 0 {
-			parts = append(parts, fmt.Sprintf("следующее через %s", htmlEscape(formatDuration(alert.NextAfter))))
-		}
 		lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  %s", htmlEscape(alert.Proxy.Name), strings.Join(parts, " · ")))
 	}
 	return trimHTMLMessage(strings.Join(lines, "\n"))
 }
 
+func formatNodeDownGroupMessage(alerts []nodeDownAlert, now time.Time) formattedMessage {
+	fallback := formatNodeDownGroup(alerts, now)
+	var items []string
+	var details []string
+	for _, alert := range alerts {
+		state := alert.State
+		downtime := "—"
+		if !state.DownSince.IsZero() {
+			downtime = formatDuration(now.Sub(state.DownSince))
+		}
+		diagnostics := formatHostDiagnosticsHTML(state.HostCheck, state.PingCheck)
+		if diagnostics == "" {
+			diagnostics = "диагностики нет"
+		}
+		items = append(items, fmt.Sprintf("<li>🔴 <b>%s</b> — %s · %s</li>", htmlEscape(alert.Proxy.Name), htmlEscape(downtime), diagnostics))
+		details = append(details, fmt.Sprintf("<li><b>%s</b> — <code>%s</code> · %s</li>", htmlEscape(alert.Proxy.Name), htmlEscape(alert.Proxy.StableID), htmlEscape(strings.ToUpper(alert.Proxy.Protocol))))
+	}
+	rich := fmt.Sprintf("<h2>⚠️ Недоступны ноды: %d</h2><ul>%s</ul><details><summary>Технические данные</summary><ul>%s</ul></details>",
+		len(alerts), strings.Join(items, ""), strings.Join(details, ""))
+	return formattedMessage{HTML: fallback, RichHTML: rich}
+}
+
 func formatNodeRecovery(proxy *models.ProxyConfig, latency time.Duration, downSince time.Time, now time.Time) string {
-	latencyText := "n/a"
+	latencyText := "—"
 	if latency > 0 {
 		latencyText = fmt.Sprintf("%d ms", latency.Milliseconds())
 	}
 	lines := []string{
-		"<b>✅ Нода снова доступна</b>",
-		"",
-		fmt.Sprintf("<b>%s</b>", htmlEscape(proxy.Name)),
-		fmt.Sprintf("ID: %s", htmlCode(proxy.StableID)),
+		fmt.Sprintf("✅ <b>%s</b> снова доступна", htmlEscape(proxy.Name)),
 		fmt.Sprintf("Задержка: <b>%s</b>", htmlEscape(latencyText)),
 	}
 	if !downSince.IsZero() {
-		lines = append(lines, fmt.Sprintf("Была недоступна с: <b>%s</b>", htmlEscape(formatCheckedAt(downSince))))
 		lines = append(lines, fmt.Sprintf("Простой: <b>%s</b>", htmlEscape(formatDuration(now.Sub(downSince)))))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func formatNodeRecoveryMessage(proxy *models.ProxyConfig, latency time.Duration, downSince time.Time, recoveredAt time.Time) formattedMessage {
+	fallback := formatNodeRecovery(proxy, latency, downSince, recoveredAt)
+	latencyText := "—"
+	if latency > 0 {
+		latencyText = fmt.Sprintf("%d ms", latency.Milliseconds())
+	}
+	downtime := "—"
+	if !downSince.IsZero() {
+		downtime = formatDuration(recoveredAt.Sub(downSince))
+	}
+	rich := fmt.Sprintf("<h2>✅ Нода снова доступна</h2><p><b>%s</b></p><table bordered><tr><th>Простой</th><td>%s</td></tr><tr><th>Задержка</th><td>%s</td></tr></table><details><summary>StableID</summary><p><code>%s</code></p></details>",
+		htmlEscape(proxy.Name), htmlEscape(downtime), htmlEscape(latencyText), htmlEscape(proxy.StableID))
+	return formattedMessage{HTML: fallback, RichHTML: rich}
 }
 
 func shouldRefreshNodeDiagnostics(state nodeAlertState, cfg Config, now time.Time) bool {
@@ -2958,12 +3561,24 @@ func formatProxySearchMiss(matches []*models.ProxyConfig) string {
 	lines = append(lines, "<b>Найдено несколько нод</b>", "", "Уточните запрос по stable ID:")
 	for _, proxy := range matches {
 		if len(lines) >= 11 {
-			lines = append(lines, fmt.Sprintf("...and %d more", len(matches)-10))
+			lines = append(lines, fmt.Sprintf("…и ещё %d", len(matches)-10))
 			break
 		}
 		lines = append(lines, fmt.Sprintf("• %s — <b>%s</b>", htmlCode(proxy.StableID), htmlEscape(proxy.Name)))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func formatProxySearchMissRich(matches []*models.ProxyConfig) string {
+	if len(matches) == 0 {
+		return "<h2>Нода не найдена</h2><p>Проверьте StableID или часть имени.</p>"
+	}
+	var items []string
+	for _, proxy := range matches {
+		items = append(items, fmt.Sprintf("<li><b>%s</b> — <code>%s</code></li>", htmlEscape(proxy.Name), htmlEscape(proxy.StableID)))
+	}
+	items = limitRichItems(items, 10)
+	return "<h2>Найдено несколько нод</h2><p>Уточните запрос по StableID.</p><ul>" + strings.Join(items, "") + "</ul>"
 }
 
 func htmlEscape(value string) string {
@@ -2974,9 +3589,24 @@ func htmlCode(value string) string {
 	return "<code>" + htmlEscape(value) + "</code>"
 }
 
+func compactText(value string, maxRunes int) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	if maxRunes == 1 {
+		return "…"
+	}
+	return string(runes[:maxRunes-1]) + "…"
+}
+
 func formatCheckedAt(value time.Time) string {
 	if value.IsZero() {
-		return "n/a"
+		return "—"
 	}
 	return value.Format("2006-01-02 15:04:05")
 }

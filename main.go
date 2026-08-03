@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"xray-checker/backup"
@@ -39,10 +40,30 @@ func main() {
 	if logLevel == logger.LevelNone {
 		logger.Startup("Log level: none (silent mode)")
 	}
+	if recovered, err := backup.RecoverUnconfirmedRestore("data"); err != nil {
+		logger.Fatal("Failed to roll back unconfirmed backup restore: %v", err)
+	} else if recovered {
+		logger.Warn("Recovered an incomplete backup restore transaction from the previous startup")
+	}
+	restoreApplied := false
 	if applied, err := backup.ApplyPendingRestore("data"); err != nil {
 		logger.Warn("Failed to apply pending backup restore: %v", err)
 	} else if applied {
+		restoreApplied = true
 		logger.Startup("Applied pending backup restore")
+	}
+	handleStateLoadError := func(owner string, loadErr error) {
+		if loadErr == nil {
+			return
+		}
+		if !restoreApplied {
+			logger.Warn("Failed to load %s state: %v", owner, loadErr)
+			return
+		}
+		if rollbackErr := backup.RollbackAppliedRestore("data"); rollbackErr != nil {
+			logger.Fatal("Failed to load restored %s state (%v) and rollback failed: %v", owner, loadErr, rollbackErr)
+		}
+		logger.Fatal("Restored %s state was rejected and rolled back; restart the application: %v", owner, loadErr)
 	}
 
 	if err := web.InitAssetLoader(config.CLIConfig.Web.CustomAssetsPath); err != nil {
@@ -111,20 +132,18 @@ func main() {
 		config.CLIConfig.Proxy.CheckMethod,
 	)
 
+	xrayLifecycle := &sync.RWMutex{}
 	speedTestManager := speedtest.NewManager(
 		proxyChecker,
 		config.CLIConfig.Xray.StartPort,
 		"data/speedtest_schedule.json",
 		speedtest.TestConfig{URL: config.CLIConfig.SpeedTest.URL},
 	)
-	if err := speedTestManager.Load(); err != nil {
-		logger.Warn("Failed to load speed test schedule: %v", err)
-	}
+	speedTestManager.SetRunGate(xrayLifecycle.RLocker())
+	handleStateLoadError("speed-test", speedTestManager.Load())
 
 	nodeArchive := nodearchive.NewStore("data/node_registry.json", proxyChecker)
-	if err := nodeArchive.Load(); err != nil {
-		logger.Warn("Failed to load node registry: %v", err)
-	}
+	handleStateLoadError("node registry", nodeArchive.Load())
 	if err := nodeArchive.SyncProxies(*proxyConfigs); err != nil {
 		logger.Warn("Failed to sync node registry: %v", err)
 	}
@@ -138,8 +157,12 @@ func main() {
 		speedTestManager,
 		config.CLIConfig.Xray.StartPort,
 	)
-	if err := telegramService.Load(); err != nil {
-		logger.Warn("Failed to load Telegram settings: %v", err)
+	handleStateLoadError("Telegram", telegramService.Load())
+	if restoreApplied {
+		if err := backup.ConfirmAppliedRestore("data"); err != nil {
+			logger.Fatal("Failed to confirm applied backup restore: %v", err)
+		}
+		logger.Startup("Confirmed restored persisted state")
 	}
 	if err := nodeArchive.RecordAvailability(); err != nil {
 		logger.Warn("Failed to record restored node availability: %v", err)
@@ -216,6 +239,9 @@ func main() {
 		if preserved := xray.PreserveStableIDs(*proxyConfigs, newConfigs); preserved > 0 {
 			logger.Info("Preserved node statistics for %d refreshed proxies", preserved)
 		}
+		if err := xray.ValidateStableIDs(newConfigs); err != nil {
+			return web.AdminSubscriptionRefreshResult{}, fmt.Errorf("reject subscription update: %w", err)
+		}
 
 		if xray.IsConfigsEqual(*proxyConfigs, newConfigs) {
 			logger.Info("Subscriptions checked, no changes")
@@ -226,7 +252,10 @@ func main() {
 			}, nil
 		}
 
-		if err := updateConfiguration(newConfigs, proxyConfigs, xrayRunner, proxyChecker); err != nil {
+		xrayLifecycle.Lock()
+		err = updateConfiguration(newConfigs, proxyConfigs, xrayRunner, proxyChecker)
+		xrayLifecycle.Unlock()
+		if err != nil {
 			return web.AdminSubscriptionRefreshResult{}, err
 		}
 		if err := nodeArchive.SyncProxies(*proxyConfigs); err != nil {

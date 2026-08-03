@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -167,27 +168,54 @@ func (c *Creator) collectFiles() ([]archiveFile, []FileInfo, error) {
 }
 
 func prepareDataFile(name string, data []byte) ([]byte, error) {
-	if !json.Valid(data) {
-		return nil, fmt.Errorf("backup file %s contains invalid JSON", name)
+	config, err := decodeJSONObjectUnique(data)
+	if err != nil {
+		return nil, fmt.Errorf("backup file %s: %w", name, err)
 	}
 	if name != "telegram_config.json" {
+		if err := validateDataFile(name, data); err != nil {
+			return nil, err
+		}
 		return data, nil
 	}
 
-	var config map[string]json.RawMessage
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("decode backup file %s: %w", name, err)
+	safeFields := map[string]string{
+		"enabled":                      "enabled",
+		"commandpollingenabled":        "commandPollingEnabled",
+		"speedreportsenabled":          "speedReportsEnabled",
+		"speedreportmode":              "speedReportMode",
+		"lowspeedthresholdmbps":        "lowSpeedThresholdMbps",
+		"speedreportlimit":             "speedReportLimit",
+		"nodealertsenabled":            "nodeAlertsEnabled",
+		"alertcheckminutes":            "alertCheckMinutes",
+		"alertafterfailures":           "alertAfterFailures",
+		"alertrepeatminutes":           "alertRepeatMinutes",
+		"alertdiagnosticsminutes":      "alertDiagnosticsMinutes",
+		"alertreminderscheduleminutes": "alertReminderScheduleMinutes",
+		"alertmaxreminderminutes":      "alertMaxReminderMinutes",
+		"groupofflinereminders":        "groupOfflineReminders",
+		"notifyrecovery":               "notifyRecovery",
+		"mutednodeids":                 "mutedNodeIds",
+		"mutedspeednodeids":            "mutedSpeedNodeIds",
+		"mutedalertnodeids":            "mutedAlertNodeIds",
+		"timeoutsec":                   "timeoutSec",
 	}
-	delete(config, "botToken")
-	delete(config, "chatId")
-	delete(config, "messageThreadId")
-	delete(config, "adminUserIds")
+	sanitizedConfig := make(map[string]json.RawMessage)
+	for key, value := range config {
+		if canonical, ok := safeFields[strings.ToLower(key)]; ok {
+			sanitizedConfig[canonical] = value
+		}
+	}
 
-	sanitized, err := json.MarshalIndent(config, "", "  ")
+	sanitized, err := json.MarshalIndent(sanitizedConfig, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("sanitize backup file %s: %w", name, err)
 	}
-	return append(sanitized, '\n'), nil
+	sanitized = append(sanitized, '\n')
+	if err := validateDataFile(name, sanitized); err != nil {
+		return nil, err
+	}
+	return sanitized, nil
 }
 
 func writeArchiveFile(zw *zip.Writer, name string, data []byte, modifiedAt time.Time) error {

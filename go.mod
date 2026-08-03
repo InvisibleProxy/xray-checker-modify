@@ -10,12 +10,12 @@ require (
 	github.com/xtls/libxray v0.0.0-20251227071437-55f9ac38eb66
 	github.com/xtls/xray-core v1.251208.0
 	golang.org/x/net v0.47.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
 	github.com/juju/ratelimit v1.0.2 // indirect
 	github.com/miekg/dns v1.1.68 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 require (

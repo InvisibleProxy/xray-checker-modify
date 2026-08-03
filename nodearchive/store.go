@@ -493,7 +493,52 @@ func (s *Store) DeleteArchived(stableID string) error {
 		return fmt.Errorf("active nodes are managed by subscription and cannot be deleted")
 	}
 	delete(s.nodes, stableID)
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		s.nodes[stableID] = record
+		return err
+	}
+	return nil
+}
+
+func (s *Store) ArchivedRecord(stableID string) (NodeRecord, error) {
+	stableID = strings.TrimSpace(stableID)
+	if stableID == "" {
+		return NodeRecord{}, fmt.Errorf("stableId is required")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	record, ok := s.nodes[stableID]
+	if !ok {
+		return NodeRecord{}, fmt.Errorf("node not found")
+	}
+	if record.Active {
+		return NodeRecord{}, fmt.Errorf("active nodes are managed by subscription and cannot be deleted")
+	}
+	return record, nil
+}
+
+func (s *Store) RestoreArchived(record NodeRecord) error {
+	stableID := strings.TrimSpace(record.StableID)
+	if stableID == "" {
+		return fmt.Errorf("stableId is required")
+	}
+	if record.Active {
+		return fmt.Errorf("cannot restore an active record as archived")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previous, existed := s.nodes[stableID]
+	s.nodes[stableID] = record
+	if err := s.saveLocked(); err != nil {
+		if existed {
+			s.nodes[stableID] = previous
+		} else {
+			delete(s.nodes, stableID)
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Store) lookupGeo(ctx context.Context, record NodeRecord) (NodeRecord, int, []error) {

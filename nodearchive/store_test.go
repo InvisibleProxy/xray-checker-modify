@@ -1,6 +1,7 @@
 package nodearchive
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -150,6 +151,47 @@ func TestDeleteArchivedRejectsActiveAndDeletesRetired(t *testing.T) {
 	}
 	if _, ok := store.nodes["retired"]; ok {
 		t.Fatal("retired node was not deleted")
+	}
+}
+
+func TestDeleteArchivedRollsBackMemoryWhenPersistenceFails(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("block"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(filepath.Join(blocker, "node_registry.json"), nil)
+	want := NodeRecord{StableID: "retired", Name: "Retired", Active: false}
+	store.nodes[want.StableID] = want
+
+	if err := store.DeleteArchived(want.StableID); err == nil {
+		t.Fatal("DeleteArchived() succeeded despite persistence failure")
+	}
+	got, ok := store.nodes[want.StableID]
+	if !ok || got != want {
+		t.Fatalf("retired record was not restored after persistence failure: %+v, exists=%v", got, ok)
+	}
+}
+
+func TestArchivedRecordAndRestoreArchivedKeepRetiredInvariant(t *testing.T) {
+	store := NewStore("", nil)
+	want := NodeRecord{StableID: "retired", Name: "Retired", Active: false}
+	store.nodes[want.StableID] = want
+	record, err := store.ArchivedRecord(want.StableID)
+	if err != nil || record != want {
+		t.Fatalf("ArchivedRecord() = %+v, %v; want %+v", record, err, want)
+	}
+	if err := store.DeleteArchived(want.StableID); err != nil {
+		t.Fatalf("DeleteArchived() error = %v", err)
+	}
+	if err := store.RestoreArchived(record); err != nil {
+		t.Fatalf("RestoreArchived() error = %v", err)
+	}
+	if got := store.nodes[want.StableID]; got != want {
+		t.Fatalf("restored record = %+v, want %+v", got, want)
+	}
+	if err := store.RestoreArchived(NodeRecord{StableID: "active", Active: true}); err == nil {
+		t.Fatal("RestoreArchived() accepted an active record")
 	}
 }
 

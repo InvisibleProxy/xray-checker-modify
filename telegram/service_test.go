@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -85,9 +86,14 @@ func TestSpeedIssuesHTMLIncludesLowSpeedOnlyBelowThreshold(t *testing.T) {
 		t.Fatalf("issue lines = %d, want 1: %#v", len(lines), lines)
 	}
 	line := lines[0]
-	for _, want := range []string{"low", "4.99 Mbps", "порог 5.00 Mbps", "low-id"} {
+	for _, want := range []string{"low", "4.99 Mbps"} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("low-speed issue line %q does not contain %q", line, want)
+		}
+	}
+	for _, noisy := range []string{"порог", "low-id", "MB", "ms"} {
+		if strings.Contains(line, noisy) {
+			t.Fatalf("low-speed issue line contains repeated technical noise %q: %q", noisy, line)
 		}
 	}
 	if strings.Contains(line, "fast") || strings.Contains(line, "equal") {
@@ -121,45 +127,46 @@ func TestSpeedReportDecisionScenarios(t *testing.T) {
 			wantSend: true,
 		},
 		{
-			name:     "manual issues mode skips without issues",
-			cfg:      withReportMode(baseCfg, "issues"),
-			source:   "manual",
-			results:  []speedtest.Result{{Name: "fast", Mbps: 25}},
-			wantSend: false,
-		},
-		{
-			name:       "manual issues mode sends low speed",
-			cfg:        withReportMode(baseCfg, "issues"),
-			source:     "manual",
-			results:    []speedtest.Result{{Name: "low", Mbps: 5}},
-			wantSlow:   1,
-			wantSend:   true,
-			wantFailed: 0,
-		},
-		{
-			name:           "schedule skips without issues even in always mode",
-			cfg:            baseCfg,
-			source:         "schedule",
+			name:           "manual issues mode skips without issues",
+			cfg:            withReportMode(baseCfg, "issues"),
+			source:         "manual",
 			results:        []speedtest.Result{{Name: "fast", Mbps: 25}},
 			wantIssuesOnly: true,
 			wantSend:       false,
 		},
 		{
-			name:           "schedule sends low speed as issues only",
-			cfg:            baseCfg,
-			source:         "schedule",
+			name:           "manual issues mode sends low speed",
+			cfg:            withReportMode(baseCfg, "issues"),
+			source:         "manual",
 			results:        []speedtest.Result{{Name: "low", Mbps: 5}},
 			wantSlow:       1,
-			wantIssuesOnly: true,
 			wantSend:       true,
+			wantFailed:     0,
+			wantIssuesOnly: true,
 		},
 		{
-			name:       "error sends in issues mode",
-			cfg:        withReportMode(baseCfg, "issues"),
-			source:     "manual",
-			results:    []speedtest.Result{{Name: "failed", Error: "timeout"}},
-			wantFailed: 1,
-			wantSend:   true,
+			name:     "schedule always sends without issues",
+			cfg:      baseCfg,
+			source:   "schedule",
+			results:  []speedtest.Result{{Name: "fast", Mbps: 25}},
+			wantSend: true,
+		},
+		{
+			name:     "schedule always sends low speed as full report",
+			cfg:      baseCfg,
+			source:   "schedule",
+			results:  []speedtest.Result{{Name: "low", Mbps: 5}},
+			wantSlow: 1,
+			wantSend: true,
+		},
+		{
+			name:           "error sends in issues mode",
+			cfg:            withReportMode(baseCfg, "issues"),
+			source:         "manual",
+			results:        []speedtest.Result{{Name: "failed", Error: "timeout"}},
+			wantFailed:     1,
+			wantSend:       true,
+			wantIssuesOnly: true,
 		},
 		{
 			name:     "disabled report mode skips low speed",
@@ -176,12 +183,11 @@ func TestSpeedReportDecisionScenarios(t *testing.T) {
 			wantSend: false,
 		},
 		{
-			name:           "threshold disabled means low speed is not an issue",
-			cfg:            withLowSpeedThreshold(baseCfg, 0),
-			source:         "schedule",
-			results:        []speedtest.Result{{Name: "slow but threshold disabled", Mbps: 1}},
-			wantIssuesOnly: true,
-			wantSend:       false,
+			name:     "threshold disabled still sends in always mode",
+			cfg:      withLowSpeedThreshold(baseCfg, 0),
+			source:   "schedule",
+			results:  []speedtest.Result{{Name: "slow but threshold disabled", Mbps: 1}},
+			wantSend: true,
 		},
 		{
 			name:     "schedule skips when only low node is muted",
@@ -237,25 +243,39 @@ func TestFormatSpeedReportLowSpeedModes(t *testing.T) {
 		},
 	}
 
-	text := service.formatSpeedReport(report, cfg, 0, 1, false)
+	message := service.formatSpeedReportMessage(report, cfg, 0, 1, false)
+	text := message.HTML
 	for _, want := range []string{
-		"Speed-test завершен",
+		"Speed-test завершён",
 		"Низкая скорость: <b>1</b>",
 		"Порог низкой скорости: <b>10.00 Mbps</b>",
-		"⚠️ <b>5.00 Mbps</b> · порог 10.00 Mbps",
-		"<b>LOW 5.00 Mbps</b>",
+		"⚠️ <b>low</b> · <b>5.00 Mbps</b>",
+		"✅ <b>fast</b> · <b>50.00 Mbps</b>",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("manual report does not contain %q:\n%s", want, text)
 		}
 	}
+	if strings.Count(text, "low") != 1 {
+		t.Fatalf("low-speed node is duplicated in compact report:\n%s", text)
+	}
+	for _, want := range []string{"<table bordered>", "<details><summary>Технические детали", "<details><summary>Без проблем: 1"} {
+		if !strings.Contains(message.RichHTML, want) {
+			t.Fatalf("rich report does not contain %q:\n%s", want, message.RichHTML)
+		}
+	}
+	if strings.Contains(message.RichHTML, "<summary>Без проблем: 2</summary>") {
+		t.Fatalf("low-speed node is duplicated in the healthy rich-report section:\n%s", message.RichHTML)
+	}
 
 	report.Source = "schedule"
-	text = service.formatSpeedReport(report, cfg, 0, 1, true)
+	message = service.formatSpeedReportMessage(report, cfg, 0, 1, true)
+	text = message.HTML
 	for _, want := range []string{
-		"Speed-test по расписанию: проблемы",
+		"Speed-test: есть проблемы",
+		"расписание",
 		"Порог низкой скорости: <b>10.00 Mbps</b>",
-		"⚠️ <b>5.00 Mbps</b> · порог 10.00 Mbps",
+		"⚠️ <b>low</b> · <b>5.00 Mbps</b>",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("schedule issues report does not contain %q:\n%s", want, text)
@@ -263,6 +283,9 @@ func TestFormatSpeedReportLowSpeedModes(t *testing.T) {
 	}
 	if strings.Contains(text, "Лучшие результаты") {
 		t.Fatalf("schedule issues-only report should not include best results:\n%s", text)
+	}
+	if strings.Contains(message.RichHTML, "Без проблем") {
+		t.Fatalf("issues-only rich report should not include successful results:\n%s", message.RichHTML)
 	}
 }
 
@@ -549,6 +572,134 @@ func TestNotifyNodeStatusesPreservesMutedOfflineState(t *testing.T) {
 	}
 	if state.FailCount <= 3 {
 		t.Fatalf("failCount = %d, want incremented value", state.FailCount)
+	}
+}
+
+func TestTelegramRunRequestUsesSavedScheduleConfig(t *testing.T) {
+	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
+	manager := speedtest.NewManager(proxyChecker, 10000, "", speedtest.TestConfig{})
+	want := speedtest.TestConfig{
+		URL:         "https://speed.example.test/file.bin",
+		MaxBytes:    8 * 1024 * 1024,
+		TimeoutSec:  33,
+		Concurrency: 3,
+	}
+	if err := manager.UpdateSchedule(speedtest.ScheduleConfig{Config: want}); err != nil {
+		t.Fatalf("UpdateSchedule() error = %v", err)
+	}
+
+	service := NewService("", proxyChecker, manager, 10000)
+	got := service.newSpeedTestRunRequest().Config
+	if got != want {
+		t.Fatalf("Telegram run config = %+v, want saved schedule config %+v", got, want)
+	}
+}
+
+func TestIsChatAllowedRequiresConfiguredChat(t *testing.T) {
+	service := &Service{}
+	admin := &user{ID: 7}
+	cfg := Config{AdminUserIDs: []int64{7}}
+	if service.isChatAllowedFor(42, admin, cfg) {
+		t.Fatal("empty configured chat authorized an incoming message")
+	}
+
+	cfg.ChatID = "42"
+	if !service.isChatAllowedFor(42, nil, cfg) {
+		t.Fatal("configured chat was rejected")
+	}
+	if service.isChatAllowedFor(43, &user{ID: 8}, cfg) {
+		t.Fatal("unconfigured chat with a non-admin user was authorized")
+	}
+	if !service.isChatAllowedFor(43, admin, cfg) {
+		t.Fatal("configured admin user was rejected")
+	}
+}
+
+func TestRecoveryStateSurvivesPersistenceAndClearsOnlyAfterConfirmation(t *testing.T) {
+	recoveredAt := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	want := nodeAlertState{
+		FailCount:       3,
+		WasDown:         true,
+		DownSince:       recoveredAt.Add(-15 * time.Minute),
+		LastAlert:       recoveredAt.Add(-10 * time.Minute),
+		AlertCount:      1,
+		RecoveryPending: true,
+		RecoveredAt:     recoveredAt,
+		RecoveryLatency: 42 * time.Millisecond,
+	}
+	got := persistedNodeAlertStateFrom(want).toNodeAlertState()
+	if !got.RecoveryPending || !got.RecoveredAt.Equal(want.RecoveredAt) || got.RecoveryLatency != want.RecoveryLatency {
+		t.Fatalf("persisted recovery state = %+v, want pending recovery %+v", got, want)
+	}
+
+	service := &Service{alerts: map[string]nodeAlertState{"node-1": got}}
+	if service.confirmNodeRecoverySent("node-1", recoveredAt.Add(time.Second)) {
+		t.Fatal("recovery was confirmed for a different notification instance")
+	}
+	if _, ok := service.alerts["node-1"]; !ok {
+		t.Fatal("pending recovery was removed after failed confirmation")
+	}
+	if !service.confirmNodeRecoverySent("node-1", recoveredAt) {
+		t.Fatal("matching pending recovery was not confirmed")
+	}
+	if _, ok := service.alerts["node-1"]; ok {
+		t.Fatal("confirmed recovery was not removed")
+	}
+}
+
+func TestRichMessagePayloadAndFallbackPolicy(t *testing.T) {
+	encoded, err := json.Marshal(inputRichMessage{
+		HTML:                "<h2>Сводка</h2><table><tr><td>1</td></tr></table>",
+		SkipEntityDetection: true,
+	})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if payload["html"] == "" || payload["skip_entity_detection"] != true {
+		t.Fatalf("rich-message payload = %#v", payload)
+	}
+
+	if !shouldFallbackRichMessage(fmt.Errorf("Telegram API error: Bad Request")) {
+		t.Fatal("definite Telegram rejection did not enable compact fallback")
+	}
+	if shouldFallbackRichMessage(fmt.Errorf("connection reset by peer")) {
+		t.Fatal("ambiguous network failure enabled fallback and could duplicate a message")
+	}
+	if !richMessageUnsupported(fmt.Errorf("HTTP 404: method not found")) {
+		t.Fatal("missing Rich Messages method was not cached as unsupported")
+	}
+	if !canSendRichMessage("<h2>Сводка</h2>") {
+		t.Fatal("valid rich message was rejected")
+	}
+	if canSendRichMessage(strings.Repeat("я", maxRichMessageRunes+1)) {
+		t.Fatal("oversized rich message was not routed to compact fallback")
+	}
+}
+
+func TestRichSpeedReportEscapesContentAndStaysWithinTelegramLimit(t *testing.T) {
+	service := &Service{}
+	cfg := DefaultConfig()
+	cfg.LowSpeedThresholdMbps = 10
+	cfg.SpeedReportLimit = 50
+	report := speedtest.RunReport{
+		Source:     "telegram",
+		FinishedAt: time.Now(),
+		Selected:   2,
+		Results: []speedtest.Result{
+			{Name: "<slow & node>", StableID: "slow-id", Mbps: 1},
+			{Name: "healthy", StableID: "healthy-id", Mbps: 100, TTFBMs: 12},
+		},
+	}
+	message := service.formatSpeedReportMessage(report, cfg, 0, 1, false)
+	if strings.Contains(message.RichHTML, "<slow & node>") || !strings.Contains(message.RichHTML, "&lt;slow &amp; node&gt;") {
+		t.Fatalf("rich report did not escape node name:\n%s", message.RichHTML)
+	}
+	if utf8.RuneCountInString(message.RichHTML) > 32768 {
+		t.Fatalf("rich report has %d runes, Telegram limit is 32768", utf8.RuneCountInString(message.RichHTML))
 	}
 }
 

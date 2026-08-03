@@ -135,6 +135,7 @@ type Manager struct {
 	schedule ScheduleConfig
 	nextRun  time.Time
 	reporter Reporter
+	runGate  sync.Locker
 
 	resultPersistMu   sync.Mutex
 	schedulePersistMu sync.Mutex
@@ -162,6 +163,15 @@ func (m *Manager) SetReporter(reporter Reporter) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.reporter = reporter
+}
+
+// SetRunGate coordinates speed tests with Xray lifecycle changes. The gate is
+// acquired before proxy pointers and SOCKS ports are selected and released only
+// after every result has been collected.
+func (m *Manager) SetRunGate(gate sync.Locker) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.runGate = gate
 }
 
 func (m *Manager) Load() error {
@@ -328,11 +338,25 @@ func (m *Manager) DeleteHistory(stableID string) error {
 	}
 
 	m.mu.Lock()
+	latest, hadLatest := m.results[stableID]
+	history, hadHistory := m.history[stableID]
+	history = append([]Result(nil), history...)
 	delete(m.results, stableID)
 	delete(m.history, stableID)
 	m.mu.Unlock()
 
-	return m.persistResults()
+	if err := m.persistResults(); err != nil {
+		m.mu.Lock()
+		if hadLatest {
+			m.results[stableID] = latest
+		}
+		if hadHistory {
+			m.history[stableID] = history
+		}
+		m.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 func (m *Manager) Schedule() ScheduleConfig {
@@ -506,6 +530,19 @@ func (m *Manager) Run(req RunRequest, source string) error {
 			return fmt.Errorf("save test URL: %w", err)
 		}
 	}
+	m.mu.RLock()
+	runGate := m.runGate
+	m.mu.RUnlock()
+	if runGate != nil {
+		runGate.Lock()
+	}
+	gateHeld := runGate != nil
+	defer func() {
+		if gateHeld {
+			runGate.Unlock()
+		}
+	}()
+
 	proxies := m.selectProxies(req)
 	if len(proxies) == 0 {
 		return fmt.Errorf("no proxies selected")
@@ -527,7 +564,8 @@ func (m *Manager) Run(req RunRequest, source string) error {
 	}
 	m.mu.Unlock()
 
-	go m.run(proxies, req.Config, source, startedAt, req.SkipOffline)
+	go m.run(proxies, req.Config, source, startedAt, req.SkipOffline, runGate)
+	gateHeld = false
 	return nil
 }
 
@@ -582,7 +620,10 @@ func (m *Manager) setNextScheduledRunAt(nextRun time.Time) {
 	m.nextRun = nextRun
 }
 
-func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source string, startedAt time.Time, skipOffline bool) {
+func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source string, startedAt time.Time, skipOffline bool, runGate sync.Locker) {
+	if runGate != nil {
+		defer runGate.Unlock()
+	}
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, cfg.Concurrency)
 	results := make(chan Result, len(proxies))

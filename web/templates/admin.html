@@ -1085,6 +1085,9 @@
         nodesOverview: [],
         nodesOverviewSort: "avgMbps",
         nodesOverviewSortDir: "desc",
+        speedPollRunning: false,
+        nodeURLDraftID: "",
+        nodeURLDirty: false,
       };
 
       const basePath = (() => {
@@ -2007,17 +2010,27 @@
           input.disabled = true;
           save.disabled = true;
           clear.disabled = true;
+          state.nodeURLDraftID = "";
+          state.nodeURLDirty = false;
           $("node-url-state").textContent = ids.length === 0 ? "Select one node" : "Select exactly one node";
           return;
         }
 
         const stableId = ids[0];
         const currentURL = nodeTestURL(stableId);
+        if (state.nodeURLDraftID !== stableId) {
+          state.nodeURLDraftID = stableId;
+          state.nodeURLDirty = false;
+          input.value = currentURL;
+        } else if (!state.nodeURLDirty) {
+          input.value = currentURL;
+        }
         input.disabled = false;
         save.disabled = false;
-        clear.disabled = !currentURL;
-        input.value = currentURL;
-        $("node-url-state").textContent = currentURL ? "Custom URL active" : "Using global Test URL";
+        clear.disabled = !currentURL && !input.value.trim();
+        $("node-url-state").textContent = state.nodeURLDirty
+          ? "Unsaved changes"
+          : (currentURL ? "Custom URL active" : "Using global Test URL");
       }
 
       function applyDefaults() {
@@ -2261,6 +2274,36 @@
         }
       }
 
+      async function pollSpeedSnapshot() {
+        if (state.speedPollRunning || document.hidden || !state.snapshot) return;
+        state.speedPollRunning = true;
+        const previousRun = state.snapshot.lastRun || {};
+        const wasRunning = !!previousRun.running;
+        try {
+          const snapshot = await request("/speed-tests");
+          const currentRun = snapshot.lastRun || {};
+          const isRunning = !!currentRun.running;
+          const completedBetweenPolls = !wasRunning
+            && !isRunning
+            && !!currentRun.finishedAt
+            && currentRun.finishedAt !== previousRun.finishedAt;
+          state.snapshot = snapshot;
+          state.lastUpdatedAt = new Date();
+          if ((wasRunning && !isRunning) || completedBetweenPolls) {
+            await load();
+            return;
+          }
+          renderRunState();
+          renderOverview();
+          renderResults();
+          if (state.activeTab === "history" && isRunning) {
+            await loadHistory();
+          }
+        } finally {
+          state.speedPollRunning = false;
+        }
+      }
+
       async function refreshSubscription() {
         $("message").textContent = "";
         $("subscription-state").textContent = "Updating";
@@ -2318,6 +2361,8 @@
               url,
             }),
           });
+          state.nodeURLDraftID = ids[0];
+          state.nodeURLDirty = false;
           $("message").textContent = url ? "Node Test URL saved" : "Node Test URL cleared";
           renderAll();
         } catch (err) {
@@ -2327,6 +2372,7 @@
 
       async function clearNodeURL() {
         $("node-url").value = "";
+        state.nodeURLDirty = true;
         await saveNodeURL();
       }
 
@@ -2505,6 +2551,12 @@
       $("selection-history").addEventListener("click", openSelectedHistory);
       $("save-node-url").addEventListener("click", saveNodeURL);
       $("clear-node-url").addEventListener("click", clearNodeURL);
+      $("node-url").addEventListener("input", () => {
+        const ids = selectedIDs();
+        state.nodeURLDraftID = ids.length === 1 ? ids[0] : "";
+        state.nodeURLDirty = ids.length === 1;
+        renderNodeURLForm();
+      });
       $("save-schedule").addEventListener("click", saveSchedule);
       $("save-telegram").addEventListener("click", saveTelegram);
       $("download-backup").addEventListener("click", downloadBackup);
@@ -2553,10 +2605,8 @@
         $("message").textContent = err.message;
       });
       setInterval(() => {
-        if (state.snapshot && state.snapshot.lastRun && state.snapshot.lastRun.running) {
-          load().catch(() => {});
-        }
-      }, 2000);
+        pollSpeedSnapshot().catch(() => {});
+      }, 5000);
       setInterval(() => {
         if (state.snapshot) {
           renderOverview();

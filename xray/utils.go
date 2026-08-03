@@ -2,6 +2,7 @@ package xray
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"xray-checker/models"
@@ -15,6 +16,40 @@ func PrepareProxyConfigs(proxies []*models.ProxyConfig) {
 			proxies[i].StableID = proxies[i].GenerateStableID()
 		}
 	}
+}
+
+// ValidateStableIDs rejects ambiguous node identity before StableID-keyed
+// status, history, archive, and Telegram maps can silently overwrite data.
+func ValidateStableIDs(proxies []*models.ProxyConfig) error {
+	seen := make(map[string]*models.ProxyConfig, len(proxies))
+	for index, proxy := range proxies {
+		if proxy == nil {
+			return fmt.Errorf("proxy %d is nil", index)
+		}
+		if proxy.StableID == "" {
+			proxy.StableID = proxy.GenerateStableID()
+		}
+		stableID := strings.TrimSpace(proxy.StableID)
+		if stableID == "" {
+			return fmt.Errorf("proxy %q has an empty StableID", proxy.Name)
+		}
+		proxy.StableID = stableID
+		identityKey := strings.ToLower(stableID)
+		if previous, ok := seen[identityKey]; ok {
+			return fmt.Errorf(
+				"StableID collision %q between %q (%s:%d) and %q (%s:%d)",
+				stableID,
+				previous.Name,
+				previous.Server,
+				previous.Port,
+				proxy.Name,
+				proxy.Server,
+				proxy.Port,
+			)
+		}
+		seen[identityKey] = proxy
+	}
+	return nil
 }
 
 func IsConfigsEqual(old, new []*models.ProxyConfig) bool {

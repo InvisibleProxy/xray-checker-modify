@@ -197,6 +197,10 @@ func AdminBackupRestoreHandler(restorer *backup.Restorer) http.HandlerFunc {
 
 func AdminProxiesHandler(proxyChecker *checker.ProxyChecker, startPort int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		proxies := proxyChecker.GetProxies()
 		result := make([]AdminProxyInfo, 0, len(proxies))
 		for _, proxy := range proxies {
@@ -217,6 +221,10 @@ func AdminProxiesHandler(proxyChecker *checker.ProxyChecker, startPort int) http
 
 func AdminSpeedTestSnapshotHandler(manager *speedtest.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		writeJSON(w, manager.Snapshot())
 	}
 }
@@ -334,12 +342,20 @@ func AdminNodesOverviewDeleteHandler(store *nodearchive.Store, manager *speedtes
 			writeError(w, "stableId is required", http.StatusBadRequest)
 			return
 		}
+		record, err := store.ArchivedRecord(stableID)
+		if err != nil {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		if err := store.DeleteArchived(stableID); err != nil {
 			writeError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		if err := manager.DeleteHistory(stableID); err != nil {
-			writeError(w, err.Error(), http.StatusBadRequest)
+			if rollbackErr := store.RestoreArchived(record); rollbackErr != nil {
+				err = errors.Join(err, errors.New("restore archived node: "+rollbackErr.Error()))
+			}
+			writeError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, map[string]string{"status": "deleted"})

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/alecthomas/kong"
 )
@@ -50,8 +51,8 @@ type CLI struct {
 		Host      string `name:"metrics-host" help:"Host to listen on" default:"0.0.0.0" env:"METRICS_HOST"`
 		Port      string `name:"metrics-port" help:"Port to listen on" default:"2112" env:"METRICS_PORT"`
 		Protected bool   `name:"metrics-protected" help:"Whether metrics are protected by basic auth" default:"false" env:"METRICS_PROTECTED"`
-		Username  string `name:"metrics-username" help:"Username for metrics if protected by basic auth" default:"metricsUser" env:"METRICS_USERNAME"`
-		Password  string `name:"metrics-password" help:"Password for metrics if protected by basic auth" default:"MetricsVeryHardPassword" env:"METRICS_PASSWORD"`
+		Username  string `name:"metrics-username" help:"Username for admin endpoints and protected metrics" default:"" env:"METRICS_USERNAME"`
+		Password  string `name:"metrics-password" help:"Password for admin endpoints and protected metrics" default:"" env:"METRICS_PASSWORD"`
 		Instance  string `name:"metrics-instance" help:"Instance label for metrics" default:"" env:"METRICS_INSTANCE"`
 		PushURL   string `name:"metrics-push-url" help:"Prometheus pushgateway URL (e.g. https://user:pass@host:port)" default:"" env:"METRICS_PUSH_URL"`
 		BasePath  string `name:"metrics-base-path" help:"URL path to metrics (e.g. /xray/metrics)" default:"" env:"METRICS_BASE_PATH"`
@@ -75,6 +76,9 @@ type CLI struct {
 func (c *CLI) Validate() error {
 	if c.Web.Public && !c.Metrics.Protected {
 		return fmt.Errorf("--web-public requires --metrics-protected to be enabled")
+	}
+	if !c.RunOnce && (strings.TrimSpace(c.Metrics.Username) == "" || strings.TrimSpace(c.Metrics.Password) == "") {
+		return fmt.Errorf("--metrics-username and --metrics-password are required because /admin and /api/v1/admin/* are enabled")
 	}
 	return nil
 }

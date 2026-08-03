@@ -1,6 +1,7 @@
 package xray
 
 import (
+	"strings"
 	"testing"
 
 	"xray-checker/models"
@@ -73,6 +74,48 @@ func TestIsConfigsEqualIgnoresOrder(t *testing.T) {
 
 	if !IsConfigsEqual([]*models.ProxyConfig{proxyA, proxyB}, []*models.ProxyConfig{&newProxyB, &newProxyA}) {
 		t.Fatal("expected same configs in different order to be equal")
+	}
+}
+
+func TestValidateStableIDsGeneratesAndAcceptsUniqueIDs(t *testing.T) {
+	proxyA := testProxy("A", "Main", "a.example.com", 443)
+	proxyB := testProxy("B", "Main", "b.example.com", 443)
+	if err := ValidateStableIDs([]*models.ProxyConfig{proxyA, proxyB}); err != nil {
+		t.Fatalf("ValidateStableIDs() error = %v", err)
+	}
+	if proxyA.StableID == "" || proxyB.StableID == "" || proxyA.StableID == proxyB.StableID {
+		t.Fatalf("generated StableIDs are not unique: %q, %q", proxyA.StableID, proxyB.StableID)
+	}
+}
+
+func TestValidateStableIDsRejectsExplicitCaseFoldedCollision(t *testing.T) {
+	proxyA := testProxy("A", "Main", "a.example.com", 443)
+	proxyA.StableID = " Collision-ID "
+	proxyB := testProxy("B", "Main", "b.example.com", 443)
+	proxyB.StableID = "collision-id"
+	err := ValidateStableIDs([]*models.ProxyConfig{proxyA, proxyB})
+	if err == nil {
+		t.Fatal("explicit StableID collision was accepted")
+	}
+	if !strings.Contains(err.Error(), "A") || !strings.Contains(err.Error(), "B") {
+		t.Fatalf("collision error does not identify both nodes: %v", err)
+	}
+	if proxyA.StableID != "Collision-ID" {
+		t.Fatalf("StableID was not trimmed: %q", proxyA.StableID)
+	}
+}
+
+func TestValidateStableIDsRejectsGeneratedCollision(t *testing.T) {
+	proxyA := testProxy("First label", "One", "same.example.com", 443)
+	proxyB := testProxy("Second label", "Two", "same.example.com", 443)
+	if err := ValidateStableIDs([]*models.ProxyConfig{proxyA, proxyB}); err == nil {
+		t.Fatal("generated StableID collision was accepted")
+	}
+}
+
+func TestValidateStableIDsRejectsNilProxy(t *testing.T) {
+	if err := ValidateStableIDs([]*models.ProxyConfig{nil}); err == nil {
+		t.Fatal("nil proxy was accepted")
 	}
 }
 

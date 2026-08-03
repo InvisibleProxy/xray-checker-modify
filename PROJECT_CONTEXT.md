@@ -1,0 +1,138 @@
+# Контекст проекта Xray Checker Modify
+
+Документ фиксирует архитектуру и бизнес-правила текущего форка. Инструкции по установке и эксплуатации находятся в [`README.md`](README.md), правила работы агентов — в [`AGENTS.md`](AGENTS.md).
+
+## Назначение
+
+Приложение получает Xray-конфигурации из одной или нескольких подписок, поднимает локальные SOCKS-inbound для каждой ноды и проверяет доступность трафика через них. Поверх базового мониторинга форк добавляет приватную админку, speedtest, архив нод, Telegram и резервное копирование persisted-состояния.
+
+Основная единица данных — нода с `StableID`. Отображаемое имя приходит из подписки и не является идентификатором.
+
+## Компоненты
+
+| Компонент | Ответственность |
+| --- | --- |
+| `main.go` | сборка приложения, startup sequence, планировщики, HTTP-маршруты и обновление подписок |
+| `config/` | CLI-флаги, переменные окружения и валидация базовой конфигурации |
+| `subscription/` | загрузка и парсинг подписок, поддержка нескольких источников, опциональное разрешение доменов |
+| `models/` | модель proxy-конфигурации и генерация `StableID` |
+| `xray/` | генерация runtime-конфига и встроенный экземпляр Xray Core |
+| `checker/` | проверки доступности, latency, host/ping diagnostics и текущее состояние нод |
+| `metrics/` | Prometheus-метрики и Pushgateway |
+| `speedtest/` | ручные и плановые тесты скорости, Test URL нод и temporal retention |
+| `nodearchive/` | долгоживущий реестр активных/выбывших нод, downtime, GeoIP и speedtest summary |
+| `telegram/` | компактный HTML и Rich Messages, команды, отчёты, алерты, recovery и настройки mute |
+| `backup/` | создание ZIP, автоматическая ротация, типизированная проверка и транзакционный staged restore |
+| `web/` | dashboard, admin UI, REST API, OpenAPI и Basic Auth middleware |
+
+Frontend встроен в Go-бинарник через `embed`. `docs/` — отдельный сайт Astro/Starlight, унаследованный от upstream.
+
+## Startup sequence
+
+1. Разбираются CLI-флаги и переменные окружения; обычный server-mode требует явно заданные Basic Auth credentials.
+2. Незавершённая restore-транзакция предыдущего процесса завершается или откатывается.
+3. Если существует staged restore, оно применяется к `data/`, но rollback-копия сохраняется.
+4. Инициализируются пользовательские web assets.
+5. Проверяется наличие GeoIP/GeoSite-файлов; отсутствующие файлы скачиваются.
+6. Загружаются подписки, назначаются индексы и проверяется уникальность `StableID`.
+7. Генерируется `xray_config.json`, запускается встроенный Xray Core.
+8. Загружаются speedtest, node archive и Telegram state. Ошибка любого владельца откатывает применённый restore и останавливает startup.
+9. Только после успешной загрузки всех владельцев restore подтверждается и rollback-копия удаляется.
+10. Восстанавливается накопленный downtime и синхронизируется speedtest history.
+11. Запускаются автоматические бэкапы, Telegram, speedtest scheduler и обычные proxy-checks.
+12. Поднимается HTTP-сервер.
+
+## Основные workflow
+
+### Проверка доступности
+
+Для каждой ноды создаётся SOCKS-inbound на `XRAY_START_PORT + Index`. Checker выполняет выбранный метод `ip`, `status` или `download` через этот inbound. Статус и диагностика хранятся по `StableID`; после итерации обновляются архив downtime, Telegram и Pushgateway.
+
+### Обновление подписки
+
+Автоматическое и ручное обновление используют один и тот же callback и защищены от параллельного запуска.
+
+1. Загружаются все источники.
+2. При необходимости домены разворачиваются в IP-конфигурации.
+3. `xray.PreserveStableIDs` пытается сопоставить новые ноды со старыми.
+4. `xray.ValidateStableIDs` отклоняет пустые и дублирующиеся без учёта регистра ID до сравнения или restart.
+5. Если effective-конфигурация не изменилась, restart Xray не выполняется.
+6. При изменении refresh получает Xray lifecycle write-lock, дожидается активного speedtest, создаёт новый `xray_config.json`, перезапускает Xray и передаёт checker новый список.
+7. Node archive синхронизирует активные/выбывшие записи; mute для исчезнувших ID очищается.
+
+### Speedtest
+
+Ручной запуск из админки получает config из формы и сохраняет актуальный глобальный URL. Плановый и Telegram-запуски берут последнюю сохранённую `ScheduleConfig`, включая URL, `MaxBytes`, timeout и concurrency. Персональный `NodeTestURLs[StableID]` имеет приоритет над глобальным URL.
+
+Каждый запуск получает read-lock Xray lifecycle до выбора proxy pointers и SOCKS-портов и освобождает его только после сбора всех результатов. Поэтому restart Xray не может пройти посередине теста, а новый тест не стартует на старой конфигурации после начала refresh.
+
+Результаты хранятся по `StableID`. Retention основан на возрасте, а не на количестве:
+
+- default: 60 дней;
+- допустимо: 1–3650 дней;
+- уменьшение значения немедленно отбрасывает более старые записи;
+- `Failures` в Nodes Overview вычисляется по сохранённой speedtest history;
+- cumulative downtime хранится отдельно в node archive и не ограничивается retention speedtest.
+
+### Резервное копирование и восстановление
+
+В backup входят только разрешённые JSON-файлы из `data/`. Каждый файл описан в `manifest.json` с размером и SHA-256. Environment, geo, сгенерированный Xray config и чувствительные Telegram-поля исключены.
+
+Автоматический scheduler запускается сразу после startup и затем ждёт `00:05 UTC`. За один UTC-день создаётся не более одного архива; удаляются архивы старше семи суток и всё сверх семи новейших файлов.
+
+Restore не заменяет работающие файлы сразу. Manifest и persisted JSON проверяются на структуру, типы, регистронезависимые дубликаты ключей и поддерживаемую схему. Безопасные файлы помещаются в `data/.restore-pending`, а на следующем старте заменяются с журналируемой rollback-копией. Файлы из разрешённого набора, которых нет в восстановленном архиве, удаляются как отсутствующие в снимке.
+
+После установки файлов транзакция остаётся неподтверждённой до успешного `Load` у speedtest, node archive и Telegram. Ошибка вызывает rollback и обязательный restart. Commit отмечается отдельным durable-маркером; startup различает оборванное применение, неподтверждённый restore и оборванную очистку уже подтверждённой транзакции.
+
+### Telegram output
+
+Каждый основной экран имеет пару представлений: Rich HTML для `sendRichMessage`/`editMessageText.rich_message` и компактный обычный HTML fallback. Rich-вариант строится как сводка, список проблем и раскрываемые технические детали; fallback не повторяет StableID, threshold и timing в каждой строке. Возможность Rich Messages кешируется только при однозначном ответе API. Сетевая ошибка не запускает повторную fallback-отправку, чтобы сохранить семантику at-most-once на неопределённом результате запроса.
+
+Режим speed-report определяется только `SpeedReportMode`: `always` отправляет и чистые scheduled-отчёты, `issues` скрывает чистые. Recovery alert хранит `RecoveryPending`, время и latency до успешной отправки; сбой Telegram не стирает alert state.
+
+## Идентичность нод
+
+`StableID` — первые 16 hex-символов SHA-256 от набора параметров подключения: protocol, server, port, UUID/пароль, а также присутствующих SNI, transport type, security и public key.
+
+Критические следствия:
+
+- `Name` и `SubName` не входят в generated ID;
+- одинаковые имена допустимы и не склеивают ноды;
+- checker не нормализует и не переименовывает входные имена — маркеры вроде `^~2~^` приходят от источника подписки;
+- при неизменных параметрах подключения статистика переживает переименование;
+- fallback-сопоставление по имени применяется только для однозначной пары;
+- две конфигурации с одинаковыми StableID, включая различие только регистром, отклоняются до создания status/history maps.
+
+## Persisted state
+
+| Файл | Владелец | Правило |
+| --- | --- | --- |
+| `data/node_registry.json` | `nodearchive` | долгоживущая статистика, включая retired-ноды |
+| `data/speedtest_results.json` | `speedtest` | latest result и temporal history |
+| `data/speedtest_schedule.json` | `speedtest` | расписание, фильтры, URL и retention |
+| `data/telegram_config.json` | `telegram` | editable settings; secrets могут переопределяться env |
+| `data/node_alert_state.json` | `telegram` | состояние последовательностей алертов |
+| `data/backups/*.zip` | `backup` | до 7 автоматических архивов за последние 7 суток |
+
+`data/` должен быть постоянным volume и доступен UID `1000` внутри production image.
+
+## Доступ и безопасность
+
+- `/admin` и `/api/v1/admin/*` всегда должны оставаться за Basic Auth.
+- В server-mode `METRICS_USERNAME` и `METRICS_PASSWORD` обязательны; публичных встроенных credentials нет. `RUN_ONCE=true` не поднимает HTTP-сервер и является единственным исключением.
+- `WEB_PUBLIC=true` разрешён только вместе с `METRICS_PROTECTED=true`.
+- Caddy из примера публикует только status page, `/static`, `/config` и публичный список прокси.
+- Нельзя писать Telegram token, chat ID, admin IDs, subscription URL с credentials или Basic Auth password в логи, API и backup.
+- Restore принимает только известные пути, ограничивает размер архива, проверяет manifest/hash/JSON-схемы и не следует symlink/reparse-point вместо state-файлов.
+
+## Известные ограничения
+
+- Имена нод отображаются ровно как в источнике; косметические суффиксы Remnawave checker не исправляет.
+- Retired-ноды сохраняются в Nodes Overview до ручного удаления.
+- Восстановление требует перезапуска приложения.
+- Rich Messages зависят от версии Telegram Bot API; при отсутствии метода бот использует менее выразительный компактный HTML.
+- GeoIP refresh использует внешние сервисы и может быть недоступен из-за сети или rate limit.
+
+## Текущее состояние
+
+Реализованы и покрыты Go-тестами: сохранение и проверка StableID при refresh, Xray lifecycle-lock speedtest, единый scheduled/Telegram TestConfig, temporal speedtest retention, node archive, структурированный Telegram output, retryable recovery alerts, ручные/автоматические backup и транзакционный staged restore. Перед релизом обязательны проверки из [`AGENTS.md`](AGENTS.md).

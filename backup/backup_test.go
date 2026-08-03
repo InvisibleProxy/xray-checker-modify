@@ -120,6 +120,83 @@ func TestCreatorRejectsInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestCreatorSanitizesTelegramSecretsCaseInsensitively(t *testing.T) {
+	dataDir := t.TempDir()
+	writeTestFile(t, filepath.Join(dataDir, "telegram_config.json"), []byte(`{
+  "Enabled": true,
+  "BoTtOkEn": "secret-token",
+  "CHATID": "secret-chat",
+  "MessageThreadID": 17,
+  "ADMINUSERIDS": [123],
+  "SpeedReportsEnabled": true,
+  "unknownSecret": "drop-me"
+}`))
+
+	var archive bytes.Buffer
+	if _, err := NewCreator(dataDir, "test").Create(&archive); err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+	entries := readArchive(t, archive.Bytes())
+	var config map[string]json.RawMessage
+	if err := json.Unmarshal(entries["data/telegram_config.json"], &config); err != nil {
+		t.Fatalf("decode sanitized Telegram config: %v", err)
+	}
+	if _, ok := config["enabled"]; !ok {
+		t.Fatal("mixed-case safe field was not canonicalized")
+	}
+	if _, ok := config["speedReportsEnabled"]; !ok {
+		t.Fatal("mixed-case editable field was not preserved")
+	}
+	for key := range config {
+		switch key {
+		case "botToken", "chatId", "messageThreadId", "adminUserIds", "unknownSecret":
+			t.Fatalf("secret or unknown Telegram field %q was included", key)
+		}
+	}
+	if len(config) != 2 {
+		t.Fatalf("sanitized Telegram config contains unexpected fields: %#v", config)
+	}
+}
+
+func TestCreatorRejectsCaseFoldedDuplicateTelegramKeys(t *testing.T) {
+	dataDir := t.TempDir()
+	writeTestFile(t, filepath.Join(dataDir, "telegram_config.json"), []byte(`{
+  "enabled": true,
+  "botToken": "first",
+  "BOTTOKEN": "second"
+}`))
+
+	var archive bytes.Buffer
+	if _, err := NewCreator(dataDir, "test").Create(&archive); err == nil {
+		t.Fatal("case-folded duplicate keys were accepted")
+	}
+}
+
+func TestPrepareDataFileRejectsMalformedPersistedSchemas(t *testing.T) {
+	tests := []struct {
+		name string
+		file string
+		data string
+	}{
+		{name: "null object", file: "node_registry.json", data: `null`},
+		{name: "wrong nodes type", file: "node_registry.json", data: `{"version":1,"nodes":"bad"}`},
+		{name: "wrong schedule config type", file: "speedtest_schedule.json", data: `{"enabled":true,"intervalSec":60,"config":"bad"}`},
+		{name: "null schedule config", file: "speedtest_schedule.json", data: `{"enabled":true,"intervalSec":60,"config":null}`},
+		{name: "wrong Telegram enabled type", file: "telegram_config.json", data: `{"enabled":"yes"}`},
+		{name: "null Telegram enabled", file: "telegram_config.json", data: `{"enabled":null}`},
+		{name: "trailing garbage", file: "node_registry.json", data: `{"version":1,"nodes":{}} garbage`},
+		{name: "nested duplicate", file: "node_registry.json", data: `{"version":1,"nodes":{"node":{"name":"first","Name":"second"}}}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := prepareDataFile(tt.file, []byte(tt.data)); err == nil {
+				t.Fatalf("prepareDataFile(%s) accepted malformed state: %s", tt.file, tt.data)
+			}
+		})
+	}
+}
+
 func writeTestFile(t *testing.T, path string, data []byte) {
 	t.Helper()
 	if err := os.WriteFile(path, data, 0600); err != nil {

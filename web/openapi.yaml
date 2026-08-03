@@ -1,12 +1,20 @@
 openapi: 3.0.3
 info:
   title: Xray Checker API
-  description: API for monitoring Xray proxy status and configuration
-  version: "1.0"
+  description: API for monitoring Xray proxies. Every `/api/v1/admin/*` operation requires explicitly configured HTTP Basic Auth credentials.
+  version: "1.1"
 servers:
   - url: /
 security:
   - basicAuth: []
+
+tags:
+  - name: Public
+  - name: Proxies
+  - name: Status
+  - name: Config
+  - name: System
+  - name: Admin
 
 paths:
   /api/v1/public/proxies:
@@ -166,6 +174,412 @@ paths:
               schema:
                 $ref: '#/components/schemas/APIErrorResponse'
 
+  /api/v1/admin/proxies:
+    get:
+      summary: List proxies for the admin UI
+      tags: [Admin]
+      responses:
+        '200':
+          description: Proxy status, diagnostics, server and local SOCKS port
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AdminProxyInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/subscription/refresh:
+    post:
+      summary: Refresh all subscription sources
+      tags: [Admin]
+      responses:
+        '200':
+          description: Refresh result
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/SubscriptionRefreshResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/admin/backup:
+    get:
+      summary: Download a persisted-state backup
+      tags: [Admin]
+      responses:
+        '200':
+          description: ZIP archive with manifest and validated JSON state
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /api/v1/admin/backup/restore:
+    post:
+      summary: Validate and stage a backup for the next startup
+      tags: [Admin]
+      parameters:
+        - name: X-Xray-Checker-Action
+          in: header
+          required: true
+          schema:
+            type: string
+            enum: [restore-backup]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [backup]
+              properties:
+                backup:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: Backup staged; application restart is required
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/RestoreResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Confirmation header is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIErrorResponse'
+        '413':
+          description: Backup archive exceeds the configured limit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIErrorResponse'
+
+  /api/v1/admin/speed-tests:
+    get:
+      summary: Get the current speed-test snapshot
+      tags: [Admin]
+      responses:
+        '200':
+          description: Defaults, schedule, current run and latest results
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/SpeedTestSnapshot'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/speed-tests/run:
+    post:
+      summary: Start a manual speed test
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpeedTestRunRequest'
+      responses:
+        '200':
+          description: Snapshot after the run was accepted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/SpeedTestSnapshot'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/admin/speed-tests/node-url:
+    put:
+      summary: Set or clear a per-node speed-test URL
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeTestURLRequest'
+      responses:
+        '200':
+          description: Updated speed-test snapshot
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/SpeedTestSnapshot'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/speed-tests/history:
+    get:
+      summary: Get retained speed-test history for one node
+      tags: [Admin]
+      parameters:
+        - name: stableId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Results ordered from newest to oldest
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/SpeedTestResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/nodes-overview:
+    get:
+      summary: Get active and retired node summaries
+      tags: [Admin]
+      responses:
+        '200':
+          description: Long-lived node archive with availability, GeoIP and speed statistics
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/NodeSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/nodes-overview/geo:
+    post:
+      summary: Refresh GeoIP information for selected nodes
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StableIDListRequest'
+      responses:
+        '200':
+          description: GeoIP refresh result
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GeoRefreshResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/nodes-overview/delete:
+    post:
+      summary: Permanently delete a retired node and its speed history
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StableIDRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/StatusOK'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    delete:
+      summary: Permanently delete a retired node and its speed history
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StableIDRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/StatusOK'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /api/v1/admin/schedules:
+    get:
+      summary: Get the speed-test schedule
+      tags: [Admin]
+      responses:
+        '200':
+          description: Current schedule
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ScheduleConfig'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      summary: Replace the speed-test schedule
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScheduleConfig'
+      responses:
+        '200':
+          description: Normalized saved schedule
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ScheduleConfig'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/telegram:
+    get:
+      summary: Get editable Telegram settings without secrets
+      tags: [Admin]
+      responses:
+        '200':
+          description: Telegram settings and secret-presence flags
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/TelegramAdminConfig'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      summary: Update editable Telegram settings
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TelegramAdminConfig'
+      responses:
+        '200':
+          description: Normalized saved settings
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/TelegramAdminConfig'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/telegram/test:
+    post:
+      summary: Send a Telegram test message
+      tags: [Admin]
+      responses:
+        '200':
+          $ref: '#/components/responses/StatusOK'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
 components:
   securitySchemes:
     basicAuth:
@@ -323,3 +737,475 @@ components:
           type: string
           example: "203.0.113.1"
 
+    AdminProxyInfo:
+      allOf:
+        - $ref: '#/components/schemas/ProxyInfo'
+        - type: object
+          properties:
+            downSince:
+              type: string
+              format: date-time
+            downtimeSec:
+              type: integer
+              format: int64
+            hostCheckChecked:
+              type: boolean
+            hostCheckOnline:
+              type: boolean
+            hostCheckLatencyMs:
+              type: integer
+              format: int64
+            hostCheckTarget:
+              type: string
+            hostCheckError:
+              type: string
+            pingCheckChecked:
+              type: boolean
+            pingCheckOnline:
+              type: boolean
+            pingCheckLatencyMs:
+              type: integer
+              format: int64
+            pingCheckTarget:
+              type: string
+            pingCheckError:
+              type: string
+
+    SubscriptionRefreshResult:
+      type: object
+      required: [updated, count]
+      properties:
+        updated:
+          type: boolean
+        count:
+          type: integer
+          minimum: 0
+        message:
+          type: string
+
+    RestoreResult:
+      type: object
+      required: [sourceCreatedAt, files, restartRequired]
+      properties:
+        sourceCreatedAt:
+          type: string
+          format: date-time
+        sourceAppVersion:
+          type: string
+        files:
+          type: array
+          items:
+            type: string
+        restartRequired:
+          type: boolean
+
+    SpeedTestConfig:
+      type: object
+      required: [url, maxBytes, timeoutSec, concurrency]
+      properties:
+        url:
+          type: string
+          format: uri
+        maxBytes:
+          type: integer
+          format: int64
+          minimum: 1
+        timeoutSec:
+          type: integer
+          minimum: 1
+        concurrency:
+          type: integer
+          minimum: 1
+
+    ScheduleConfig:
+      type: object
+      required: [enabled, intervalSec, proxyIds, onlyOnline, subName, protocol, config]
+      properties:
+        enabled:
+          type: boolean
+        intervalSec:
+          type: integer
+          minimum: 0
+        proxyIds:
+          type: array
+          items:
+            type: string
+        onlyOnline:
+          type: boolean
+        subName:
+          type: string
+        protocol:
+          type: string
+        config:
+          $ref: '#/components/schemas/SpeedTestConfig'
+        nodeTestUrls:
+          type: object
+          additionalProperties:
+            type: string
+            format: uri
+        historyRetentionDays:
+          type: integer
+          minimum: 1
+
+    SpeedTestRunRequest:
+      type: object
+      required: [proxyIds]
+      properties:
+        proxyIds:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        onlyOnline:
+          type: boolean
+        skipOffline:
+          type: boolean
+        subName:
+          type: string
+        protocol:
+          type: string
+        config:
+          $ref: '#/components/schemas/SpeedTestConfig'
+
+    NodeTestURLRequest:
+      type: object
+      required: [stableId, url]
+      properties:
+        stableId:
+          type: string
+        url:
+          type: string
+          description: Empty string clears the per-node override.
+
+    SpeedTestRunInfo:
+      type: object
+      properties:
+        running:
+          type: boolean
+        source:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+        selected:
+          type: integer
+        completed:
+          type: integer
+        error:
+          type: string
+        config:
+          $ref: '#/components/schemas/SpeedTestConfig'
+
+    SpeedTestResult:
+      type: object
+      properties:
+        stableId:
+          type: string
+        name:
+          type: string
+        subName:
+          type: string
+        protocol:
+          type: string
+        url:
+          type: string
+        statusCode:
+          type: integer
+        downloadedBytes:
+          type: integer
+          format: int64
+        durationMs:
+          type: integer
+          format: int64
+        ttfbMs:
+          type: integer
+          format: int64
+        mbps:
+          type: number
+          format: double
+        error:
+          type: string
+        offline:
+          type: boolean
+        hostCheck:
+          type: object
+          additionalProperties: true
+        pingCheck:
+          type: object
+          additionalProperties: true
+        checkedAt:
+          type: string
+          format: date-time
+        source:
+          type: string
+
+    SpeedTestSnapshot:
+      type: object
+      required: [defaults, schedule, nodeTestUrls, lastRun, results]
+      properties:
+        defaults:
+          $ref: '#/components/schemas/SpeedTestConfig'
+        schedule:
+          $ref: '#/components/schemas/ScheduleConfig'
+        nodeTestUrls:
+          type: object
+          additionalProperties:
+            type: string
+        nextScheduledRunAt:
+          type: string
+          format: date-time
+        lastRun:
+          $ref: '#/components/schemas/SpeedTestRunInfo'
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SpeedTestResult'
+
+    StableIDListRequest:
+      type: object
+      required: [stableIds]
+      properties:
+        stableIds:
+          type: array
+          items:
+            type: string
+
+    StableIDRequest:
+      type: object
+      required: [stableId]
+      properties:
+        stableId:
+          type: string
+
+    GeoRefreshResult:
+      type: object
+      required: [updated, failed]
+      properties:
+        updated:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
+        errors:
+          type: array
+          items:
+            type: string
+
+    GeoSource:
+      type: object
+      properties:
+        source:
+          type: string
+        ip:
+          type: string
+        country:
+          type: string
+        countryCode:
+          type: string
+        org:
+          type: string
+        asn:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time
+        error:
+          type: string
+
+    NodeSummary:
+      type: object
+      description: Persisted active or retired node, enriched with availability, GeoIP and speed statistics.
+      properties:
+        stableId:
+          type: string
+        name:
+          type: string
+        subName:
+          type: string
+        server:
+          type: string
+        port:
+          type: integer
+        protocol:
+          type: string
+        active:
+          type: boolean
+        firstSeenAt:
+          type: string
+          format: date-time
+        lastSeenAt:
+          type: string
+          format: date-time
+        retiredAt:
+          type: string
+          format: date-time
+        claimedCountry:
+          type: string
+        claimedCountryCode:
+          type: string
+        geoIp:
+          type: string
+        geoCountry:
+          type: string
+        geoCountryCode:
+          type: string
+        geoOrg:
+          type: string
+        geoUpdatedAt:
+          type: string
+          format: date-time
+        geoError:
+          type: string
+        totalDowntimeSec:
+          type: integer
+          format: int64
+        incidentCount:
+          type: integer
+        longestDowntimeSec:
+          type: integer
+          format: int64
+        currentDownSince:
+          type: string
+          format: date-time
+        ipInfoUrl:
+          type: string
+        countryMatch:
+          type: string
+        geoSources:
+          type: array
+          items:
+            $ref: '#/components/schemas/GeoSource'
+        geoBlacklisted:
+          type: boolean
+        resultCount:
+          type: integer
+        successfulResults:
+          type: integer
+        failedResults:
+          type: integer
+        avgMbps:
+          type: number
+          format: double
+        minMbps:
+          type: number
+          format: double
+        maxMbps:
+          type: number
+          format: double
+        lastMbps:
+          type: number
+          format: double
+        lastSpeedAt:
+          type: string
+          format: date-time
+        lastSpeedError:
+          type: string
+        lastSpeedOffline:
+          type: boolean
+
+    TelegramAdminConfig:
+      type: object
+      required: [enabled, commandPollingEnabled, speedReportsEnabled, speedReportMode, nodeAlertsEnabled]
+      properties:
+        enabled:
+          type: boolean
+        commandPollingEnabled:
+          type: boolean
+        speedReportsEnabled:
+          type: boolean
+        speedReportMode:
+          type: string
+          enum: [always, issues, disabled]
+        lowSpeedThresholdMbps:
+          type: number
+          format: double
+        speedReportLimit:
+          type: integer
+        nodeAlertsEnabled:
+          type: boolean
+        alertCheckMinutes:
+          type: integer
+        alertAfterFailures:
+          type: integer
+        alertRepeatMinutes:
+          type: integer
+        alertDiagnosticsMinutes:
+          type: integer
+        alertReminderScheduleMinutes:
+          type: array
+          items:
+            type: integer
+        alertMaxReminderMinutes:
+          type: integer
+        groupOfflineReminders:
+          type: boolean
+        notifyRecovery:
+          type: boolean
+        mutedNodeIds:
+          type: array
+          items:
+            type: string
+        mutedSpeedNodeIds:
+          type: array
+          items:
+            type: string
+        mutedAlertNodeIds:
+          type: array
+          items:
+            type: string
+        botTokenConfigured:
+          type: boolean
+          readOnly: true
+        chatConfigured:
+          type: boolean
+          readOnly: true
+        messageThreadConfigured:
+          type: boolean
+          readOnly: true
+        adminUserCount:
+          type: integer
+          readOnly: true
+
+  responses:
+    Unauthorized:
+      description: HTTP Basic Auth credentials are missing or invalid
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/APIErrorResponse'
+    BadRequest:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/APIErrorResponse'
+    Conflict:
+      description: An equivalent operation is already running
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/APIErrorResponse'
+    ServerError:
+      description: Operation failed after request validation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/APIErrorResponse'
+    StatusOK:
+      description: Operation completed
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/APIResponse'
+              - type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      status:
+                        type: string
