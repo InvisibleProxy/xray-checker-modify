@@ -39,13 +39,22 @@ type TestConfig struct {
 	Concurrency int    `json:"concurrency"`
 }
 
+// ReportTarget is an ephemeral Telegram destination for an explicitly
+// requested speed-test result. It is intentionally never persisted or exposed
+// through the admin API.
+type ReportTarget struct {
+	ChatID          string `json:"-"`
+	MessageThreadID int    `json:"-"`
+}
+
 type RunRequest struct {
-	ProxyIDs    []string   `json:"proxyIds"`
-	OnlyOnline  bool       `json:"onlyOnline"`
-	SkipOffline bool       `json:"skipOffline"`
-	SubName     string     `json:"subName"`
-	Protocol    string     `json:"protocol"`
-	Config      TestConfig `json:"config"`
+	ProxyIDs     []string     `json:"proxyIds"`
+	OnlyOnline   bool         `json:"onlyOnline"`
+	SkipOffline  bool         `json:"skipOffline"`
+	SubName      string       `json:"subName"`
+	Protocol     string       `json:"protocol"`
+	Config       TestConfig   `json:"config"`
+	ReportTarget ReportTarget `json:"-"`
 }
 
 type ScheduleConfig struct {
@@ -100,12 +109,13 @@ type Snapshot struct {
 }
 
 type RunReport struct {
-	Source     string
-	StartedAt  time.Time
-	FinishedAt time.Time
-	Selected   int
-	Config     TestConfig
-	Results    []Result
+	Source       string
+	StartedAt    time.Time
+	FinishedAt   time.Time
+	Selected     int
+	Config       TestConfig
+	Results      []Result
+	ReportTarget ReportTarget `json:"-"`
 }
 
 type resultStateFile struct {
@@ -564,7 +574,7 @@ func (m *Manager) Run(req RunRequest, source string) error {
 	}
 	m.mu.Unlock()
 
-	go m.run(proxies, req.Config, source, startedAt, req.SkipOffline, runGate)
+	go m.run(proxies, req.Config, source, startedAt, req.SkipOffline, req.ReportTarget, runGate)
 	gateHeld = false
 	return nil
 }
@@ -620,7 +630,7 @@ func (m *Manager) setNextScheduledRunAt(nextRun time.Time) {
 	m.nextRun = nextRun
 }
 
-func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source string, startedAt time.Time, skipOffline bool, runGate sync.Locker) {
+func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source string, startedAt time.Time, skipOffline bool, reportTarget ReportTarget, runGate sync.Locker) {
 	if runGate != nil {
 		defer runGate.Unlock()
 	}
@@ -667,12 +677,13 @@ func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source stri
 
 	finishedAt := time.Now()
 	report := RunReport{
-		Source:     source,
-		StartedAt:  startedAt,
-		FinishedAt: finishedAt,
-		Selected:   len(proxies),
-		Config:     cfg,
-		Results:    runResults,
+		Source:       source,
+		StartedAt:    startedAt,
+		FinishedAt:   finishedAt,
+		Selected:     len(proxies),
+		Config:       cfg,
+		Results:      runResults,
+		ReportTarget: reportTarget,
 	}
 
 	m.mu.Lock()
