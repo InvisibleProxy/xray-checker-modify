@@ -30,6 +30,8 @@
 - Ручное и плановое обновление подписки должны использовать один workflow и не выполняться параллельно.
 - Ручной и плановый speedtest должны применять одинаковую логику URL: per-node URL имеет приоритет над глобальным.
 - Telegram-запуск speedtest использует сохранённый `ScheduleConfig`, а не нулевой `TestConfig`.
+- Прямой результат Telegram-speedtest должен возвращаться в исходные chat ID и topic ID независимо от настроек фоновых speed-report; report target не персистится и не попадает в admin API.
+- Первый фоновый low-speed результат (schedule/admin) не уведомляет: повторяются только просевшие `StableID` через 30 минут, а алерт отправляется лишь при повторной проблеме. Первичные offline/error не задерживаются.
 - Speedtest удерживает Xray lifecycle read-lock от выбора нод до завершения теста; restart при refresh выполняется только под write-lock.
 - Speedtest history хранится по возрасту; default 60 дней. Не возвращайте count-based limit.
 - Downtime в node archive накопительный и не должен очищаться вместе со speedtest history.

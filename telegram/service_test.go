@@ -595,6 +595,213 @@ func TestTelegramRunRequestUsesSavedScheduleConfig(t *testing.T) {
 	}
 }
 
+func TestTelegramRunRequestTargetsOriginChatAndThread(t *testing.T) {
+	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
+	manager := speedtest.NewManager(proxyChecker, 10000, "", speedtest.TestConfig{})
+	service := NewService("", proxyChecker, manager, 10000)
+	service.setConfig(Config{ChatID: "configured-chat", MessageThreadID: 11})
+	msg := &message{
+		Chat:            chat{ID: -100987654321},
+		MessageThreadID: 77,
+	}
+
+	req := service.newTelegramSpeedTestRunRequest(msg)
+	want := speedtest.ReportTarget{ChatID: "-100987654321", MessageThreadID: 77}
+	if req.ReportTarget != want {
+		t.Fatalf("report target = %+v, want %+v", req.ReportTarget, want)
+	}
+}
+
+func TestRequestedTelegramSpeedReportUsesOriginEvenWhenAutomatedReportsAreDisabled(t *testing.T) {
+	service := NewService("", nil, nil, 10000)
+	defer service.Stop()
+	service.setConfig(Config{
+		Enabled:             true,
+		ChatID:              "configured-chat",
+		SpeedReportsEnabled: false,
+		SpeedReportMode:     "disabled",
+		TimeoutSec:          1,
+	})
+
+	type sentReport struct {
+		chatID   string
+		threadID int
+		content  formattedMessage
+	}
+	sent := make(chan sentReport, 1)
+	service.speedReportSendFunc = func(chatID string, threadID int, content formattedMessage) {
+		sent <- sentReport{chatID: chatID, threadID: threadID, content: content}
+	}
+
+	service.NotifySpeedTest(speedtest.RunReport{
+		Source:       "telegram",
+		FinishedAt:   time.Now(),
+		Selected:     1,
+		Results:      []speedtest.Result{{StableID: "node-1", Name: "Node 1", Mbps: 50}},
+		ReportTarget: speedtest.ReportTarget{ChatID: "origin-chat", MessageThreadID: 42},
+	})
+
+	select {
+	case got := <-sent:
+		if got.chatID != "origin-chat" || got.threadID != 42 {
+			t.Fatalf("sent to %q/%d, want origin-chat/42", got.chatID, got.threadID)
+		}
+		if !strings.Contains(got.content.HTML, "Speed-test завершён") {
+			t.Fatalf("requested result is not a full report:\n%s", got.content.HTML)
+		}
+	default:
+		t.Fatal("requested Telegram result was not sent")
+	}
+}
+
+func TestAutomaticLowSpeedAlertRequiresFailedConfirmation(t *testing.T) {
+	service := NewService("", nil, nil, 10000)
+	defer service.Stop()
+	service.speedRetryDelay = time.Hour
+	service.setConfig(Config{
+		Enabled:               true,
+		ChatID:                "alerts-chat",
+		SpeedReportsEnabled:   true,
+		SpeedReportMode:       "issues",
+		LowSpeedThresholdMbps: 10,
+		SpeedReportLimit:      10,
+		TimeoutSec:            1,
+	})
+
+	var sent []formattedMessage
+	service.speedReportSendFunc = func(_ string, _ int, content formattedMessage) {
+		sent = append(sent, content)
+	}
+	initial := speedtest.RunReport{
+		Source:     "schedule",
+		FinishedAt: time.Now(),
+		Selected:   1,
+		Config:     speedtest.TestConfig{URL: "https://speed.example.test/file.bin"},
+		Results:    []speedtest.Result{{StableID: "node-1", Name: "Node 1", Mbps: 5}},
+	}
+
+	service.NotifySpeedTest(initial)
+	if len(sent) != 0 {
+		t.Fatalf("initial low-speed result sent %d reports, want none", len(sent))
+	}
+	service.speedRetryMu.Lock()
+	pending := service.speedRetryPending["node-1"]
+	service.speedRetryMu.Unlock()
+	if !pending {
+		t.Fatal("initial low-speed result did not schedule confirmation")
+	}
+
+	recovered := initial
+	recovered.Source = lowSpeedRetrySource
+	recovered.Results = []speedtest.Result{{StableID: "node-1", Name: "Node 1", Mbps: 25}}
+	service.NotifySpeedTest(recovered)
+	if len(sent) != 0 {
+		t.Fatalf("successful confirmation sent %d reports, want none", len(sent))
+	}
+
+	service.NotifySpeedTest(initial)
+	confirmed := initial
+	confirmed.Source = lowSpeedRetrySource
+	confirmed.Results = []speedtest.Result{{StableID: "node-1", Name: "Node 1", Mbps: 4}}
+	service.NotifySpeedTest(confirmed)
+	if len(sent) != 1 {
+		t.Fatalf("failed confirmation sent %d reports, want 1", len(sent))
+	}
+	for _, want := range []string{"проблема подтверждена", "повтор через 30 минут", "4.00 Mbps"} {
+		if !strings.Contains(sent[0].HTML, want) {
+			t.Fatalf("confirmed report does not contain %q:\n%s", want, sent[0].HTML)
+		}
+	}
+}
+
+func TestInitialTransportFailureIsNotDelayedWithLowSpeedRetry(t *testing.T) {
+	service := NewService("", nil, nil, 10000)
+	defer service.Stop()
+	service.speedRetryDelay = time.Hour
+	service.setConfig(Config{
+		Enabled:               true,
+		ChatID:                "alerts-chat",
+		SpeedReportsEnabled:   true,
+		SpeedReportMode:       "issues",
+		LowSpeedThresholdMbps: 10,
+		SpeedReportLimit:      10,
+		TimeoutSec:            1,
+	})
+
+	var sent []formattedMessage
+	service.speedReportSendFunc = func(_ string, _ int, content formattedMessage) {
+		sent = append(sent, content)
+	}
+	service.NotifySpeedTest(speedtest.RunReport{
+		Source:     "schedule",
+		FinishedAt: time.Now(),
+		Selected:   2,
+		Results: []speedtest.Result{
+			{StableID: "slow", Name: "Slow node", Mbps: 5},
+			{StableID: "failed", Name: "Failed node", Error: "timeout"},
+		},
+	})
+
+	if len(sent) != 1 {
+		t.Fatalf("initial transport failure sent %d reports, want 1", len(sent))
+	}
+	if !strings.Contains(sent[0].HTML, "Failed node") || !strings.Contains(sent[0].HTML, "timeout") {
+		t.Fatalf("initial transport failure is missing:\n%s", sent[0].HTML)
+	}
+	if strings.Contains(sent[0].HTML, "Slow node") {
+		t.Fatalf("unconfirmed low-speed node leaked into initial alert:\n%s", sent[0].HTML)
+	}
+}
+
+func TestLowSpeedConfirmationRunsOnlyAffectedNodes(t *testing.T) {
+	service := NewService("", nil, nil, 10000)
+	defer service.Stop()
+	service.speedRetryDelay = 20 * time.Millisecond
+	service.setConfig(Config{LowSpeedThresholdMbps: 10})
+
+	type runCall struct {
+		req    speedtest.RunRequest
+		source string
+	}
+	runs := make(chan runCall, 2)
+	service.speedRunFunc = func(req speedtest.RunRequest, source string) error {
+		runs <- runCall{req: req, source: source}
+		return nil
+	}
+	report := speedtest.RunReport{
+		Config: speedtest.TestConfig{URL: "https://speed.example.test/file.bin", TimeoutSec: 30},
+		Results: []speedtest.Result{
+			{StableID: "slow-b", Mbps: 2},
+			{StableID: "fast", Mbps: 50},
+			{StableID: "slow-a", Mbps: 3},
+		},
+	}
+	if !service.scheduleLowSpeedRetry(report) || !service.scheduleLowSpeedRetry(report) {
+		t.Fatal("low-speed confirmation was not scheduled")
+	}
+
+	select {
+	case got := <-runs:
+		if got.source != lowSpeedRetrySource {
+			t.Fatalf("retry source = %q, want %q", got.source, lowSpeedRetrySource)
+		}
+		if strings.Join(got.req.ProxyIDs, ",") != "slow-a,slow-b" {
+			t.Fatalf("retry proxy IDs = %v, want only slow nodes", got.req.ProxyIDs)
+		}
+		if got.req.Config != report.Config {
+			t.Fatalf("retry config = %+v, want %+v", got.req.Config, report.Config)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for low-speed confirmation run")
+	}
+
+	select {
+	case duplicate := <-runs:
+		t.Fatalf("duplicate confirmation run: %+v", duplicate)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestIsChatAllowedRequiresConfiguredChat(t *testing.T) {
 	service := &Service{}
 	admin := &user{ID: 7}
@@ -700,6 +907,43 @@ func TestRichSpeedReportEscapesContentAndStaysWithinTelegramLimit(t *testing.T) 
 	}
 	if utf8.RuneCountInString(message.RichHTML) > 32768 {
 		t.Fatalf("rich report has %d runes, Telegram limit is 32768", utf8.RuneCountInString(message.RichHTML))
+	}
+}
+
+func TestRecentMeasurementsUseRichFormattedTable(t *testing.T) {
+	proxy := &models.ProxyConfig{
+		StableID: "node-1",
+		Name:     "<Node & one>",
+		Protocol: "vless",
+		Server:   "node.example.com",
+		Port:     443,
+		UUID:     "uuid",
+	}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "", "", 1, 0, "status")
+	if !proxyChecker.RestoreOfflineStatus(proxy.StableID, time.Now().Add(-time.Minute), checker.HostCheckDetails{}, checker.PingCheckDetails{}) {
+		t.Fatal("failed to prepare offline proxy state")
+	}
+	manager := speedtest.NewManager(proxyChecker, 10000, "", speedtest.TestConfig{})
+	if err := manager.Run(speedtest.RunRequest{
+		ProxyIDs:    []string{proxy.StableID},
+		SkipOffline: true,
+	}, "schedule"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for manager.Snapshot().LastRun.Running && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+
+	service := NewService("", proxyChecker, manager, 10000)
+	message := service.formatRecentSpeedOverviewMessage()
+	for _, want := range []string{"<h2>Замеры</h2>", "<table bordered striped>", "<th>Результат</th>", "&lt;Node &amp; one&gt;"} {
+		if !strings.Contains(message.RichHTML, want) {
+			t.Fatalf("rich measurements do not contain %q:\n%s", want, message.RichHTML)
+		}
+	}
+	if !strings.Contains(message.HTML, "<b>Замеры</b>") {
+		t.Fatalf("compact measurements are not formatted:\n%s", message.HTML)
 	}
 }
 

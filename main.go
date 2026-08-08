@@ -172,10 +172,10 @@ func main() {
 	defer automaticBackups.Stop()
 	speedTestManager.SetReporter(telegramService)
 	telegramService.Start()
-	defer telegramService.Stop()
 
 	speedTestManager.StartScheduler()
 	defer speedTestManager.Stop()
+	defer telegramService.Stop()
 
 	runCheckIteration := func() {
 		logger.Info("Starting proxy check iteration")

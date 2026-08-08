@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,12 @@ import (
 	"xray-checker/checker"
 	"xray-checker/models"
 )
+
+type reportRecorder chan RunReport
+
+func (r reportRecorder) NotifySpeedTest(report RunReport) {
+	r <- report
+}
 
 func TestLoadResultsKeepsInactiveHistory(t *testing.T) {
 	dir := t.TempDir()
@@ -261,6 +268,54 @@ func TestUpdatedTestURLIsUsedByScheduledConfig(t *testing.T) {
 	}
 	if reloaded.Schedule().Config.URL != "https://new.example.com/test.bin" {
 		t.Fatalf("reloaded scheduled URL = %q, want updated URL", reloaded.Schedule().Config.URL)
+	}
+}
+
+func TestRunReportPreservesEphemeralReportTarget(t *testing.T) {
+	proxy := &models.ProxyConfig{
+		StableID: "node-1",
+		Name:     "Node 1",
+		Protocol: "vless",
+		Server:   "node.example.com",
+		Port:     443,
+		UUID:     "uuid",
+	}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "", "", 1, 0, "status")
+	if !proxyChecker.RestoreOfflineStatus(proxy.StableID, time.Now().Add(-time.Minute), checker.HostCheckDetails{}, checker.PingCheckDetails{}) {
+		t.Fatal("failed to prepare offline proxy state")
+	}
+	manager := NewManager(proxyChecker, 10000, "", TestConfig{})
+	reports := make(reportRecorder, 1)
+	manager.SetReporter(reports)
+	target := ReportTarget{ChatID: "-100123", MessageThreadID: 77}
+	req := RunRequest{
+		ProxyIDs:     []string{proxy.StableID},
+		SkipOffline:  true,
+		Config:       TestConfig{URL: "https://example.com/test.bin"},
+		ReportTarget: target,
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) == "" || string(data) == "null" {
+		t.Fatalf("marshaled request is empty: %q", data)
+	}
+	if strings.Contains(string(data), target.ChatID) || strings.Contains(string(data), "77") {
+		t.Fatalf("ephemeral report target leaked into JSON: %s", data)
+	}
+
+	if err := manager.Run(req, "telegram"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case report := <-reports:
+		if report.ReportTarget != target {
+			t.Fatalf("report target = %+v, want %+v", report.ReportTarget, target)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for speed-test report")
 	}
 }
 

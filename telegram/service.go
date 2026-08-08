@@ -36,6 +36,9 @@ const (
 	menuSpeedButtonLimit               = 8
 	maxDiagnosticsRefreshConcurrency   = 4
 	maxRichMessageRunes                = 32768
+	lowSpeedRetryDelay                 = 30 * time.Minute
+	lowSpeedRetryBusyDelay             = time.Minute
+	lowSpeedRetrySource                = "speed-retry"
 )
 
 var defaultAlertReminderScheduleMinutes = parseMinuteSchedule(defaultAlertReminderScheduleString)
@@ -178,6 +181,16 @@ type Service struct {
 
 	stopCh   chan struct{}
 	stopOnce sync.Once
+
+	speedRetryMu        sync.Mutex
+	speedRetryWG        sync.WaitGroup
+	speedRetryPending   map[string]bool
+	speedRetryTimers    map[uint64]*time.Timer
+	speedRetrySeq       uint64
+	speedRetryDelay     time.Duration
+	speedRetryBusy      time.Duration
+	speedRunFunc        func(speedtest.RunRequest, string) error
+	speedReportSendFunc func(string, int, formattedMessage)
 }
 
 type nodeAlertState struct {
@@ -328,15 +341,19 @@ func NewService(statePath string, proxyChecker *checker.ProxyChecker, speedManag
 	}
 
 	return &Service{
-		proxyChecker:   proxyChecker,
-		speedManager:   speedManager,
-		startPort:      startPort,
-		statePath:      statePath,
-		alertStatePath: alertStatePath,
-		config:         DefaultConfig(),
-		alerts:         make(map[string]nodeAlertState),
-		menuMessages:   make(map[string]int),
-		stopCh:         make(chan struct{}),
+		proxyChecker:      proxyChecker,
+		speedManager:      speedManager,
+		startPort:         startPort,
+		statePath:         statePath,
+		alertStatePath:    alertStatePath,
+		config:            DefaultConfig(),
+		alerts:            make(map[string]nodeAlertState),
+		menuMessages:      make(map[string]int),
+		stopCh:            make(chan struct{}),
+		speedRetryPending: make(map[string]bool),
+		speedRetryTimers:  make(map[uint64]*time.Timer),
+		speedRetryDelay:   lowSpeedRetryDelay,
+		speedRetryBusy:    lowSpeedRetryBusyDelay,
 	}
 }
 
@@ -485,6 +502,16 @@ func (s *Service) Start() {
 func (s *Service) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
+		s.speedRetryMu.Lock()
+		for _, timer := range s.speedRetryTimers {
+			if timer.Stop() {
+				s.speedRetryWG.Done()
+			}
+		}
+		s.speedRetryTimers = make(map[uint64]*time.Timer)
+		s.speedRetryPending = make(map[string]bool)
+		s.speedRetryMu.Unlock()
+		s.speedRetryWG.Wait()
 	})
 }
 
@@ -508,19 +535,221 @@ func (s *Service) SendTestMessage() error {
 
 func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 	cfg := s.Config()
+	if isRequestedTelegramSpeedReport(report) {
+		if !cfg.Enabled || len(report.Results) == 0 {
+			return
+		}
+		failed, slow := countSpeedIssues(report.Results, cfg.LowSpeedThresholdMbps)
+		content := s.formatSpeedReportMessage(report, cfg, failed, slow, false)
+		s.sendSpeedTestReport(cfg, report.ReportTarget.ChatID, report.ReportTarget.MessageThreadID, content)
+		return
+	}
+
+	if report.Source == lowSpeedRetrySource {
+		s.completeLowSpeedRetry(report.Results)
+	}
+
 	report = filterMutedRunReport(report, cfg)
 	failed, slow, issuesOnly, shouldSend := speedReportDecision(report, cfg)
 	if !shouldSend {
 		return
 	}
 
+	if report.Source == lowSpeedRetrySource {
+		if failed == 0 && slow == 0 {
+			return
+		}
+		issuesOnly = true
+	} else if slow > 0 && s.scheduleLowSpeedRetry(report) {
+		// Low throughput is intentionally absent from the first alert. Explicit
+		// transport failures remain visible immediately and are not hidden behind
+		// the 30-minute confirmation window.
+		report.Results = speedFailureResults(report.Results)
+		report.Selected = len(report.Results)
+		failed, slow = countSpeedIssues(report.Results, cfg.LowSpeedThresholdMbps)
+		if failed == 0 {
+			return
+		}
+		issuesOnly = true
+	}
+
 	content := s.formatSpeedReportMessage(report, cfg, failed, slow, issuesOnly)
+	s.sendSpeedTestReport(cfg, cfg.ChatID, cfg.MessageThreadID, content)
+}
+
+func (s *Service) sendSpeedTestReport(cfg Config, chatID string, threadID int, content formattedMessage) {
+	if s.speedReportSendFunc != nil {
+		s.speedReportSendFunc(chatID, threadID, content)
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
 	defer cancel()
 
-	if _, err := s.sendFormattedToWithMarkup(ctx, cfg.ChatID, cfg.MessageThreadID, content, backToMenuMarkup()); err != nil {
+	if _, err := s.sendFormattedToWithMarkup(ctx, chatID, threadID, content, backToMenuMarkup()); err != nil {
 		logger.Warn("Failed to send Telegram speed-test report: %v", err)
 	}
+}
+
+func isRequestedTelegramSpeedReport(report speedtest.RunReport) bool {
+	return report.Source == "telegram" && strings.TrimSpace(report.ReportTarget.ChatID) != ""
+}
+
+func speedFailureResults(results []speedtest.Result) []speedtest.Result {
+	filtered := make([]speedtest.Result, 0, len(results))
+	for _, result := range results {
+		if result.Offline || result.Error != "" {
+			filtered = append(filtered, result)
+		}
+	}
+	return filtered
+}
+
+func lowSpeedRetryIDs(results []speedtest.Result, threshold float64) []string {
+	if threshold <= 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var ids []string
+	for _, result := range results {
+		stableID := strings.TrimSpace(result.StableID)
+		if stableID == "" || result.Offline || result.Error != "" || result.Mbps >= threshold || seen[stableID] {
+			continue
+		}
+		seen[stableID] = true
+		ids = append(ids, stableID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func (s *Service) scheduleLowSpeedRetry(report speedtest.RunReport) bool {
+	cfg := s.Config()
+	ids := lowSpeedRetryIDs(report.Results, cfg.LowSpeedThresholdMbps)
+	if len(ids) == 0 {
+		return false
+	}
+
+	s.speedRetryMu.Lock()
+	defer s.speedRetryMu.Unlock()
+	select {
+	case <-s.stopCh:
+		return false
+	default:
+	}
+	if s.speedRetryPending == nil {
+		s.speedRetryPending = make(map[string]bool)
+	}
+	if s.speedRetryTimers == nil {
+		s.speedRetryTimers = make(map[uint64]*time.Timer)
+	}
+
+	newIDs := ids[:0]
+	for _, stableID := range ids {
+		if s.speedRetryPending[stableID] {
+			continue
+		}
+		s.speedRetryPending[stableID] = true
+		newIDs = append(newIDs, stableID)
+	}
+	if len(newIDs) == 0 {
+		return true
+	}
+
+	req := speedtest.RunRequest{
+		ProxyIDs: newIDs,
+		Config:   report.Config,
+	}
+	s.scheduleLowSpeedRetryLocked(req, append([]string(nil), newIDs...), s.configuredSpeedRetryDelay())
+	return true
+}
+
+func (s *Service) configuredSpeedRetryDelay() time.Duration {
+	if s.speedRetryDelay > 0 {
+		return s.speedRetryDelay
+	}
+	return lowSpeedRetryDelay
+}
+
+func (s *Service) configuredSpeedRetryBusyDelay() time.Duration {
+	if s.speedRetryBusy > 0 {
+		return s.speedRetryBusy
+	}
+	return lowSpeedRetryBusyDelay
+}
+
+func (s *Service) scheduleLowSpeedRetryLocked(req speedtest.RunRequest, ids []string, delay time.Duration) {
+	s.speedRetrySeq++
+	timerID := s.speedRetrySeq
+	s.speedRetryWG.Add(1)
+	s.speedRetryTimers[timerID] = time.AfterFunc(delay, func() {
+		defer s.speedRetryWG.Done()
+		s.runLowSpeedRetry(timerID, req, ids)
+	})
+}
+
+func (s *Service) runLowSpeedRetry(timerID uint64, req speedtest.RunRequest, ids []string) {
+	s.speedRetryMu.Lock()
+	delete(s.speedRetryTimers, timerID)
+	s.speedRetryMu.Unlock()
+
+	select {
+	case <-s.stopCh:
+		s.clearLowSpeedRetry(ids)
+		return
+	default:
+	}
+
+	err := s.runSpeedTest(req, lowSpeedRetrySource)
+	if err == nil {
+		return
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "already running") {
+		s.speedRetryMu.Lock()
+		select {
+		case <-s.stopCh:
+			for _, stableID := range ids {
+				delete(s.speedRetryPending, stableID)
+			}
+			s.speedRetryMu.Unlock()
+			return
+		default:
+		}
+		s.scheduleLowSpeedRetryLocked(req, ids, s.configuredSpeedRetryBusyDelay())
+		s.speedRetryMu.Unlock()
+		logger.Warn("Low-speed confirmation test postponed because another speed-test is running")
+		return
+	}
+
+	s.clearLowSpeedRetry(ids)
+	logger.Warn("Failed to start low-speed confirmation test: %v", err)
+}
+
+func (s *Service) completeLowSpeedRetry(results []speedtest.Result) {
+	ids := make([]string, 0, len(results))
+	for _, result := range results {
+		if result.StableID != "" {
+			ids = append(ids, result.StableID)
+		}
+	}
+	s.clearLowSpeedRetry(ids)
+}
+
+func (s *Service) clearLowSpeedRetry(ids []string) {
+	s.speedRetryMu.Lock()
+	defer s.speedRetryMu.Unlock()
+	for _, stableID := range ids {
+		delete(s.speedRetryPending, stableID)
+	}
+}
+
+func (s *Service) runSpeedTest(req speedtest.RunRequest, source string) error {
+	if s.speedRunFunc != nil {
+		return s.speedRunFunc(req, source)
+	}
+	if s.speedManager == nil {
+		return fmt.Errorf("speed-test manager is unavailable")
+	}
+	return s.speedManager.Run(req, source)
 }
 
 func speedReportDecision(report speedtest.RunReport, cfg Config) (failed int, slow int, issuesOnly bool, shouldSend bool) {
@@ -1041,10 +1270,10 @@ func (s *Service) handleNodeSpeedTestCallback(cb *callbackQuery, stableID string
 		return
 	}
 
-	req := s.newSpeedTestRunRequest()
+	req := s.newTelegramSpeedTestRunRequest(cb.Message)
 	req.ProxyIDs = []string{proxy.StableID}
 	req.OnlyOnline = false
-	if err := s.speedManager.Run(req, "telegram"); err != nil {
+	if err := s.runSpeedTest(req, "telegram"); err != nil {
 		s.answerCallback(cb.ID, "Не запущено")
 		if cb.Message != nil {
 			s.editCommandMessage(cb.Message, fmt.Sprintf("<b>Speed-test не запущен</b>\n\n%s", htmlEscape(err.Error())), s.nodeDetailMarkup(proxy.StableID, true))
@@ -1064,9 +1293,9 @@ func (s *Service) handleSpeedTestCallback(cb *callbackQuery, onlyOnline bool) {
 		s.answerCallback(cb.ID, "Только для администратора")
 		return
 	}
-	req := s.newSpeedTestRunRequest()
+	req := s.newTelegramSpeedTestRunRequest(cb.Message)
 	req.OnlyOnline = onlyOnline
-	if err := s.speedManager.Run(req, "telegram"); err != nil {
+	if err := s.runSpeedTest(req, "telegram"); err != nil {
 		s.answerCallback(cb.ID, "Не запущено")
 		if cb.Message != nil {
 			s.editCommandMessage(cb.Message, fmt.Sprintf("<b>Speed-test не запущен</b>\n\n%s", htmlEscape(err.Error())), backToMenuMarkup())
@@ -1240,7 +1469,7 @@ func (s *Service) editMenuMessage(msg *message, from *user) {
 }
 
 func (s *Service) handleSpeedTestCommand(msg *message, args []string) {
-	req := s.newSpeedTestRunRequest()
+	req := s.newTelegramSpeedTestRunRequest(msg)
 	req.OnlyOnline = true
 
 	var queryParts []string
@@ -1269,7 +1498,7 @@ func (s *Service) handleSpeedTestCommand(msg *message, args []string) {
 		req.OnlyOnline = false
 	}
 
-	if err := s.speedManager.Run(req, "telegram"); err != nil {
+	if err := s.runSpeedTest(req, "telegram"); err != nil {
 		s.sendCommandReply(msg, fmt.Sprintf("<b>Speed-test не запущен</b>\n\n%s", htmlEscape(err.Error())))
 		return
 	}
@@ -1278,6 +1507,19 @@ func (s *Service) handleSpeedTestCommand(msg *message, args []string) {
 
 func (s *Service) newSpeedTestRunRequest() speedtest.RunRequest {
 	return speedtest.RunRequest{Config: s.speedManager.Schedule().Config}
+}
+
+func (s *Service) newTelegramSpeedTestRunRequest(msg *message) speedtest.RunRequest {
+	req := s.newSpeedTestRunRequest()
+	if msg == nil {
+		return req
+	}
+	cfg := s.Config()
+	req.ReportTarget = speedtest.ReportTarget{
+		ChatID:          strconv.FormatInt(msg.Chat.ID, 10),
+		MessageThreadID: replyThreadID(msg, cfg),
+	}
+	return req
 }
 
 func (s *Service) formatHelp(cfg Config) string {
@@ -1838,7 +2080,7 @@ func (s *Service) formatSpeedHistoryMessage(query string) formattedMessage {
 func (s *Service) formatRecentSpeedOverview() string {
 	results := s.speedManager.Snapshot().Results
 	if len(results) == 0 {
-		return "<b>Последние замеры</b>\n\nПока нет результатов speed-test."
+		return "<b>Замеры</b>\n\nПока нет результатов speed-test."
 	}
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].CheckedAt.After(results[j].CheckedAt)
@@ -1846,7 +2088,9 @@ func (s *Service) formatRecentSpeedOverview() string {
 
 	cfg := s.Config()
 	lines := []string{
-		"<b>Последние замеры speed-test</b>",
+		"<b>Замеры</b>",
+		"Последний результат speed-test для каждой ноды:",
+		"",
 	}
 	for _, result := range limitResults(results, 10) {
 		status := fmt.Sprintf("<b>%.2f Mbps</b>", result.Mbps)
@@ -1867,22 +2111,34 @@ func (s *Service) formatRecentSpeedOverviewMessage() formattedMessage {
 	fallback := s.formatRecentSpeedOverview()
 	results := s.speedManager.Snapshot().Results
 	if len(results) == 0 {
-		return formattedMessage{HTML: fallback, RichHTML: "<h2>Последние замеры</h2><p>Результатов пока нет.</p>"}
+		return formattedMessage{HTML: fallback, RichHTML: "<h2>Замеры</h2><p>Результатов пока нет.</p>"}
 	}
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].CheckedAt.After(results[j].CheckedAt)
 	})
 	cfg := s.Config()
-	var items []string
-	for _, result := range limitResults(results, 10) {
-		items = append(items, fmt.Sprintf("<li><b>%s</b> — %s · %s</li>",
+	visible := limitResults(results, 10)
+	failed, slow := countSpeedIssues(visible, cfg.LowSpeedThresholdMbps)
+	healthy := len(healthySpeedResults(visible, cfg.LowSpeedThresholdMbps))
+
+	var rich strings.Builder
+	rich.WriteString("<h2>Замеры</h2>")
+	fmt.Fprintf(&rich, "<p>✅ В норме: <b>%d</b> · ⚠️ Низкая: <b>%d</b> · ❌ Ошибки: <b>%d</b></p>", healthy, slow, failed)
+	rich.WriteString("<table bordered striped><tr><th>Нода</th><th>Результат</th><th>Время</th></tr>")
+	for _, result := range visible {
+		fmt.Fprintf(&rich, "<tr><td>%s</td><td>%s</td><td>%s</td></tr>",
 			htmlEscape(result.Name),
 			formatSpeedStatusRich(result, cfg.LowSpeedThresholdMbps),
 			htmlEscape(formatCheckedAt(result.CheckedAt)),
-		))
+		)
 	}
-	rich := "<h2>Последние замеры</h2><ul>" + strings.Join(items, "") + "</ul><footer>Откройте ноду кнопкой ниже, чтобы посмотреть историю.</footer>"
-	return formattedMessage{HTML: fallback, RichHTML: rich}
+	rich.WriteString("</table>")
+	if cfg.LowSpeedThresholdMbps > 0 {
+		fmt.Fprintf(&rich, "<footer>Порог: %.2f Mbps. Откройте ноду ниже, чтобы посмотреть историю.</footer>", cfg.LowSpeedThresholdMbps)
+	} else {
+		rich.WriteString("<footer>Откройте ноду ниже, чтобы посмотреть историю.</footer>")
+	}
+	return formattedMessage{HTML: fallback, RichHTML: rich.String()}
 }
 
 func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, failed int, slow int, issuesOnly bool) string {
@@ -1896,7 +2152,7 @@ func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, fail
 	issues := speedIssuesHTML(report.Results, cfg.LowSpeedThresholdMbps)
 	if issuesOnly {
 		lines := []string{
-			"<b>Speed-test: есть проблемы</b>",
+			fmt.Sprintf("<b>%s</b>", htmlEscape(speedReportTitle(report.Source, true))),
 			fmt.Sprintf("%s · %s", htmlEscape(reportSourceLabel(report.Source)), htmlEscape(formatCheckedAt(report.FinishedAt))),
 		}
 		if cfg.LowSpeedThresholdMbps > 0 {
@@ -1938,10 +2194,7 @@ func (s *Service) formatSpeedReportMessage(report speedtest.RunReport, cfg Confi
 	successful := successfulResults(report.Results)
 	healthy := healthySpeedResults(report.Results, cfg.LowSpeedThresholdMbps)
 	issues := speedIssueResults(report.Results, cfg.LowSpeedThresholdMbps)
-	title := "Speed-test завершён"
-	if issuesOnly {
-		title = "Speed-test: есть проблемы"
-	}
+	title := speedReportTitle(report.Source, issuesOnly)
 
 	var rich strings.Builder
 	fmt.Fprintf(&rich, "<h2>%s</h2>", htmlEscape(title))
@@ -3230,12 +3483,24 @@ func reportSourceLabel(source string) string {
 		return "Telegram"
 	case "schedule":
 		return "расписание"
+	case lowSpeedRetrySource:
+		return "повтор через 30 минут"
 	default:
 		if source == "" {
 			return "неизвестно"
 		}
 		return source
 	}
+}
+
+func speedReportTitle(source string, issuesOnly bool) string {
+	if source == lowSpeedRetrySource {
+		return "Speed-test: проблема подтверждена"
+	}
+	if issuesOnly {
+		return "Speed-test: есть проблемы"
+	}
+	return "Speed-test завершён"
 }
 
 func formatSpeedHistoryLine(result speedtest.Result, threshold float64) string {
