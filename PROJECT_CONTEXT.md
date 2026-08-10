@@ -46,7 +46,7 @@ Frontend встроен в Go-бинарник через `embed`. `docs/` — �
 
 ### Проверка доступности
 
-Для каждой ноды создаётся SOCKS-inbound на `XRAY_START_PORT + Index`. Полный обход с периодом `PROXY_CHECK_INTERVAL` выполняет выбранный метод `ip`, `status` или `download` через каждый inbound без предварительного TCP-гейта. Статус и диагностика хранятся по `StableID`; после итерации обновляются архив downtime, Telegram и Pushgateway.
+Для каждой ноды создаётся SOCKS-inbound на `XRAY_START_PORT + Index`. Полный обход с периодом `PROXY_CHECK_INTERVAL` выполняет выбранный метод `ip`, `status` или `download` через каждый inbound без предварительного TCP-гейта. При провале proxy-check переход в offline и `DownSince` сохраняются до TCP/ping-диагностики, а её результаты дописываются только если нода всё ещё offline. Непривилегированный Linux ICMP datagram socket может переписать Echo ID, поэтому ping reply сопоставляется по типу, sequence и уникальному payload. Статус и диагностика хранятся по `StableID`; после итерации обновляются архив downtime, Telegram и Pushgateway.
 
 Уже недоступные ноды попадают в отдельный recovery-loop с периодом `PROXY_RECOVERY_INTERVAL` (default 15 секунд, `0` отключает). В одной ограниченной worker-pool итерации TCP и ping выполняются параллельно. Если TCP недоступен, proxy-check пропускается; после `TCP OK` полноценный настроенный proxy-check запускается немедленно. Ping никогда не является gate. Полный обход остаётся независимой контрольной проверкой и предотвращает постоянную блокировку recovery из-за ошибочной TCP-диагностики.
 

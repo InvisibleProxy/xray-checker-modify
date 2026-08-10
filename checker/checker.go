@@ -1,6 +1,7 @@
 package checker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -52,6 +53,8 @@ type ProxyChecker struct {
 }
 
 const maxAvailabilityCheckConcurrency = 4
+
+var pingProbeCounter uint64
 
 type ProxyStatusDetails struct {
 	Online        bool
@@ -216,8 +219,7 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 			0,
 		)
 		pc.currentMetrics.Store(metricKey, false)
-		hostCheck, pingCheck := pc.hostDiagnosticsIfBecameUnavailable(proxy)
-		pc.storeStatusDetails(proxy.StableID, false, 0, hostCheck, pingCheck)
+		hostCheck, pingCheck := pc.markUnavailableAndCollectDiagnostics(proxy)
 		logHostDiagnostics(proxy.Name, hostCheck, pingCheck)
 	}
 
@@ -451,18 +453,19 @@ func (pc *ProxyChecker) ClearMetrics() {
 	})
 }
 
-func (pc *ProxyChecker) storeStatusDetails(stableID string, online bool, latency time.Duration, hostCheck *HostCheckDetails, pingCheck *PingCheckDetails) {
+func (pc *ProxyChecker) storeStatusDetails(stableID string, online bool, latency time.Duration, hostCheck *HostCheckDetails, pingCheck *PingCheckDetails) bool {
 	pc.statusMu.Lock()
 	defer pc.statusMu.Unlock()
-	pc.storeStatusDetailsLocked(stableID, online, latency, hostCheck, pingCheck)
+	return pc.storeStatusDetailsLocked(stableID, online, latency, hostCheck, pingCheck)
 }
 
-func (pc *ProxyChecker) storeStatusDetailsLocked(stableID string, online bool, latency time.Duration, hostCheck *HostCheckDetails, pingCheck *PingCheckDetails) {
+func (pc *ProxyChecker) storeStatusDetailsLocked(stableID string, online bool, latency time.Duration, hostCheck *HostCheckDetails, pingCheck *PingCheckDetails) bool {
 	if stableID == "" {
-		return
+		return false
 	}
 
 	now := time.Now()
+	becameUnavailable := !online
 	details := ProxyStatusDetails{
 		Online:        online,
 		Latency:       latency,
@@ -472,6 +475,7 @@ func (pc *ProxyChecker) storeStatusDetailsLocked(stableID string, online bool, l
 
 	if previousValue, ok := pc.statusDetails.Load(stableID); ok {
 		previous := previousValue.(ProxyStatusDetails)
+		becameUnavailable = !online && previous.Online
 		if previous.Online == online {
 			details.LastChangedAt = previous.LastChangedAt
 		}
@@ -493,22 +497,38 @@ func (pc *ProxyChecker) storeStatusDetailsLocked(stableID string, online bool, l
 	}
 
 	pc.statusDetails.Store(stableID, details)
+	return becameUnavailable
 }
 
-func (pc *ProxyChecker) hostDiagnosticsIfBecameUnavailable(proxy *models.ProxyConfig) (*HostCheckDetails, *PingCheckDetails) {
+func (pc *ProxyChecker) markUnavailableAndCollectDiagnostics(proxy *models.ProxyConfig) (*HostCheckDetails, *PingCheckDetails) {
 	if proxy == nil || proxy.StableID == "" {
 		return nil, nil
 	}
 
-	if previousValue, ok := pc.statusDetails.Load(proxy.StableID); ok {
-		previous := previousValue.(ProxyStatusDetails)
-		if !previous.Online {
-			return nil, nil
-		}
+	if !pc.storeStatusDetails(proxy.StableID, false, 0, nil, nil) {
+		return nil, nil
 	}
 
 	hostCheck, pingCheck := pc.checkHostDiagnostics(proxy)
+	pc.storeOfflineDiagnostics(proxy.StableID, hostCheck, pingCheck)
 	return &hostCheck, &pingCheck
+}
+
+func (pc *ProxyChecker) storeOfflineDiagnostics(stableID string, hostCheck HostCheckDetails, pingCheck PingCheckDetails) {
+	pc.statusMu.Lock()
+	defer pc.statusMu.Unlock()
+
+	currentValue, ok := pc.statusDetails.Load(stableID)
+	if !ok {
+		return
+	}
+	current := currentValue.(ProxyStatusDetails)
+	if current.Online {
+		return
+	}
+	current.HostCheck = hostCheck
+	current.PingCheck = pingCheck
+	pc.statusDetails.Store(stableID, current)
 }
 
 func (pc *ProxyChecker) checkHostDiagnostics(proxy *models.ProxyConfig) (HostCheckDetails, PingCheckDetails) {
@@ -698,11 +718,13 @@ func pingIP(ip net.IP, timeout time.Duration) (time.Duration, error) {
 	listenAddr := "0.0.0.0"
 	protocol := ipv4.ICMPTypeEcho.Protocol()
 	var messageType icmp.Type = ipv4.ICMPTypeEcho
+	var replyType icmp.Type = ipv4.ICMPTypeEchoReply
 	if ip.To4() == nil {
 		network = "udp6"
 		listenAddr = "::"
 		protocol = ipv6.ICMPTypeEchoRequest.Protocol()
 		messageType = ipv6.ICMPTypeEchoRequest
+		replyType = ipv6.ICMPTypeEchoReply
 	}
 
 	conn, err := icmp.ListenPacket(network, listenAddr)
@@ -717,14 +739,16 @@ func pingIP(ip net.IP, timeout time.Duration) (time.Duration, error) {
 	}
 
 	id := os.Getpid() & 0xffff
-	seq := int(time.Now().UnixNano() & 0xffff)
+	probeNumber := atomic.AddUint64(&pingProbeCounter, 1)
+	seq := int(probeNumber & 0xffff)
+	probeData := []byte(fmt.Sprintf("xray-checker:%d:%d:%d", id, time.Now().UnixNano(), probeNumber))
 	message := icmp.Message{
 		Type: messageType,
 		Code: 0,
 		Body: &icmp.Echo{
 			ID:   id,
 			Seq:  seq,
-			Data: []byte("xray-checker"),
+			Data: probeData,
 		},
 	}
 	payload, err := message.Marshal(nil)
@@ -749,10 +773,18 @@ func pingIP(ip net.IP, timeout time.Duration) (time.Duration, error) {
 		if err != nil {
 			continue
 		}
-		if echo, ok := reply.Body.(*icmp.Echo); ok && echo.ID == id && echo.Seq == seq {
+		if matchesPingReply(reply, replyType, seq, probeData) {
 			return latency, nil
 		}
 	}
+}
+
+func matchesPingReply(reply *icmp.Message, replyType icmp.Type, seq int, probeData []byte) bool {
+	if reply == nil || reply.Type != replyType {
+		return false
+	}
+	echo, ok := reply.Body.(*icmp.Echo)
+	return ok && echo.Seq == seq && bytes.Equal(echo.Data, probeData)
 }
 
 func compactHostCheckError(err error) string {

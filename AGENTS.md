@@ -33,6 +33,7 @@
 - Прямой результат Telegram-speedtest должен возвращаться в исходные chat ID и topic ID независимо от настроек фоновых speed-report; report target не персистится и не попадает в admin API.
 - Первый фоновый low-speed результат (schedule/admin) не уведомляет: повторяются только просевшие `StableID` через 30 минут, а алерт отправляется лишь при повторной проблеме. Первичные offline/error не задерживаются.
 - Полный availability-check всех нод не использует TCP-гейт. Быстрый recovery-loop проверяет только уже недоступные `StableID`: обновляет TCP/ping и запускает proxy-check лишь после `TCP OK`; ping никогда не является gate.
+- Переход в offline и `DownSince` сохраняются до дополнительной TCP/ping-диагностики. Для непривилегированного ICMP `udp4`/`udp6` не сопоставляйте reply по Echo ID: Linux может переписать его; используйте тип ответа, sequence и уникальный payload.
 - Быстрые recovery-checks не увеличивают Telegram `FailCount` и не сдвигают reminder schedule. Подтверждённый online передаётся immediate-recovery пути без ожидания `AlertCheckMinutes`.
 - Ручная availability-проверка из admin UI/API и карточки ноды Telegram использует общий workflow; для online/unknown выполняется полный proxy-check, для offline — каскадная проверка.
 - В admin UI действия `Check` и `Run` должны оставаться доступны одновременно в строке каждой ноды и в групповой панели выбранных нод.

@@ -1,8 +1,13 @@
 package checker
 
 import (
+	"net"
+	"runtime"
 	"testing"
 	"time"
+
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
 
 	"xray-checker/models"
 )
@@ -39,6 +44,109 @@ func TestGetProxyStatusByStableIDFallsBackToStatusDetails(t *testing.T) {
 	}
 	if latency != 123*time.Millisecond {
 		t.Fatalf("expected latency %s, got %s", 123*time.Millisecond, latency)
+	}
+}
+
+func TestUnavailableStatusIsStoredBeforeDiagnosticsComplete(t *testing.T) {
+	proxy := testProxy("node-1", "Node one")
+	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{proxy})
+	proxyChecker.storeStatusDetails(proxy.StableID, true, 10*time.Millisecond, nil, nil)
+
+	diagnosticsStarted := make(chan struct{})
+	releaseDiagnostics := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(releaseDiagnostics)
+		}
+	}()
+	diagnosticsAt := time.Now()
+	proxyChecker.hostDiagnosticsFunc = func(*models.ProxyConfig) (HostCheckDetails, PingCheckDetails) {
+		close(diagnosticsStarted)
+		<-releaseDiagnostics
+		return HostCheckDetails{Checked: true, Online: false, CheckedAt: diagnosticsAt},
+			PingCheckDetails{Checked: true, Online: true, CheckedAt: diagnosticsAt}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		proxyChecker.markUnavailableAndCollectDiagnostics(proxy)
+		close(done)
+	}()
+
+	select {
+	case <-diagnosticsStarted:
+	case <-time.After(time.Second):
+		t.Fatal("host diagnostics did not start")
+	}
+	details, err := proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if details.Online || details.DownSince.IsZero() {
+		t.Fatalf("offline transition was not stored before diagnostics: %+v", details)
+	}
+	downSince := details.DownSince
+	if details.HostCheck.Checked || details.PingCheck.Checked {
+		t.Fatalf("diagnostics unexpectedly completed before release: %+v", details)
+	}
+
+	close(releaseDiagnostics)
+	released = true
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("host diagnostics did not complete")
+	}
+	details, err = proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !details.DownSince.Equal(downSince) {
+		t.Fatalf("DownSince changed after diagnostics: got %s, want %s", details.DownSince, downSince)
+	}
+	if !details.HostCheck.Checked || !details.PingCheck.Checked || !details.PingCheck.Online {
+		t.Fatalf("completed diagnostics were not stored: %+v", details)
+	}
+}
+
+func TestMatchesPingReplyWhenKernelRewritesEchoID(t *testing.T) {
+	probeData := []byte("xray-checker:probe")
+	reply := &icmp.Message{
+		Type: ipv4.ICMPTypeEchoReply,
+		Body: &icmp.Echo{
+			ID:   54321,
+			Seq:  123,
+			Data: append([]byte(nil), probeData...),
+		},
+	}
+
+	if !matchesPingReply(reply, ipv4.ICMPTypeEchoReply, 123, probeData) {
+		t.Fatal("valid echo reply was rejected after the kernel rewrote its ID")
+	}
+	if matchesPingReply(reply, ipv4.ICMPTypeEchoReply, 124, probeData) {
+		t.Fatal("echo reply with an unexpected sequence was accepted")
+	}
+	if matchesPingReply(reply, ipv4.ICMPTypeEchoReply, 123, []byte("other-probe")) {
+		t.Fatal("echo reply with unexpected payload was accepted")
+	}
+	reply.Type = ipv4.ICMPTypeEcho
+	if matchesPingReply(reply, ipv4.ICMPTypeEchoReply, 123, probeData) {
+		t.Fatal("echo request was accepted as a reply")
+	}
+}
+
+func TestPingIPLoopback(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("unprivileged ICMP datagram behavior is verified on Linux")
+	}
+
+	latency, err := pingIP(net.ParseIP("127.0.0.1"), time.Second)
+	if err != nil {
+		t.Fatalf("pingIP(loopback) error = %v", err)
+	}
+	if latency < 0 || latency >= time.Second {
+		t.Fatalf("pingIP(loopback) latency = %s, want less than 1s", latency)
 	}
 }
 
