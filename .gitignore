@@ -21,11 +21,48 @@
 go.work
 go.work.sum
 
-# env file
+# Environment files
 .env
+.env.*
+!.env.example
+
+# Application runtime state
+data/
+*.log
+*.tmp
+*.pid
+
+# Local build, test, and profiling output
+dist/
+build/
+tmp/
+.cache/
+coverage/
+coverage.*
+*.coverprofile
+
+# Local editor and OS metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini
+
+# GitHub automation is intentionally disabled in this fork
+.github/workflows/
+.github/dependabot.yml
+
 xray-checker
 xray_config.json
 docker-compose.yml
+docker-compose.yaml
+docker-compose.override.yml
+docker-compose.override.yaml
+compose.yml
+compose.yaml
+compose.override.yml
+compose.override.yaml
 .DS_Store
 test-files/
 configs/

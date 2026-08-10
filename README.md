@@ -173,6 +173,8 @@ Recovery-уведомление хранится как pending до подтв�
 
 ## Проверка изменений
 
+GitHub Actions и Dependabot в этом форке отключены: автоматические проверки, публикация Docker Hub description и release jobs на GitHub не запускаются. Проверки выполняются локально перед push.
+
 На машине с Go:
 
 ```powershell

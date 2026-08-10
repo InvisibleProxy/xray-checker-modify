@@ -145,4 +145,4 @@ Recovery alert хранит `RecoveryPending`, время и latency до усп
 
 ## Текущее состояние
 
-Реализованы и покрыты Go-тестами: сохранение и проверка StableID при refresh, Xray lifecycle-lock speedtest, единый scheduled/Telegram TestConfig, temporal speedtest retention, node archive, структурированный Telegram output, retryable recovery alerts, ручные/автоматические backup и транзакционный staged restore. Перед релизом обязательны проверки из [`AGENTS.md`](AGENTS.md).
+Реализованы и покрыты Go-тестами: сохранение и проверка StableID при refresh, Xray lifecycle-lock speedtest, единый scheduled/Telegram TestConfig, temporal speedtest retention, node archive, структурированный Telegram output, retryable recovery alerts, ручные/автоматические backup и транзакционный staged restore. GitHub Actions и Dependabot в форке отключены; CI, Docker Hub description и release jobs на GitHub не выполняются. Перед релизом обязательны локальные проверки из [`AGENTS.md`](AGENTS.md).
