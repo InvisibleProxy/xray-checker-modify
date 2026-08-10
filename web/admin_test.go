@@ -21,6 +21,24 @@ import (
 	"xray-checker/speedtest"
 )
 
+func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
+	var rendered bytes.Buffer
+	if err := RenderAdmin(&rendered); err != nil {
+		t.Fatalf("RenderAdmin() error = %v", err)
+	}
+	html := rendered.String()
+	for _, marker := range []string{
+		`id="selection-check"`,
+		`id="selection-run"`,
+		`data-check-id="${escapeHtml(proxy.stableId)}"`,
+		`data-run-id="${escapeHtml(proxy.stableId)}"`,
+	} {
+		if !strings.Contains(html, marker) {
+			t.Fatalf("admin template does not contain %q", marker)
+		}
+	}
+}
+
 func TestAdminSubscriptionRefreshHandler(t *testing.T) {
 	handler := AdminSubscriptionRefreshHandler(func() (AdminSubscriptionRefreshResult, error) {
 		return AdminSubscriptionRefreshResult{

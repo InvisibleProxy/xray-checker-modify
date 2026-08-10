@@ -303,6 +303,15 @@
         min-width: 110px;
         white-space: nowrap;
       }
+      .node-actions-cell {
+        min-width: 118px;
+        white-space: nowrap;
+      }
+      .node-actions {
+        display: flex;
+        gap: 6px;
+        flex-wrap: nowrap;
+      }
       .history-table {
         min-width: 980px;
       }
@@ -876,6 +885,7 @@
                 <tr>
                   <th></th>
                   <th>Name</th>
+                  <th>Actions</th>
                   <th>Status</th>
                   <th>Down Since</th>
                   <th>Host Check</th>
@@ -1088,6 +1098,7 @@
         nodesOverviewSortDir: "desc",
         speedPollRunning: false,
         availabilityCheckRunning: false,
+        availabilityCheckIDs: new Set(),
         nodeURLDraftID: "",
         nodeURLDirty: false,
       };
@@ -1862,12 +1873,22 @@
           const downSince = proxy.downSince ? formatTime(proxy.downSince) : "";
           const downtime = proxy.downSince ? formatDurationSec(proxy.downtimeSec) : "";
           const hostCheck = formatHostCheck(proxy);
+          const run = state.snapshot && state.snapshot.lastRun;
+          const checking = state.availabilityCheckRunning && state.availabilityCheckIDs.has(proxy.stableId);
+          const checkDisabled = state.availabilityCheckRunning ? "disabled" : "";
+          const runDisabled = run && run.running ? "disabled" : "";
           return `
             <tr class="${rowClass}">
               <td><input type="checkbox" data-id="${proxy.stableId}" ${checked}></td>
               <td class="node-name">
                 <div>${escapeHtml(proxy.name || "Unnamed")}</div>
                 <div class="muted mono">${escapeHtml(proxy.stableId)}</div>
+              </td>
+              <td class="node-actions-cell">
+                <div class="node-actions">
+                  <button class="secondary small" type="button" data-check-id="${escapeHtml(proxy.stableId)}" ${checkDisabled}>${checking ? "Checking…" : "Check"}</button>
+                  <button class="primary small" type="button" data-run-id="${escapeHtml(proxy.stableId)}" ${runDisabled}>Run</button>
+                </div>
               </td>
               <td class="status-cell">
                 ${formatStatusChips(proxy)}
@@ -1878,12 +1899,18 @@
               <td class="speed-cell">${formatSpeedChip(result)}</td>
             </tr>`;
         });
-        $("nodes").innerHTML = rows.join("") || `<tr><td colspan="7" class="muted">No nodes match filters</td></tr>`;
+        $("nodes").innerHTML = rows.join("") || `<tr><td colspan="8" class="muted">No nodes match filters</td></tr>`;
         $("nodes").querySelectorAll("input[type=checkbox]").forEach((input) => {
           input.addEventListener("change", () => {
             input.checked ? state.selected.add(input.dataset.id) : state.selected.delete(input.dataset.id);
             renderSelectionCount();
           });
+        });
+        $("nodes").querySelectorAll("[data-check-id]").forEach((button) => {
+          button.addEventListener("click", () => checkAvailability([button.dataset.checkId]));
+        });
+        $("nodes").querySelectorAll("[data-run-id]").forEach((button) => {
+          button.addEventListener("click", () => runNodes([button.dataset.runId]));
         });
         renderSelectionCount();
       }
@@ -2328,9 +2355,10 @@
         }
       }
 
-      async function runSelected() {
+      async function runNodes(stableIds) {
         $("message").textContent = "";
-        if (state.selected.size === 0) {
+        const proxyIds = [...new Set(stableIds.filter(Boolean))];
+        if (proxyIds.length === 0) {
           $("message").textContent = "Select at least one node";
           return;
         }
@@ -2339,7 +2367,7 @@
           await request("/speed-tests/run", {
             method: "POST",
             body: JSON.stringify({
-              proxyIds: [...state.selected],
+              proxyIds,
               config: configFromForm(),
             }),
           });
@@ -2349,27 +2377,37 @@
         }
       }
 
-      async function checkSelectedAvailability() {
+      async function runSelected() {
+        await runNodes(selectedIDs());
+      }
+
+      async function checkAvailability(stableIds) {
         $("message").textContent = "";
-        const stableIds = selectedIDs();
-        if (stableIds.length === 0 || state.availabilityCheckRunning) return;
+        const ids = [...new Set(stableIds.filter(Boolean))];
+        if (ids.length === 0 || state.availabilityCheckRunning) return;
         state.availabilityCheckRunning = true;
-        renderSelectionCount();
+        state.availabilityCheckIDs = new Set(ids);
+        renderNodes();
         try {
           await request("/proxies/check", {
             method: "POST",
-            body: JSON.stringify({ stableIds }),
+            body: JSON.stringify({ stableIds: ids }),
           });
           await load();
-          $("message").textContent = stableIds.length === 1
+          $("message").textContent = ids.length === 1
             ? "Node availability checked"
-            : `${stableIds.length} nodes checked`;
+            : `${ids.length} nodes checked`;
         } catch (err) {
           $("message").textContent = err.message;
         } finally {
           state.availabilityCheckRunning = false;
-          renderSelectionCount();
+          state.availabilityCheckIDs.clear();
+          renderNodes();
         }
+      }
+
+      async function checkSelectedAvailability() {
+        await checkAvailability(selectedIDs());
       }
 
       async function saveNodeURL() {

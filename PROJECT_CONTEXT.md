@@ -50,7 +50,7 @@ Frontend встроен в Go-бинарник через `embed`. `docs/` — �
 
 Уже недоступные ноды попадают в отдельный recovery-loop с периодом `PROXY_RECOVERY_INTERVAL` (default 15 секунд, `0` отключает). В одной ограниченной worker-pool итерации TCP и ping выполняются параллельно. Если TCP недоступен, proxy-check пропускается; после `TCP OK` полноценный настроенный proxy-check запускается немедленно. Ping никогда не является gate. Полный обход остаётся независимой контрольной проверкой и предотвращает постоянную блокировку recovery из-за ошибочной TCP-диагностики.
 
-Полные, recovery и ручные availability-checks сериализованы и удерживают Xray lifecycle read-lock; refresh получает write-lock. Быстрые проверки не вызывают обычный Telegram alert-pass, поэтому не увеличивают `FailCount` и не сдвигают reminders. Успешный переход offline → online закрывает downtime и передаётся в отдельный immediate-recovery путь Telegram. Ручная проверка выбранных `StableID` доступна через admin API/UI и в карточке ноды Telegram; для уже недоступной ноды она использует тот же TCP-гейт.
+Полные, recovery и ручные availability-checks сериализованы и удерживают Xray lifecycle read-lock; refresh получает write-lock. Быстрые проверки не вызывают обычный Telegram alert-pass, поэтому не увеличивают `FailCount` и не сдвигают reminders. Успешный переход offline → online закрывает downtime и передаётся в отдельный immediate-recovery путь Telegram. Ручная проверка `StableID` доступна через admin API, в строке ноды и как групповое действие для выбранных строк, а также в карточке ноды Telegram; для уже недоступной ноды она использует тот же TCP-гейт. Speedtest-кнопка `Run` в admin UI также имеет строковый и групповой варианты.
 
 ### Обновление подписки
 
