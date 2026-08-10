@@ -195,6 +195,36 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /api/v1/admin/proxies/check:
+    post:
+      summary: Check selected proxy availability now
+      description: Runs a targeted availability check. Previously unavailable nodes refresh TCP and ping first and skip the proxy request while TCP is unavailable.
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StableIDListRequest'
+      responses:
+        '200':
+          description: Updated status and diagnostics for selected proxies
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AdminProxyInfo'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /api/v1/admin/subscription/refresh:
     post:
       summary: Refresh all subscription sources
@@ -687,6 +717,10 @@ components:
         checkInterval:
           type: integer
           example: 300
+        recoveryInterval:
+          type: integer
+          description: TCP-gated fast recovery interval for unavailable nodes in seconds; 0 disables the fast loop
+          example: 15
         checkMethod:
           type: string
           enum: [ip, status, download]

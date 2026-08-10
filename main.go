@@ -133,6 +133,7 @@ func main() {
 	)
 
 	xrayLifecycle := &sync.RWMutex{}
+	proxyChecker.SetRunGate(xrayLifecycle.RLocker())
 	speedTestManager := speedtest.NewManager(
 		proxyChecker,
 		config.CLIConfig.Xray.StartPort,
@@ -170,6 +171,33 @@ func main() {
 	automaticBackups := backup.NewAutomaticScheduler(backupCreator, "data/backups")
 	automaticBackups.Start()
 	defer automaticBackups.Stop()
+
+	notifyRecoveredNodes := func(stableIDs []string) {
+		if len(stableIDs) == 0 {
+			return
+		}
+		telegramService.NotifyNodeRecoveries(stableIDs)
+	}
+	runManualAvailabilityCheck := func(stableIDs []string) error {
+		var recovered []string
+		var checkErr error
+		if len(stableIDs) == 0 {
+			offlineBefore := offlineStableIDSet(proxyChecker)
+			proxyChecker.CheckAllProxies()
+			recovered = recoveredStableIDs(proxyChecker, offlineBefore)
+		} else {
+			var report checker.AvailabilityCheckReport
+			report, checkErr = proxyChecker.CheckProxiesByStableIDs(stableIDs)
+			recovered = report.RecoveredStableIDs()
+		}
+		if err := nodeArchive.RecordAvailability(); err != nil {
+			logger.Warn("Failed to record node availability after manual check: %v", err)
+		}
+		notifyRecoveredNodes(recovered)
+		return checkErr
+	}
+	telegramService.SetAvailabilityCheckFunc(runManualAvailabilityCheck)
+
 	speedTestManager.SetReporter(telegramService)
 	telegramService.Start()
 
@@ -179,11 +207,17 @@ func main() {
 
 	runCheckIteration := func() {
 		logger.Info("Starting proxy check iteration")
+		offlineBefore := offlineStableIDSet(proxyChecker)
 		proxyChecker.CheckAllProxies()
+		recovered := recoveredStableIDs(proxyChecker, offlineBefore)
 		if err := nodeArchive.RecordAvailability(); err != nil {
 			logger.Warn("Failed to record node availability: %v", err)
 		}
-		go telegramService.NotifyNodeStatuses()
+		go func() {
+			if !telegramService.NotifyNodeStatuses() {
+				notifyRecoveredNodes(recovered)
+			}
+		}()
 
 		if config.CLIConfig.Metrics.PushURL != "" {
 			pushConfig, err := metrics.ParseURL(config.CLIConfig.Metrics.PushURL)
@@ -211,6 +245,40 @@ func main() {
 		runCheckIteration()
 	})
 	checkScheduler.StartAsync()
+
+	if recoveryInterval := config.CLIConfig.Proxy.RecoveryInterval; recoveryInterval > 0 {
+		recoveryStop := make(chan struct{})
+		var recoveryWG sync.WaitGroup
+		recoveryWG.Add(1)
+		go func() {
+			defer recoveryWG.Done()
+			ticker := time.NewTicker(time.Duration(recoveryInterval) * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					report, err := proxyChecker.CheckUnavailableProxies()
+					recovered := report.RecoveredStableIDs()
+					if len(recovered) > 0 {
+						if archiveErr := nodeArchive.RecordAvailability(); archiveErr != nil {
+							logger.Warn("Failed to record recovered node availability: %v", archiveErr)
+						}
+						notifyRecoveredNodes(recovered)
+					}
+					if err != nil {
+						logger.Warn("Fast recovery check failed: %v", err)
+					}
+				case <-recoveryStop:
+					return
+				}
+			}
+		}()
+		defer func() {
+			close(recoveryStop)
+			recoveryWG.Wait()
+		}()
+		logger.Startup("Fast recovery checks enabled every %d seconds", recoveryInterval)
+	}
 
 	subscriptionRefreshLock := make(chan struct{}, 1)
 	refreshSubscription := func(source string) (web.AdminSubscriptionRefreshResult, error) {
@@ -306,6 +374,7 @@ func main() {
 	protectedHandler.Handle("/admin", web.AdminHandler())
 	protectedHandler.Handle("/admin/", web.AdminHandler())
 	protectedHandler.Handle("/api/v1/admin/proxies", web.AdminProxiesHandler(proxyChecker, config.CLIConfig.Xray.StartPort))
+	protectedHandler.Handle("/api/v1/admin/proxies/check", web.AdminProxyCheckHandler(runManualAvailabilityCheck, proxyChecker, config.CLIConfig.Xray.StartPort))
 	protectedHandler.Handle("/api/v1/admin/subscription/refresh", web.AdminSubscriptionRefreshHandler(func() (web.AdminSubscriptionRefreshResult, error) {
 		return refreshSubscription("manual")
 	}))
@@ -398,4 +467,36 @@ func updateConfiguration(newConfigs []*models.ProxyConfig, currentConfigs *[]*mo
 
 	logger.Info("Configuration updated: %d proxies", len(newConfigs))
 	return nil
+}
+
+func offlineStableIDSet(proxyChecker *checker.ProxyChecker) map[string]bool {
+	offline := make(map[string]bool)
+	for _, proxy := range proxyChecker.GetProxies() {
+		if proxy == nil {
+			continue
+		}
+		stableID := proxy.StableID
+		if stableID == "" {
+			stableID = proxy.GenerateStableID()
+		}
+		details, err := proxyChecker.GetProxyStatusDetailsByStableID(stableID)
+		if err == nil && !details.Online {
+			offline[stableID] = true
+		}
+	}
+	return offline
+}
+
+func recoveredStableIDs(proxyChecker *checker.ProxyChecker, offlineBefore map[string]bool) []string {
+	if len(offlineBefore) == 0 {
+		return nil
+	}
+	recovered := make([]string, 0)
+	for stableID := range offlineBefore {
+		details, err := proxyChecker.GetProxyStatusDetailsByStableID(stableID)
+		if err == nil && details.Online {
+			recovered = append(recovered, stableID)
+		}
+	}
+	return recovered
 }

@@ -854,6 +854,67 @@ func TestRecoveryStateSurvivesPersistenceAndClearsOnlyAfterConfirmation(t *testi
 	}
 }
 
+func TestPrepareNodeRecoveryDoesNotAdvanceFailureOrReminderState(t *testing.T) {
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "Node one"}
+	recoveredAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	downSince := recoveredAt.Add(-10 * time.Minute)
+	wantState := nodeAlertState{
+		FailCount:  4,
+		WasDown:    true,
+		DownSince:  downSince,
+		LastAlert:  recoveredAt.Add(-5 * time.Minute),
+		AlertCount: 2,
+		NextAlert:  recoveredAt.Add(time.Hour),
+		HostCheck:  checker.HostCheckDetails{Checked: true, Online: true},
+		PingCheck:  checker.PingCheckDetails{Checked: true, Online: true},
+	}
+	service := &Service{alerts: map[string]nodeAlertState{proxy.StableID: wantState}}
+	cfg := DefaultConfig()
+	details := checker.ProxyStatusDetails{Online: true, Latency: 42 * time.Millisecond, CheckedAt: recoveredAt}
+
+	alert, shouldSend, changed := service.prepareNodeRecovery(proxy, details, cfg, false)
+	if !shouldSend || !changed {
+		t.Fatalf("prepareNodeRecovery() shouldSend = %v, changed = %v", shouldSend, changed)
+	}
+	if alert.StableID != proxy.StableID || !alert.RecoveredAt.Equal(recoveredAt) {
+		t.Fatalf("recovery alert = %+v", alert)
+	}
+	got := service.alerts[proxy.StableID]
+	if got.FailCount != wantState.FailCount || got.AlertCount != wantState.AlertCount || got.NextAlert != wantState.NextAlert {
+		t.Fatalf("recovery changed failure/reminder state: got %+v, want base %+v", got, wantState)
+	}
+	if !got.RecoveryPending || !got.RecoveredAt.Equal(recoveredAt) || got.RecoveryLatency != details.Latency {
+		t.Fatalf("recovery pending state = %+v", got)
+	}
+}
+
+func TestAvailabilityCheckUsesInjectedWorkflow(t *testing.T) {
+	service := &Service{}
+	var got []string
+	service.SetAvailabilityCheckFunc(func(stableIDs []string) error {
+		got = append([]string(nil), stableIDs...)
+		return nil
+	})
+	if err := service.runAvailabilityCheck([]string{"node-1"}); err != nil {
+		t.Fatalf("runAvailabilityCheck() error = %v", err)
+	}
+	if len(got) != 1 || got[0] != "node-1" {
+		t.Fatalf("availability callback IDs = %v", got)
+	}
+}
+
+func TestNodeDetailMarkupIncludesManualAvailabilityCheckForAdmin(t *testing.T) {
+	service := &Service{}
+	adminMarkup := service.nodeDetailMarkup("node-1", true)
+	if !strings.Contains(adminMarkup, "Проверить доступность") || !strings.Contains(adminMarkup, "node:check:node-1") {
+		t.Fatalf("admin node markup does not include availability check: %s", adminMarkup)
+	}
+	userMarkup := service.nodeDetailMarkup("node-1", false)
+	if strings.Contains(userMarkup, "node:check:node-1") {
+		t.Fatalf("non-admin node markup exposes availability check: %s", userMarkup)
+	}
+}
+
 func TestRichMessagePayloadAndFallbackPolicy(t *testing.T) {
 	encoded, err := json.Marshal(inputRichMessage{
 		HTML:                "<h2>Сводка</h2><table><tr><td>1</td></tr></table>",

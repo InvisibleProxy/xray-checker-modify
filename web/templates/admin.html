@@ -863,6 +863,7 @@
             <span id="nodes-summary" class="table-meta">0 nodes</span>
             <div id="selection-action-bar" class="action-bar" hidden>
               <span id="selection-count" class="muted">0 selected</span>
+              <button id="selection-check" class="secondary" type="button">Check</button>
               <button id="selection-run" class="primary" type="button">Run</button>
               <button id="selection-mute" class="secondary" type="button">Mute</button>
               <button id="selection-unmute" class="secondary" type="button">Unmute</button>
@@ -1086,6 +1087,7 @@
         nodesOverviewSort: "avgMbps",
         nodesOverviewSortDir: "desc",
         speedPollRunning: false,
+        availabilityCheckRunning: false,
         nodeURLDraftID: "",
         nodeURLDirty: false,
       };
@@ -1992,6 +1994,8 @@
         $("selection-action-bar").hidden = count === 0;
         $("nodes-summary").hidden = count > 0;
         $("nodes-summary").textContent = `${filteredProxies().length} shown · ${state.proxies.length} total`;
+        $("selection-check").textContent = state.availabilityCheckRunning ? "Checking…" : "Check";
+        $("selection-check").disabled = count === 0 || state.availabilityCheckRunning;
         $("selection-run").disabled = count === 0 || !!(run && run.running);
         $("selection-mute").disabled = count === 0 || ids.every((id) => muted.has(id));
         $("selection-unmute").disabled = count === 0 || !ids.some((id) => anyMuted.has(id));
@@ -2345,6 +2349,29 @@
         }
       }
 
+      async function checkSelectedAvailability() {
+        $("message").textContent = "";
+        const stableIds = selectedIDs();
+        if (stableIds.length === 0 || state.availabilityCheckRunning) return;
+        state.availabilityCheckRunning = true;
+        renderSelectionCount();
+        try {
+          await request("/proxies/check", {
+            method: "POST",
+            body: JSON.stringify({ stableIds }),
+          });
+          await load();
+          $("message").textContent = stableIds.length === 1
+            ? "Node availability checked"
+            : `${stableIds.length} nodes checked`;
+        } catch (err) {
+          $("message").textContent = err.message;
+        } finally {
+          state.availabilityCheckRunning = false;
+          renderSelectionCount();
+        }
+      }
+
       async function saveNodeURL() {
         $("message").textContent = "";
         const ids = selectedIDs();
@@ -2545,6 +2572,7 @@
         loadHistory();
       });
       $("run").addEventListener("click", runSelected);
+      $("selection-check").addEventListener("click", checkSelectedAvailability);
       $("selection-run").addEventListener("click", runSelected);
       $("selection-mute").addEventListener("click", () => updateTelegramMute("all", true));
       $("selection-unmute").addEventListener("click", () => updateTelegramMute("all", false));

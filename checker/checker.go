@@ -2,6 +2,7 @@ package checker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -41,8 +42,16 @@ type ProxyChecker struct {
 	downloadMinSize int64
 	checkMethod     string
 	mu              sync.RWMutex
+	checkMu         sync.Mutex
+	currentIPMu     sync.Mutex
+	runGate         sync.Locker
 	generation      uint64
+
+	checkProxyFunc      func(*models.ProxyConfig, uint64, bool, bool)
+	hostDiagnosticsFunc func(*models.ProxyConfig) (HostCheckDetails, PingCheckDetails)
 }
+
+const maxAvailabilityCheckConcurrency = 4
 
 type ProxyStatusDetails struct {
 	Online        bool
@@ -72,6 +81,32 @@ type PingCheckDetails struct {
 	Error     string
 }
 
+type AvailabilityCheckResult struct {
+	StableID     string
+	Online       bool
+	ProxyChecked bool
+	Recovered    bool
+}
+
+type AvailabilityCheckReport struct {
+	Results []AvailabilityCheckResult
+}
+
+func (r AvailabilityCheckReport) RecoveredStableIDs() []string {
+	stableIDs := make([]string, 0)
+	for _, result := range r.Results {
+		if result.Recovered {
+			stableIDs = append(stableIDs, result.StableID)
+		}
+	}
+	return stableIDs
+}
+
+type availabilityCheckCandidate struct {
+	Proxy      *models.ProxyConfig
+	WasOffline bool
+}
+
 func NewProxyChecker(proxies []*models.ProxyConfig, startPort int, ipCheckURL string, ipCheckTimeout int, genMethodURL string, downloadURL string, downloadTimeout int, downloadMinSize int64, checkMethod string) *ProxyChecker {
 	return &ProxyChecker{
 		proxies:   proxies,
@@ -89,7 +124,14 @@ func NewProxyChecker(proxies []*models.ProxyConfig, startPort int, ipCheckURL st
 	}
 }
 
+func (pc *ProxyChecker) SetRunGate(gate sync.Locker) {
+	pc.runGate = gate
+}
+
 func (pc *ProxyChecker) GetCurrentIP() (string, error) {
+	pc.currentIPMu.Lock()
+	defer pc.currentIPMu.Unlock()
+
 	if pc.ipInitialized && pc.currentIP != "" {
 		return pc.currentIP, nil
 	}
@@ -111,10 +153,36 @@ func (pc *ProxyChecker) GetCurrentIP() (string, error) {
 }
 
 func (pc *ProxyChecker) CheckProxy(proxy *models.ProxyConfig) {
-	pc.checkProxyInternal(proxy, 0, false)
+	pc.withCheckRun(func() {
+		if pc.checkMethod == "ip" {
+			if _, err := pc.GetCurrentIP(); err != nil {
+				logger.Warn("Error getting current IP: %v", err)
+				return
+			}
+		}
+		pc.runProxyCheck(proxy, 0, false, false)
+	})
 }
 
-func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGeneration uint64, checkGeneration bool) {
+func (pc *ProxyChecker) withCheckRun(run func()) {
+	pc.checkMu.Lock()
+	defer pc.checkMu.Unlock()
+	if pc.runGate != nil {
+		pc.runGate.Lock()
+		defer pc.runGate.Unlock()
+	}
+	run()
+}
+
+func (pc *ProxyChecker) runProxyCheck(proxy *models.ProxyConfig, expectedGeneration uint64, checkGeneration bool, quiet bool) {
+	if pc.checkProxyFunc != nil {
+		pc.checkProxyFunc(proxy, expectedGeneration, checkGeneration, quiet)
+		return
+	}
+	pc.checkProxyInternal(proxy, expectedGeneration, checkGeneration, quiet)
+}
+
+func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGeneration uint64, checkGeneration bool, quiet bool) {
 	if proxy.StableID == "" {
 		proxy.StableID = proxy.GenerateStableID()
 	}
@@ -202,7 +270,11 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 	}
 
 	if checkErr != nil {
-		logger.Error("%s | %v", proxy.Name, checkErr)
+		if quiet {
+			logger.Debug("%s | Recovery probe failed | %v", proxy.Name, checkErr)
+		} else {
+			logger.Error("%s | %v", proxy.Name, checkErr)
+		}
 		setFailedStatus()
 		setFailedLatency()
 
@@ -210,7 +282,11 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 	}
 
 	if !checkSuccess {
-		logger.Error("%s | Failed | %s | Latency: %s", proxy.Name, logMessage, latency)
+		if quiet {
+			logger.Debug("%s | Recovery probe failed | %s | Latency: %s", proxy.Name, logMessage, latency)
+		} else {
+			logger.Error("%s | Failed | %s | Latency: %s", proxy.Name, logMessage, latency)
+		}
 		setFailedStatus()
 		setFailedLatency()
 	} else {
@@ -431,9 +507,29 @@ func (pc *ProxyChecker) hostDiagnosticsIfBecameUnavailable(proxy *models.ProxyCo
 		}
 	}
 
-	hostCheck := pc.tcpCheckHost(proxy.Server, proxy.Port)
-	pingCheck := pc.pingHost(proxy.Server)
+	hostCheck, pingCheck := pc.checkHostDiagnostics(proxy)
 	return &hostCheck, &pingCheck
+}
+
+func (pc *ProxyChecker) checkHostDiagnostics(proxy *models.ProxyConfig) (HostCheckDetails, PingCheckDetails) {
+	if pc.hostDiagnosticsFunc != nil {
+		return pc.hostDiagnosticsFunc(proxy)
+	}
+
+	var hostCheck HostCheckDetails
+	var pingCheck PingCheckDetails
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		hostCheck = pc.tcpCheckHost(proxy.Server, proxy.Port)
+	}()
+	go func() {
+		defer wg.Done()
+		pingCheck = pc.pingHost(proxy.Server)
+	}()
+	wg.Wait()
+	return hostCheck, pingCheck
 }
 
 func (pc *ProxyChecker) RefreshHostDiagnosticsByStableID(stableID string) (ProxyStatusDetails, error) {
@@ -445,8 +541,7 @@ func (pc *ProxyChecker) RefreshHostDiagnosticsByStableID(stableID string) (Proxy
 		proxy.StableID = proxy.GenerateStableID()
 	}
 
-	hostCheck := pc.tcpCheckHost(proxy.Server, proxy.Port)
-	pingCheck := pc.pingHost(proxy.Server)
+	hostCheck, pingCheck := pc.checkHostDiagnostics(proxy)
 	logHostDiagnostics(proxy.Name, &hostCheck, &pingCheck)
 
 	pc.statusMu.Lock()
@@ -748,9 +843,15 @@ func (pc *ProxyChecker) RestoreOfflineStatus(stableID string, downSince time.Tim
 }
 
 func (pc *ProxyChecker) CheckAllProxies() {
-	if _, err := pc.GetCurrentIP(); err != nil {
-		logger.Warn("Error getting current IP: %v", err)
-		return
+	pc.withCheckRun(pc.checkAllProxies)
+}
+
+func (pc *ProxyChecker) checkAllProxies() {
+	if pc.checkMethod == "ip" {
+		if _, err := pc.GetCurrentIP(); err != nil {
+			logger.Warn("Error getting current IP: %v", err)
+			return
+		}
 	}
 
 	pc.mu.RLock()
@@ -764,9 +865,199 @@ func (pc *ProxyChecker) CheckAllProxies() {
 		wg.Add(1)
 		go func(p *models.ProxyConfig, gen uint64) {
 			defer wg.Done()
-			pc.checkProxyInternal(p, gen, true)
+			pc.runProxyCheck(p, gen, true, false)
 		}(proxy, currentGeneration)
 	}
+	wg.Wait()
+}
+
+func (pc *ProxyChecker) CheckUnavailableProxies() (AvailabilityCheckReport, error) {
+	var report AvailabilityCheckReport
+	var checkErr error
+	pc.withCheckRun(func() {
+		candidates, generation, err := pc.availabilityCheckCandidates(nil, true)
+		if err != nil {
+			checkErr = err
+			return
+		}
+		report, checkErr = pc.checkAvailabilityCandidates(candidates, generation, true)
+	})
+	return report, checkErr
+}
+
+func (pc *ProxyChecker) CheckProxiesByStableIDs(stableIDs []string) (AvailabilityCheckReport, error) {
+	var report AvailabilityCheckReport
+	var checkErr error
+	pc.withCheckRun(func() {
+		candidates, generation, err := pc.availabilityCheckCandidates(stableIDs, false)
+		if err != nil {
+			checkErr = err
+			return
+		}
+		report, checkErr = pc.checkAvailabilityCandidates(candidates, generation, false)
+	})
+	return report, checkErr
+}
+
+func (pc *ProxyChecker) availabilityCheckCandidates(stableIDs []string, unavailableOnly bool) ([]availabilityCheckCandidate, uint64, error) {
+	requested := make([]string, 0, len(stableIDs))
+	requestedSet := make(map[string]bool, len(stableIDs))
+	for _, rawStableID := range stableIDs {
+		stableID := strings.TrimSpace(rawStableID)
+		if stableID == "" || requestedSet[stableID] {
+			continue
+		}
+		requestedSet[stableID] = true
+		requested = append(requested, stableID)
+	}
+	if !unavailableOnly && len(requested) == 0 {
+		return nil, 0, fmt.Errorf("select at least one node")
+	}
+
+	pc.mu.RLock()
+	generation := atomic.LoadUint64(&pc.generation)
+	byStableID := make(map[string]availabilityCheckCandidate, len(pc.proxies))
+	ordered := make([]availabilityCheckCandidate, 0, len(pc.proxies))
+	for _, proxy := range pc.proxies {
+		if proxy == nil {
+			continue
+		}
+		stableID := proxy.StableID
+		if stableID == "" {
+			stableID = proxy.GenerateStableID()
+		}
+		if len(requestedSet) > 0 && !requestedSet[stableID] {
+			continue
+		}
+		details, hasDetails := pc.statusDetailsByStableID(stableID)
+		wasOffline := hasDetails && !details.Online
+		if unavailableOnly && !wasOffline {
+			continue
+		}
+		proxyCopy := *proxy
+		proxyCopy.StableID = stableID
+		candidate := availabilityCheckCandidate{Proxy: &proxyCopy, WasOffline: wasOffline}
+		byStableID[stableID] = candidate
+		ordered = append(ordered, candidate)
+	}
+	pc.mu.RUnlock()
+
+	if unavailableOnly {
+		return ordered, generation, nil
+	}
+
+	selected := make([]availabilityCheckCandidate, 0, len(requested))
+	var missing []string
+	for _, stableID := range requested {
+		candidate, ok := byStableID[stableID]
+		if !ok {
+			missing = append(missing, stableID)
+			continue
+		}
+		selected = append(selected, candidate)
+	}
+	if len(missing) > 0 {
+		return nil, generation, fmt.Errorf("proxy not found: %s", strings.Join(missing, ", "))
+	}
+	return selected, generation, nil
+}
+
+func (pc *ProxyChecker) checkAvailabilityCandidates(candidates []availabilityCheckCandidate, generation uint64, quiet bool) (AvailabilityCheckReport, error) {
+	report := AvailabilityCheckReport{Results: make([]AvailabilityCheckResult, len(candidates))}
+	if len(candidates) == 0 {
+		return report, nil
+	}
+
+	needsProxyCheck := make([]bool, len(candidates))
+	var diagnosticErrors []error
+	var diagnosticErrorsMu sync.Mutex
+	pc.runAvailabilityWorkers(len(candidates), func(index int) {
+		candidate := candidates[index]
+		report.Results[index].StableID = candidate.Proxy.StableID
+		if !candidate.WasOffline {
+			needsProxyCheck[index] = true
+			return
+		}
+
+		hostCheck, pingCheck := pc.checkHostDiagnostics(candidate.Proxy)
+		if atomic.LoadUint64(&pc.generation) != generation {
+			diagnosticErrorsMu.Lock()
+			diagnosticErrors = append(diagnosticErrors, fmt.Errorf("%s: proxy configuration changed during diagnostics", candidate.Proxy.StableID))
+			diagnosticErrorsMu.Unlock()
+			return
+		}
+		pc.storeStatusDetails(candidate.Proxy.StableID, false, 0, &hostCheck, &pingCheck)
+		needsProxyCheck[index] = hostCheck.Online
+	})
+
+	if len(diagnosticErrors) > 0 {
+		pc.populateAvailabilityResults(&report, candidates)
+		return report, errors.Join(diagnosticErrors...)
+	}
+
+	proxyChecksRequired := false
+	for _, required := range needsProxyCheck {
+		if required {
+			proxyChecksRequired = true
+			break
+		}
+	}
+	if proxyChecksRequired && pc.checkMethod == "ip" {
+		if _, err := pc.GetCurrentIP(); err != nil {
+			pc.populateAvailabilityResults(&report, candidates)
+			return report, fmt.Errorf("get current IP before proxy checks: %w", err)
+		}
+	}
+
+	pc.runAvailabilityWorkers(len(candidates), func(index int) {
+		if !needsProxyCheck[index] {
+			return
+		}
+		candidate := candidates[index]
+		pc.runProxyCheck(candidate.Proxy, generation, true, quiet)
+		report.Results[index].ProxyChecked = true
+	})
+	pc.populateAvailabilityResults(&report, candidates)
+	return report, nil
+}
+
+func (pc *ProxyChecker) populateAvailabilityResults(report *AvailabilityCheckReport, candidates []availabilityCheckCandidate) {
+	for index, candidate := range candidates {
+		result := &report.Results[index]
+		result.StableID = candidate.Proxy.StableID
+		details, ok := pc.statusDetailsByStableID(candidate.Proxy.StableID)
+		if !ok {
+			continue
+		}
+		result.Online = details.Online
+		result.Recovered = candidate.WasOffline && details.Online
+	}
+}
+
+func (pc *ProxyChecker) runAvailabilityWorkers(count int, run func(int)) {
+	workers := maxAvailabilityCheckConcurrency
+	if workers > count {
+		workers = count
+	}
+	if workers <= 0 {
+		return
+	}
+
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				run(index)
+			}
+		}()
+	}
+	for index := 0; index < count; index++ {
+		jobs <- index
+	}
+	close(jobs)
 	wg.Wait()
 }
 

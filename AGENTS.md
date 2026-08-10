@@ -32,6 +32,9 @@
 - Telegram-запуск speedtest использует сохранённый `ScheduleConfig`, а не нулевой `TestConfig`.
 - Прямой результат Telegram-speedtest должен возвращаться в исходные chat ID и topic ID независимо от настроек фоновых speed-report; report target не персистится и не попадает в admin API.
 - Первый фоновый low-speed результат (schedule/admin) не уведомляет: повторяются только просевшие `StableID` через 30 минут, а алерт отправляется лишь при повторной проблеме. Первичные offline/error не задерживаются.
+- Полный availability-check всех нод не использует TCP-гейт. Быстрый recovery-loop проверяет только уже недоступные `StableID`: обновляет TCP/ping и запускает proxy-check лишь после `TCP OK`; ping никогда не является gate.
+- Быстрые recovery-checks не увеличивают Telegram `FailCount` и не сдвигают reminder schedule. Подтверждённый online передаётся immediate-recovery пути без ожидания `AlertCheckMinutes`.
+- Ручная availability-проверка из admin UI/API и карточки ноды Telegram использует общий workflow; для online/unknown выполняется полный proxy-check, для offline — каскадная проверка.
 - Speedtest удерживает Xray lifecycle read-lock от выбора нод до завершения теста; restart при refresh выполняется только под write-lock.
 - Speedtest history хранится по возрасту; default 60 дней. Не возвращайте count-based limit.
 - Downtime в node archive накопительный и не должен очищаться вместе со speedtest history.
@@ -55,7 +58,7 @@
 - Не коммитьте secrets, `.env`, runtime `data/`, `geo/`, `xray_config.json`, логи и backup ZIP.
 - Новая persisted-схема должна иметь безопасную нормализацию старых файлов и тест миграции.
 - Новые map по нодам должны использовать `StableID`; отдельно учитывайте возможные ID-коллизии.
-- UI работает и на узких экранах. После заметной UI-правки требуется браузерная проверка, а не только парсинг шаблона.
+- После заметной UI-правки требуется desktop browser check, а не только парсинг шаблона. Mobile viewport и отдельная mobile browser QA для админки не требуются и не выполняются.
 
 ## Обязательные проверки
 
@@ -90,7 +93,7 @@ docker build --build-arg ENABLE_UPX=false -t xray-checker:check .
 - backup/restore: manifest, hash, дубликаты JSON-ключей, typed schema, interrupted apply/commit, path traversal, missing files, rollback, secrets и rotation;
 - Telegram: HTML/Rich HTML escaping, структура summary/details, fallback policy, сохранённый TestConfig, mute scopes, alert lifecycle и отсутствие токенов в выводе;
 - API: обновить `web/openapi.yaml`, проверить все локальные `$ref` и handler tests;
-- UI: desktop и mobile viewport, filters, selection, admin auth и отсутствие ошибок в console;
+- UI: только desktop viewport, filters, selection, admin auth и отсутствие ошибок в console; mobile browser check не запускать;
 - Dockerfile/Compose: builder build и финальный production image.
 
 ## Документация при изменениях

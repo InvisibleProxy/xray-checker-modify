@@ -42,6 +42,7 @@ func TestOpenAPISpecDocumentsEveryForkAdminRoute(t *testing.T) {
 	paths := objectValue(t, document, "paths")
 	want := []string{
 		"/api/v1/admin/proxies",
+		"/api/v1/admin/proxies/check",
 		"/api/v1/admin/subscription/refresh",
 		"/api/v1/admin/backup",
 		"/api/v1/admin/backup/restore",

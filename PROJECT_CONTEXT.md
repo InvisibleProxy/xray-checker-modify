@@ -39,14 +39,18 @@ Frontend встроен в Go-бинарник через `embed`. `docs/` — �
 8. Загружаются speedtest, node archive и Telegram state. Ошибка любого владельца откатывает применённый restore и останавливает startup.
 9. Только после успешной загрузки всех владельцев restore подтверждается и rollback-копия удаляется.
 10. Восстанавливается накопленный downtime и синхронизируется speedtest history.
-11. Запускаются автоматические бэкапы, Telegram, speedtest scheduler и обычные proxy-checks.
+11. Запускаются автоматические бэкапы, Telegram, speedtest scheduler, полные proxy-checks и быстрый recovery-loop недоступных нод.
 12. Поднимается HTTP-сервер.
 
 ## Основные workflow
 
 ### Проверка доступности
 
-Для каждой ноды создаётся SOCKS-inbound на `XRAY_START_PORT + Index`. Checker выполняет выбранный метод `ip`, `status` или `download` через этот inbound. Статус и диагностика хранятся по `StableID`; после итерации обновляются архив downtime, Telegram и Pushgateway.
+Для каждой ноды создаётся SOCKS-inbound на `XRAY_START_PORT + Index`. Полный обход с периодом `PROXY_CHECK_INTERVAL` выполняет выбранный метод `ip`, `status` или `download` через каждый inbound без предварительного TCP-гейта. Статус и диагностика хранятся по `StableID`; после итерации обновляются архив downtime, Telegram и Pushgateway.
+
+Уже недоступные ноды попадают в отдельный recovery-loop с периодом `PROXY_RECOVERY_INTERVAL` (default 15 секунд, `0` отключает). В одной ограниченной worker-pool итерации TCP и ping выполняются параллельно. Если TCP недоступен, proxy-check пропускается; после `TCP OK` полноценный настроенный proxy-check запускается немедленно. Ping никогда не является gate. Полный обход остаётся независимой контрольной проверкой и предотвращает постоянную блокировку recovery из-за ошибочной TCP-диагностики.
+
+Полные, recovery и ручные availability-checks сериализованы и удерживают Xray lifecycle read-lock; refresh получает write-lock. Быстрые проверки не вызывают обычный Telegram alert-pass, поэтому не увеличивают `FailCount` и не сдвигают reminders. Успешный переход offline → online закрывает downtime и передаётся в отдельный immediate-recovery путь Telegram. Ручная проверка выбранных `StableID` доступна через admin API/UI и в карточке ноды Telegram; для уже недоступной ноды она использует тот же TCP-гейт.
 
 ### Обновление подписки
 
@@ -66,7 +70,7 @@ Frontend встроен в Go-бинарник через `embed`. `docs/` — �
 
 Telegram-запуск добавляет к неперсистентному `RunRequest` исходные chat ID и topic ID. `RunReport` переносит этот адрес до reporter, поэтому прямой результат возвращается инициатору даже при другом настроенном alert-чате и независимо от режима автоматических speed-report.
 
-Каждый запуск получает read-lock Xray lifecycle до выбора proxy pointers и SOCKS-портов и освобождает его только после сбора всех результатов. Поэтому restart Xray не может пройти посередине теста, а новый тест не стартует на старой конфигурации после начала refresh.
+Каждый speedtest получает read-lock Xray lifecycle до выбора proxy pointers и SOCKS-портов и освобождает его только после сбора всех результатов. Availability-checks используют тот же lifecycle lock и дополнительно сериализуются между собой. Поэтому restart Xray не может пройти посередине сетевой проверки, а новая проверка не стартует на старой конфигурации после начала refresh.
 
 Результаты хранятся по `StableID`. Retention основан на возрасте, а не на количестве:
 
@@ -94,7 +98,7 @@ Restore не заменяет работающие файлы сразу. Manife
 
 Прямой результат Telegram-команды не является фоновым report: он отправляется сразу в исходные chat/topic и не фильтруется настройкой автоматических отчётов. Экран «Замеры» имеет Rich HTML-таблицу и компактный HTML fallback, как остальные основные экраны.
 
-Recovery alert хранит `RecoveryPending`, время и latency до успешной отправки; сбой Telegram не стирает alert state. Recovery отправляется только после ранее подтверждённой отправки down-alert. Его обнаружение выполняется после обычного proxy-check и дополнительно ограничено `AlertCheckMinutes`; при двух значениях по умолчанию 5 минут сообщение обычно приходит не позднее следующего пятиминутного цикла плюс время проверки и Telegram-доставки.
+Recovery alert хранит `RecoveryPending`, время и latency до успешной отправки; сбой Telegram не стирает alert state. Recovery отправляется только после ранее подтверждённой отправки down-alert. Быстрый checker передаёт подтверждённый переход online напрямую, без ожидания `AlertCheckMinutes`; обычный alert-pass по-прежнему отвечает за `Failed checks`, down-alerts и reminders. Одновременные alert/recovery проходы сериализованы, чтобы одну pending recovery не отправили дважды.
 
 ## Идентичность нод
 

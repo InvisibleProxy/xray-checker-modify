@@ -41,3 +41,188 @@ func TestGetProxyStatusByStableIDFallsBackToStatusDetails(t *testing.T) {
 		t.Fatalf("expected latency %s, got %s", 123*time.Millisecond, latency)
 	}
 }
+
+func TestFastRecoverySkipsProxyCheckWhileTCPIsUnavailable(t *testing.T) {
+	proxy := testProxy("node-1", "Node one")
+	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{proxy})
+	downSince := time.Now().Add(-time.Minute)
+	if !proxyChecker.RestoreOfflineStatus(proxy.StableID, downSince, HostCheckDetails{}, PingCheckDetails{}) {
+		t.Fatal("failed to seed offline status")
+	}
+
+	diagnosticsAt := time.Now()
+	proxyChecks := 0
+	proxyChecker.hostDiagnosticsFunc = func(*models.ProxyConfig) (HostCheckDetails, PingCheckDetails) {
+		return HostCheckDetails{Checked: true, Online: false, CheckedAt: diagnosticsAt, Target: "node.example.com:443", Error: "timeout"},
+			PingCheckDetails{Checked: true, Online: false, CheckedAt: diagnosticsAt, Target: "node.example.com", Error: "timeout"}
+	}
+	proxyChecker.checkProxyFunc = func(*models.ProxyConfig, uint64, bool, bool) {
+		proxyChecks++
+	}
+
+	report, err := proxyChecker.CheckUnavailableProxies()
+	if err != nil {
+		t.Fatalf("CheckUnavailableProxies() error = %v", err)
+	}
+	if proxyChecks != 0 {
+		t.Fatalf("proxy checks = %d, want 0 while TCP is unavailable", proxyChecks)
+	}
+	if len(report.Results) != 1 || report.Results[0].ProxyChecked || report.Results[0].Recovered {
+		t.Fatalf("unexpected recovery report: %+v", report)
+	}
+	details, err := proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !details.HostCheck.Checked || details.HostCheck.Online || !details.HostCheck.CheckedAt.Equal(diagnosticsAt) {
+		t.Fatalf("TCP diagnostics were not refreshed: %+v", details.HostCheck)
+	}
+	if !details.PingCheck.Checked || details.PingCheck.Online || !details.PingCheck.CheckedAt.Equal(diagnosticsAt) {
+		t.Fatalf("ping diagnostics were not refreshed: %+v", details.PingCheck)
+	}
+}
+
+func TestFastRecoveryChecksProxyImmediatelyWhenTCPReturns(t *testing.T) {
+	proxy := testProxy("node-1", "Node one")
+	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{proxy})
+	if !proxyChecker.RestoreOfflineStatus(proxy.StableID, time.Now().Add(-time.Minute), HostCheckDetails{}, PingCheckDetails{}) {
+		t.Fatal("failed to seed offline status")
+	}
+
+	proxyChecks := 0
+	quietProbe := false
+	proxyChecker.hostDiagnosticsFunc = func(*models.ProxyConfig) (HostCheckDetails, PingCheckDetails) {
+		return HostCheckDetails{Checked: true, Online: true, CheckedAt: time.Now()}, PingCheckDetails{Checked: true, Online: false, CheckedAt: time.Now()}
+	}
+	proxyChecker.checkProxyFunc = func(candidate *models.ProxyConfig, _ uint64, _ bool, quiet bool) {
+		proxyChecks++
+		quietProbe = quiet
+		proxyChecker.storeStatusDetails(candidate.StableID, true, 25*time.Millisecond, nil, nil)
+	}
+
+	report, err := proxyChecker.CheckUnavailableProxies()
+	if err != nil {
+		t.Fatalf("CheckUnavailableProxies() error = %v", err)
+	}
+	if proxyChecks != 1 || !quietProbe {
+		t.Fatalf("proxy checks = %d, quiet = %v; want one quiet recovery probe", proxyChecks, quietProbe)
+	}
+	if got := report.RecoveredStableIDs(); len(got) != 1 || got[0] != proxy.StableID {
+		t.Fatalf("recovered IDs = %v, want [%s]", got, proxy.StableID)
+	}
+	if !report.Results[0].ProxyChecked || !report.Results[0].Online || !report.Results[0].Recovered {
+		t.Fatalf("unexpected recovery result: %+v", report.Results[0])
+	}
+}
+
+func TestManualAvailabilityCheckUsesFullProbeForOnlineNode(t *testing.T) {
+	proxy := testProxy("node-1", "Node one")
+	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{proxy})
+	proxyChecker.storeStatusDetails(proxy.StableID, true, 10*time.Millisecond, nil, nil)
+
+	diagnosticsCalls := 0
+	proxyChecks := 0
+	quietProbe := true
+	proxyChecker.hostDiagnosticsFunc = func(*models.ProxyConfig) (HostCheckDetails, PingCheckDetails) {
+		diagnosticsCalls++
+		return HostCheckDetails{}, PingCheckDetails{}
+	}
+	proxyChecker.checkProxyFunc = func(candidate *models.ProxyConfig, _ uint64, _ bool, quiet bool) {
+		proxyChecks++
+		quietProbe = quiet
+		proxyChecker.storeStatusDetails(candidate.StableID, true, 12*time.Millisecond, nil, nil)
+	}
+
+	report, err := proxyChecker.CheckProxiesByStableIDs([]string{proxy.StableID})
+	if err != nil {
+		t.Fatalf("CheckProxiesByStableIDs() error = %v", err)
+	}
+	if diagnosticsCalls != 0 {
+		t.Fatalf("diagnostic calls = %d, want 0 before a full check of an online node", diagnosticsCalls)
+	}
+	if proxyChecks != 1 || quietProbe {
+		t.Fatalf("proxy checks = %d, quiet = %v; want one visible manual probe", proxyChecks, quietProbe)
+	}
+	if len(report.Results) != 1 || !report.Results[0].ProxyChecked || !report.Results[0].Online || report.Results[0].Recovered {
+		t.Fatalf("unexpected manual check result: %+v", report)
+	}
+}
+
+func TestFastRecoveryOnlyChecksUnavailableNodes(t *testing.T) {
+	offline := testProxy("node-offline", "Offline")
+	online := testProxy("node-online", "Online")
+	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{offline, online})
+	if !proxyChecker.RestoreOfflineStatus(offline.StableID, time.Now().Add(-time.Minute), HostCheckDetails{}, PingCheckDetails{}) {
+		t.Fatal("failed to seed offline status")
+	}
+	proxyChecker.storeStatusDetails(online.StableID, true, 10*time.Millisecond, nil, nil)
+
+	var diagnosticIDs []string
+	proxyChecker.hostDiagnosticsFunc = func(proxy *models.ProxyConfig) (HostCheckDetails, PingCheckDetails) {
+		diagnosticIDs = append(diagnosticIDs, proxy.StableID)
+		return HostCheckDetails{Checked: true, Online: false, CheckedAt: time.Now()}, PingCheckDetails{Checked: true, CheckedAt: time.Now()}
+	}
+
+	report, err := proxyChecker.CheckUnavailableProxies()
+	if err != nil {
+		t.Fatalf("CheckUnavailableProxies() error = %v", err)
+	}
+	if len(diagnosticIDs) != 1 || diagnosticIDs[0] != offline.StableID {
+		t.Fatalf("diagnostic IDs = %v, want only %s", diagnosticIDs, offline.StableID)
+	}
+	if len(report.Results) != 1 || report.Results[0].StableID != offline.StableID {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+}
+
+func TestFullCheckNeverUsesTCPAsAGate(t *testing.T) {
+	proxy := testProxy("node-1", "Node one")
+	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{proxy})
+	if !proxyChecker.RestoreOfflineStatus(proxy.StableID, time.Now().Add(-time.Minute), HostCheckDetails{}, PingCheckDetails{}) {
+		t.Fatal("failed to seed offline status")
+	}
+
+	diagnosticsCalls := 0
+	proxyChecks := 0
+	quietProbe := false
+	proxyChecker.hostDiagnosticsFunc = func(*models.ProxyConfig) (HostCheckDetails, PingCheckDetails) {
+		diagnosticsCalls++
+		return HostCheckDetails{Checked: true, Online: false}, PingCheckDetails{Checked: true, Online: false}
+	}
+	proxyChecker.checkProxyFunc = func(candidate *models.ProxyConfig, _ uint64, _ bool, quiet bool) {
+		proxyChecks++
+		quietProbe = quiet
+		proxyChecker.storeStatusDetails(candidate.StableID, true, 20*time.Millisecond, nil, nil)
+	}
+
+	proxyChecker.CheckAllProxies()
+
+	if diagnosticsCalls != 0 {
+		t.Fatalf("full check made %d preflight diagnostic calls, want 0", diagnosticsCalls)
+	}
+	if proxyChecks != 1 {
+		t.Fatalf("full proxy checks = %d, want 1", proxyChecks)
+	}
+	if quietProbe {
+		t.Fatal("full proxy check unexpectedly ran as a quiet recovery probe")
+	}
+	details, err := proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+	if err != nil || !details.Online {
+		t.Fatalf("full check did not update the node online: details=%+v err=%v", details, err)
+	}
+}
+
+func testProxy(stableID string, name string) *models.ProxyConfig {
+	return &models.ProxyConfig{
+		StableID: stableID,
+		Protocol: "vless",
+		Name:     name,
+		Server:   "node.example.com",
+		Port:     443,
+		UUID:     stableID + "-uuid",
+	}
+}
+
+func newTestProxyChecker(proxies []*models.ProxyConfig) *ProxyChecker {
+	return NewProxyChecker(proxies, 10000, "", 1, "https://example.com/status", "", 1, 0, "status")
+}

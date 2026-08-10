@@ -171,6 +171,7 @@ type Service struct {
 	alertStatePath string
 
 	mu           sync.RWMutex
+	nodeNotifyMu sync.Mutex
 	config       Config
 	alerts       map[string]nodeAlertState
 	menuMessages map[string]int
@@ -191,6 +192,8 @@ type Service struct {
 	speedRetryBusy      time.Duration
 	speedRunFunc        func(speedtest.RunRequest, string) error
 	speedReportSendFunc func(string, int, formattedMessage)
+	availabilityCheck   func([]string) error
+	nodeAlertSendFunc   func(Config, formattedMessage) error
 }
 
 type nodeAlertState struct {
@@ -355,6 +358,10 @@ func NewService(statePath string, proxyChecker *checker.ProxyChecker, speedManag
 		speedRetryDelay:   lowSpeedRetryDelay,
 		speedRetryBusy:    lowSpeedRetryBusyDelay,
 	}
+}
+
+func (s *Service) SetAvailabilityCheckFunc(check func([]string) error) {
+	s.availabilityCheck = check
 }
 
 func (s *Service) Load() error {
@@ -770,15 +777,18 @@ func speedReportDecision(report speedtest.RunReport, cfg Config) (failed int, sl
 	return failed, slow, issuesOnly, true
 }
 
-func (s *Service) NotifyNodeStatuses() {
+func (s *Service) NotifyNodeStatuses() bool {
+	s.nodeNotifyMu.Lock()
+	defer s.nodeNotifyMu.Unlock()
+
 	cfg := s.Config()
 	if !cfg.Enabled || cfg.ChatID == "" || !cfg.NodeAlertsEnabled {
-		return
+		return false
 	}
 
 	now := time.Now()
 	if !s.shouldRunNodeAlertCheck(cfg, now) {
-		return
+		return false
 	}
 
 	proxies := s.proxyChecker.GetProxies()
@@ -937,11 +947,104 @@ func (s *Service) NotifyNodeStatuses() {
 			logger.Warn("Failed to save Telegram node alert state: %v", err)
 		}
 	}
+	return true
+}
+
+func (s *Service) NotifyNodeRecoveries(stableIDs []string) {
+	if len(stableIDs) == 0 {
+		return
+	}
+
+	s.nodeNotifyMu.Lock()
+	defer s.nodeNotifyMu.Unlock()
+
+	cfg := s.Config()
+	if !cfg.Enabled || cfg.ChatID == "" || !cfg.NodeAlertsEnabled {
+		return
+	}
+
+	muted := mutedAlertNodeSet(cfg)
+	seen := make(map[string]bool, len(stableIDs))
+	recoveryAlerts := make([]nodeRecoveryAlert, 0, len(stableIDs))
+	stateChanged := false
+	for _, rawStableID := range stableIDs {
+		stableID := strings.TrimSpace(rawStableID)
+		if stableID == "" || seen[stableID] {
+			continue
+		}
+		seen[stableID] = true
+
+		proxy, ok := s.proxyChecker.GetProxyByStableID(stableID)
+		if !ok {
+			continue
+		}
+		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(stableID)
+		if err != nil || !details.Online {
+			continue
+		}
+
+		alert, shouldSend, changed := s.prepareNodeRecovery(proxy, details, cfg, muted[stableID])
+		if shouldSend {
+			recoveryAlerts = append(recoveryAlerts, alert)
+		}
+		if changed {
+			stateChanged = true
+		}
+	}
+
+	for _, alert := range recoveryAlerts {
+		if err := s.sendNodeAlertMessage(cfg, alert.Message); err == nil {
+			if s.confirmNodeRecoverySent(alert.StableID, alert.RecoveredAt) {
+				stateChanged = true
+			}
+		}
+	}
+	if stateChanged {
+		if err := s.saveAlertState(); err != nil {
+			logger.Warn("Failed to save Telegram node alert state: %v", err)
+		}
+	}
+}
+
+func (s *Service) prepareNodeRecovery(proxy *models.ProxyConfig, details checker.ProxyStatusDetails, cfg Config, isMuted bool) (nodeRecoveryAlert, bool, bool) {
+	if proxy == nil || proxy.StableID == "" || !details.Online {
+		return nodeRecoveryAlert{}, false, false
+	}
+	recoveredAt := details.CheckedAt
+	if recoveredAt.IsZero() {
+		recoveredAt = time.Now()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, exists := s.alerts[proxy.StableID]
+	if !exists {
+		return nodeRecoveryAlert{}, false, false
+	}
+	previous := state
+	if !shouldNotifyNodeRecovery(state, cfg, isMuted) {
+		delete(s.alerts, proxy.StableID)
+		return nodeRecoveryAlert{}, false, true
+	}
+	if !state.RecoveryPending {
+		state.RecoveryPending = true
+		state.RecoveredAt = recoveredAt
+		state.RecoveryLatency = details.Latency
+		s.alerts[proxy.StableID] = state
+	}
+	return nodeRecoveryAlert{
+		StableID:    proxy.StableID,
+		RecoveredAt: state.RecoveredAt,
+		Message:     formatNodeRecoveryMessage(proxy, state.RecoveryLatency, state.DownSince, state.RecoveredAt),
+	}, true, previous != state
 }
 
 func (s *Service) sendNodeAlertMessage(cfg Config, content formattedMessage) error {
 	if content.HTML == "" && content.RichHTML == "" {
 		return nil
+	}
+	if s.nodeAlertSendFunc != nil {
+		return s.nodeAlertSendFunc(cfg, content)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
 	defer cancel()
@@ -1235,6 +1338,9 @@ func (s *Service) handleCallback(cb *callbackQuery) {
 	case data == "speed:list":
 		s.answerCallback(cb.ID, "")
 		s.editFormattedCommandMessage(cb.Message, s.formatRecentSpeedOverviewMessage(), s.speedHistoryMarkup())
+	case strings.HasPrefix(data, "node:check:"):
+		stableID := strings.TrimPrefix(data, "node:check:")
+		s.handleNodeAvailabilityCheckCallback(cb, stableID)
 	case strings.HasPrefix(data, "node:test:"):
 		stableID := strings.TrimPrefix(data, "node:test:")
 		s.handleNodeSpeedTestCallback(cb, stableID)
@@ -1308,6 +1414,45 @@ func (s *Service) handleSpeedTestCallback(cb *callbackQuery, onlyOnline bool) {
 	}
 }
 
+func (s *Service) handleNodeAvailabilityCheckCallback(cb *callbackQuery, stableID string) {
+	cfg := s.Config()
+	if !s.isAdminUser(cb.From, cfg) {
+		s.answerCallback(cb.ID, "Только для администратора")
+		return
+	}
+	proxy, matches := s.findProxy(stableID)
+	if proxy == nil {
+		s.answerCallback(cb.ID, "Нода не найдена")
+		if cb.Message != nil {
+			s.editCommandMessage(cb.Message, formatProxySearchMiss(matches), s.nodeListMarkup())
+		}
+		return
+	}
+	if !s.beginStatusCheck() {
+		s.answerCallback(cb.ID, "Проверка уже идёт")
+		return
+	}
+
+	s.answerCallback(cb.ID, "Проверка запущена")
+	if cb.Message != nil {
+		s.editFormattedCommandMessage(cb.Message, formatNodeAvailabilityCheckStartedMessage(proxy), s.nodeDetailMarkup(proxy.StableID, true))
+	}
+
+	msg := cb.Message
+	go func() {
+		defer s.endStatusCheck()
+		if err := s.runAvailabilityCheck([]string{proxy.StableID}); err != nil {
+			if msg != nil {
+				s.editCommandMessage(msg, fmt.Sprintf("<b>Проверка не выполнена</b>\n\n%s", htmlEscape(err.Error())), s.nodeDetailMarkup(proxy.StableID, true))
+			}
+			return
+		}
+		if msg != nil {
+			s.editFormattedCommandMessage(msg, s.formatNodeDetailsMessage(proxy.StableID), s.nodeDetailMarkup(proxy.StableID, true))
+		}
+	}()
+}
+
 func (s *Service) handleStatusRefreshCallback(cb *callbackQuery) {
 	if !s.beginStatusCheck() {
 		s.answerCallback(cb.ID, "Проверка уже идёт")
@@ -1324,13 +1469,30 @@ func (s *Service) handleStatusRefreshCallback(cb *callbackQuery) {
 		defer s.endStatusCheck()
 
 		offlineBefore := s.offlineStableIDs()
-		s.proxyChecker.CheckAllProxies()
+		if err := s.runAvailabilityCheck(nil); err != nil {
+			if msg != nil {
+				s.editCommandMessage(msg, fmt.Sprintf("<b>Проверка не выполнена</b>\n\n%s", htmlEscape(err.Error())), statusMarkup())
+			}
+			return
+		}
 		s.refreshHostDiagnosticsForStillOffline(offlineBefore)
 
 		if msg != nil {
 			s.editFormattedCommandMessage(msg, s.formatStatusMessage(), statusMarkup())
 		}
 	}()
+}
+
+func (s *Service) runAvailabilityCheck(stableIDs []string) error {
+	if s.availabilityCheck != nil {
+		return s.availabilityCheck(stableIDs)
+	}
+	if len(stableIDs) == 0 {
+		s.proxyChecker.CheckAllProxies()
+		return nil
+	}
+	_, err := s.proxyChecker.CheckProxiesByStableIDs(stableIDs)
+	return err
 }
 
 func (s *Service) offlineStableIDs() map[string]bool {
@@ -1933,6 +2095,17 @@ func formatStatusRefreshStartedMessage() formattedMessage {
 	return formattedMessage{
 		HTML:     formatStatusRefreshStarted(),
 		RichHTML: "<h2>Статусы нод</h2><p>Проверяю доступность. Это сообщение обновится автоматически.</p>",
+	}
+}
+
+func formatNodeAvailabilityCheckStartedMessage(proxy *models.ProxyConfig) formattedMessage {
+	name := "Нода"
+	if proxy != nil && strings.TrimSpace(proxy.Name) != "" {
+		name = proxy.Name
+	}
+	return formattedMessage{
+		HTML:     fmt.Sprintf("<b>%s</b>\nПроверяю доступность, TCP и ping…", htmlEscape(name)),
+		RichHTML: fmt.Sprintf("<h2>%s</h2><p>Проверяю доступность, TCP и ping…</p>", htmlEscape(name)),
 	}
 }
 
@@ -3372,6 +3545,10 @@ func (s *Service) nodeListMarkup() string {
 func (s *Service) nodeDetailMarkup(stableID string, isAdmin bool) string {
 	var rows [][]inlineKeyboardButton
 	if isAdmin {
+		rows = append(rows, []inlineKeyboardButton{{
+			Text:         "Проверить доступность",
+			CallbackData: "node:check:" + stableID,
+		}})
 		rows = append(rows, []inlineKeyboardButton{{
 			Text:         "Speed-test этой ноды",
 			CallbackData: "node:test:" + stableID,

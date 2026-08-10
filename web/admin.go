@@ -49,6 +49,12 @@ type AdminNodeTestURLRequest struct {
 	URL      string `json:"url"`
 }
 
+type AdminProxyCheckRequest struct {
+	StableIDs []string `json:"stableIds"`
+}
+
+type AdminProxyCheckFunc func([]string) error
+
 type AdminSubscriptionRefreshResult struct {
 	Updated bool   `json:"updated"`
 	Count   int    `json:"count"`
@@ -214,6 +220,52 @@ func AdminProxiesHandler(proxyChecker *checker.ProxyChecker, startPort int) http
 				details.Latency = latency
 			}
 			result = append(result, adminProxyInfo(proxy, details, startPort))
+		}
+		writeJSON(w, result)
+	}
+}
+
+func AdminProxyCheckHandler(check AdminProxyCheckFunc, proxyChecker *checker.ProxyChecker, startPort int) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req AdminProxyCheckRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, "Invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		if len(req.StableIDs) == 0 {
+			writeError(w, "Select at least one node", http.StatusBadRequest)
+			return
+		}
+		if err := check(req.StableIDs); err != nil {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		selected := make(map[string]bool, len(req.StableIDs))
+		for _, stableID := range req.StableIDs {
+			selected[strings.TrimSpace(stableID)] = true
+		}
+		result := make([]AdminProxyInfo, 0, len(selected))
+		for _, proxy := range proxyChecker.GetProxies() {
+			if proxy == nil {
+				continue
+			}
+			stableID := proxy.StableID
+			if stableID == "" {
+				stableID = proxy.GenerateStableID()
+			}
+			if !selected[stableID] {
+				continue
+			}
+			details, _ := proxyChecker.GetProxyStatusDetailsByStableID(stableID)
+			proxyCopy := *proxy
+			proxyCopy.StableID = stableID
+			result = append(result, adminProxyInfo(&proxyCopy, details, startPort))
 		}
 		writeJSON(w, result)
 	}

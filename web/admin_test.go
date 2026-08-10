@@ -16,6 +16,7 @@ import (
 
 	"xray-checker/backup"
 	"xray-checker/checker"
+	"xray-checker/models"
 	"xray-checker/nodearchive"
 	"xray-checker/speedtest"
 )
@@ -220,6 +221,51 @@ func TestAdminReadHandlersRejectMutatingMethods(t *testing.T) {
 				t.Fatalf("expected status %d, got %d", http.StatusMethodNotAllowed, rec.Code)
 			}
 		})
+	}
+}
+
+func TestAdminProxyCheckHandlerChecksSelectedNodes(t *testing.T) {
+	proxy := &models.ProxyConfig{
+		StableID: "node-1",
+		Name:     "Node one",
+		Protocol: "vless",
+		Server:   "node.example.com",
+		Port:     443,
+		UUID:     "uuid",
+	}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "", "", 1, 0, "status")
+	if !proxyChecker.RestoreOfflineStatus(proxy.StableID, time.Now().Add(-time.Minute), checker.HostCheckDetails{}, checker.PingCheckDetails{}) {
+		t.Fatal("failed to seed offline status")
+	}
+
+	var checked []string
+	handler := AdminProxyCheckHandler(func(stableIDs []string) error {
+		checked = append([]string(nil), stableIDs...)
+		return nil
+	}, proxyChecker, 10000)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/proxies/check", strings.NewReader(`{"stableIds":["node-1"]}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if len(checked) != 1 || checked[0] != proxy.StableID {
+		t.Fatalf("checked IDs = %v, want [%s]", checked, proxy.StableID)
+	}
+	if !strings.Contains(rec.Body.String(), `"stableId":"node-1"`) {
+		t.Fatalf("response does not contain updated proxy: %s", rec.Body.String())
+	}
+}
+
+func TestAdminProxyCheckHandlerRequiresSelection(t *testing.T) {
+	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
+	handler := AdminProxyCheckHandler(func([]string) error { return nil }, proxyChecker, 10000)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/proxies/check", strings.NewReader(`{"stableIds":[]}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
 	}
 }
 
