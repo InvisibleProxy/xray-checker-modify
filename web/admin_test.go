@@ -32,6 +32,9 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`id="selection-run"`,
 		`data-check-id="${escapeHtml(proxy.stableId)}"`,
 		`data-run-id="${escapeHtml(proxy.stableId)}"`,
+		`id="tab-incidents"`,
+		`id="incidents"`,
+		`proxy.failureSummary`,
 	} {
 		if !strings.Contains(html, marker) {
 			t.Fatalf("admin template does not contain %q", marker)
@@ -39,8 +42,42 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 	}
 }
 
+func TestAdminIncidentsHandlerReturnsPersistedJournal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "node_registry.json")
+	state := nodearchive.StateFile{
+		Version: 1,
+		Nodes:   map[string]nodearchive.NodeRecord{},
+		Incidents: []nodearchive.IncidentRecord{{
+			ID: "incident-1", Kind: "node", Status: "active", Scope: "node:one",
+			StableIDs: []string{"one"}, AffectedCount: 1, TotalCount: 1,
+			CauseCode: checker.FailureCodeTCPRefused, CauseSummary: checker.FailureSummary(checker.FailureCodeTCPRefused),
+			StartedAt: time.Now(),
+		}},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := nodearchive.NewStore(path, nil)
+	if err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/incidents?limit=10", nil)
+	AdminIncidentsHandler(store).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "incident-1") {
+		t.Fatalf("incidents response %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAdminSubscriptionRefreshHandler(t *testing.T) {
-	handler := AdminSubscriptionRefreshHandler(func() (AdminSubscriptionRefreshResult, error) {
+	handler := AdminSubscriptionRefreshHandler(func(request AdminSubscriptionRefreshRequest) (AdminSubscriptionRefreshResult, error) {
+		if !request.Force || request.ConfirmationToken != "candidate-token" {
+			t.Fatalf("refresh request was not decoded: %+v", request)
+		}
 		return AdminSubscriptionRefreshResult{
 			Updated: true,
 			Count:   2,
@@ -49,7 +86,7 @@ func TestAdminSubscriptionRefreshHandler(t *testing.T) {
 	})
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/subscription/refresh", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/subscription/refresh", strings.NewReader(`{"force":true,"confirmationToken":"candidate-token"}`))
 	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -70,7 +107,7 @@ func TestAdminSubscriptionRefreshHandler(t *testing.T) {
 }
 
 func TestAdminSubscriptionRefreshHandlerRejectsInvalidMethod(t *testing.T) {
-	handler := AdminSubscriptionRefreshHandler(func() (AdminSubscriptionRefreshResult, error) {
+	handler := AdminSubscriptionRefreshHandler(func(AdminSubscriptionRefreshRequest) (AdminSubscriptionRefreshResult, error) {
 		return AdminSubscriptionRefreshResult{}, nil
 	})
 
@@ -84,7 +121,7 @@ func TestAdminSubscriptionRefreshHandlerRejectsInvalidMethod(t *testing.T) {
 }
 
 func TestAdminSubscriptionRefreshHandlerReportsRunningRefresh(t *testing.T) {
-	handler := AdminSubscriptionRefreshHandler(func() (AdminSubscriptionRefreshResult, error) {
+	handler := AdminSubscriptionRefreshHandler(func(AdminSubscriptionRefreshRequest) (AdminSubscriptionRefreshResult, error) {
 		return AdminSubscriptionRefreshResult{}, fmt.Errorf("subscription refresh already running")
 	})
 

@@ -229,6 +229,12 @@ paths:
     post:
       summary: Refresh all subscription sources
       tags: [Admin]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubscriptionRefreshRequest'
       responses:
         '200':
           description: Refresh result
@@ -442,6 +448,38 @@ paths:
                         type: array
                         items:
                           $ref: '#/components/schemas/NodeSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/incidents:
+    get:
+      summary: Get persisted node and correlated mass incidents
+      tags: [Admin]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 200
+      responses:
+        '200':
+          description: Incident journal ordered from newest to oldest
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/IncidentRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
 
@@ -804,6 +842,22 @@ components:
               type: string
             pingCheckError:
               type: string
+            failureCode:
+              type: string
+            failureSummary:
+              type: string
+            failureDetail:
+              type: string
+
+    SubscriptionRefreshRequest:
+      type: object
+      properties:
+        force:
+          type: boolean
+          default: false
+        confirmationToken:
+          type: string
+          description: Opaque fingerprint returned by the immediately preceding suspicious-update preview
 
     SubscriptionRefreshResult:
       type: object
@@ -814,6 +868,20 @@ components:
         count:
           type: integer
           minimum: 0
+        added:
+          type: integer
+        removed:
+          type: integer
+        changed:
+          type: integer
+        removedNames:
+          type: array
+          items:
+            type: string
+        requiresConfirmation:
+          type: boolean
+        confirmationToken:
+          type: string
         message:
           type: string
 
@@ -1140,6 +1208,53 @@ components:
           type: string
         lastSpeedOffline:
           type: boolean
+
+    IncidentRecord:
+      type: object
+      required: [id, kind, status, scope, stableIds, affectedCount, totalCount, causeCode, causeSummary, startedAt]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [node, mass]
+        status:
+          type: string
+          enum: [active, resolved]
+        scope:
+          type: string
+        subscription:
+          type: string
+        stableIds:
+          type: array
+          items:
+            type: string
+        nodeNames:
+          type: array
+          items:
+            type: string
+        affectedCount:
+          type: integer
+        totalCount:
+          type: integer
+        causeCode:
+          type: string
+        causeSummary:
+          type: string
+        causeDetail:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        resolvedAt:
+          type: string
+          format: date-time
+        durationSec:
+          type: integer
+          format: int64
 
     TelegramAdminConfig:
       type: object

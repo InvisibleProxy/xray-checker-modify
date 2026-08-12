@@ -281,7 +281,7 @@ func main() {
 	}
 
 	subscriptionRefreshLock := make(chan struct{}, 1)
-	refreshSubscription := func(source string) (web.AdminSubscriptionRefreshResult, error) {
+	refreshSubscription := func(source string, force bool, confirmationToken string) (web.AdminSubscriptionRefreshResult, error) {
 		select {
 		case subscriptionRefreshLock <- struct{}{}:
 			defer func() { <-subscriptionRefreshLock }()
@@ -310,14 +310,31 @@ func main() {
 		if err := xray.ValidateStableIDs(newConfigs); err != nil {
 			return web.AdminSubscriptionRefreshResult{}, fmt.Errorf("reject subscription update: %w", err)
 		}
+		diff := xray.AnalyzeConfigDiff(*proxyConfigs, newConfigs)
+		refreshResult := web.AdminSubscriptionRefreshResult{
+			Count:        len(newConfigs),
+			Added:        diff.Added,
+			Removed:      diff.Removed,
+			Changed:      diff.Changed,
+			RemovedNames: diff.RemovedNames,
+		}
+		if diff.Suspicious() && !force {
+			refreshResult.RequiresConfirmation = source == "manual"
+			refreshResult.ConfirmationToken = xray.ConfigFingerprint(newConfigs)
+			refreshResult.Message = fmt.Sprintf("Suspicious subscription update blocked: %d of %d nodes would be removed", diff.Removed, diff.Before)
+			if source == "manual" {
+				return refreshResult, nil
+			}
+			return refreshResult, fmt.Errorf("%s", refreshResult.Message)
+		}
+		if diff.Suspicious() && source == "manual" && confirmationToken != xray.ConfigFingerprint(newConfigs) {
+			return refreshResult, fmt.Errorf("subscription candidate changed since confirmation; review the update again")
+		}
 
 		if xray.IsConfigsEqual(*proxyConfigs, newConfigs) {
 			logger.Info("Subscriptions checked, no changes")
-			return web.AdminSubscriptionRefreshResult{
-				Updated: false,
-				Count:   len(newConfigs),
-				Message: "Subscriptions checked, no changes",
-			}, nil
+			refreshResult.Message = "Subscriptions checked, no changes"
+			return refreshResult, nil
 		}
 
 		xrayLifecycle.Lock()
@@ -333,17 +350,15 @@ func main() {
 			logger.Warn("Failed to prune inactive muted Telegram nodes: %v", err)
 		}
 
-		return web.AdminSubscriptionRefreshResult{
-			Updated: true,
-			Count:   len(newConfigs),
-			Message: "Configuration updated",
-		}, nil
+		refreshResult.Updated = true
+		refreshResult.Message = "Configuration updated"
+		return refreshResult, nil
 	}
 
 	if config.CLIConfig.Subscription.Update {
 		updateScheduler := gocron.NewScheduler(time.UTC)
 		updateScheduler.Every(config.CLIConfig.Subscription.UpdateInterval).Seconds().WaitForSchedule().Do(func() {
-			if _, err := refreshSubscription("scheduled"); err != nil {
+			if _, err := refreshSubscription("scheduled", false, ""); err != nil {
 				logger.Error("Error updating subscriptions: %v", err)
 			}
 		})
@@ -375,8 +390,8 @@ func main() {
 	protectedHandler.Handle("/admin/", web.AdminHandler())
 	protectedHandler.Handle("/api/v1/admin/proxies", web.AdminProxiesHandler(proxyChecker, config.CLIConfig.Xray.StartPort))
 	protectedHandler.Handle("/api/v1/admin/proxies/check", web.AdminProxyCheckHandler(runManualAvailabilityCheck, proxyChecker, config.CLIConfig.Xray.StartPort))
-	protectedHandler.Handle("/api/v1/admin/subscription/refresh", web.AdminSubscriptionRefreshHandler(func() (web.AdminSubscriptionRefreshResult, error) {
-		return refreshSubscription("manual")
+	protectedHandler.Handle("/api/v1/admin/subscription/refresh", web.AdminSubscriptionRefreshHandler(func(request web.AdminSubscriptionRefreshRequest) (web.AdminSubscriptionRefreshResult, error) {
+		return refreshSubscription("manual", request.Force, request.ConfirmationToken)
 	}))
 	protectedHandler.Handle("/api/v1/admin/backup", web.AdminBackupHandler(backupCreator))
 	protectedHandler.Handle("/api/v1/admin/backup/restore", web.AdminBackupRestoreHandler(backupRestorer))
@@ -387,6 +402,7 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/nodes-overview/geo", web.AdminNodesOverviewGeoHandler(nodeArchive))
 	protectedHandler.Handle("/api/v1/admin/nodes-overview/delete", web.AdminNodesOverviewDeleteHandler(nodeArchive, speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/nodes-overview", web.AdminNodesOverviewHandler(nodeArchive, speedTestManager))
+	protectedHandler.Handle("/api/v1/admin/incidents", web.AdminIncidentsHandler(nodeArchive))
 	protectedHandler.Handle("/api/v1/admin/schedules", web.AdminScheduleHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/telegram/test", web.AdminTelegramTestHandler(telegramService))
 	protectedHandler.Handle("/api/v1/admin/telegram", web.AdminTelegramHandler(telegramService))
@@ -442,20 +458,14 @@ func updateConfiguration(newConfigs []*models.ProxyConfig, currentConfigs *[]*mo
 
 	configFile := "xray_config.json"
 	configGenerator := xray.NewConfigGenerator()
-	if err := configGenerator.GenerateAndSaveConfig(
-		newConfigs,
-		config.CLIConfig.Xray.StartPort,
-		configFile,
-		config.CLIConfig.Xray.LogLevel,
-	); err != nil {
-		return err
-	}
-
-	if err := xrayRunner.Stop(); err != nil {
-		return err
-	}
-
-	if err := xrayRunner.Start(); err != nil {
+	if err := xray.RestartWithConfigRollback(configFile, xrayRunner, func(candidateFile string) error {
+		return configGenerator.GenerateAndSaveConfig(
+			newConfigs,
+			config.CLIConfig.Xray.StartPort,
+			candidateFile,
+			config.CLIConfig.Xray.LogLevel,
+		)
+	}); err != nil {
 		return err
 	}
 

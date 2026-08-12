@@ -1,12 +1,94 @@
 package xray
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"xray-checker/models"
 )
+
+type ConfigDiff struct {
+	Before       int      `json:"before"`
+	After        int      `json:"after"`
+	Added        int      `json:"added"`
+	Removed      int      `json:"removed"`
+	Changed      int      `json:"changed"`
+	RemovedNames []string `json:"removedNames,omitempty"`
+}
+
+func (d ConfigDiff) Suspicious() bool {
+	if d.Before <= 0 {
+		return false
+	}
+	if d.After == 0 {
+		return true
+	}
+	return d.Removed >= 3 && d.Removed*2 >= d.Before
+}
+
+func AnalyzeConfigDiff(old, new []*models.ProxyConfig) ConfigDiff {
+	diff := ConfigDiff{Before: len(old), After: len(new)}
+	oldByID := configMapByStableID(old)
+	newByID := configMapByStableID(new)
+	for stableID, oldProxy := range oldByID {
+		newProxy, ok := newByID[stableID]
+		if !ok {
+			diff.Removed++
+			diff.RemovedNames = append(diff.RemovedNames, oldProxy.Name)
+			continue
+		}
+		if configSignature(oldProxy) != configSignature(newProxy) {
+			diff.Changed++
+		}
+	}
+	for stableID := range newByID {
+		if _, ok := oldByID[stableID]; !ok {
+			diff.Added++
+		}
+	}
+	sort.Strings(diff.RemovedNames)
+	return diff
+}
+
+// ConfigFingerprint binds an explicit confirmation to the exact candidate
+// configuration that was previewed. It intentionally exposes only a digest,
+// never credentials contained in proxy configs.
+func ConfigFingerprint(proxies []*models.ProxyConfig) string {
+	entries := make([]string, 0, len(proxies))
+	for _, proxy := range proxies {
+		if proxy == nil {
+			continue
+		}
+		stableID := strings.TrimSpace(proxy.StableID)
+		if stableID == "" {
+			stableID = proxy.GenerateStableID()
+		}
+		entries = append(entries, strings.ToLower(stableID)+"\x00"+configSignature(proxy))
+	}
+	sort.Strings(entries)
+	sum := sha256.Sum256([]byte(strings.Join(entries, "\x1e")))
+	return fmt.Sprintf("%x", sum)
+}
+
+func configMapByStableID(proxies []*models.ProxyConfig) map[string]*models.ProxyConfig {
+	result := make(map[string]*models.ProxyConfig, len(proxies))
+	for _, proxy := range proxies {
+		if proxy == nil {
+			continue
+		}
+		stableID := strings.TrimSpace(proxy.StableID)
+		if stableID == "" {
+			stableID = proxy.GenerateStableID()
+		}
+		if stableID != "" {
+			result[strings.ToLower(stableID)] = proxy
+		}
+	}
+	return result
+}
 
 func PrepareProxyConfigs(proxies []*models.ProxyConfig) {
 	for i := range proxies {

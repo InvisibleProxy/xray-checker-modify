@@ -17,10 +17,10 @@
 | `subscription/` | загрузка и парсинг подписок, поддержка нескольких источников, опциональное разрешение доменов |
 | `models/` | модель proxy-конфигурации и генерация `StableID` |
 | `xray/` | генерация runtime-конфига и встроенный экземпляр Xray Core |
-| `checker/` | проверки доступности, latency, host/ping diagnostics и текущее состояние нод |
+| `checker/` | проверки доступности, latency, host/ping diagnostics, классификация причин и текущее состояние нод |
 | `metrics/` | Prometheus-метрики и Pushgateway |
 | `speedtest/` | ручные и плановые тесты скорости, Test URL нод и temporal retention |
-| `nodearchive/` | долгоживущий реестр активных/выбывших нод, downtime, GeoIP и speedtest summary |
+| `nodearchive/` | долгоживущий реестр активных/выбывших нод, downtime, persisted incident journal, GeoIP и speedtest summary |
 | `telegram/` | компактный HTML и Rich Messages, команды, отчёты, алерты, recovery и настройки mute |
 | `backup/` | создание ZIP, автоматическая ротация, типизированная проверка и транзакционный staged restore |
 | `web/` | dashboard, admin UI, REST API, OpenAPI и Basic Auth middleware |
@@ -46,7 +46,9 @@ Frontend встроен в Go-бинарник через `embed`. `docs/` — �
 
 ### Проверка доступности
 
-Для каждой ноды создаётся SOCKS-inbound на `XRAY_START_PORT + Index`. Полный обход с периодом `PROXY_CHECK_INTERVAL` выполняет выбранный метод `ip`, `status` или `download` через каждый inbound без предварительного TCP-гейта. При провале proxy-check переход в offline и `DownSince` сохраняются до TCP/ping-диагностики, а её результаты дописываются только если нода всё ещё offline. Непривилегированный Linux ICMP datagram socket может переписать Echo ID, поэтому ping reply сопоставляется по типу, sequence и уникальному payload. Статус и диагностика хранятся по `StableID`; после итерации обновляются архив downtime, Telegram и Pushgateway.
+Для каждой ноды создаётся SOCKS-inbound на `XRAY_START_PORT + Index`. Полный обход с периодом `PROXY_CHECK_INTERVAL` выполняет выбранный метод `ip`, `status` или `download` через каждый inbound без предварительного TCP-гейта. При провале proxy-check переход в offline и `DownSince` сохраняются до TCP/ping-диагностики, а её результаты дописываются только если нода всё ещё offline. Непривилегированный Linux ICMP datagram socket может переписать Echo ID, поэтому ping reply сопоставляется по типу, sequence и уникальному payload. Ошибка check-метода сначала классифицируется как DNS, TCP, proxy handshake/timeout, TLS, HTTP, unchanged source IP, incomplete download или unknown; затем прямые host diagnostics могут уточнить её. Статус, причина и диагностика хранятся по `StableID`; после итерации обновляются downtime, incident journal, Telegram и Pushgateway.
+
+`nodearchive` открывает node incident при первом offline, обновляет его диагностическую причину и закрывает при recovery или retirement. Массовый incident создаётся, когда один код причины одновременно затрагивает минимум три и не менее 50% активных нод: сначала проверяется global scope, затем отдельные подписки. Если разные серверы имеют доступный TCP-порт, но одинаково проваливают DNS/HTTP/TLS/timeout check, общий `check_endpoint` отмечается как вероятная корреляционная причина, а не доказанный факт.
 
 Уже недоступные ноды попадают в отдельный recovery-loop с периодом `PROXY_RECOVERY_INTERVAL` (default 15 секунд, `0` отключает). В одной ограниченной worker-pool итерации TCP и ping выполняются параллельно. Если TCP недоступен, proxy-check пропускается; после `TCP OK` полноценный настроенный proxy-check запускается немедленно. Ping никогда не является gate. Полный обход остаётся независимой контрольной проверкой и предотвращает постоянную блокировку recovery из-за ошибочной TCP-диагностики.
 
@@ -60,9 +62,11 @@ Frontend встроен в Go-бинарник через `embed`. `docs/` — �
 2. При необходимости домены разворачиваются в IP-конфигурации.
 3. `xray.PreserveStableIDs` пытается сопоставить новые ноды со старыми.
 4. `xray.ValidateStableIDs` отклоняет пустые и дублирующиеся без учёта регистра ID до сравнения или restart.
-5. Если effective-конфигурация не изменилась, restart Xray не выполняется.
-6. При изменении refresh получает Xray lifecycle write-lock, дожидается активного speedtest, создаёт новый `xray_config.json`, перезапускает Xray и передаёт checker новый список.
-7. Node archive синхронизирует активные/выбывшие записи; mute для исчезнувших ID очищается.
+5. Строится diff added/removed/changed. Пустая новая конфигурация или удаление минимум трёх и не менее 50% прежних нод блокирует scheduled refresh; ручной refresh требует explicit force-confirmation, привязанного opaque fingerprint к конкретному previewed candidate.
+6. Если effective-конфигурация не изменилась, restart Xray не выполняется.
+7. При изменении refresh получает Xray lifecycle write-lock, дожидается активного speedtest и генерирует candidate рядом с `xray_config.json`. Если Xray отклоняет candidate, предыдущий файл восстанавливается и last-known-good процесс запускается повторно.
+8. Только после успешного restart checker и web endpoints получают новый список.
+9. Node archive синхронизирует активные/выбывшие записи; mute и pending speed retries исчезнувших ID очищаются.
 
 ### Speedtest
 
@@ -94,7 +98,7 @@ Restore не заменяет работающие файлы сразу. Manife
 
 Каждый основной экран имеет пару представлений: Rich HTML для `sendRichMessage`/`editMessageText.rich_message` и компактный обычный HTML fallback. Rich-вариант строится как сводка, список проблем и раскрываемые технические детали; fallback не повторяет StableID, threshold и timing в каждой строке. Возможность Rich Messages кешируется только при однозначном ответе API. Сетевая ошибка не запускает повторную fallback-отправку, чтобы сохранить семантику at-most-once на неопределённом результате запроса.
 
-Режим фонового speed-report определяется `SpeedReportMode`: `always` отправляет чистые scheduled-отчёты, `issues` скрывает чистые, `disabled` отключает их. Низкая скорость запуска по расписанию или из админ-панели подтверждается отдельным тестом затронутых `StableID` через 30 минут. До подтверждения low-speed часть отчёта подавляется; повторно низкий, offline или error-результат отправляется как подтверждённая проблема, успешный повтор не создаёт сообщения. Первичные transport/offline-ошибки остаются немедленными. Pending retry живёт только в памяти процесса и отменяется при штатной остановке.
+Режим фонового speed-report определяется `SpeedReportMode`: `always` отправляет чистые scheduled-отчёты, `issues` скрывает чистые, `disabled` отключает их. Низкая скорость запуска по расписанию или из админ-панели подтверждается отдельным тестом затронутых `StableID` через 30 минут. До подтверждения low-speed часть отчёта подавляется; повторно низкий, offline или error-результат отправляется как подтверждённая проблема, успешный повтор не создаёт сообщения. Первичные transport/offline-ошибки остаются немедленными. Pending retry персистится вместе с исходным TestConfig, due time и `StableID`, восстанавливается после restart и удаляется после результата либо окончательной ошибки запуска.
 
 Прямой результат Telegram-команды не является фоновым report: он отправляется сразу в исходные chat/topic и не фильтруется настройкой автоматических отчётов. Экран «Замеры» имеет Rich HTML-таблицу и компактный HTML fallback, как остальные основные экраны.
 
@@ -117,11 +121,11 @@ Recovery alert хранит `RecoveryPending`, время и latency до усп
 
 | Файл | Владелец | Правило |
 | --- | --- | --- |
-| `data/node_registry.json` | `nodearchive` | долгоживущая статистика, включая retired-ноды |
+| `data/node_registry.json` | `nodearchive` | долгоживущая статистика, retired-ноды и incident journal |
 | `data/speedtest_results.json` | `speedtest` | latest result и temporal history |
 | `data/speedtest_schedule.json` | `speedtest` | расписание, фильтры, URL и retention |
 | `data/telegram_config.json` | `telegram` | editable settings; secrets могут переопределяться env |
-| `data/node_alert_state.json` | `telegram` | состояние последовательностей алертов |
+| `data/node_alert_state.json` | `telegram` | состояние последовательностей алертов, диагностические причины и pending low-speed retries |
 | `data/backups/*.zip` | `backup` | до 7 автоматических архивов за последние 7 суток |
 
 `data/` должен быть постоянным volume и доступен UID `1000` внутри production image.
@@ -142,7 +146,8 @@ Recovery alert хранит `RecoveryPending`, время и latency до усп
 - Восстановление требует перезапуска приложения.
 - Rich Messages зависят от версии Telegram Bot API; при отсутствии метода бот использует менее выразительный компактный HTML.
 - GeoIP refresh использует внешние сервисы и может быть недоступен из-за сети или rate limit.
+- `check_endpoint` является корреляционным выводом по нескольким нодам; он не доказывает отказ внешнего сервиса без отдельной проверки с другой точки.
 
 ## Текущее состояние
 
-Реализованы и покрыты Go-тестами: сохранение и проверка StableID при refresh, Xray lifecycle-lock speedtest, единый scheduled/Telegram TestConfig, temporal speedtest retention, node archive, структурированный Telegram output, retryable recovery alerts, ручные/автоматические backup и транзакционный staged restore. GitHub Actions и Dependabot в форке отключены; CI, Docker Hub description и release jobs на GitHub не выполняются. Перед релизом обязательны локальные проверки из [`AGENTS.md`](AGENTS.md).
+Реализованы и покрыты Go-тестами: сохранение и проверка StableID при refresh, suspicious-diff guard и Xray config rollback, Xray lifecycle-lock speedtest, единый scheduled/Telegram TestConfig, temporal speedtest retention, persisted low-speed retries, node archive и incident journal, детерминированные failure codes, корреляция массовых сбоев, структурированный Telegram output, retryable recovery alerts, ручные/автоматические backup и транзакционный staged restore. GitHub Actions и Dependabot в форке отключены; CI, Docker Hub description и release jobs на GitHub не выполняются. Перед релизом обязательны локальные проверки из [`AGENTS.md`](AGENTS.md).

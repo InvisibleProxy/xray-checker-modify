@@ -42,6 +42,9 @@ type AdminProxyInfo struct {
 	PingCheckLatencyMs int64  `json:"pingCheckLatencyMs"`
 	PingCheckTarget    string `json:"pingCheckTarget,omitempty"`
 	PingCheckError     string `json:"pingCheckError,omitempty"`
+	FailureCode        string `json:"failureCode,omitempty"`
+	FailureSummary     string `json:"failureSummary,omitempty"`
+	FailureDetail      string `json:"failureDetail,omitempty"`
 }
 
 type AdminNodeTestURLRequest struct {
@@ -56,12 +59,23 @@ type AdminProxyCheckRequest struct {
 type AdminProxyCheckFunc func([]string) error
 
 type AdminSubscriptionRefreshResult struct {
-	Updated bool   `json:"updated"`
-	Count   int    `json:"count"`
-	Message string `json:"message,omitempty"`
+	Updated              bool     `json:"updated"`
+	Count                int      `json:"count"`
+	Added                int      `json:"added"`
+	Removed              int      `json:"removed"`
+	Changed              int      `json:"changed"`
+	RemovedNames         []string `json:"removedNames,omitempty"`
+	RequiresConfirmation bool     `json:"requiresConfirmation,omitempty"`
+	ConfirmationToken    string   `json:"confirmationToken,omitempty"`
+	Message              string   `json:"message,omitempty"`
 }
 
-type AdminSubscriptionRefreshFunc func() (AdminSubscriptionRefreshResult, error)
+type AdminSubscriptionRefreshRequest struct {
+	Force             bool   `json:"force"`
+	ConfirmationToken string `json:"confirmationToken,omitempty"`
+}
+
+type AdminSubscriptionRefreshFunc func(AdminSubscriptionRefreshRequest) (AdminSubscriptionRefreshResult, error)
 
 type AdminNodesOverviewGeoRequest struct {
 	StableIDs []string `json:"stableIds"`
@@ -92,7 +106,14 @@ func AdminSubscriptionRefreshHandler(refresh AdminSubscriptionRefreshFunc) http.
 			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		result, err := refresh()
+		var request AdminSubscriptionRefreshRequest
+		if r.Body != nil {
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil && !errors.Is(err, io.EOF) {
+				writeError(w, "Invalid JSON body", http.StatusBadRequest)
+				return
+			}
+		}
+		result, err := refresh(request)
 		if err != nil {
 			status := http.StatusBadRequest
 			if strings.Contains(err.Error(), "already running") {
@@ -354,6 +375,25 @@ func AdminNodesOverviewHandler(store *nodearchive.Store, manager *speedtest.Mana
 	}
 }
 
+func AdminIncidentsHandler(store *nodearchive.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		limit := 200
+		if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed < 1 || parsed > 1000 {
+				writeError(w, "limit must be between 1 and 1000", http.StatusBadRequest)
+				return
+			}
+			limit = parsed
+		}
+		writeJSON(w, store.Incidents(limit))
+	}
+}
+
 func AdminNodesOverviewGeoHandler(store *nodearchive.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -502,5 +542,8 @@ func adminProxyInfo(proxy *models.ProxyConfig, details checker.ProxyStatusDetail
 		PingCheckLatencyMs: details.PingCheck.Latency.Milliseconds(),
 		PingCheckTarget:    details.PingCheck.Target,
 		PingCheckError:     details.PingCheck.Error,
+		FailureCode:        details.Failure.Code,
+		FailureSummary:     details.Failure.Summary,
+		FailureDetail:      details.Failure.Detail,
 	}
 }

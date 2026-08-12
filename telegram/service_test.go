@@ -3,6 +3,7 @@ package telegram
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -799,6 +800,87 @@ func TestLowSpeedConfirmationRunsOnlyAffectedNodes(t *testing.T) {
 	case duplicate := <-runs:
 		t.Fatalf("duplicate confirmation run: %+v", duplicate)
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestPendingLowSpeedRetrySurvivesRestart(t *testing.T) {
+	dataDir := t.TempDir()
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "Node 1", Protocol: "vless", Server: "node.example", Port: 443}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "https://check.example/ip", 5, "https://check.example/status", "", 5, 1, "status")
+	statePath := filepath.Join(dataDir, "telegram_config.json")
+
+	service := NewService(statePath, proxyChecker, nil, 10000)
+	service.speedRetryDelay = time.Hour
+	service.setConfig(Config{LowSpeedThresholdMbps: 10})
+	if !service.scheduleLowSpeedRetry(speedtest.RunReport{
+		Config:  speedtest.TestConfig{URL: "https://speed.example/file.bin", TimeoutSec: 30},
+		Results: []speedtest.Result{{StableID: proxy.StableID, Mbps: 2}},
+	}) {
+		t.Fatal("retry was not scheduled")
+	}
+	service.Stop()
+
+	restored := NewService(statePath, proxyChecker, nil, 10000)
+	if err := restored.Load(); err != nil {
+		t.Fatal(err)
+	}
+	restored.speedRetryMu.Lock()
+	if !restored.speedRetryPending[proxy.StableID] || len(restored.speedRetryEntries) != 1 {
+		restored.speedRetryMu.Unlock()
+		t.Fatalf("restored retries = %+v", restored.speedRetryEntries)
+	}
+	for timerID, entry := range restored.speedRetryEntries {
+		entry.DueAt = time.Now().Add(-time.Second)
+		restored.speedRetryEntries[timerID] = entry
+	}
+	restored.speedRetryMu.Unlock()
+
+	runs := make(chan speedtest.RunRequest, 1)
+	restored.speedRunFunc = func(req speedtest.RunRequest, source string) error {
+		if source != lowSpeedRetrySource {
+			t.Errorf("source = %q", source)
+		}
+		runs <- req
+		return nil
+	}
+	restored.Start()
+	defer restored.Stop()
+	select {
+	case req := <-runs:
+		if len(req.ProxyIDs) != 1 || req.ProxyIDs[0] != proxy.StableID {
+			t.Fatalf("restored request = %+v", req)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("restored retry did not run")
+	}
+}
+
+func TestMassNodeFailuresAreCorrelatedByCause(t *testing.T) {
+	proxies := []*models.ProxyConfig{
+		{StableID: "one", Name: "One", SubName: "Primary", Server: "one.example"},
+		{StableID: "two", Name: "Two", SubName: "Primary", Server: "two.example"},
+		{StableID: "three", Name: "Three", SubName: "Primary", Server: "three.example"},
+		{StableID: "four", Name: "Four", SubName: "Primary", Server: "four.example"},
+	}
+	failure := checker.FailureDetails{Code: checker.FailureCodeTCPRefused, Summary: checker.FailureSummary(checker.FailureCodeTCPRefused)}
+	alerts := []nodeDownAlert{
+		{Proxy: proxies[0], State: nodeAlertState{Failure: failure}},
+		{Proxy: proxies[1], State: nodeAlertState{Failure: failure}},
+		{Proxy: proxies[2], State: nodeAlertState{Failure: failure}},
+	}
+	groups, remaining := partitionMassNodeDownAlerts(alerts, proxies, nil)
+	if len(groups) != 1 || len(groups[0].Alerts) != 3 || len(remaining) != 0 {
+		t.Fatalf("groups=%+v remaining=%+v", groups, remaining)
+	}
+	message := formatMassNodeDownMessage(groups[0], time.Now())
+	if !strings.Contains(message.HTML, "Массовый сбой") || !strings.Contains(message.HTML, "3 из 4") || !strings.Contains(message.HTML, checker.FailureCodeTCPRefused) {
+		t.Fatalf("mass incident message:\n%s", message.HTML)
+	}
+
+	alerts[2].State.Failure = checker.FailureDetails{Code: checker.FailureCodeTLS, Summary: checker.FailureSummary(checker.FailureCodeTLS)}
+	groups, _ = partitionMassNodeDownAlerts(alerts, proxies, nil)
+	if len(groups) != 0 {
+		t.Fatalf("mixed causes were correlated: %+v", groups)
 	}
 }
 

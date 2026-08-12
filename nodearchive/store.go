@@ -21,19 +21,51 @@ import (
 
 const stateVersion = 1
 
+const (
+	incidentKindNode       = "node"
+	incidentKindMass       = "mass"
+	incidentStatusActive   = "active"
+	incidentStatusResolved = "resolved"
+	maxIncidentRecords     = 1000
+)
+
 type Store struct {
 	path         string
 	proxyChecker *checker.ProxyChecker
 	httpClient   *http.Client
 
-	mu    sync.RWMutex
-	nodes map[string]NodeRecord
+	mu        sync.RWMutex
+	nodes     map[string]NodeRecord
+	incidents []IncidentRecord
 }
 
 type StateFile struct {
 	Version   int                   `json:"version"`
 	UpdatedAt time.Time             `json:"updatedAt"`
 	Nodes     map[string]NodeRecord `json:"nodes"`
+	Incidents []IncidentRecord      `json:"incidents,omitempty"`
+}
+
+// IncidentRecord is an append-oriented operational journal entry. Node
+// incidents retain the exact StableID, while mass incidents capture a
+// correlated global or subscription-scoped failure.
+type IncidentRecord struct {
+	ID            string    `json:"id"`
+	Kind          string    `json:"kind"`
+	Status        string    `json:"status"`
+	Scope         string    `json:"scope"`
+	Subscription  string    `json:"subscription,omitempty"`
+	StableIDs     []string  `json:"stableIds"`
+	NodeNames     []string  `json:"nodeNames,omitempty"`
+	AffectedCount int       `json:"affectedCount"`
+	TotalCount    int       `json:"totalCount"`
+	CauseCode     string    `json:"causeCode"`
+	CauseSummary  string    `json:"causeSummary"`
+	CauseDetail   string    `json:"causeDetail,omitempty"`
+	StartedAt     time.Time `json:"startedAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+	ResolvedAt    time.Time `json:"resolvedAt,omitempty"`
+	DurationSec   int64     `json:"durationSec"`
 }
 
 type NodeRecord struct {
@@ -135,7 +167,8 @@ func NewStore(path string, proxyChecker *checker.ProxyChecker) *Store {
 		httpClient: &http.Client{
 			Timeout: 8 * time.Second,
 		},
-		nodes: make(map[string]NodeRecord),
+		nodes:     make(map[string]NodeRecord),
+		incidents: make([]IncidentRecord, 0),
 	}
 }
 
@@ -169,9 +202,11 @@ func (s *Store) Load() error {
 		normalizeRecordCountries(&record)
 		nodes[stableID] = record
 	}
+	incidents := normalizeIncidents(state.Incidents)
 
 	s.mu.Lock()
 	s.nodes = nodes
+	s.incidents = incidents
 	s.mu.Unlock()
 	return nil
 }
@@ -215,6 +250,10 @@ func (s *Store) SyncProxies(proxies []*models.ProxyConfig) error {
 		record.RetiredAt = now
 		record.LastSeenAt = now
 		record = closeDowntime(record, now)
+		if incidentIndex := s.findActiveIncidentLocked(incidentKindNode, "node:"+stableID); incidentIndex >= 0 {
+			s.resolveIncidentLocked(incidentIndex, now)
+			changed = true
+		}
 		if previous != record {
 			s.nodes[stableID] = record
 			changed = true
@@ -294,6 +333,7 @@ func (s *Store) RecordAvailability() error {
 	now := time.Now()
 	changed := false
 	active := make(map[string]bool, len(proxies))
+	detailsByStableID := make(map[string]checker.ProxyStatusDetails, len(proxies))
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -313,12 +353,22 @@ func (s *Store) RecordAvailability() error {
 		previous := record
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
 		if err == nil {
+			detailsByStableID[proxy.StableID] = details
 			record = applyAvailability(record, details, now)
+			if s.updateNodeIncidentLocked(proxy, details, now) {
+				changed = true
+			}
 		}
 		if previous != record || s.nodes[proxy.StableID] != record {
 			s.nodes[proxy.StableID] = record
 			changed = true
 		}
+	}
+	if s.updateMassIncidentsLocked(proxies, detailsByStableID, now) {
+		changed = true
+	}
+	if s.pruneIncidentsLocked() {
+		changed = true
 	}
 
 	for stableID, record := range s.nodes {
@@ -396,6 +446,24 @@ func (s *Store) Summaries(history map[string][]speedtest.Result) []Summary {
 		return strings.ToLower(result[i].Name) < strings.ToLower(result[j].Name)
 	})
 	return result
+}
+
+// Incidents returns newest-first copies of the persisted incident journal.
+func (s *Store) Incidents(limit int) []IncidentRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	incidents := append([]IncidentRecord(nil), s.incidents...)
+	for index := range incidents {
+		incidents[index].StableIDs = append([]string(nil), incidents[index].StableIDs...)
+		incidents[index].NodeNames = append([]string(nil), incidents[index].NodeNames...)
+	}
+	sort.Slice(incidents, func(i, j int) bool {
+		return incidents[i].StartedAt.After(incidents[j].StartedAt)
+	})
+	if limit > 0 && len(incidents) > limit {
+		incidents = incidents[:limit]
+	}
+	return incidents
 }
 
 func (s *Store) RefreshGeo(ctx context.Context, stableIDs []string) (GeoRefreshResult, error) {
@@ -711,6 +779,341 @@ func closeDowntime(record NodeRecord, closedAt time.Time) NodeRecord {
 	return record
 }
 
+func (s *Store) updateNodeIncidentLocked(proxy *models.ProxyConfig, details checker.ProxyStatusDetails, now time.Time) bool {
+	if proxy == nil || proxy.StableID == "" {
+		return false
+	}
+	index := s.findActiveIncidentLocked(incidentKindNode, "node:"+proxy.StableID)
+	if details.Online {
+		if index < 0 {
+			return false
+		}
+		s.resolveIncidentLocked(index, now)
+		return true
+	}
+
+	failure := details.Failure
+	if failure.Code == "" {
+		failure.Code = checker.FailureCodeUnknown
+		failure.Summary = checker.FailureSummary(failure.Code)
+	}
+	startedAt := details.DownSince
+	if startedAt.IsZero() {
+		startedAt = now
+	}
+	if index < 0 {
+		s.incidents = append(s.incidents, IncidentRecord{
+			ID:            incidentID("node", proxy.StableID, startedAt),
+			Kind:          incidentKindNode,
+			Status:        incidentStatusActive,
+			Scope:         "node:" + proxy.StableID,
+			Subscription:  proxy.SubName,
+			StableIDs:     []string{proxy.StableID},
+			NodeNames:     []string{proxy.Name},
+			AffectedCount: 1,
+			TotalCount:    1,
+			CauseCode:     failure.Code,
+			CauseSummary:  failure.Summary,
+			CauseDetail:   failure.Detail,
+			StartedAt:     startedAt,
+			UpdatedAt:     now,
+		})
+		return true
+	}
+	incident := &s.incidents[index]
+	incident.CauseCode = failure.Code
+	incident.CauseSummary = failure.Summary
+	incident.CauseDetail = failure.Detail
+	incident.UpdatedAt = now
+	incident.DurationSec = durationSeconds(incident.StartedAt, now)
+	return true
+}
+
+type massIncidentCandidate struct {
+	Scope        string
+	Subscription string
+	StableIDs    []string
+	NodeNames    []string
+	TotalCount   int
+	Cause        checker.FailureDetails
+}
+
+type incidentNodeFailure struct {
+	proxy   *models.ProxyConfig
+	details checker.ProxyStatusDetails
+}
+
+func (s *Store) updateMassIncidentsLocked(proxies []*models.ProxyConfig, detailsByStableID map[string]checker.ProxyStatusDetails, now time.Time) bool {
+	candidates := correlateMassIncidents(proxies, detailsByStableID)
+	activeScopes := make(map[string]bool, len(candidates))
+	changed := false
+	for _, candidate := range candidates {
+		activeScopes[candidate.Scope] = true
+		index := s.findActiveIncidentLocked(incidentKindMass, candidate.Scope)
+		if index < 0 {
+			s.incidents = append(s.incidents, IncidentRecord{
+				ID:            incidentID("mass", candidate.Scope, now),
+				Kind:          incidentKindMass,
+				Status:        incidentStatusActive,
+				Scope:         candidate.Scope,
+				Subscription:  candidate.Subscription,
+				StableIDs:     append([]string(nil), candidate.StableIDs...),
+				NodeNames:     append([]string(nil), candidate.NodeNames...),
+				AffectedCount: len(candidate.StableIDs),
+				TotalCount:    candidate.TotalCount,
+				CauseCode:     candidate.Cause.Code,
+				CauseSummary:  candidate.Cause.Summary,
+				CauseDetail:   candidate.Cause.Detail,
+				StartedAt:     now,
+				UpdatedAt:     now,
+			})
+			changed = true
+			continue
+		}
+		incident := &s.incidents[index]
+		incident.StableIDs = append([]string(nil), candidate.StableIDs...)
+		incident.NodeNames = append([]string(nil), candidate.NodeNames...)
+		incident.AffectedCount = len(candidate.StableIDs)
+		incident.TotalCount = candidate.TotalCount
+		incident.CauseCode = candidate.Cause.Code
+		incident.CauseSummary = candidate.Cause.Summary
+		incident.CauseDetail = candidate.Cause.Detail
+		incident.UpdatedAt = now
+		incident.DurationSec = durationSeconds(incident.StartedAt, now)
+		changed = true
+	}
+	for index := range s.incidents {
+		incident := &s.incidents[index]
+		if incident.Kind == incidentKindMass && incident.Status == incidentStatusActive && !activeScopes[incident.Scope] {
+			s.resolveIncidentLocked(index, now)
+			changed = true
+		}
+	}
+	return changed
+}
+
+func correlateMassIncidents(proxies []*models.ProxyConfig, detailsByStableID map[string]checker.ProxyStatusDetails) []massIncidentCandidate {
+	var failed []incidentNodeFailure
+	active := make([]*models.ProxyConfig, 0, len(proxies))
+	for _, proxy := range proxies {
+		if proxy == nil || proxy.StableID == "" {
+			continue
+		}
+		active = append(active, proxy)
+		if details, ok := detailsByStableID[proxy.StableID]; ok && !details.Online {
+			failed = append(failed, incidentNodeFailure{proxy: proxy, details: details})
+		}
+	}
+	if candidate, ok := massCandidate("global", "", active, failed); ok {
+		return []massIncidentCandidate{candidate}
+	}
+
+	bySubscription := make(map[string][]*models.ProxyConfig)
+	failedBySubscription := make(map[string][]incidentNodeFailure)
+	for _, proxy := range active {
+		bySubscription[proxy.SubName] = append(bySubscription[proxy.SubName], proxy)
+	}
+	for _, item := range failed {
+		failedBySubscription[item.proxy.SubName] = append(failedBySubscription[item.proxy.SubName], item)
+	}
+	var result []massIncidentCandidate
+	for subscription, subscriptionProxies := range bySubscription {
+		scope := "subscription:" + subscription
+		if subscription == "" {
+			scope = "subscription:(unnamed)"
+		}
+		if candidate, ok := massCandidate(scope, subscription, subscriptionProxies, failedBySubscription[subscription]); ok {
+			result = append(result, candidate)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Scope < result[j].Scope })
+	return result
+}
+
+func massCandidate(scope, subscription string, active []*models.ProxyConfig, failed []incidentNodeFailure) (massIncidentCandidate, bool) {
+	if len(active) == 0 || len(failed) == 0 {
+		return massIncidentCandidate{}, false
+	}
+	required := (len(active) + 1) / 2
+	if required < 3 {
+		required = 3
+	}
+	byCause := make(map[string][]incidentNodeFailure)
+	for _, item := range failed {
+		code := item.details.Failure.Code
+		if code == "" {
+			code = checker.FailureCodeUnknown
+		}
+		byCause[code] = append(byCause[code], item)
+	}
+	var causeCodes []string
+	for code := range byCause {
+		causeCodes = append(causeCodes, code)
+	}
+	sort.Strings(causeCodes)
+	selectedCode := ""
+	for _, code := range causeCodes {
+		if len(byCause[code]) < required {
+			continue
+		}
+		if selectedCode == "" || len(byCause[code]) > len(byCause[selectedCode]) {
+			selectedCode = code
+		}
+	}
+	if selectedCode == "" {
+		return massIncidentCandidate{}, false
+	}
+	selected := byCause[selectedCode]
+	sort.Slice(selected, func(i, j int) bool { return selected[i].proxy.StableID < selected[j].proxy.StableID })
+	cause := selected[0].details.Failure
+	if cause.Code == "" {
+		cause.Code = selectedCode
+	}
+	if cause.Summary == "" {
+		cause.Summary = checker.FailureSummary(cause.Code)
+	}
+	if scope == "global" && likelySharedCheckEndpoint(selectedCode, selected) {
+		cause = checker.FailureDetails{
+			Code:    checker.FailureCodeCheckEndpoint,
+			Summary: "Вероятен общий сбой проверочного endpoint",
+			Detail:  "одинаковая ошибка проверки при доступных TCP-портах разных нод",
+		}
+	}
+	candidate := massIncidentCandidate{
+		Scope:        scope,
+		Subscription: subscription,
+		TotalCount:   len(active),
+		Cause:        cause,
+	}
+	for _, item := range selected {
+		candidate.StableIDs = append(candidate.StableIDs, item.proxy.StableID)
+		candidate.NodeNames = append(candidate.NodeNames, item.proxy.Name)
+	}
+	return candidate, true
+}
+
+func likelySharedCheckEndpoint(code string, failed []incidentNodeFailure) bool {
+	switch code {
+	case checker.FailureCodeDNS, checker.FailureCodeHTTPStatus, checker.FailureCodeProxyTimeout, checker.FailureCodeTLS:
+	default:
+		return false
+	}
+	servers := make(map[string]bool)
+	for _, item := range failed {
+		if !item.details.HostCheck.Checked || !item.details.HostCheck.Online {
+			return false
+		}
+		servers[item.proxy.Server] = true
+	}
+	return len(servers) >= 2
+}
+
+func (s *Store) findActiveIncidentLocked(kind, scope string) int {
+	for index := len(s.incidents) - 1; index >= 0; index-- {
+		incident := s.incidents[index]
+		if incident.Kind == kind && incident.Scope == scope && incident.Status == incidentStatusActive {
+			return index
+		}
+	}
+	return -1
+}
+
+func (s *Store) resolveIncidentLocked(index int, resolvedAt time.Time) {
+	if index < 0 || index >= len(s.incidents) {
+		return
+	}
+	incident := &s.incidents[index]
+	incident.Status = incidentStatusResolved
+	incident.ResolvedAt = resolvedAt
+	incident.UpdatedAt = resolvedAt
+	incident.DurationSec = durationSeconds(incident.StartedAt, resolvedAt)
+}
+
+func (s *Store) pruneIncidentsLocked() bool {
+	if len(s.incidents) <= maxIncidentRecords {
+		return false
+	}
+	active := make([]IncidentRecord, 0)
+	resolved := make([]IncidentRecord, 0)
+	for _, incident := range s.incidents {
+		if incident.Status == incidentStatusActive {
+			active = append(active, incident)
+		} else {
+			resolved = append(resolved, incident)
+		}
+	}
+	sort.Slice(resolved, func(i, j int) bool { return resolved[i].StartedAt.After(resolved[j].StartedAt) })
+	keepResolved := maxIncidentRecords - len(active)
+	if keepResolved < 0 {
+		keepResolved = 0
+	}
+	if len(resolved) > keepResolved {
+		resolved = resolved[:keepResolved]
+	}
+	s.incidents = append(active, resolved...)
+	return true
+}
+
+func normalizeIncidents(input []IncidentRecord) []IncidentRecord {
+	result := make([]IncidentRecord, 0, len(input))
+	seen := make(map[string]bool)
+	for _, incident := range input {
+		incident.ID = strings.TrimSpace(incident.ID)
+		incident.Kind = strings.TrimSpace(incident.Kind)
+		incident.Scope = strings.TrimSpace(incident.Scope)
+		if incident.ID == "" || incident.Scope == "" || incident.StartedAt.IsZero() || seen[incident.ID] {
+			continue
+		}
+		if incident.Kind != incidentKindNode && incident.Kind != incidentKindMass {
+			continue
+		}
+		if incident.Status != incidentStatusActive && incident.Status != incidentStatusResolved {
+			incident.Status = incidentStatusResolved
+		}
+		incident.StableIDs = uniqueSortedStrings(incident.StableIDs)
+		incident.NodeNames = append([]string(nil), incident.NodeNames...)
+		if incident.CauseCode == "" {
+			incident.CauseCode = checker.FailureCodeUnknown
+		}
+		if incident.CauseSummary == "" {
+			incident.CauseSummary = checker.FailureSummary(incident.CauseCode)
+		}
+		seen[incident.ID] = true
+		result = append(result, incident)
+	}
+	if len(result) > maxIncidentRecords {
+		result = result[len(result)-maxIncidentRecords:]
+	}
+	return result
+}
+
+func uniqueSortedStrings(values []string) []string {
+	seen := make(map[string]bool)
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func incidentID(kind, scope string, startedAt time.Time) string {
+	replacer := strings.NewReplacer(" ", "-", ":", "-", "/", "-")
+	return fmt.Sprintf("%s-%d-%s", kind, startedAt.UnixNano(), replacer.Replace(scope))
+}
+
+func durationSeconds(startedAt, endedAt time.Time) int64 {
+	if startedAt.IsZero() || endedAt.Before(startedAt) {
+		return 0
+	}
+	return int64(endedAt.Sub(startedAt).Seconds())
+}
+
 func applySpeedStats(summary *Summary, entries []speedtest.Result) {
 	for _, entry := range entries {
 		summary.ResultCount++
@@ -954,6 +1357,7 @@ func (s *Store) saveLocked() error {
 		Version:   stateVersion,
 		UpdatedAt: time.Now(),
 		Nodes:     s.nodes,
+		Incidents: s.incidents,
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {

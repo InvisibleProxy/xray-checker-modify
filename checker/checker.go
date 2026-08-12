@@ -64,6 +64,8 @@ type ProxyStatusDetails struct {
 	DownSince     time.Time
 	HostCheck     HostCheckDetails
 	PingCheck     PingCheckDetails
+	CheckFailure  FailureDetails
+	Failure       FailureDetails
 }
 
 type HostCheckDetails struct {
@@ -206,7 +208,7 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 		return atomic.LoadUint64(&pc.generation) == expectedGeneration
 	}
 
-	setFailedStatus := func() {
+	setFailedStatus := func(failure FailureDetails) {
 		if !isGenerationValid() {
 			logger.Debug("%s | Skipping metric update: generation changed", proxy.Name)
 			return
@@ -219,7 +221,7 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 			0,
 		)
 		pc.currentMetrics.Store(metricKey, false)
-		hostCheck, pingCheck := pc.markUnavailableAndCollectDiagnostics(proxy)
+		hostCheck, pingCheck := pc.markUnavailableAndCollectDiagnostics(proxy, failure)
 		logHostDiagnostics(proxy.Name, hostCheck, pingCheck)
 	}
 
@@ -241,7 +243,7 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 	proxyURLParsed, err := url.Parse(proxyURL)
 	if err != nil {
 		logger.Error("Error parsing proxy URL %s: %v", proxyURL, err)
-		setFailedStatus()
+		setFailedStatus(failureDetails(FailureCodeConfiguration, err.Error()))
 		setFailedLatency()
 
 		return
@@ -268,6 +270,8 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 		checkSuccess, logMessage, latency, checkErr = pc.checkByDownload(client)
 	} else {
 		logger.Error("Invalid check method: %s", pc.checkMethod)
+		setFailedStatus(failureDetails(FailureCodeConfiguration, "invalid check method: "+pc.checkMethod))
+		setFailedLatency()
 		return
 	}
 
@@ -277,7 +281,7 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 		} else {
 			logger.Error("%s | %v", proxy.Name, checkErr)
 		}
-		setFailedStatus()
+		setFailedStatus(failureFromError(checkErr))
 		setFailedLatency()
 
 		return
@@ -289,7 +293,7 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 		} else {
 			logger.Error("%s | Failed | %s | Latency: %s", proxy.Name, logMessage, latency)
 		}
-		setFailedStatus()
+		setFailedStatus(failureFromCheckResult(pc.checkMethod, logMessage))
 		setFailedLatency()
 	} else {
 		logger.Result("%s | Success | %s | Latency: %s", proxy.Name, logMessage, latency)
@@ -454,12 +458,16 @@ func (pc *ProxyChecker) ClearMetrics() {
 }
 
 func (pc *ProxyChecker) storeStatusDetails(stableID string, online bool, latency time.Duration, hostCheck *HostCheckDetails, pingCheck *PingCheckDetails) bool {
-	pc.statusMu.Lock()
-	defer pc.statusMu.Unlock()
-	return pc.storeStatusDetailsLocked(stableID, online, latency, hostCheck, pingCheck)
+	return pc.storeStatusDetailsWithFailure(stableID, online, latency, hostCheck, pingCheck, nil)
 }
 
-func (pc *ProxyChecker) storeStatusDetailsLocked(stableID string, online bool, latency time.Duration, hostCheck *HostCheckDetails, pingCheck *PingCheckDetails) bool {
+func (pc *ProxyChecker) storeStatusDetailsWithFailure(stableID string, online bool, latency time.Duration, hostCheck *HostCheckDetails, pingCheck *PingCheckDetails, failure *FailureDetails) bool {
+	pc.statusMu.Lock()
+	defer pc.statusMu.Unlock()
+	return pc.storeStatusDetailsLocked(stableID, online, latency, hostCheck, pingCheck, failure)
+}
+
+func (pc *ProxyChecker) storeStatusDetailsLocked(stableID string, online bool, latency time.Duration, hostCheck *HostCheckDetails, pingCheck *PingCheckDetails, failure *FailureDetails) bool {
 	if stableID == "" {
 		return false
 	}
@@ -483,6 +491,8 @@ func (pc *ProxyChecker) storeStatusDetailsLocked(stableID string, online bool, l
 			details.DownSince = previous.DownSince
 			details.HostCheck = previous.HostCheck
 			details.PingCheck = previous.PingCheck
+			details.CheckFailure = previous.CheckFailure
+			details.Failure = previous.Failure
 		}
 	}
 
@@ -495,17 +505,27 @@ func (pc *ProxyChecker) storeStatusDetailsLocked(stableID string, online bool, l
 	if !online && pingCheck != nil {
 		details.PingCheck = *pingCheck
 	}
+	if !online && failure != nil {
+		details.CheckFailure = *failure
+	}
+	if !online {
+		details.Failure = DiagnoseFailure(details.CheckFailure, details.HostCheck, details.PingCheck)
+	}
 
 	pc.statusDetails.Store(stableID, details)
 	return becameUnavailable
 }
 
-func (pc *ProxyChecker) markUnavailableAndCollectDiagnostics(proxy *models.ProxyConfig) (*HostCheckDetails, *PingCheckDetails) {
+func (pc *ProxyChecker) markUnavailableAndCollectDiagnostics(proxy *models.ProxyConfig, failures ...FailureDetails) (*HostCheckDetails, *PingCheckDetails) {
 	if proxy == nil || proxy.StableID == "" {
 		return nil, nil
 	}
+	failure := FailureDetails{}
+	if len(failures) > 0 {
+		failure = failures[0]
+	}
 
-	if !pc.storeStatusDetails(proxy.StableID, false, 0, nil, nil) {
+	if !pc.storeStatusDetailsWithFailure(proxy.StableID, false, 0, nil, nil, &failure) {
 		return nil, nil
 	}
 
@@ -528,6 +548,7 @@ func (pc *ProxyChecker) storeOfflineDiagnostics(stableID string, hostCheck HostC
 	}
 	current.HostCheck = hostCheck
 	current.PingCheck = pingCheck
+	current.Failure = DiagnoseFailure(current.CheckFailure, hostCheck, pingCheck)
 	pc.statusDetails.Store(stableID, current)
 }
 
@@ -585,7 +606,7 @@ func (pc *ProxyChecker) RefreshHostDiagnosticsByStableID(stableID string) (Proxy
 		return current, nil
 	}
 
-	pc.storeStatusDetailsLocked(proxy.StableID, false, 0, &hostCheck, &pingCheck)
+	pc.storeStatusDetailsLocked(proxy.StableID, false, 0, &hostCheck, &pingCheck, nil)
 	updatedValue, ok := pc.statusDetails.Load(proxy.StableID)
 	if !ok {
 		return ProxyStatusDetails{}, fmt.Errorf("metric not found")
@@ -827,7 +848,7 @@ func (pc *ProxyChecker) pruneStatusDetails(proxies []*models.ProxyConfig) {
 	})
 }
 
-func (pc *ProxyChecker) RestoreOfflineStatus(stableID string, downSince time.Time, hostCheck HostCheckDetails, pingCheck PingCheckDetails) bool {
+func (pc *ProxyChecker) RestoreOfflineStatus(stableID string, downSince time.Time, hostCheck HostCheckDetails, pingCheck PingCheckDetails, failures ...FailureDetails) bool {
 	if stableID == "" || downSince.IsZero() {
 		return false
 	}
@@ -860,6 +881,13 @@ func (pc *ProxyChecker) RestoreOfflineStatus(stableID string, downSince time.Tim
 	now := time.Now()
 	pc.statusMu.Lock()
 	defer pc.statusMu.Unlock()
+	var failure FailureDetails
+	if len(failures) > 0 {
+		failure = failures[0]
+	}
+	if failure.Code == "" {
+		failure = DiagnoseFailure(FailureDetails{}, hostCheck, pingCheck)
+	}
 	pc.statusDetails.Store(stableID, ProxyStatusDetails{
 		Online:        false,
 		Latency:       0,
@@ -868,6 +896,8 @@ func (pc *ProxyChecker) RestoreOfflineStatus(stableID string, downSince time.Tim
 		DownSince:     downSince,
 		HostCheck:     hostCheck,
 		PingCheck:     pingCheck,
+		CheckFailure:  failure,
+		Failure:       failure,
 	})
 	pc.currentMetrics.Store(metricKey, false)
 	pc.latencyMetrics.Store(metricKey, time.Duration(0))

@@ -172,6 +172,7 @@ type Service struct {
 
 	mu           sync.RWMutex
 	nodeNotifyMu sync.Mutex
+	stateSaveMu  sync.Mutex
 	config       Config
 	alerts       map[string]nodeAlertState
 	menuMessages map[string]int
@@ -187,6 +188,7 @@ type Service struct {
 	speedRetryWG        sync.WaitGroup
 	speedRetryPending   map[string]bool
 	speedRetryTimers    map[uint64]*time.Timer
+	speedRetryEntries   map[uint64]pendingSpeedRetry
 	speedRetrySeq       uint64
 	speedRetryDelay     time.Duration
 	speedRetryBusy      time.Duration
@@ -206,15 +208,29 @@ type nodeAlertState struct {
 	LastDiagnostics time.Time
 	HostCheck       checker.HostCheckDetails
 	PingCheck       checker.PingCheckDetails
+	Failure         checker.FailureDetails
 	RecoveryPending bool
 	RecoveredAt     time.Time
 	RecoveryLatency time.Duration
 }
 
 type nodeAlertStateFile struct {
-	Version   int                                `json:"version"`
-	UpdatedAt time.Time                          `json:"updatedAt"`
-	Nodes     map[string]persistedNodeAlertState `json:"nodes"`
+	Version      int                                `json:"version"`
+	UpdatedAt    time.Time                          `json:"updatedAt"`
+	Nodes        map[string]persistedNodeAlertState `json:"nodes"`
+	SpeedRetries []persistedSpeedRetry              `json:"speedRetries,omitempty"`
+}
+
+type pendingSpeedRetry struct {
+	Request   speedtest.RunRequest
+	StableIDs []string
+	DueAt     time.Time
+}
+
+type persistedSpeedRetry struct {
+	StableIDs []string             `json:"stableIds"`
+	Config    speedtest.TestConfig `json:"config"`
+	DueAt     time.Time            `json:"dueAt"`
 }
 
 type persistedNodeAlertState struct {
@@ -227,6 +243,9 @@ type persistedNodeAlertState struct {
 	LastDiagnostics time.Time           `json:"lastDiagnostics"`
 	HostCheck       *persistedHostCheck `json:"hostCheck,omitempty"`
 	PingCheck       *persistedPingCheck `json:"pingCheck,omitempty"`
+	FailureCode     string              `json:"failureCode,omitempty"`
+	FailureSummary  string              `json:"failureSummary,omitempty"`
+	FailureDetail   string              `json:"failureDetail,omitempty"`
 	RecoveryPending bool                `json:"recoveryPending,omitempty"`
 	RecoveredAt     time.Time           `json:"recoveredAt,omitempty"`
 	RecoveryLatency int64               `json:"recoveryLatencyMs,omitempty"`
@@ -259,6 +278,14 @@ type nodeDownAlert struct {
 	Proxy     *models.ProxyConfig
 	State     nodeAlertState
 	NextAfter time.Duration
+}
+
+type nodeDownIncidentGroup struct {
+	Scope        string
+	Subscription string
+	Alerts       []nodeDownAlert
+	Total        int
+	Cause        checker.FailureDetails
 }
 
 type nodeRecoveryAlert struct {
@@ -355,6 +382,7 @@ func NewService(statePath string, proxyChecker *checker.ProxyChecker, speedManag
 		stopCh:            make(chan struct{}),
 		speedRetryPending: make(map[string]bool),
 		speedRetryTimers:  make(map[uint64]*time.Timer),
+		speedRetryEntries: make(map[uint64]pendingSpeedRetry),
 		speedRetryDelay:   lowSpeedRetryDelay,
 		speedRetryBusy:    lowSpeedRetryBusyDelay,
 	}
@@ -475,17 +503,40 @@ func (s *Service) PruneInactiveMutedNodes() error {
 	prunedAll := s.activeMutedNodeIDs(currentAll)
 	prunedSpeed := s.activeMutedNodeIDs(currentSpeed)
 	prunedAlert := s.activeMutedNodeIDs(currentAlert)
-	if sameNodeIDs(currentAll, prunedAll) && sameNodeIDs(currentSpeed, prunedSpeed) && sameNodeIDs(currentAlert, prunedAlert) {
-		return nil
+	configChanged := !sameNodeIDs(currentAll, prunedAll) || !sameNodeIDs(currentSpeed, prunedSpeed) || !sameNodeIDs(currentAlert, prunedAlert)
+	if configChanged {
+		cfg.MutedNodeIDs = prunedAll
+		cfg.MutedSpeedNodeIDs = prunedSpeed
+		cfg.MutedAlertNodeIDs = prunedAlert
+		if err := s.saveEditableConfig(cfg); err != nil {
+			return err
+		}
+		s.setConfig(cfg)
 	}
 
-	cfg.MutedNodeIDs = prunedAll
-	cfg.MutedSpeedNodeIDs = prunedSpeed
-	cfg.MutedAlertNodeIDs = prunedAlert
-	if err := s.saveEditableConfig(cfg); err != nil {
-		return err
+	active := make(map[string]bool)
+	for _, proxy := range s.proxyChecker.GetProxies() {
+		if proxy != nil {
+			if proxy.StableID == "" {
+				proxy.StableID = proxy.GenerateStableID()
+			}
+			active[proxy.StableID] = true
+		}
 	}
-	s.setConfig(cfg)
+	var inactiveRetries []string
+	s.speedRetryMu.Lock()
+	for stableID := range s.speedRetryPending {
+		if !active[stableID] {
+			inactiveRetries = append(inactiveRetries, stableID)
+		}
+	}
+	s.speedRetryMu.Unlock()
+	if len(inactiveRetries) > 0 {
+		s.clearLowSpeedRetry(inactiveRetries)
+		if err := s.saveAlertState(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -503,6 +554,7 @@ func (s *Service) UpdateConfig(cfg Config) error {
 }
 
 func (s *Service) Start() {
+	s.startRestoredLowSpeedRetries()
 	go s.pollingLoop()
 }
 
@@ -516,8 +568,10 @@ func (s *Service) Stop() {
 			}
 		}
 		s.speedRetryTimers = make(map[uint64]*time.Timer)
-		s.speedRetryPending = make(map[string]bool)
 		s.speedRetryMu.Unlock()
+		if err := s.saveAlertState(); err != nil {
+			logger.Warn("Failed to save pending low-speed retries on shutdown: %v", err)
+		}
 		s.speedRetryWG.Wait()
 	})
 }
@@ -637,9 +691,9 @@ func (s *Service) scheduleLowSpeedRetry(report speedtest.RunReport) bool {
 	}
 
 	s.speedRetryMu.Lock()
-	defer s.speedRetryMu.Unlock()
 	select {
 	case <-s.stopCh:
+		s.speedRetryMu.Unlock()
 		return false
 	default:
 	}
@@ -648,6 +702,9 @@ func (s *Service) scheduleLowSpeedRetry(report speedtest.RunReport) bool {
 	}
 	if s.speedRetryTimers == nil {
 		s.speedRetryTimers = make(map[uint64]*time.Timer)
+	}
+	if s.speedRetryEntries == nil {
+		s.speedRetryEntries = make(map[uint64]pendingSpeedRetry)
 	}
 
 	newIDs := ids[:0]
@@ -659,6 +716,7 @@ func (s *Service) scheduleLowSpeedRetry(report speedtest.RunReport) bool {
 		newIDs = append(newIDs, stableID)
 	}
 	if len(newIDs) == 0 {
+		s.speedRetryMu.Unlock()
 		return true
 	}
 
@@ -667,6 +725,8 @@ func (s *Service) scheduleLowSpeedRetry(report speedtest.RunReport) bool {
 		Config:   report.Config,
 	}
 	s.scheduleLowSpeedRetryLocked(req, append([]string(nil), newIDs...), s.configuredSpeedRetryDelay())
+	s.speedRetryMu.Unlock()
+	s.persistRetryStateWithWarn()
 	return true
 }
 
@@ -687,6 +747,24 @@ func (s *Service) configuredSpeedRetryBusyDelay() time.Duration {
 func (s *Service) scheduleLowSpeedRetryLocked(req speedtest.RunRequest, ids []string, delay time.Duration) {
 	s.speedRetrySeq++
 	timerID := s.speedRetrySeq
+	if delay < 0 {
+		delay = 0
+	}
+	s.speedRetryEntries[timerID] = pendingSpeedRetry{
+		Request:   req,
+		StableIDs: append([]string(nil), ids...),
+		DueAt:     time.Now().Add(delay),
+	}
+	s.armLowSpeedRetryLocked(timerID, delay)
+}
+
+func (s *Service) armLowSpeedRetryLocked(timerID uint64, delay time.Duration) {
+	entry, ok := s.speedRetryEntries[timerID]
+	if !ok {
+		return
+	}
+	req := entry.Request
+	ids := append([]string(nil), entry.StableIDs...)
 	s.speedRetryWG.Add(1)
 	s.speedRetryTimers[timerID] = time.AfterFunc(delay, func() {
 		defer s.speedRetryWG.Done()
@@ -701,7 +779,6 @@ func (s *Service) runLowSpeedRetry(timerID uint64, req speedtest.RunRequest, ids
 
 	select {
 	case <-s.stopCh:
-		s.clearLowSpeedRetry(ids)
 		return
 	default:
 	}
@@ -714,20 +791,20 @@ func (s *Service) runLowSpeedRetry(timerID uint64, req speedtest.RunRequest, ids
 		s.speedRetryMu.Lock()
 		select {
 		case <-s.stopCh:
-			for _, stableID := range ids {
-				delete(s.speedRetryPending, stableID)
-			}
 			s.speedRetryMu.Unlock()
 			return
 		default:
 		}
+		delete(s.speedRetryEntries, timerID)
 		s.scheduleLowSpeedRetryLocked(req, ids, s.configuredSpeedRetryBusyDelay())
 		s.speedRetryMu.Unlock()
+		s.persistRetryStateWithWarn()
 		logger.Warn("Low-speed confirmation test postponed because another speed-test is running")
 		return
 	}
 
 	s.clearLowSpeedRetry(ids)
+	s.persistRetryStateWithWarn()
 	logger.Warn("Failed to start low-speed confirmation test: %v", err)
 }
 
@@ -739,13 +816,57 @@ func (s *Service) completeLowSpeedRetry(results []speedtest.Result) {
 		}
 	}
 	s.clearLowSpeedRetry(ids)
+	s.persistRetryStateWithWarn()
 }
 
 func (s *Service) clearLowSpeedRetry(ids []string) {
 	s.speedRetryMu.Lock()
 	defer s.speedRetryMu.Unlock()
+	cleared := make(map[string]bool, len(ids))
 	for _, stableID := range ids {
 		delete(s.speedRetryPending, stableID)
+		cleared[stableID] = true
+	}
+	for timerID, entry := range s.speedRetryEntries {
+		remaining := entry.StableIDs[:0]
+		for _, stableID := range entry.StableIDs {
+			if !cleared[stableID] {
+				remaining = append(remaining, stableID)
+			}
+		}
+		if len(remaining) == 0 {
+			delete(s.speedRetryEntries, timerID)
+			if timer := s.speedRetryTimers[timerID]; timer != nil && timer.Stop() {
+				s.speedRetryWG.Done()
+			}
+			delete(s.speedRetryTimers, timerID)
+			continue
+		}
+		entry.StableIDs = append([]string(nil), remaining...)
+		entry.Request.ProxyIDs = append([]string(nil), remaining...)
+		s.speedRetryEntries[timerID] = entry
+	}
+}
+
+func (s *Service) startRestoredLowSpeedRetries() {
+	s.speedRetryMu.Lock()
+	defer s.speedRetryMu.Unlock()
+	now := time.Now()
+	for timerID, entry := range s.speedRetryEntries {
+		if s.speedRetryTimers[timerID] != nil {
+			continue
+		}
+		delay := entry.DueAt.Sub(now)
+		if delay < 0 {
+			delay = 0
+		}
+		s.armLowSpeedRetryLocked(timerID, delay)
+	}
+}
+
+func (s *Service) persistRetryStateWithWarn() {
+	if err := s.saveAlertState(); err != nil {
+		logger.Warn("Failed to save pending low-speed retries: %v", err)
 	}
 }
 
@@ -840,6 +961,9 @@ func (s *Service) NotifyNodeStatuses() bool {
 			if details.PingCheck.Checked {
 				state.PingCheck = details.PingCheck
 			}
+			if details.Failure.Code != "" {
+				state.Failure = details.Failure
+			}
 			state.LastDiagnostics = latestDiagnosticsAt(state.LastDiagnostics, state.HostCheck, state.PingCheck)
 			if state.DownSince.IsZero() {
 				state.DownSince = details.DownSince
@@ -906,7 +1030,7 @@ func (s *Service) NotifyNodeStatuses() bool {
 		if result.Details.Online {
 			continue
 		}
-		if s.updateAlertDiagnostics(result.StableID, result.Details.HostCheck, result.Details.PingCheck) {
+		if s.updateAlertDiagnostics(result.StableID, result.Details.HostCheck, result.Details.PingCheck, result.Details.Failure) {
 			stateChanged = true
 		}
 	}
@@ -926,14 +1050,22 @@ func (s *Service) NotifyNodeStatuses() bool {
 		}
 	}
 
-	if cfg.GroupOfflineReminders && len(downAlerts) > 1 {
-		if err := s.sendNodeAlertMessage(cfg, formatNodeDownGroupMessage(downAlerts, now)); err == nil {
-			if s.confirmNodeDownAlertsSent(downAlerts, time.Now(), cfg) {
+	massGroups, remainingDownAlerts := partitionMassNodeDownAlerts(downAlerts, proxies, muted)
+	for _, group := range massGroups {
+		if err := s.sendNodeAlertMessage(cfg, formatMassNodeDownMessage(group, now)); err == nil {
+			if s.confirmNodeDownAlertsSent(group.Alerts, time.Now(), cfg) {
+				stateChanged = true
+			}
+		}
+	}
+	if cfg.GroupOfflineReminders && len(remainingDownAlerts) > 1 {
+		if err := s.sendNodeAlertMessage(cfg, formatNodeDownGroupMessage(remainingDownAlerts, now)); err == nil {
+			if s.confirmNodeDownAlertsSent(remainingDownAlerts, time.Now(), cfg) {
 				stateChanged = true
 			}
 		}
 	} else {
-		for _, alert := range downAlerts {
+		for _, alert := range remainingDownAlerts {
 			if err := s.sendNodeAlertMessage(cfg, formatNodeDownMessage(alert.Proxy, alert.State, now)); err == nil {
 				if s.confirmNodeDownAlertsSent([]nodeDownAlert{alert}, time.Now(), cfg) {
 					stateChanged = true
@@ -1536,7 +1668,7 @@ func (s *Service) refreshHostDiagnosticsForStillOffline(stableIDs map[string]boo
 		if result.Details.Online {
 			continue
 		}
-		if s.updateAlertDiagnostics(result.StableID, result.Details.HostCheck, result.Details.PingCheck) {
+		if s.updateAlertDiagnostics(result.StableID, result.Details.HostCheck, result.Details.PingCheck, result.Details.Failure) {
 			stateChanged = true
 		}
 	}
@@ -1547,7 +1679,7 @@ func (s *Service) refreshHostDiagnosticsForStillOffline(stableIDs map[string]boo
 	}
 }
 
-func (s *Service) updateAlertDiagnostics(stableID string, hostCheck checker.HostCheckDetails, pingCheck checker.PingCheckDetails) bool {
+func (s *Service) updateAlertDiagnostics(stableID string, hostCheck checker.HostCheckDetails, pingCheck checker.PingCheckDetails, failure checker.FailureDetails) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1562,6 +1694,9 @@ func (s *Service) updateAlertDiagnostics(stableID string, hostCheck checker.Host
 	}
 	if pingCheck.Checked {
 		state.PingCheck = pingCheck
+	}
+	if failure.Code != "" {
+		state.Failure = failure
 	}
 	state.LastDiagnostics = latestDiagnosticsAt(state.LastDiagnostics, state.HostCheck, state.PingCheck)
 	if previous == state {
@@ -1847,6 +1982,9 @@ func (s *Service) formatNodeDetails(stableID string) string {
 		lines = append(lines, fmt.Sprintf("Простой: <b>%s</b>", htmlEscape(formatDuration(time.Since(details.DownSince)))))
 	}
 	if !online {
+		if failure := formatFailureHTML(details.Failure); failure != "" {
+			lines = append(lines, failure)
+		}
 		if diagnostics := formatHostDiagnosticsHTML(details.HostCheck, details.PingCheck); diagnostics != "" {
 			lines = append(lines, fmt.Sprintf("Диагностика: %s", diagnostics))
 		}
@@ -1901,6 +2039,9 @@ func (s *Service) formatNodeDetailsMessage(stableID string) formattedMessage {
 		fmt.Fprintf(&rich, "<p>Простой: <b>%s</b> · с %s</p>", htmlEscape(formatDuration(time.Since(details.DownSince))), htmlEscape(formatCheckedAt(details.DownSince)))
 	}
 	if !online {
+		if failure := formatFailureHTML(details.Failure); failure != "" {
+			fmt.Fprintf(&rich, "<p>%s</p>", failure)
+		}
 		if diagnostics := formatHostDiagnosticsHTML(details.HostCheck, details.PingCheck); diagnostics != "" {
 			fmt.Fprintf(&rich, "<blockquote>%s</blockquote>", diagnostics)
 		}
@@ -2856,10 +2997,6 @@ func (s *Service) loadAlertState() error {
 	if err := json.Unmarshal(data, &stateFile); err != nil {
 		return err
 	}
-	if len(stateFile.Nodes) == 0 {
-		return nil
-	}
-
 	active := make(map[string]bool)
 	for _, proxy := range s.proxyChecker.GetProxies() {
 		if proxy.StableID == "" {
@@ -2881,30 +3018,63 @@ func (s *Service) loadAlertState() error {
 		}
 		loaded[stableID] = state
 	}
-	if len(loaded) == 0 {
-		return nil
+	if len(loaded) > 0 {
+		s.mu.Lock()
+		for stableID, state := range loaded {
+			s.alerts[stableID] = state
+		}
+		s.mu.Unlock()
 	}
 
-	s.mu.Lock()
-	for stableID, state := range loaded {
-		s.alerts[stableID] = state
+	restoredRetries := 0
+	s.speedRetryMu.Lock()
+	for _, persisted := range stateFile.SpeedRetries {
+		var ids []string
+		for _, rawStableID := range persisted.StableIDs {
+			stableID := strings.TrimSpace(rawStableID)
+			if stableID == "" || !active[stableID] || s.speedRetryPending[stableID] {
+				continue
+			}
+			s.speedRetryPending[stableID] = true
+			ids = append(ids, stableID)
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		sort.Strings(ids)
+		dueAt := persisted.DueAt
+		if dueAt.IsZero() {
+			dueAt = time.Now().Add(s.configuredSpeedRetryDelay())
+		}
+		s.speedRetrySeq++
+		s.speedRetryEntries[s.speedRetrySeq] = pendingSpeedRetry{
+			Request: speedtest.RunRequest{
+				ProxyIDs: append([]string(nil), ids...),
+				Config:   persisted.Config,
+			},
+			StableIDs: append([]string(nil), ids...),
+			DueAt:     dueAt,
+		}
+		restoredRetries += len(ids)
 	}
-	s.mu.Unlock()
+	s.speedRetryMu.Unlock()
 
 	restored := 0
 	for stableID, state := range loaded {
 		if state.WasDown && !state.RecoveryPending && !state.DownSince.IsZero() {
-			if s.proxyChecker.RestoreOfflineStatus(stableID, state.DownSince, state.HostCheck, state.PingCheck) {
+			if s.proxyChecker.RestoreOfflineStatus(stableID, state.DownSince, state.HostCheck, state.PingCheck, state.Failure) {
 				restored++
 			}
 		}
 	}
 
-	logger.Info("Loaded Telegram node alert state: %d nodes, restored %d offline statuses", len(loaded), restored)
+	logger.Info("Loaded Telegram state: %d alert nodes, %d offline statuses, %d pending low-speed retries", len(loaded), restored, restoredRetries)
 	return nil
 }
 
 func (s *Service) saveAlertState() error {
+	s.stateSaveMu.Lock()
+	defer s.stateSaveMu.Unlock()
 	if s.alertStatePath == "" {
 		return nil
 	}
@@ -2930,7 +3100,29 @@ func (s *Service) saveAlertState() error {
 	}
 	s.mu.RUnlock()
 
-	if len(nodes) == 0 {
+	var retries []persistedSpeedRetry
+	s.speedRetryMu.Lock()
+	for _, entry := range s.speedRetryEntries {
+		var ids []string
+		for _, stableID := range entry.StableIDs {
+			if active[stableID] {
+				ids = append(ids, stableID)
+			}
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		sort.Strings(ids)
+		retries = append(retries, persistedSpeedRetry{
+			StableIDs: ids,
+			Config:    entry.Request.Config,
+			DueAt:     entry.DueAt,
+		})
+	}
+	s.speedRetryMu.Unlock()
+	sort.Slice(retries, func(i, j int) bool { return retries[i].DueAt.Before(retries[j].DueAt) })
+
+	if len(nodes) == 0 && len(retries) == 0 {
 		if err := os.Remove(s.alertStatePath); err != nil && !os.IsNotExist(err) {
 			return err
 		}
@@ -2941,9 +3133,10 @@ func (s *Service) saveAlertState() error {
 		return err
 	}
 	data, err := json.MarshalIndent(nodeAlertStateFile{
-		Version:   1,
-		UpdatedAt: time.Now(),
-		Nodes:     nodes,
+		Version:      1,
+		UpdatedAt:    time.Now(),
+		Nodes:        nodes,
+		SpeedRetries: retries,
 	}, "", "  ")
 	if err != nil {
 		return err
@@ -2963,6 +3156,9 @@ func persistedNodeAlertStateFrom(state nodeAlertState) persistedNodeAlertState {
 		RecoveryPending: state.RecoveryPending,
 		RecoveredAt:     state.RecoveredAt,
 		RecoveryLatency: state.RecoveryLatency.Milliseconds(),
+		FailureCode:     state.Failure.Code,
+		FailureSummary:  state.Failure.Summary,
+		FailureDetail:   state.Failure.Detail,
 	}
 	if state.HostCheck.Checked {
 		hostCheck := persistedHostCheckFrom(state.HostCheck)
@@ -2987,6 +3183,14 @@ func (p persistedNodeAlertState) toNodeAlertState() nodeAlertState {
 		RecoveryPending: p.RecoveryPending,
 		RecoveredAt:     p.RecoveredAt,
 		RecoveryLatency: time.Duration(p.RecoveryLatency) * time.Millisecond,
+		Failure: checker.FailureDetails{
+			Code:    p.FailureCode,
+			Summary: p.FailureSummary,
+			Detail:  p.FailureDetail,
+		},
+	}
+	if state.Failure.Code != "" && state.Failure.Summary == "" {
+		state.Failure.Summary = checker.FailureSummary(state.Failure.Code)
 	}
 	if p.HostCheck != nil {
 		state.HostCheck = p.HostCheck.toHostCheckDetails()
@@ -3829,6 +4033,9 @@ func formatNodeDown(proxy *models.ProxyConfig, state nodeAlertState, now time.Ti
 	if !state.DownSince.IsZero() {
 		lines = append(lines, fmt.Sprintf("Простой: <b>%s</b> · с %s", htmlEscape(formatDuration(now.Sub(state.DownSince))), htmlEscape(formatCheckedAt(state.DownSince))))
 	}
+	if failure := formatFailureHTML(state.Failure); failure != "" {
+		lines = append(lines, failure)
+	}
 	if diagnostics := formatHostDiagnosticsHTML(state.HostCheck, state.PingCheck); diagnostics != "" {
 		lines = append(lines, diagnostics)
 	} else {
@@ -3851,6 +4058,9 @@ func formatNodeDownMessage(proxy *models.ProxyConfig, state nodeAlertState, now 
 	if !state.DownSince.IsZero() {
 		fmt.Fprintf(&rich, "<p>Простой: <b>%s</b> · с %s</p>", htmlEscape(formatDuration(now.Sub(state.DownSince))), htmlEscape(formatCheckedAt(state.DownSince)))
 	}
+	if failure := formatFailureHTML(state.Failure); failure != "" {
+		fmt.Fprintf(&rich, "<p>%s</p>", failure)
+	}
 	if diagnostics := formatHostDiagnosticsHTML(state.HostCheck, state.PingCheck); diagnostics != "" {
 		fmt.Fprintf(&rich, "<blockquote>%s</blockquote>", diagnostics)
 	}
@@ -3862,6 +4072,168 @@ func formatNodeDownMessage(proxy *models.ProxyConfig, state nodeAlertState, now 
 	}
 	rich.WriteString("</table></details>")
 	return formattedMessage{HTML: fallback, RichHTML: rich.String()}
+}
+
+func partitionMassNodeDownAlerts(alerts []nodeDownAlert, proxies []*models.ProxyConfig, muted map[string]bool) ([]nodeDownIncidentGroup, []nodeDownAlert) {
+	alertable := make([]*models.ProxyConfig, 0, len(proxies))
+	for _, proxy := range proxies {
+		if proxy == nil || muted[proxy.StableID] {
+			continue
+		}
+		alertable = append(alertable, proxy)
+	}
+	grouped := make(map[string]bool)
+	var groups []nodeDownIncidentGroup
+	if group, ok := buildMassNodeDownGroup("global", "", alerts, len(alertable)); ok {
+		groups = append(groups, group)
+		for _, alert := range group.Alerts {
+			grouped[alert.Proxy.StableID] = true
+		}
+	} else {
+		totals := make(map[string]int)
+		bySubscription := make(map[string][]nodeDownAlert)
+		for _, proxy := range alertable {
+			totals[proxy.SubName]++
+		}
+		for _, alert := range alerts {
+			if alert.Proxy != nil {
+				bySubscription[alert.Proxy.SubName] = append(bySubscription[alert.Proxy.SubName], alert)
+			}
+		}
+		var subscriptions []string
+		for subscription := range bySubscription {
+			subscriptions = append(subscriptions, subscription)
+		}
+		sort.Strings(subscriptions)
+		for _, subscription := range subscriptions {
+			scope := "subscription:" + subscription
+			if subscription == "" {
+				scope = "subscription:(unnamed)"
+			}
+			group, ok := buildMassNodeDownGroup(scope, subscription, bySubscription[subscription], totals[subscription])
+			if !ok {
+				continue
+			}
+			groups = append(groups, group)
+			for _, alert := range group.Alerts {
+				grouped[alert.Proxy.StableID] = true
+			}
+		}
+	}
+	remaining := make([]nodeDownAlert, 0, len(alerts))
+	for _, alert := range alerts {
+		if alert.Proxy == nil || !grouped[alert.Proxy.StableID] {
+			remaining = append(remaining, alert)
+		}
+	}
+	return groups, remaining
+}
+
+func buildMassNodeDownGroup(scope, subscription string, alerts []nodeDownAlert, total int) (nodeDownIncidentGroup, bool) {
+	required := (total + 1) / 2
+	if required < 3 {
+		required = 3
+	}
+	if total == 0 || len(alerts) < required {
+		return nodeDownIncidentGroup{}, false
+	}
+	byCause := make(map[string][]nodeDownAlert)
+	for _, alert := range alerts {
+		if alert.Proxy == nil {
+			continue
+		}
+		code := alert.State.Failure.Code
+		if code == "" {
+			code = checker.FailureCodeUnknown
+		}
+		byCause[code] = append(byCause[code], alert)
+	}
+	var codes []string
+	for code := range byCause {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+	selectedCode := ""
+	for _, code := range codes {
+		if len(byCause[code]) >= required && (selectedCode == "" || len(byCause[code]) > len(byCause[selectedCode])) {
+			selectedCode = code
+		}
+	}
+	if selectedCode == "" {
+		return nodeDownIncidentGroup{}, false
+	}
+	selected := append([]nodeDownAlert(nil), byCause[selectedCode]...)
+	sort.Slice(selected, func(i, j int) bool { return selected[i].Proxy.Name < selected[j].Proxy.Name })
+	cause := selected[0].State.Failure
+	if cause.Code == "" {
+		cause.Code = selectedCode
+	}
+	if cause.Summary == "" {
+		cause.Summary = checker.FailureSummary(cause.Code)
+	}
+	if scope == "global" && telegramLikelySharedCheckEndpoint(selectedCode, selected) {
+		cause = checker.FailureDetails{
+			Code:    checker.FailureCodeCheckEndpoint,
+			Summary: "Вероятен общий сбой проверочного endpoint",
+			Detail:  "одинаковая ошибка проверки при доступных TCP-портах разных нод",
+		}
+	}
+	return nodeDownIncidentGroup{
+		Scope:        scope,
+		Subscription: subscription,
+		Alerts:       selected,
+		Total:        total,
+		Cause:        cause,
+	}, true
+}
+
+func telegramLikelySharedCheckEndpoint(code string, alerts []nodeDownAlert) bool {
+	switch code {
+	case checker.FailureCodeDNS, checker.FailureCodeHTTPStatus, checker.FailureCodeProxyTimeout, checker.FailureCodeTLS:
+	default:
+		return false
+	}
+	servers := make(map[string]bool)
+	for _, alert := range alerts {
+		if alert.Proxy == nil || !alert.State.HostCheck.Checked || !alert.State.HostCheck.Online {
+			return false
+		}
+		servers[alert.Proxy.Server] = true
+	}
+	return len(servers) >= 2
+}
+
+func formatMassNodeDownMessage(group nodeDownIncidentGroup, now time.Time) formattedMessage {
+	scope := "все подписки"
+	if group.Subscription != "" {
+		scope = "подписка " + group.Subscription
+	} else if strings.HasPrefix(group.Scope, "subscription:") {
+		scope = "подписка без имени"
+	}
+	summary := group.Cause.Summary
+	if summary == "" {
+		summary = checker.FailureSummary(group.Cause.Code)
+	}
+	lines := []string{
+		"<b>🚨 Массовый сбой нод</b>",
+		fmt.Sprintf("Область: <b>%s</b>", htmlEscape(scope)),
+		fmt.Sprintf("Затронуто: <b>%d из %d</b>", len(group.Alerts), group.Total),
+		fmt.Sprintf("Причина: <b>%s</b> · %s", htmlEscape(summary), htmlCode(group.Cause.Code)),
+		"",
+	}
+	var items []string
+	for _, alert := range group.Alerts {
+		downtime := "—"
+		if !alert.State.DownSince.IsZero() {
+			downtime = formatDuration(now.Sub(alert.State.DownSince))
+		}
+		lines = append(lines, fmt.Sprintf("• <b>%s</b> · %s", htmlEscape(alert.Proxy.Name), htmlEscape(downtime)))
+		items = append(items, fmt.Sprintf("<li><b>%s</b> — %s</li>", htmlEscape(alert.Proxy.Name), htmlEscape(downtime)))
+	}
+	fallback := trimHTMLMessage(strings.Join(lines, "\n"))
+	rich := fmt.Sprintf("<h2>🚨 Массовый сбой нод</h2><p>%s · <b>%d из %d</b></p><blockquote>Причина: <b>%s</b> · <code>%s</code></blockquote><ul>%s</ul>",
+		htmlEscape(scope), len(group.Alerts), group.Total, htmlEscape(summary), htmlEscape(group.Cause.Code), strings.Join(items, ""))
+	return formattedMessage{HTML: fallback, RichHTML: rich}
 }
 
 func formatNodeDownGroup(alerts []nodeDownAlert, now time.Time) string {
@@ -3876,6 +4248,9 @@ func formatNodeDownGroup(alerts []nodeDownAlert, now time.Time) string {
 			downtime = formatDuration(now.Sub(state.DownSince))
 		}
 		parts := []string{fmt.Sprintf("простой %s", htmlEscape(downtime))}
+		if alert.State.Failure.Summary != "" {
+			parts = append(parts, "причина "+htmlEscape(alert.State.Failure.Summary))
+		}
 		diagnostics := formatHostDiagnosticsHTML(state.HostCheck, state.PingCheck)
 		if diagnostics == "" {
 			diagnostics = "Диагностика: нет данных"
@@ -3900,7 +4275,11 @@ func formatNodeDownGroupMessage(alerts []nodeDownAlert, now time.Time) formatted
 		if diagnostics == "" {
 			diagnostics = "диагностики нет"
 		}
-		items = append(items, fmt.Sprintf("<li>🔴 <b>%s</b> — %s · %s</li>", htmlEscape(alert.Proxy.Name), htmlEscape(downtime), diagnostics))
+		cause := state.Failure.Summary
+		if cause == "" {
+			cause = "причина не определена"
+		}
+		items = append(items, fmt.Sprintf("<li>🔴 <b>%s</b> — %s · %s · %s</li>", htmlEscape(alert.Proxy.Name), htmlEscape(downtime), htmlEscape(cause), diagnostics))
 		details = append(details, fmt.Sprintf("<li><b>%s</b> — <code>%s</code> · %s</li>", htmlEscape(alert.Proxy.Name), htmlEscape(alert.Proxy.StableID), htmlEscape(strings.ToUpper(alert.Proxy.Protocol))))
 	}
 	rich := fmt.Sprintf("<h2>⚠️ Недоступны ноды: %d</h2><ul>%s</ul><details><summary>Технические данные</summary><ul>%s</ul></details>",
@@ -3936,6 +4315,21 @@ func formatNodeRecoveryMessage(proxy *models.ProxyConfig, latency time.Duration,
 	rich := fmt.Sprintf("<h2>✅ Нода снова доступна</h2><p><b>%s</b></p><table bordered><tr><th>Простой</th><td>%s</td></tr><tr><th>Задержка</th><td>%s</td></tr></table><details><summary>StableID</summary><p><code>%s</code></p></details>",
 		htmlEscape(proxy.Name), htmlEscape(downtime), htmlEscape(latencyText), htmlEscape(proxy.StableID))
 	return formattedMessage{HTML: fallback, RichHTML: rich}
+}
+
+func formatFailureHTML(failure checker.FailureDetails) string {
+	if failure.Code == "" && failure.Summary == "" {
+		return ""
+	}
+	summary := failure.Summary
+	if summary == "" {
+		summary = checker.FailureSummary(failure.Code)
+	}
+	result := "Причина: <b>" + htmlEscape(summary) + "</b>"
+	if failure.Code != "" {
+		result += " · " + htmlCode(failure.Code)
+	}
+	return result
 }
 
 func shouldRefreshNodeDiagnostics(state nodeAlertState, cfg Config, now time.Time) bool {

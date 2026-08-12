@@ -103,6 +103,99 @@ func TestApplyAvailabilityUsesExistingDownSince(t *testing.T) {
 	}
 }
 
+func TestNodeIncidentJournalOpensAndResolves(t *testing.T) {
+	store := NewStore("", nil)
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "Node 1", SubName: "Primary"}
+	startedAt := time.Now().Add(-time.Minute).Truncate(time.Second)
+	details := checker.ProxyStatusDetails{
+		Online:    false,
+		DownSince: startedAt,
+		Failure: checker.FailureDetails{
+			Code:    checker.FailureCodeTCPRefused,
+			Summary: checker.FailureSummary(checker.FailureCodeTCPRefused),
+		},
+	}
+	if !store.updateNodeIncidentLocked(proxy, details, time.Now()) {
+		t.Fatal("offline transition did not open an incident")
+	}
+	if len(store.incidents) != 1 || store.incidents[0].Status != incidentStatusActive {
+		t.Fatalf("incidents = %+v", store.incidents)
+	}
+	if !store.updateNodeIncidentLocked(proxy, checker.ProxyStatusDetails{Online: true}, time.Now()) {
+		t.Fatal("recovery did not resolve the incident")
+	}
+	if store.incidents[0].Status != incidentStatusResolved || store.incidents[0].ResolvedAt.IsZero() {
+		t.Fatalf("resolved incident = %+v", store.incidents[0])
+	}
+}
+
+func TestCorrelateMassIncidentsRequiresSameCauseAndMajority(t *testing.T) {
+	proxies := []*models.ProxyConfig{
+		{StableID: "one", Name: "One", SubName: "Primary", Server: "one.example"},
+		{StableID: "two", Name: "Two", SubName: "Primary", Server: "two.example"},
+		{StableID: "three", Name: "Three", SubName: "Primary", Server: "three.example"},
+		{StableID: "four", Name: "Four", SubName: "Primary", Server: "four.example"},
+	}
+	details := make(map[string]checker.ProxyStatusDetails)
+	for _, proxy := range proxies[:3] {
+		details[proxy.StableID] = checker.ProxyStatusDetails{
+			Online:  false,
+			Failure: checker.FailureDetails{Code: checker.FailureCodeTCPRefused, Summary: checker.FailureSummary(checker.FailureCodeTCPRefused)},
+		}
+	}
+	details["four"] = checker.ProxyStatusDetails{Online: true}
+	groups := correlateMassIncidents(proxies, details)
+	if len(groups) != 1 || groups[0].Scope != "global" || len(groups[0].StableIDs) != 3 {
+		t.Fatalf("mass groups = %+v", groups)
+	}
+
+	details["three"] = checker.ProxyStatusDetails{Online: false, Failure: checker.FailureDetails{Code: checker.FailureCodeTLS}}
+	if groups := correlateMassIncidents(proxies, details); len(groups) != 0 {
+		t.Fatalf("mixed causes were grouped: %+v", groups)
+	}
+}
+
+func TestLoadOldNodeRegistryWithoutIncidentJournal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "node_registry.json")
+	if err := os.WriteFile(path, []byte(`{"version":1,"nodes":{"one":{"stableId":"one","name":"One"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(path, nil)
+	if err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.Incidents(10)) != 0 || store.nodes["one"].Name != "One" {
+		t.Fatalf("old state was not normalized: nodes=%+v incidents=%+v", store.nodes, store.incidents)
+	}
+}
+
+func TestRecordAvailabilityPersistsIncidentJournal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "node_registry.json")
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "Node 1", Protocol: "vless", Server: "node.example", Port: 443}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "https://check.example/status", "", 1, 0, "status")
+	store := NewStore(path, proxyChecker)
+	if err := store.SyncProxies([]*models.ProxyConfig{proxy}); err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Now().Add(-time.Minute).Truncate(time.Second)
+	failure := checker.FailureDetails{Code: checker.FailureCodeTCPTimeout, Summary: checker.FailureSummary(checker.FailureCodeTCPTimeout)}
+	if !proxyChecker.RestoreOfflineStatus(proxy.StableID, startedAt, checker.HostCheckDetails{}, checker.PingCheckDetails{}, failure) {
+		t.Fatal("failed to restore offline checker state")
+	}
+	if err := store.RecordAvailability(); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded := NewStore(path, proxyChecker)
+	if err := reloaded.Load(); err != nil {
+		t.Fatal(err)
+	}
+	incidents := reloaded.Incidents(10)
+	if len(incidents) != 1 || incidents[0].CauseCode != checker.FailureCodeTCPTimeout || incidents[0].Status != incidentStatusActive {
+		t.Fatalf("persisted incidents = %+v", incidents)
+	}
+}
+
 func TestDetectClaimedCountryAvoidsSubstringFalsePositive(t *testing.T) {
 	code, _ := detectClaimedCountry("node backup")
 	if code != "" {

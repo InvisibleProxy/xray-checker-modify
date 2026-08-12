@@ -532,6 +532,7 @@
       <nav class="tabs" aria-label="Admin sections">
         <button id="tab-dashboard" class="tab active" type="button">Dashboard</button>
         <button id="tab-nodes-overview" class="tab" type="button">Nodes Overview</button>
+        <button id="tab-incidents" class="tab" type="button">Incidents</button>
         <button id="tab-history" class="tab" type="button">Speed History</button>
       </nav>
 
@@ -1015,6 +1016,36 @@
         </section>
       </section>
 
+      <section id="incidents-view" class="view stack" hidden>
+        <section class="panel stack">
+          <div class="row" style="justify-content: space-between">
+            <div>
+              <h2>Incidents</h2>
+              <div class="muted">Persisted node failures and correlated mass outages</div>
+            </div>
+            <button id="refresh-incidents" class="secondary" type="button">Refresh Incidents</button>
+          </div>
+          <span id="incidents-state" class="table-meta">0 incidents</span>
+        </section>
+        <section class="panel panel-strong stack">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Scope</th>
+                  <th>Affected</th>
+                  <th>Cause</th>
+                  <th>Started</th>
+                  <th>Duration</th>
+                </tr>
+              </thead>
+              <tbody id="incidents"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
       <section id="history-view" class="view stack" hidden>
         <section class="panel stack">
           <div class="row" style="justify-content: space-between">
@@ -1094,6 +1125,7 @@
         historyStableId: "",
         historyResults: [],
         nodesOverview: [],
+        incidents: [],
         nodesOverviewSort: "avgMbps",
         nodesOverviewSortDir: "desc",
         speedPollRunning: false,
@@ -1429,6 +1461,9 @@
         if (proxy.pingCheckChecked) {
           const pingText = proxy.pingCheckOnline ? `${proxy.pingCheckLatencyMs || 0} ms` : "No";
           parts.push(`<div><span class="${proxy.pingCheckOnline ? "ok" : "error"}">Ping ${escapeHtml(pingText)}</span></div>`);
+        }
+        if (proxy.failureSummary) {
+          parts.push(`<div class="muted" title="${escapeHtml(proxy.failureDetail || "")}">${escapeHtml(proxy.failureSummary)}${proxy.failureCode ? ` · ${escapeHtml(proxy.failureCode)}` : ""}</div>`);
         }
         return parts.join("");
       }
@@ -2243,13 +2278,50 @@
         }
       }
 
+      function renderIncidents() {
+        const incidents = Array.isArray(state.incidents) ? state.incidents : [];
+        const rows = incidents.map((incident) => {
+          const active = incident.status === "active";
+          const scope = incident.scope === "global"
+            ? "All subscriptions"
+            : (incident.subscription || incident.scope || "n/a");
+          const names = Array.isArray(incident.nodeNames) ? incident.nodeNames.filter(Boolean) : [];
+          const affected = `${Number(incident.affectedCount || names.length || 0)} / ${Number(incident.totalCount || 0)}`;
+          const elapsed = active && incident.startedAt
+            ? Math.max(0, Math.floor((Date.now() - new Date(incident.startedAt).getTime()) / 1000))
+            : Number(incident.durationSec || 0);
+          return `<tr>
+            <td><span class="${active ? "error" : "ok"}">${active ? "Active" : "Resolved"}</span><div class="muted">${escapeHtml(incident.kind || "node")}</div></td>
+            <td>${escapeHtml(scope)}</td>
+            <td title="${escapeHtml(names.join(", "))}">${escapeHtml(affected)}<div class="muted">${escapeHtml(names.slice(0, 3).join(", "))}${names.length > 3 ? "…" : ""}</div></td>
+            <td><strong>${escapeHtml(incident.causeSummary || "Unknown")}</strong><div class="muted mono">${escapeHtml(incident.causeCode || "unknown")}</div></td>
+            <td>${escapeHtml(formatTime(incident.startedAt) || "n/a")}</td>
+            <td>${escapeHtml(formatDurationSec(elapsed))}</td>
+          </tr>`;
+        });
+        $("incidents").innerHTML = rows.join("") || `<tr><td colspan="6" class="muted">No incidents recorded</td></tr>`;
+        const activeCount = incidents.filter((incident) => incident.status === "active").length;
+        $("incidents-state").textContent = `${incidents.length} incidents · ${activeCount} active`;
+      }
+
+      async function loadIncidents() {
+        try {
+          state.incidents = await request("/incidents?limit=500");
+          renderIncidents();
+        } catch (err) {
+          $("incidents-state").textContent = err.message;
+        }
+      }
+
       async function switchTab(tab) {
         state.activeTab = tab;
         $("dashboard-view").hidden = tab !== "dashboard";
         $("nodes-overview-view").hidden = tab !== "nodes-overview";
+        $("incidents-view").hidden = tab !== "incidents";
         $("history-view").hidden = tab !== "history";
         $("tab-dashboard").classList.toggle("active", tab === "dashboard");
         $("tab-nodes-overview").classList.toggle("active", tab === "nodes-overview");
+        $("tab-incidents").classList.toggle("active", tab === "incidents");
         $("tab-history").classList.toggle("active", tab === "history");
 
         if (tab === "history") {
@@ -2261,6 +2333,9 @@
         }
         if (tab === "nodes-overview") {
           await loadNodesOverview();
+        }
+        if (tab === "incidents") {
+          await loadIncidents();
         }
       }
 
@@ -2303,6 +2378,9 @@
         if (state.activeTab === "history") {
           await loadHistory();
         }
+        if (state.activeTab === "incidents") {
+          await loadIncidents();
+        }
       }
 
       async function pollSpeedSnapshot() {
@@ -2340,12 +2418,27 @@
         $("subscription-state").textContent = "Updating";
         $("refresh-subscription").disabled = true;
         try {
-          const result = await request("/subscription/refresh", { method: "POST", body: "{}" });
+          let result = await request("/subscription/refresh", { method: "POST", body: JSON.stringify({ force: false }) });
+          if (result.requiresConfirmation) {
+            const removed = Array.isArray(result.removedNames) ? result.removedNames.slice(0, 10) : [];
+            const detail = removed.length > 0 ? `\n\nRemoved nodes:\n- ${removed.join("\n- ")}` : "";
+            const confirmed = window.confirm(`${result.message}${detail}\n\nApply this update anyway?`);
+            if (!confirmed) {
+              $("subscription-state").textContent = "Update blocked";
+              $("message").textContent = result.message;
+              return;
+            }
+            result = await request("/subscription/refresh", {
+              method: "POST",
+              body: JSON.stringify({ force: true, confirmationToken: result.confirmationToken || "" }),
+            });
+          }
           const suffix = result.count === 1 ? "node" : "nodes";
           $("subscription-state").textContent = result.updated
             ? `Updated ${result.count} ${suffix}`
             : `No changes (${result.count} ${suffix})`;
-          $("message").textContent = result.message || $("subscription-state").textContent;
+          const diff = `+${result.added || 0} / -${result.removed || 0} / ~${result.changed || 0}`;
+          $("message").textContent = `${result.message || $("subscription-state").textContent} · ${diff}`;
           await load(false, true);
         } catch (err) {
           $("subscription-state").textContent = err.message;
@@ -2591,6 +2684,7 @@
 
       $("tab-dashboard").addEventListener("click", () => switchTab("dashboard"));
       $("tab-nodes-overview").addEventListener("click", () => switchTab("nodes-overview"));
+      $("tab-incidents").addEventListener("click", () => switchTab("incidents"));
       $("tab-history").addEventListener("click", () => switchTab("history"));
       ["run", "filters", "schedule", "telegram", "backup"].forEach((pane) => {
         $(`settings-tab-${pane}`).addEventListener("click", () => switchSettingsPane(pane));
@@ -2598,6 +2692,7 @@
       $("refresh").addEventListener("click", () => load());
       $("refresh-subscription").addEventListener("click", refreshSubscription);
       $("refresh-nodes-overview").addEventListener("click", loadNodesOverview);
+      $("refresh-incidents").addEventListener("click", loadIncidents);
       $("refresh-node-geo").addEventListener("click", refreshNodeGeo);
       $("nodes-overview").addEventListener("click", (event) => {
         const button = event.target.closest("[data-delete-node]");

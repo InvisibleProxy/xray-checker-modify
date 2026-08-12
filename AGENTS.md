@@ -28,10 +28,12 @@
 - При refresh сначала вызывайте `xray.PreserveStableIDs`, затем `xray.ValidateStableIDs` и только потом сравнивайте effective-конфигурации.
 - Пустой или дублирующийся без учёта регистра `StableID` должен останавливать startup/refresh до создания StableID-keyed maps и restart Xray.
 - Ручное и плановое обновление подписки должны использовать один workflow и не выполняться параллельно.
+- Пустой refresh или удаление минимум трёх и не менее 50% прежних нод считается подозрительным: scheduled update блокируется, manual требует explicit force, привязанный fingerprint к previewed candidate; candidate Xray config не должен уничтожать last-known-good при неудачном startup.
 - Ручной и плановый speedtest должны применять одинаковую логику URL: per-node URL имеет приоритет над глобальным.
 - Telegram-запуск speedtest использует сохранённый `ScheduleConfig`, а не нулевой `TestConfig`.
 - Прямой результат Telegram-speedtest должен возвращаться в исходные chat ID и topic ID независимо от настроек фоновых speed-report; report target не персистится и не попадает в admin API.
 - Первый фоновый low-speed результат (schedule/admin) не уведомляет: повторяются только просевшие `StableID` через 30 минут, а алерт отправляется лишь при повторной проблеме. Первичные offline/error не задерживаются.
+- Pending low-speed retry персистится с due time, исходным TestConfig и `StableID`, восстанавливается после restart и очищается для исчезнувших нод.
 - Полный availability-check всех нод не использует TCP-гейт. Быстрый recovery-loop проверяет только уже недоступные `StableID`: обновляет TCP/ping и запускает proxy-check лишь после `TCP OK`; ping никогда не является gate.
 - Переход в offline и `DownSince` сохраняются до дополнительной TCP/ping-диагностики. Для непривилегированного ICMP `udp4`/`udp6` не сопоставляйте reply по Echo ID: Linux может переписать его; используйте тип ответа, sequence и уникальный payload.
 - Быстрые recovery-checks не увеличивают Telegram `FailCount` и не сдвигают reminder schedule. Подтверждённый online передаётся immediate-recovery пути без ожидания `AlertCheckMinutes`.
@@ -40,6 +42,8 @@
 - Speedtest удерживает Xray lifecycle read-lock от выбора нод до завершения теста; restart при refresh выполняется только под write-lock.
 - Speedtest history хранится по возрасту; default 60 дней. Не возвращайте count-based limit.
 - Downtime в node archive накопительный и не должен очищаться вместе со speedtest history.
+- Incident journal хранит node и mass records; массовая корреляция требует одинакового failure code, минимум 3 и минимум 50% active scope. `check_endpoint` всегда маркируется как вероятностный вывод.
+- Failure code строится из proxy-check и прямых TCP/ping diagnostics; отсутствие ICMP reply не является самостоятельным доказательством offline.
 - Активные ноды управляются подпиской; удалять вручную можно только retired-записи.
 - Backup не должен включать environment, geo-файлы, `xray_config.json` и Telegram secrets/admin IDs.
 - Автоматические backup: максимум один за UTC-день, максимум 7 файлов и максимум 7 суток.
@@ -91,10 +95,10 @@ docker build --build-arg ENABLE_UPX=false -t xray-checker:check .
 
 Дополнительные проверки по области:
 
-- subscription/identity: тесты `xray` и сценарии неоднозначных имён;
+- subscription/identity: тесты `xray`, сценарии неоднозначных имён, suspicious diff и rollback rejected candidate;
 - speedtest: manual и scheduled paths, per-node URL, retention и persistence;
 - backup/restore: manifest, hash, дубликаты JSON-ключей, typed schema, interrupted apply/commit, path traversal, missing files, rollback, secrets и rotation;
-- Telegram: HTML/Rich HTML escaping, структура summary/details, fallback policy, сохранённый TestConfig, mute scopes, alert lifecycle и отсутствие токенов в выводе;
+- Telegram: HTML/Rich HTML escaping, структура summary/details, fallback policy, сохранённый TestConfig, persisted low-speed retry, mass incident grouping, mute scopes, alert lifecycle и отсутствие токенов в выводе;
 - API: обновить `web/openapi.yaml`, проверить все локальные `$ref` и handler tests;
 - UI: только desktop viewport, filters, selection, admin auth и отсутствие ошибок в console; mobile browser check не запускать;
 - Dockerfile/Compose: builder build и финальный production image.

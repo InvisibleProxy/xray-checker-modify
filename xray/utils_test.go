@@ -119,6 +119,44 @@ func TestValidateStableIDsRejectsNilProxy(t *testing.T) {
 	}
 }
 
+func TestAnalyzeConfigDiffFlagsSuspiciousMassRemoval(t *testing.T) {
+	old := []*models.ProxyConfig{
+		{StableID: "one", Name: "One"}, {StableID: "two", Name: "Two"},
+		{StableID: "three", Name: "Three"}, {StableID: "four", Name: "Four"},
+		{StableID: "five", Name: "Five"}, {StableID: "six", Name: "Six"},
+	}
+	newConfigs := []*models.ProxyConfig{
+		{StableID: "one", Name: "One"}, {StableID: "two", Name: "Two"}, {StableID: "three", Name: "Three"},
+	}
+	diff := AnalyzeConfigDiff(old, newConfigs)
+	if diff.Removed != 3 || diff.Added != 0 || !diff.Suspicious() {
+		t.Fatalf("diff = %+v, want suspicious removal of 3/6", diff)
+	}
+}
+
+func TestAnalyzeConfigDiffAllowsSmallRemoval(t *testing.T) {
+	old := []*models.ProxyConfig{{StableID: "one"}, {StableID: "two"}, {StableID: "three"}, {StableID: "four"}}
+	newConfigs := []*models.ProxyConfig{{StableID: "one"}, {StableID: "two"}, {StableID: "three"}}
+	diff := AnalyzeConfigDiff(old, newConfigs)
+	if diff.Suspicious() {
+		t.Fatalf("diff = %+v, small removal must not require force", diff)
+	}
+}
+
+func TestConfigFingerprintChangesWithCandidateAndIgnoresOrder(t *testing.T) {
+	one := &models.ProxyConfig{StableID: "one", Server: "one.example", Port: 443}
+	two := &models.ProxyConfig{StableID: "two", Server: "two.example", Port: 443}
+	first := ConfigFingerprint([]*models.ProxyConfig{one, two})
+	if reordered := ConfigFingerprint([]*models.ProxyConfig{two, one}); reordered != first {
+		t.Fatalf("fingerprint depends on order: %q != %q", first, reordered)
+	}
+	changed := *two
+	changed.Port = 8443
+	if ConfigFingerprint([]*models.ProxyConfig{one, &changed}) == first {
+		t.Fatal("fingerprint did not change with candidate")
+	}
+}
+
 func testProxy(name, subName, server string, port int) *models.ProxyConfig {
 	return &models.ProxyConfig{
 		Protocol: "vless",

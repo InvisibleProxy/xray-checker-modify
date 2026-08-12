@@ -22,9 +22,16 @@ type speedResultStateSchema struct {
 }
 
 type nodeAlertStateSchema struct {
-	Version   int                                 `json:"version"`
-	UpdatedAt time.Time                           `json:"updatedAt"`
-	Nodes     map[string]persistedNodeAlertSchema `json:"nodes"`
+	Version      int                                 `json:"version"`
+	UpdatedAt    time.Time                           `json:"updatedAt"`
+	Nodes        map[string]persistedNodeAlertSchema `json:"nodes"`
+	SpeedRetries []persistedSpeedRetrySchema         `json:"speedRetries,omitempty"`
+}
+
+type persistedSpeedRetrySchema struct {
+	StableIDs []string             `json:"stableIds"`
+	Config    speedtest.TestConfig `json:"config"`
+	DueAt     time.Time            `json:"dueAt"`
 }
 
 type persistedNodeAlertSchema struct {
@@ -37,6 +44,9 @@ type persistedNodeAlertSchema struct {
 	LastDiagnostics time.Time             `json:"lastDiagnostics"`
 	HostCheck       *persistedCheckSchema `json:"hostCheck,omitempty"`
 	PingCheck       *persistedCheckSchema `json:"pingCheck,omitempty"`
+	FailureCode     string                `json:"failureCode,omitempty"`
+	FailureSummary  string                `json:"failureSummary,omitempty"`
+	FailureDetail   string                `json:"failureDetail,omitempty"`
 	RecoveryPending bool                  `json:"recoveryPending,omitempty"`
 	RecoveredAt     time.Time             `json:"recoveredAt,omitempty"`
 	RecoveryLatency int64                 `json:"recoveryLatencyMs,omitempty"`
@@ -65,6 +75,11 @@ func validateDataFile(name string, data []byte) error {
 		}
 		if state.Version != 1 || state.Nodes == nil {
 			return fmt.Errorf("backup file %s has an unsupported schema", name)
+		}
+		for _, retry := range state.SpeedRetries {
+			if len(retry.StableIDs) == 0 || retry.DueAt.IsZero() {
+				return fmt.Errorf("backup file %s has an invalid pending speed retry", name)
+			}
 		}
 	case "node_registry.json":
 		var state nodearchive.StateFile
