@@ -657,6 +657,7 @@
         width: 100%;
         min-width: 620px;
         height: 250px;
+        cursor: crosshair;
       }
       .chart-grid-line {
         stroke: rgba(165, 176, 189, 0.14);
@@ -677,6 +678,20 @@
         fill: url(#speed-area-gradient);
         stroke: none;
       }
+      .chart-gap-bridge {
+        fill: none;
+        stroke: rgba(110, 168, 254, 0.3);
+        stroke-width: 1.4;
+        stroke-dasharray: 4 7;
+        stroke-linecap: round;
+      }
+      .chart-error-band {
+        fill: rgba(247, 118, 142, 0.11);
+        transition: fill 0.15s ease;
+      }
+      .chart-error-band:hover {
+        fill: rgba(247, 118, 142, 0.2);
+      }
       .chart-point {
         opacity: 0;
         stroke: var(--panel-3);
@@ -695,6 +710,44 @@
         stroke-width: 1.5;
         stroke-dasharray: 5 5;
       }
+      .chart-cursor {
+        stroke: rgba(231, 236, 242, 0.9);
+        stroke-width: 1.5;
+        pointer-events: none;
+      }
+      .speed-chart-tooltip {
+        position: fixed;
+        z-index: 80;
+        min-width: 178px;
+        max-width: min(300px, calc(100vw - 16px));
+        padding: 10px 12px;
+        pointer-events: none;
+        opacity: 0;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--panel-3);
+        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.32);
+        color: var(--text);
+        font-size: 13px;
+        line-height: 1.5;
+        transition: opacity 0.08s ease;
+      }
+      .speed-chart-tooltip.visible {
+        opacity: 1;
+      }
+      .speed-chart-tooltip-time {
+        margin-bottom: 4px;
+        font-weight: 700;
+      }
+      .speed-chart-tooltip-row {
+        color: var(--muted);
+      }
+      .speed-chart-tooltip-row strong {
+        color: var(--text);
+      }
+      .speed-chart-tooltip-row strong.ok { color: var(--green); }
+      .speed-chart-tooltip-row strong.warn { color: var(--yellow); }
+      .speed-chart-tooltip-row strong.error { color: var(--red); }
       .chart-threshold {
         stroke: var(--yellow);
         stroke-width: 1;
@@ -1368,6 +1421,7 @@
         </section>
       </section>
     </main>
+    <div id="node-speed-tooltip" class="speed-chart-tooltip" role="status" aria-live="polite"></div>
 
     <script>
       const state = {
@@ -1817,12 +1871,26 @@
         if (run.length) runs.push(run);
 
         const successfulRuns = runs.filter((items) => items.length > 1);
-        const areas = successfulRuns.map((items) => {
+        const areaMasks = [];
+        const areas = successfulRuns.map((items, index) => {
           const firstX = xOf(items[0].checkedAt).toFixed(1);
           const lastX = xOf(items[items.length - 1].checkedAt).toFixed(1);
           const baselineY = (top + plotHeight).toFixed(1);
+          const runWidth = Math.max(1, Number(lastX) - Number(firstX));
+          const fadePercent = Math.min(22, Math.max(3, (18 / runWidth) * 100));
+          const maskID = `speed-area-mask-${index}`;
+          const gradientID = `speed-area-mask-gradient-${index}`;
+          areaMasks.push(`<linearGradient id="${gradientID}" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stop-color="black" />
+              <stop offset="${fadePercent.toFixed(1)}%" stop-color="white" />
+              <stop offset="${(100 - fadePercent).toFixed(1)}%" stop-color="white" />
+              <stop offset="100%" stop-color="black" />
+            </linearGradient>
+            <mask id="${maskID}">
+              <rect x="${firstX}" y="${top}" width="${runWidth.toFixed(1)}" height="${plotHeight}" fill="url(#${gradientID})" />
+            </mask>`);
           const path = items.map((result) => `L ${xOf(result.checkedAt).toFixed(1)} ${yOf(result.mbps).toFixed(1)}`).join(" ");
-          return `<path class="chart-area" d="M ${firstX} ${baselineY} ${path} L ${lastX} ${baselineY} Z" />`;
+          return `<path class="chart-area" mask="url(#${maskID})" d="M ${firstX} ${baselineY} ${path} L ${lastX} ${baselineY} Z" />`;
         }).join("");
         const lines = successfulRuns.map((items) => {
           const path = items.map((result, index) => {
@@ -1830,6 +1898,13 @@
             return `${command} ${xOf(result.checkedAt).toFixed(1)} ${yOf(result.mbps).toFixed(1)}`;
           }).join(" ");
           return `<path class="chart-line" d="${path}" />`;
+        }).join("");
+        const gapBridges = runs.slice(1).map((items, index) => {
+          const previousRun = runs[index];
+          if (!previousRun.length || !items.length) return "";
+          const previous = previousRun[previousRun.length - 1];
+          const next = items[0];
+          return `<path class="chart-gap-bridge" d="M ${xOf(previous.checkedAt).toFixed(1)} ${yOf(previous.mbps).toFixed(1)} L ${xOf(next.checkedAt).toFixed(1)} ${yOf(next.mbps).toFixed(1)}" aria-hidden="true" />`;
         }).join("");
         const singlePointTimes = new Set(runs.filter((items) => items.length === 1).map((items) => items[0].checkedAt));
         const points = successful.map((result) => {
@@ -1839,11 +1914,11 @@
           const singleClass = singlePointTimes.has(result.checkedAt) ? " single" : "";
           return `<circle class="chart-point${singleClass}" cx="${xOf(result.checkedAt).toFixed(1)}" cy="${yOf(result.mbps).toFixed(1)}" r="5" fill="${color}" tabindex="0"><title>${escapeHtml(detail)}</title></circle>`;
         }).join("");
+        const errorBandWidth = Math.max(3, Math.min(34, medianInterval > 0 ? (medianInterval / spanMs) * plotWidth : 8));
         const errors = ordered.filter((result) => !isSuccessfulResult(result)).map((result) => {
           const x = xOf(result.checkedAt);
-          const y = top + plotHeight - 1;
           const detail = `${formatTime(result.checkedAt)} · ${result.offline ? "Offline" : compactReason(result.error) || "Failed"}`;
-          return `<path d="M ${x} ${y - 7} L ${x + 6} ${y} L ${x} ${y + 7} L ${x - 6} ${y} Z" fill="var(--red)"><title>${escapeHtml(detail)}</title></path>`;
+          return `<rect class="chart-error-band" x="${(x - errorBandWidth / 2).toFixed(1)}" y="${top}" width="${errorBandWidth.toFixed(1)}" height="${plotHeight}" rx="2"><title>${escapeHtml(detail)}</title></rect>`;
         }).join("");
         const thresholdLine = threshold > 0 && threshold < yMax
           ? `<line class="chart-threshold" x1="${left}" y1="${yOf(threshold)}" x2="${width - right}" y2="${yOf(threshold)}"><title>Low-speed threshold: ${escapeHtml(formatMbps(threshold))}</title></line>`
@@ -1851,16 +1926,100 @@
         const latest = ordered[ordered.length - 1];
         const latestX = xOf(latest.checkedAt).toFixed(1);
         const latestMarker = `<line class="chart-last-marker" x1="${latestX}" y1="${top}" x2="${latestX}" y2="${top + plotHeight}"><title>Latest measurement: ${escapeHtml(formatTime(latest.checkedAt))}</title></line>`;
+        const cursor = `<line class="chart-cursor" x1="${left}" y1="${top}" x2="${left}" y2="${top + plotHeight}" opacity="0" aria-hidden="true" />`;
         return `<svg class="speed-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Speed-test history in Mbps">
           <defs>
             <linearGradient id="speed-area-gradient" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stop-color="var(--blue)" stop-opacity="0.28" />
               <stop offset="100%" stop-color="var(--blue)" stop-opacity="0.02" />
             </linearGradient>
+            ${areaMasks.join("")}
           </defs>
-          ${grid.join("")}${areas}${thresholdLine}${lines}${latestMarker}${points}${errors}
+          ${grid.join("")}${areas}${errors}${thresholdLine}${gapBridges}${lines}${latestMarker}${cursor}${points}
           <text class="chart-axis-label" x="12" y="14">Mbps</text>
         </svg>`;
+      }
+
+      function hideSpeedChartTooltip() {
+        const tooltip = $("node-speed-tooltip");
+        if (tooltip) tooltip.classList.remove("visible");
+      }
+
+      function moveSpeedChartTooltip(event) {
+        const tooltip = $("node-speed-tooltip");
+        if (!tooltip) return;
+        const gap = 14;
+        const width = tooltip.offsetWidth;
+        const height = tooltip.offsetHeight;
+        let x = event.clientX + gap;
+        let y = event.clientY - 10;
+        if (x + width > window.innerWidth - 8) x = event.clientX - width - gap;
+        if (y + height > window.innerHeight - 8) y = window.innerHeight - height - 8;
+        tooltip.style.left = `${Math.max(8, x)}px`;
+        tooltip.style.top = `${Math.max(8, y)}px`;
+      }
+
+      function speedChartTooltipHTML(result) {
+        const successful = isSuccessfulResult(result);
+        const low = successful && isLowSpeed(result);
+        const statusClass = successful ? (low ? "warn" : "ok") : "error";
+        const status = successful ? (low ? "Below threshold" : "Successful") : (result.offline ? "Offline" : compactReason(result.error) || "Failed");
+        const measurement = successful
+          ? `<div class="speed-chart-tooltip-row">Speed: <strong>${escapeHtml(formatMbps(result.mbps))}</strong></div>
+             <div class="speed-chart-tooltip-row">TTFB: <strong>${Number(result.ttfbMs || 0)} ms</strong></div>
+             <div class="speed-chart-tooltip-row">Downloaded: <strong>${escapeHtml(formatBytes(result.downloadedBytes))}</strong></div>`
+          : "";
+        return `<div class="speed-chart-tooltip-time">${escapeHtml(formatTime(result.checkedAt))}</div>
+          <div class="speed-chart-tooltip-row">Result: <strong class="${statusClass}">${escapeHtml(status)}</strong></div>
+          ${measurement}`;
+      }
+
+      function bindSpeedChartInteractions() {
+        const svg = $("node-speed-chart")?.querySelector("svg.speed-chart");
+        const tooltip = $("node-speed-tooltip");
+        if (!svg || !tooltip) return;
+        const cursor = svg.querySelector(".chart-cursor");
+        const bounds = dashboardRangeBounds();
+        if (!cursor || bounds.error) return;
+        const ordered = [...(state.dashboardHistoryResults || [])]
+          .filter((result) => result.checkedAt && !result.checkedAt.startsWith("0001-"))
+          .sort((a, b) => new Date(a.checkedAt) - new Date(b.checkedAt));
+        if (ordered.length === 0) return;
+
+        const width = 960;
+        const left = 54;
+        const right = 20;
+        const plotWidth = width - left - right;
+        const fromMs = bounds.from.getTime();
+        const spanMs = Math.max(1, bounds.to.getTime() - fromMs);
+        const xOf = (result) => left + Math.max(0, Math.min(1, (new Date(result.checkedAt).getTime() - fromMs) / spanMs)) * plotWidth;
+
+        svg.addEventListener("mousemove", (event) => {
+          const rect = svg.getBoundingClientRect();
+          const svgX = ((event.clientX - rect.left) / Math.max(1, rect.width)) * width;
+          const ratio = Math.max(0, Math.min(1, (svgX - left) / plotWidth));
+          const targetTime = fromMs + ratio * spanMs;
+          let nearest = ordered[0];
+          let nearestDistance = Math.abs(new Date(nearest.checkedAt).getTime() - targetTime);
+          for (let index = 1; index < ordered.length; index += 1) {
+            const distance = Math.abs(new Date(ordered[index].checkedAt).getTime() - targetTime);
+            if (distance < nearestDistance) {
+              nearest = ordered[index];
+              nearestDistance = distance;
+            }
+          }
+          const x = xOf(nearest).toFixed(1);
+          cursor.setAttribute("x1", x);
+          cursor.setAttribute("x2", x);
+          cursor.setAttribute("opacity", "1");
+          tooltip.innerHTML = speedChartTooltipHTML(nearest);
+          tooltip.classList.add("visible");
+          moveSpeedChartTooltip(event);
+        });
+        svg.addEventListener("mouseleave", () => {
+          cursor.setAttribute("opacity", "0");
+          hideSpeedChartTooltip();
+        });
       }
 
       function compactReason(error) {
@@ -2424,6 +2583,7 @@
       }
 
       function renderNodes() {
+        hideSpeedChartTooltip();
         const cards = filteredProxies().map((proxy) => {
           const result = resultFor(proxy.stableId);
           const muted = telegramAnyMutedNodeSet().has(proxy.stableId);
@@ -2506,6 +2666,7 @@
             await openSelectedHistory();
           });
         });
+        bindSpeedChartInteractions();
         renderSelectionCount();
       }
 
