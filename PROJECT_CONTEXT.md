@@ -135,7 +135,7 @@ Recovery alert хранит `RecoveryPending`, время и latency до усп
 - `/admin` и `/api/v1/admin/*` всегда должны оставаться за Basic Auth.
 - В server-mode `METRICS_USERNAME` и `METRICS_PASSWORD` обязательны; публичных встроенных credentials нет. `RUN_ONCE=true` не поднимает HTTP-сервер и является единственным исключением.
 - `WEB_PUBLIC=true` разрешён только вместе с `METRICS_PROTECTED=true`.
-- Caddy из примера публикует только status page, `/static`, `/config` и публичный список прокси.
+- `Caddyfile.example` — версионируемый источник шаблона; локальный `Caddyfile` создаётся копированием, игнорируется Git и публикует только status page, `/static`, `/config` и публичный список прокси.
 - Нельзя писать Telegram token, chat ID, admin IDs, subscription URL с credentials или Basic Auth password в логи, API и backup.
 - Restore принимает только известные пути, ограничивает размер архива, проверяет manifest/hash/JSON-схемы и не следует symlink/reparse-point вместо state-файлов.
 

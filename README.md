@@ -49,7 +49,10 @@ docker run --rm `
 
 ```powershell
 Copy-Item docker-compose.yaml.example docker-compose.yaml
+Copy-Item Caddyfile.example Caddyfile
 ```
+
+`Caddyfile` — локальная конфигурация и игнорируется Git. Версионируемый шаблон находится в `Caddyfile.example`, поэтому доменные или инфраструктурные правки не засоряют `git status`.
 
 Создайте `.env`:
 

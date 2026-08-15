@@ -46,6 +46,7 @@
 - Failure code строится из proxy-check и прямых TCP/ping diagnostics; отсутствие ICMP reply не является самостоятельным доказательством offline.
 - Активные ноды управляются подпиской; удалять вручную можно только retired-записи.
 - Backup не должен включать environment, geo-файлы, `xray_config.json` и Telegram secrets/admin IDs.
+- `Caddyfile.example` является источником шаблона reverse proxy; локальный `Caddyfile` игнорируется и не должен попадать в коммиты.
 - Автоматические backup: максимум один за UTC-день, максимум 7 файлов и максимум 7 суток.
 - Restore всегда проходит типизированную JSON-валидацию и staging; применение — только на следующем startup с rollback. Commit допустим лишь после успешного `Load` у всех владельцев restored state.
 - Restore transaction должна различать оборванное применение, неподтверждённое состояние и оборванную очистку подтверждённого commit; не удаляйте rollback-копию без commit marker.

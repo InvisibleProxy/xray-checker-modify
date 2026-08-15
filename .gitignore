@@ -26,6 +26,9 @@ go.work.sum
 .env.*
 !.env.example
 
+# Local reverse-proxy configuration
+Caddyfile
+
 # Application runtime state
 data/
 *.log
