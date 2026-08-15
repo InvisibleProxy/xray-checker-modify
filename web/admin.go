@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -313,8 +314,52 @@ func AdminSpeedTestHistoryHandler(manager *speedtest.Manager) http.HandlerFunc {
 			writeError(w, "stableId is required", http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, manager.ResultHistory(stableID))
+		from, err := parseHistoryTime(r.URL.Query().Get("from"), "from")
+		if err != nil {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		to, err := parseHistoryTime(r.URL.Query().Get("to"), "to")
+		if err != nil {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !from.IsZero() && !to.IsZero() && !from.Before(to) {
+			writeError(w, "from must be before to", http.StatusBadRequest)
+			return
+		}
+
+		history := manager.ResultHistory(stableID)
+		if !from.IsZero() || !to.IsZero() {
+			filtered := make([]speedtest.Result, 0, len(history))
+			for _, result := range history {
+				if result.CheckedAt.IsZero() {
+					continue
+				}
+				if !from.IsZero() && result.CheckedAt.Before(from) {
+					continue
+				}
+				if !to.IsZero() && !result.CheckedAt.Before(to) {
+					continue
+				}
+				filtered = append(filtered, result)
+			}
+			history = filtered
+		}
+		writeJSON(w, history)
 	}
+}
+
+func parseHistoryTime(raw, name string) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s must be RFC3339", name)
+	}
+	return parsed, nil
 }
 
 func AdminSpeedTestRunHandler(manager *speedtest.Manager) http.HandlerFunc {

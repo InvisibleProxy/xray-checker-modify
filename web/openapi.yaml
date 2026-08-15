@@ -411,6 +411,20 @@ paths:
           required: true
           schema:
             type: string
+        - name: from
+          in: query
+          required: false
+          description: Inclusive lower bound for checkedAt in RFC3339 format.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          description: Exclusive upper bound for checkedAt in RFC3339 format.
+          schema:
+            type: string
+            format: date-time
       responses:
         '200':
           description: Results ordered from newest to oldest

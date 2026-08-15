@@ -9,14 +9,14 @@
     <style>
       :root {
         color-scheme: dark;
-        --bg: #0b0f13;
-        --panel: #151a20;
-        --panel-2: #20262e;
-        --panel-3: #10161d;
-        --border: #2c3743;
+        --bg: #121419;
+        --panel: #191d23;
+        --panel-2: #20252c;
+        --panel-3: #15191f;
+        --border: #303741;
         --text: #e5e7eb;
         --muted: #a5b0bd;
-        --green: #35d878;
+        --green: #20c997;
         --red: #ff5d5d;
         --yellow: #f2b84b;
         --blue: #6ea8fe;
@@ -31,7 +31,10 @@
       }
       body {
         margin: 0;
-        background: #0b0f13;
+        min-height: 100vh;
+        background:
+          radial-gradient(circle at 50% -20%, rgba(77, 155, 255, 0.09), transparent 36%),
+          var(--bg);
         color: var(--text);
         font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
@@ -47,6 +50,30 @@
         justify-content: space-between;
         gap: 16px;
         border-bottom: 1px solid var(--border);
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .brand-mark {
+        position: relative;
+        width: 38px;
+        height: 38px;
+        flex: 0 0 38px;
+        border-radius: 11px;
+        background: linear-gradient(145deg, #36c5f0 0%, #5368e8 54%, #8f5bd7 100%);
+        box-shadow: 0 10px 28px rgba(83, 104, 232, 0.25);
+      }
+      .brand-mark::after {
+        content: "";
+        position: absolute;
+        width: 13px;
+        height: 13px;
+        left: 12px;
+        top: 8px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.92);
       }
       .topbar-status {
         display: flex;
@@ -76,7 +103,7 @@
       .panel {
         background: var(--panel);
         border: 1px solid var(--border);
-        border-radius: 8px;
+        border-radius: 12px;
         padding: 16px;
         min-width: 0;
       }
@@ -397,7 +424,7 @@
       }
       .overview-grid {
         display: grid;
-        grid-template-columns: repeat(6, minmax(0, 1fr));
+        grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 12px;
       }
       .history-stats-grid {
@@ -406,9 +433,9 @@
       .kpi-card {
         min-width: 0;
         border: 1px solid var(--border);
-        border-radius: 8px;
+        border-radius: 12px;
         background: var(--panel-2);
-        padding: 14px;
+        padding: 18px;
       }
       .kpi-card span {
         display: block;
@@ -418,7 +445,7 @@
       .kpi-card strong {
         display: block;
         margin-top: 7px;
-        font-size: 24px;
+        font-size: 26px;
         line-height: 1.1;
       }
       .kpi-card .metric-detail {
@@ -458,6 +485,248 @@
         gap: 12px;
         flex-wrap: wrap;
       }
+      .nodes-list {
+        display: grid;
+        gap: 10px;
+      }
+      .node-card {
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--panel-2);
+        transition: border-color 0.18s ease, box-shadow 0.18s ease;
+      }
+      .node-card:hover,
+      .node-card.open {
+        border-color: #46515e;
+      }
+      .node-card.open {
+        box-shadow: 0 14px 36px rgba(0, 0, 0, 0.18);
+      }
+      .node-card.row-error {
+        border-color: rgba(255, 93, 93, 0.42);
+      }
+      .node-card.row-warn {
+        border-color: rgba(242, 184, 75, 0.42);
+      }
+      .node-card-head {
+        display: grid;
+        grid-template-columns: auto minmax(210px, 1.3fr) minmax(140px, 0.72fr) minmax(140px, 0.72fr) auto auto;
+        gap: 14px;
+        align-items: center;
+        min-height: 72px;
+        padding: 12px 14px;
+      }
+      .node-select {
+        display: flex;
+        align-items: center;
+      }
+      .node-identity,
+      .node-current,
+      .node-speed-summary {
+        min-width: 0;
+      }
+      .node-title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        font-weight: 700;
+      }
+      .node-title-text {
+        overflow-wrap: anywhere;
+      }
+      .node-subline,
+      .node-summary-label {
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .node-current strong,
+      .node-speed-summary strong {
+        display: block;
+        font-size: 15px;
+      }
+      .node-current strong.ok,
+      .node-speed-summary strong.ok {
+        color: var(--green);
+      }
+      .node-current strong.error,
+      .node-speed-summary strong.error {
+        color: var(--red);
+      }
+      .node-current strong.warn,
+      .node-speed-summary strong.warn {
+        color: var(--yellow);
+      }
+      .node-card-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      button.node-toggle {
+        display: inline-flex;
+        width: 34px;
+        height: 34px;
+        padding: 0;
+        align-items: center;
+        justify-content: center;
+        border-radius: 50%;
+        background: transparent;
+        color: var(--muted);
+      }
+      .node-toggle svg {
+        transition: transform 0.18s ease;
+      }
+      .node-card.open .node-toggle svg {
+        transform: rotate(180deg);
+      }
+      .node-card-detail {
+        display: grid;
+        gap: 16px;
+        padding: 18px;
+        border-top: 1px solid var(--border);
+        background: rgba(14, 18, 23, 0.34);
+      }
+      .node-detail-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .node-detail-stat {
+        min-width: 0;
+        padding: 11px 12px;
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        background: rgba(32, 37, 44, 0.78);
+      }
+      .node-detail-stat span {
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .node-detail-stat strong {
+        display: block;
+        margin-top: 5px;
+        overflow-wrap: anywhere;
+      }
+      .chart-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .chart-ranges {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      button.chart-range {
+        padding: 6px 9px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      button.chart-range.active {
+        border-color: rgba(110, 168, 254, 0.65);
+        background: var(--blue-soft);
+        color: var(--text);
+      }
+      .custom-range {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(150px, 1fr));
+        gap: 8px;
+      }
+      .custom-range[hidden] {
+        display: none;
+      }
+      .speed-chart-wrap {
+        position: relative;
+        min-height: 260px;
+        overflow-x: auto;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: rgba(15, 19, 24, 0.58);
+        padding: 10px;
+      }
+      .speed-chart {
+        display: block;
+        width: 100%;
+        min-width: 620px;
+        height: 250px;
+      }
+      .chart-grid-line {
+        stroke: rgba(165, 176, 189, 0.14);
+        stroke-width: 1;
+      }
+      .chart-axis-label {
+        fill: var(--muted);
+        font-size: 11px;
+      }
+      .chart-line {
+        fill: none;
+        stroke: var(--blue);
+        stroke-width: 2.5;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .chart-area {
+        fill: url(#speed-area-gradient);
+        stroke: none;
+      }
+      .chart-point {
+        opacity: 0;
+        stroke: var(--panel-3);
+        stroke-width: 2;
+        transition: opacity 0.15s ease;
+      }
+      .chart-point:hover,
+      .chart-point:focus {
+        opacity: 1;
+      }
+      .chart-point.single {
+        opacity: 0.9;
+      }
+      .chart-last-marker {
+        stroke: rgba(207, 216, 226, 0.78);
+        stroke-width: 1.5;
+        stroke-dasharray: 5 5;
+      }
+      .chart-threshold {
+        stroke: var(--yellow);
+        stroke-width: 1;
+        stroke-dasharray: 6 5;
+        opacity: 0.8;
+      }
+      .chart-empty {
+        display: grid;
+        min-height: 235px;
+        place-items: center;
+        color: var(--muted);
+      }
+      .chart-legend {
+        display: flex;
+        gap: 14px;
+        flex-wrap: wrap;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .chart-legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .legend-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--blue);
+      }
+      .legend-dot.warn { background: var(--yellow); }
+      .legend-dot.error { background: var(--red); }
       .table-meta {
         color: var(--muted);
         font-size: 12px;
@@ -505,6 +774,20 @@
         .overview-grid {
           grid-template-columns: repeat(2, minmax(0, 1fr));
         }
+        .node-card-head {
+          grid-template-columns: auto minmax(210px, 1fr) auto;
+        }
+        .node-current,
+        .node-speed-summary {
+          grid-row: 2;
+        }
+        .node-current { grid-column: 2; }
+        .node-speed-summary { grid-column: 3; }
+        .node-card-actions { grid-column: 2; }
+        .node-toggle { grid-column: 3; }
+        .node-detail-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
         .control-panel {
           position: static;
         }
@@ -517,11 +800,15 @@
   </head>
   <body>
     <header>
-      <div>
-        <h1>Xray Checker Admin</h1>
-        <div class="muted">Manual speed tests, private schedule and backups</div>
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <div>
+          <h1>Xray Checker Admin</h1>
+          <div class="muted">Availability, speed tests and operational controls</div>
+        </div>
       </div>
       <div class="topbar-status">
+        <span id="overall-status" class="chip neutral">Waiting for data</span>
         <span id="last-updated" class="muted">Last updated: n/a</span>
         <span id="run-state" class="pill state-chip idle">Idle</span>
         <button id="refresh" class="secondary" type="button">Refresh</button>
@@ -835,19 +1122,9 @@
           </div>
           <div class="overview-grid">
             <div class="kpi-card ok">
-              <span>Online</span>
-              <strong id="kpi-online">0</strong>
+              <span>Servers online</span>
+              <strong id="kpi-online">0 / 0</strong>
               <div id="kpi-online-detail" class="metric-detail">0%</div>
-            </div>
-            <div class="kpi-card error">
-              <span>Offline</span>
-              <strong id="kpi-offline">0</strong>
-              <div id="kpi-offline-detail" class="metric-detail">0%</div>
-            </div>
-            <div class="kpi-card warn">
-              <span>Muted</span>
-              <strong id="kpi-muted">0</strong>
-              <div class="metric-detail">Telegram rules</div>
             </div>
             <div class="kpi-card blue">
               <span>Avg speed</span>
@@ -855,14 +1132,9 @@
               <div class="metric-detail">latest successful checks</div>
             </div>
             <div class="kpi-card">
-              <span>Last check</span>
+              <span>Last speed test</span>
               <strong id="kpi-last-check">n/a</strong>
               <div id="kpi-last-source" class="metric-detail">no results</div>
-            </div>
-            <div class="kpi-card">
-              <span>Next test</span>
-              <strong id="kpi-next-check">n/a</strong>
-              <div id="kpi-next-check-detail" class="metric-detail">schedule disabled</div>
             </div>
           </div>
         </section>
@@ -880,23 +1152,7 @@
               <button id="selection-history" class="secondary" type="button">History</button>
             </div>
           </div>
-          <div class="table-wrap">
-            <table class="nodes-table">
-              <thead>
-                <tr>
-                  <th></th>
-                  <th>Name</th>
-                  <th>Actions</th>
-                  <th>Status</th>
-                  <th>Down Since</th>
-                  <th>Host Check</th>
-                  <th>Server</th>
-                  <th>Last Speed</th>
-                </tr>
-              </thead>
-              <tbody id="nodes"></tbody>
-            </table>
-          </div>
+          <div id="nodes" class="nodes-list"></div>
         </section>
 
         <section class="panel panel-strong stack">
@@ -1133,6 +1389,14 @@
         availabilityCheckIDs: new Set(),
         nodeURLDraftID: "",
         nodeURLDirty: false,
+        openNodeStableId: "",
+        dashboardHistoryResults: [],
+        dashboardHistoryLoading: false,
+        dashboardHistoryError: "",
+        dashboardHistoryRequest: 0,
+        dashboardRange: "7d",
+        dashboardFrom: "",
+        dashboardTo: "",
       };
 
       const basePath = (() => {
@@ -1427,6 +1691,176 @@
           min: Math.min(...speeds),
           max: Math.max(...speeds),
         };
+      }
+
+      function dateInputValue(date) {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, "0");
+        const day = String(date.getDate()).padStart(2, "0");
+        return `${year}-${month}-${day}`;
+      }
+
+      function dashboardRangeBounds() {
+        const now = new Date();
+        if (state.dashboardRange === "custom") {
+          if (!state.dashboardFrom || !state.dashboardTo) {
+            return { error: "Choose both start and end dates" };
+          }
+          const from = new Date(`${state.dashboardFrom}T00:00:00`);
+          const to = new Date(`${state.dashboardTo}T00:00:00`);
+          to.setDate(to.getDate() + 1);
+          if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || from >= to) {
+            return { error: "Start date must be before or equal to end date" };
+          }
+          return { from, to };
+        }
+
+        const durations = {
+          "1d": 24 * 60 * 60 * 1000,
+          "3d": 3 * 24 * 60 * 60 * 1000,
+          "7d": 7 * 24 * 60 * 60 * 1000,
+          "14d": 14 * 24 * 60 * 60 * 1000,
+          "30d": 30 * 24 * 60 * 60 * 1000,
+        };
+        return { from: new Date(now.getTime() - (durations[state.dashboardRange] || durations["7d"])), to: now };
+      }
+
+      function speedChartAxisTime(timestamp, spanMs) {
+        const date = new Date(timestamp);
+        if (spanMs <= 36 * 60 * 60 * 1000) {
+          return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        }
+        return date.toLocaleDateString([], { day: "2-digit", month: "short" });
+      }
+
+      function niceSpeedMax(value) {
+        const max = Math.max(1, Number(value || 0));
+        const exponent = 10 ** Math.floor(Math.log10(max));
+        const normalized = max / exponent;
+        const step = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+        return step * exponent;
+      }
+
+      function renderNodeSpeedChart(results) {
+        if (state.dashboardHistoryLoading) {
+          return `<div class="chart-empty">Loading speed-test history…</div>`;
+        }
+        if (state.dashboardHistoryError) {
+          return `<div class="chart-empty error">${escapeHtml(state.dashboardHistoryError)}</div>`;
+        }
+        const bounds = dashboardRangeBounds();
+        if (bounds.error) {
+          return `<div class="chart-empty warn">${escapeHtml(bounds.error)}</div>`;
+        }
+        const ordered = [...(results || [])]
+          .filter((result) => result.checkedAt && !result.checkedAt.startsWith("0001-"))
+          .sort((a, b) => new Date(a.checkedAt) - new Date(b.checkedAt));
+        if (ordered.length === 0) {
+          return `<div class="chart-empty">No speed tests in this period</div>`;
+        }
+
+        const successful = ordered.filter(isSuccessfulResult);
+        const threshold = lowSpeedThreshold();
+        const observedMax = successful.reduce((max, result) => Math.max(max, Number(result.mbps || 0)), 0);
+        const yMax = niceSpeedMax(Math.max(observedMax, threshold));
+        const width = 960;
+        const height = 250;
+        const left = 54;
+        const right = 20;
+        const top = 18;
+        const bottom = 38;
+        const plotWidth = width - left - right;
+        const plotHeight = height - top - bottom;
+        const fromMs = bounds.from.getTime();
+        const toMs = bounds.to.getTime();
+        const spanMs = Math.max(1, toMs - fromMs);
+        const xOf = (iso) => left + Math.max(0, Math.min(1, (new Date(iso).getTime() - fromMs) / spanMs)) * plotWidth;
+        const yOf = (mbps) => top + plotHeight - Math.max(0, Math.min(1, Number(mbps || 0) / yMax)) * plotHeight;
+
+        const grid = [];
+        [0, 0.5, 1].forEach((ratio) => {
+          const y = top + plotHeight - ratio * plotHeight;
+          grid.push(`<line class="chart-grid-line" x1="${left}" y1="${y}" x2="${width - right}" y2="${y}" />`);
+          grid.push(`<text class="chart-axis-label" x="${left - 8}" y="${y + 4}" text-anchor="end">${Math.round(yMax * ratio)}</text>`);
+        });
+        for (let index = 0; index < 5; index += 1) {
+          const ratio = index / 4;
+          const x = left + ratio * plotWidth;
+          const timestamp = fromMs + ratio * spanMs;
+          grid.push(`<text class="chart-axis-label" x="${x}" y="${height - 10}" text-anchor="middle">${escapeHtml(speedChartAxisTime(timestamp, spanMs))}</text>`);
+        }
+
+        const intervals = [];
+        for (let index = 1; index < ordered.length; index += 1) {
+          intervals.push(new Date(ordered[index].checkedAt) - new Date(ordered[index - 1].checkedAt));
+        }
+        intervals.sort((a, b) => a - b);
+        const medianInterval = intervals.length ? intervals[Math.floor(intervals.length / 2)] : 0;
+        const gapLimit = medianInterval > 0 ? medianInterval * 2.5 : Number.POSITIVE_INFINITY;
+        const runs = [];
+        let run = [];
+        let previous = null;
+        ordered.forEach((result) => {
+          if (!isSuccessfulResult(result)) {
+            if (run.length) runs.push(run);
+            run = [];
+            previous = null;
+            return;
+          }
+          if (previous && new Date(result.checkedAt) - new Date(previous.checkedAt) > gapLimit) {
+            if (run.length) runs.push(run);
+            run = [];
+          }
+          run.push(result);
+          previous = result;
+        });
+        if (run.length) runs.push(run);
+
+        const successfulRuns = runs.filter((items) => items.length > 1);
+        const areas = successfulRuns.map((items) => {
+          const firstX = xOf(items[0].checkedAt).toFixed(1);
+          const lastX = xOf(items[items.length - 1].checkedAt).toFixed(1);
+          const baselineY = (top + plotHeight).toFixed(1);
+          const path = items.map((result) => `L ${xOf(result.checkedAt).toFixed(1)} ${yOf(result.mbps).toFixed(1)}`).join(" ");
+          return `<path class="chart-area" d="M ${firstX} ${baselineY} ${path} L ${lastX} ${baselineY} Z" />`;
+        }).join("");
+        const lines = successfulRuns.map((items) => {
+          const path = items.map((result, index) => {
+            const command = index === 0 ? "M" : "L";
+            return `${command} ${xOf(result.checkedAt).toFixed(1)} ${yOf(result.mbps).toFixed(1)}`;
+          }).join(" ");
+          return `<path class="chart-line" d="${path}" />`;
+        }).join("");
+        const singlePointTimes = new Set(runs.filter((items) => items.length === 1).map((items) => items[0].checkedAt));
+        const points = successful.map((result) => {
+          const low = isLowSpeed(result);
+          const color = low ? "var(--yellow)" : "var(--blue)";
+          const detail = `${formatTime(result.checkedAt)} · ${formatMbps(result.mbps)} · TTFB ${Number(result.ttfbMs || 0)} ms · ${formatBytes(result.downloadedBytes)}`;
+          const singleClass = singlePointTimes.has(result.checkedAt) ? " single" : "";
+          return `<circle class="chart-point${singleClass}" cx="${xOf(result.checkedAt).toFixed(1)}" cy="${yOf(result.mbps).toFixed(1)}" r="5" fill="${color}" tabindex="0"><title>${escapeHtml(detail)}</title></circle>`;
+        }).join("");
+        const errors = ordered.filter((result) => !isSuccessfulResult(result)).map((result) => {
+          const x = xOf(result.checkedAt);
+          const y = top + plotHeight - 1;
+          const detail = `${formatTime(result.checkedAt)} · ${result.offline ? "Offline" : compactReason(result.error) || "Failed"}`;
+          return `<path d="M ${x} ${y - 7} L ${x + 6} ${y} L ${x} ${y + 7} L ${x - 6} ${y} Z" fill="var(--red)"><title>${escapeHtml(detail)}</title></path>`;
+        }).join("");
+        const thresholdLine = threshold > 0 && threshold < yMax
+          ? `<line class="chart-threshold" x1="${left}" y1="${yOf(threshold)}" x2="${width - right}" y2="${yOf(threshold)}"><title>Low-speed threshold: ${escapeHtml(formatMbps(threshold))}</title></line>`
+          : "";
+        const latest = ordered[ordered.length - 1];
+        const latestX = xOf(latest.checkedAt).toFixed(1);
+        const latestMarker = `<line class="chart-last-marker" x1="${latestX}" y1="${top}" x2="${latestX}" y2="${top + plotHeight}"><title>Latest measurement: ${escapeHtml(formatTime(latest.checkedAt))}</title></line>`;
+        return `<svg class="speed-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Speed-test history in Mbps">
+          <defs>
+            <linearGradient id="speed-area-gradient" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="var(--blue)" stop-opacity="0.28" />
+              <stop offset="100%" stop-color="var(--blue)" stop-opacity="0.02" />
+            </linearGradient>
+          </defs>
+          ${grid.join("")}${areas}${thresholdLine}${lines}${latestMarker}${points}${errors}
+          <text class="chart-axis-label" x="12" y="14">Mbps</text>
+        </svg>`;
       }
 
       function compactReason(error) {
@@ -1875,6 +2309,92 @@
         $("sub-filter").value = subs.includes(subValue) ? subValue : "";
       }
 
+      function overviewNodeFor(stableId) {
+        return (state.nodesOverview || []).find((node) => node.stableId === stableId) || null;
+      }
+
+      function nodeCountryMarker(stableId) {
+        const node = overviewNodeFor(stableId);
+        const code = String((node && node.claimedCountryCode) || "").trim().toUpperCase();
+        return code ? `<span class="chip blue country-chip">${escapeHtml(code)}</span>` : "";
+      }
+
+      function dashboardRangeControls() {
+        const active = (value) => state.dashboardRange === value ? "active" : "";
+        return `<div class="chart-toolbar">
+          <div>
+            <h3>Measured speed</h3>
+            <div class="muted">Only real speed tests are plotted; gaps mean no measurement.</div>
+          </div>
+          <div class="chart-ranges" aria-label="Speed chart period">
+            <button class="chart-range ${active("1d")}" type="button" data-chart-range="1d">24 h</button>
+            <button class="chart-range ${active("3d")}" type="button" data-chart-range="3d">3 d</button>
+            <button class="chart-range ${active("7d")}" type="button" data-chart-range="7d">7 d</button>
+            <button class="chart-range ${active("14d")}" type="button" data-chart-range="14d">14 d</button>
+            <button class="chart-range ${active("30d")}" type="button" data-chart-range="30d">30 d</button>
+            <button class="chart-range ${active("custom")}" type="button" data-chart-range="custom">Dates</button>
+          </div>
+        </div>
+        <div class="custom-range" ${state.dashboardRange === "custom" ? "" : "hidden"}>
+          <label>From<input id="node-chart-from" type="date" value="${escapeHtml(state.dashboardFrom)}"></label>
+          <label>To<input id="node-chart-to" type="date" value="${escapeHtml(state.dashboardTo)}"></label>
+        </div>`;
+      }
+
+      function nodeSpeedStatsHTML(results) {
+        const stats = speedStats(results);
+        const errors = (results || []).filter((result) => !isSuccessfulResult(result)).length;
+        return `<div class="node-detail-grid">
+          <div class="node-detail-stat"><span>Average</span><strong>${stats ? escapeHtml(formatMbps(stats.avg)) : "n/a"}</strong></div>
+          <div class="node-detail-stat"><span>Minimum</span><strong>${stats ? escapeHtml(formatMbps(stats.min)) : "n/a"}</strong></div>
+          <div class="node-detail-stat"><span>Maximum</span><strong>${stats ? escapeHtml(formatMbps(stats.max)) : "n/a"}</strong></div>
+          <div class="node-detail-stat"><span>Measurements</span><strong>${stats ? stats.count : 0} ok · ${errors} failed</strong></div>
+        </div>`;
+      }
+
+      function nodeAvailabilityDetails(proxy) {
+        if (proxy.online) {
+          return `${proxy.latencyMs > 0 ? `${proxy.latencyMs} ms` : "Online"}`;
+        }
+        const parts = [];
+        if (proxy.hostCheckChecked) {
+          parts.push(`TCP ${proxy.hostCheckOnline ? `OK${proxy.hostCheckLatencyMs ? ` ${proxy.hostCheckLatencyMs} ms` : ""}` : "No"}`);
+        }
+        if (proxy.pingCheckChecked) {
+          parts.push(`Ping ${proxy.pingCheckOnline ? `OK${proxy.pingCheckLatencyMs ? ` ${proxy.pingCheckLatencyMs} ms` : ""}` : "No"}`);
+        }
+        return parts.join(" · ") || "Diagnostics unavailable";
+      }
+
+      function nodeDetailHTML(proxy, result) {
+        const down = proxy.downSince ? `${formatTime(proxy.downSince)} · ${formatDurationSec(proxy.downtimeSec)}` : "No active downtime";
+        const failure = proxy.failureSummary
+          ? `${proxy.failureSummary}${proxy.failureCode ? ` · ${proxy.failureCode}` : ""}`
+          : "No current failure";
+        const speed = result ? formatSpeedStatus(result) : "No speed test";
+        const checked = result ? formatTime(result.checkedAt) : "n/a";
+        return `<div class="node-card-detail">
+          <div class="node-detail-grid">
+            <div class="node-detail-stat"><span>Server</span><strong class="mono">${escapeHtml(proxy.server)}:${escapeHtml(proxy.port)}</strong></div>
+            <div class="node-detail-stat"><span>Availability</span><strong class="${proxy.online ? "ok" : "error"}">${escapeHtml(nodeAvailabilityDetails(proxy))}</strong></div>
+            <div class="node-detail-stat"><span>Down since</span><strong>${escapeHtml(down)}</strong></div>
+            <div class="node-detail-stat"><span>Failure</span><strong title="${escapeHtml(proxy.failureDetail || "")}">${escapeHtml(failure)}</strong></div>
+          </div>
+          ${dashboardRangeControls()}
+          ${nodeSpeedStatsHTML(state.dashboardHistoryResults)}
+          <div id="node-speed-chart" class="speed-chart-wrap">${renderNodeSpeedChart(state.dashboardHistoryResults)}</div>
+          <div class="chart-legend">
+            <span><i class="legend-dot"></i>Normal speed</span>
+            <span><i class="legend-dot warn"></i>Below configured threshold</span>
+            <span><i class="legend-dot error"></i>Error or offline</span>
+            <span>Latest: ${escapeHtml(speed)} · ${escapeHtml(checked)}</span>
+          </div>
+          <div class="row">
+            <button class="secondary small" type="button" data-open-history="${escapeHtml(proxy.stableId)}">Open full history</button>
+          </div>
+        </div>`;
+      }
+
       function renderOverview() {
         const total = state.proxies.length;
         const online = state.proxies.filter((proxy) => proxy.online).length;
@@ -1887,62 +2407,69 @@
           : 0;
         const latest = latestResult();
         const nextRun = nextScheduledRunAt();
-        const schedule = state.snapshot ? state.snapshot.schedule || {} : {};
 
-        $("kpi-online").textContent = online;
-        $("kpi-online-detail").textContent = `${percent(online, total)} of ${total}`;
-        $("kpi-offline").textContent = offline;
-        $("kpi-offline-detail").textContent = `${percent(offline, total)} of ${total}`;
-        $("kpi-muted").textContent = muted;
+        $("kpi-online").textContent = `${online} / ${total}`;
+        $("kpi-online-detail").textContent = `${percent(online, total)} available · ${offline} offline · ${muted} muted`;
         $("kpi-avg-speed").textContent = successful.length ? formatMbps(avgMbps) : "n/a";
         $("kpi-last-check").textContent = latest ? formatShortTime(latest.checkedAt) : "n/a";
         $("kpi-last-source").textContent = latest ? (latest.source || "speed-test") : "no results";
-        $("kpi-next-check").textContent = nextRun ? formatShortTime(nextRun) : "n/a";
-        $("kpi-next-check-detail").textContent = nextRun
-          ? formatTimeUntil(nextRun)
-          : (schedule.enabled ? "waiting for scheduler" : "schedule disabled");
-        $("overview-state").textContent = `${results.length} latest results`;
+        $("overall-status").textContent = total > 0 && offline === 0 ? "All systems operational" : `${offline} server(s) unavailable`;
+        $("overall-status").className = `chip ${total > 0 && offline === 0 ? "ok" : offline > 0 ? "error" : "neutral"}`;
+        $("overview-state").textContent = nextRun
+          ? `${results.length} latest results · next test ${formatTimeUntil(nextRun)}`
+          : `${results.length} latest results`;
         $("last-updated").textContent = state.lastUpdatedAt
           ? `Last updated: ${state.lastUpdatedAt.toLocaleTimeString()}`
           : "Last updated: n/a";
       }
 
       function renderNodes() {
-        const rows = filteredProxies().map((proxy) => {
+        const cards = filteredProxies().map((proxy) => {
           const result = resultFor(proxy.stableId);
           const muted = telegramAnyMutedNodeSet().has(proxy.stableId);
           const checked = state.selected.has(proxy.stableId) ? "checked" : "";
           const rowClass = nodeRowClass(proxy, result, muted);
-          const downSince = proxy.downSince ? formatTime(proxy.downSince) : "";
-          const downtime = proxy.downSince ? formatDurationSec(proxy.downtimeSec) : "";
-          const hostCheck = formatHostCheck(proxy);
           const run = state.snapshot && state.snapshot.lastRun;
           const checking = state.availabilityCheckRunning && state.availabilityCheckIDs.has(proxy.stableId);
           const checkDisabled = state.availabilityCheckRunning ? "disabled" : "";
           const runDisabled = run && run.running ? "disabled" : "";
+          const open = state.openNodeStableId === proxy.stableId;
+          const availabilityClass = proxy.online ? "ok" : "error";
+          const availabilityText = proxy.online
+            ? (proxy.latencyMs > 0 ? `${proxy.latencyMs} ms` : "Online")
+            : (proxy.downSince ? `Offline · ${formatDurationSec(proxy.downtimeSec)}` : "Offline");
+          const speedClass = result ? speedStatusClass(result) : "";
+          const speedText = result ? formatSpeedStatus(result) : "No result";
           return `
-            <tr class="${rowClass}">
-              <td><input type="checkbox" data-id="${proxy.stableId}" ${checked}></td>
-              <td class="node-name">
-                <div>${escapeHtml(proxy.name || "Unnamed")}</div>
-                <div class="muted mono">${escapeHtml(proxy.stableId)}</div>
-              </td>
-              <td class="node-actions-cell">
-                <div class="node-actions">
+            <article class="node-card ${rowClass} ${open ? "open" : ""}" data-node-card="${escapeHtml(proxy.stableId)}">
+              <div class="node-card-head">
+                <label class="node-select" aria-label="Select ${escapeHtml(proxy.name || "node")}">
+                  <input type="checkbox" data-id="${escapeHtml(proxy.stableId)}" ${checked}>
+                </label>
+                <div class="node-identity">
+                  <div class="node-title">${nodeCountryMarker(proxy.stableId)}<span class="dot ${proxy.online ? "online" : "offline"}"></span><span class="node-title-text">${escapeHtml(proxy.name || "Unnamed")}</span></div>
+                  <div class="node-subline">${escapeHtml([proxy.subName, proxy.protocol, proxy.server].filter(Boolean).join(" · "))}</div>
+                </div>
+                <div class="node-current">
+                  <strong class="${availabilityClass}">${escapeHtml(availabilityText)}</strong>
+                  <div class="node-summary-label">Availability</div>
+                </div>
+                <div class="node-speed-summary">
+                  <strong class="${speedClass}">${escapeHtml(speedText)}</strong>
+                  <div class="node-summary-label">${result ? escapeHtml(formatShortTime(result.checkedAt)) : "Last speed test"}</div>
+                </div>
+                <div class="node-card-actions">
                   <button class="secondary small" type="button" data-check-id="${escapeHtml(proxy.stableId)}" ${checkDisabled}>${checking ? "Checking…" : "Check"}</button>
                   <button class="primary small" type="button" data-run-id="${escapeHtml(proxy.stableId)}" ${runDisabled}>Run</button>
                 </div>
-              </td>
-              <td class="status-cell">
-                ${formatStatusChips(proxy)}
-              </td>
-              <td>${proxy.online ? "" : `${escapeHtml(downSince || "n/a")}<div class="muted">${escapeHtml(downtime)}</div>`}</td>
-              <td>${hostCheck}</td>
-              <td class="mono server-cell">${escapeHtml(proxy.server)}:${proxy.port}</td>
-              <td class="speed-cell">${formatSpeedChip(result)}</td>
-            </tr>`;
+                <button class="node-toggle" type="button" data-node-toggle="${escapeHtml(proxy.stableId)}" aria-expanded="${open}" aria-label="${open ? "Close" : "Open"} details">
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+                </button>
+              </div>
+              ${open ? nodeDetailHTML(proxy, result) : ""}
+            </article>`;
         });
-        $("nodes").innerHTML = rows.join("") || `<tr><td colspan="8" class="muted">No nodes match filters</td></tr>`;
+        $("nodes").innerHTML = cards.join("") || `<div class="panel muted">No nodes match filters</div>`;
         $("nodes").querySelectorAll("input[type=checkbox]").forEach((input) => {
           input.addEventListener("change", () => {
             input.checked ? state.selected.add(input.dataset.id) : state.selected.delete(input.dataset.id);
@@ -1954,6 +2481,30 @@
         });
         $("nodes").querySelectorAll("[data-run-id]").forEach((button) => {
           button.addEventListener("click", () => runNodes([button.dataset.runId]));
+        });
+        $("nodes").querySelectorAll("[data-node-toggle]").forEach((button) => {
+          button.addEventListener("click", () => toggleNodeDetails(button.dataset.nodeToggle));
+        });
+        $("nodes").querySelectorAll("[data-chart-range]").forEach((button) => {
+          button.addEventListener("click", () => setDashboardRange(button.dataset.chartRange));
+        });
+        const fromInput = $("node-chart-from");
+        const toInput = $("node-chart-to");
+        if (fromInput && toInput) {
+          fromInput.addEventListener("change", () => {
+            state.dashboardFrom = fromInput.value;
+            loadDashboardHistory();
+          });
+          toInput.addEventListener("change", () => {
+            state.dashboardTo = toInput.value;
+            loadDashboardHistory();
+          });
+        }
+        $("nodes").querySelectorAll("[data-open-history]").forEach((button) => {
+          button.addEventListener("click", async () => {
+            state.selected = new Set([button.dataset.openHistory]);
+            await openSelectedHistory();
+          });
         });
         renderSelectionCount();
       }
@@ -2198,9 +2749,83 @@
         const knownIds = new Set(state.proxies.map((proxy) => proxy.stableId));
         const knownHistoryIds = new Set(historyNodes().map((node) => node.stableId));
         state.selected = new Set([...state.selected].filter((id) => knownIds.has(id)));
+        if (state.openNodeStableId && !knownIds.has(state.openNodeStableId)) {
+          state.openNodeStableId = "";
+          state.dashboardHistoryResults = [];
+          state.dashboardHistoryRequest += 1;
+        }
         if (state.historyStableId && !knownHistoryIds.has(state.historyStableId)) {
           state.historyStableId = "";
           state.historyResults = [];
+        }
+      }
+
+      async function toggleNodeDetails(stableId) {
+        if (state.openNodeStableId === stableId) {
+          state.openNodeStableId = "";
+          state.dashboardHistoryResults = [];
+          state.dashboardHistoryError = "";
+          state.dashboardHistoryLoading = false;
+          state.dashboardHistoryRequest += 1;
+          renderNodes();
+          return;
+        }
+        state.openNodeStableId = stableId;
+        state.dashboardHistoryResults = [];
+        state.dashboardHistoryError = "";
+        renderNodes();
+        await loadDashboardHistory();
+      }
+
+      async function setDashboardRange(range) {
+        state.dashboardRange = ["1d", "3d", "7d", "14d", "30d", "custom"].includes(range) ? range : "7d";
+        if (state.dashboardRange === "custom" && (!state.dashboardFrom || !state.dashboardTo)) {
+          const today = new Date();
+          const from = new Date(today);
+          from.setDate(from.getDate() - 7);
+          state.dashboardFrom = dateInputValue(from);
+          state.dashboardTo = dateInputValue(today);
+        }
+        renderNodes();
+        await loadDashboardHistory();
+      }
+
+      async function loadDashboardHistory() {
+        const stableId = state.openNodeStableId;
+        if (!stableId) return;
+        const bounds = dashboardRangeBounds();
+        if (bounds.error) {
+          state.dashboardHistoryResults = [];
+          state.dashboardHistoryError = bounds.error;
+          state.dashboardHistoryLoading = false;
+          renderNodes();
+          return;
+        }
+
+        const requestID = state.dashboardHistoryRequest + 1;
+        state.dashboardHistoryRequest = requestID;
+        state.dashboardHistoryLoading = true;
+        state.dashboardHistoryError = "";
+        state.dashboardHistoryResults = [];
+        renderNodes();
+        const query = new URLSearchParams({
+          stableId,
+          from: bounds.from.toISOString(),
+          to: bounds.to.toISOString(),
+        });
+        try {
+          const results = await request(`/speed-tests/history?${query.toString()}`);
+          if (requestID !== state.dashboardHistoryRequest || stableId !== state.openNodeStableId) return;
+          state.dashboardHistoryResults = results;
+        } catch (err) {
+          if (requestID !== state.dashboardHistoryRequest || stableId !== state.openNodeStableId) return;
+          state.dashboardHistoryResults = [];
+          state.dashboardHistoryError = err.message;
+        } finally {
+          if (requestID === state.dashboardHistoryRequest && stableId === state.openNodeStableId) {
+            state.dashboardHistoryLoading = false;
+            renderNodes();
+          }
         }
       }
 
@@ -2388,6 +3013,9 @@
         }
         if (state.activeTab === "incidents") {
           await loadIncidents();
+        }
+        if (state.openNodeStableId) {
+          await loadDashboardHistory();
         }
       }
 

@@ -32,12 +32,85 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`id="selection-run"`,
 		`data-check-id="${escapeHtml(proxy.stableId)}"`,
 		`data-run-id="${escapeHtml(proxy.stableId)}"`,
+		`data-node-toggle="${escapeHtml(proxy.stableId)}"`,
+		`data-chart-range="7d"`,
+		`id="node-speed-chart"`,
+		`class="chart-area"`,
+		`class="chart-last-marker"`,
 		`id="tab-incidents"`,
 		`id="incidents"`,
 		`proxy.failureSummary`,
 	} {
 		if !strings.Contains(html, marker) {
 			t.Fatalf("admin template does not contain %q", marker)
+		}
+	}
+}
+
+func TestAdminSpeedTestHistoryHandlerFiltersByTimeRange(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	root := t.TempDir()
+	schedulePath := filepath.Join(root, "speedtest_schedule.json")
+	results := []speedtest.Result{
+		{StableID: "node-1", Name: "Node one", Mbps: 30, CheckedAt: now.Add(-time.Hour)},
+		{StableID: "node-1", Name: "Node one", Mbps: 20, CheckedAt: now.Add(-48 * time.Hour)},
+		{StableID: "node-1", Name: "Node one", Mbps: 10, CheckedAt: now.Add(-10 * 24 * time.Hour)},
+	}
+	state := map[string]any{
+		"version":   1,
+		"updatedAt": now,
+		"lastRun":   map[string]any{},
+		"results":   map[string]speedtest.Result{"node-1": results[0]},
+		"history":   map[string][]speedtest.Result{"node-1": results},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "speedtest_results.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
+	manager := speedtest.NewManager(proxyChecker, 10000, schedulePath, speedtest.TestConfig{})
+	if err := manager.Load(); err != nil {
+		t.Fatalf("load speed history: %v", err)
+	}
+	handler := AdminSpeedTestHistoryHandler(manager)
+	rec := httptest.NewRecorder()
+	path := fmt.Sprintf(
+		"/api/v1/admin/speed-tests/history?stableId=node-1&from=%s&to=%s",
+		now.Add(-3*24*time.Hour).Format(time.RFC3339),
+		now.Format(time.RFC3339),
+	)
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Success bool               `json:"success"`
+		Data    []speedtest.Result `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !body.Success || len(body.Data) != 2 || body.Data[0].Mbps != 30 || body.Data[1].Mbps != 20 {
+		t.Fatalf("unexpected filtered history: %+v", body)
+	}
+}
+
+func TestAdminSpeedTestHistoryHandlerRejectsInvalidRange(t *testing.T) {
+	manager := speedtest.NewManager(nil, 10000, "", speedtest.TestConfig{})
+	handler := AdminSpeedTestHistoryHandler(manager)
+	tests := []string{
+		"/api/v1/admin/speed-tests/history?stableId=node-1&from=not-a-time",
+		"/api/v1/admin/speed-tests/history?stableId=node-1&from=2026-08-15T12:00:00Z&to=2026-08-15T11:00:00Z",
+	}
+	for _, path := range tests {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: expected status %d, got %d: %s", path, http.StatusBadRequest, rec.Code, rec.Body.String())
 		}
 	}
 }
