@@ -70,22 +70,30 @@ type ScheduleConfig struct {
 }
 
 type Result struct {
-	StableID        string                    `json:"stableId"`
-	Name            string                    `json:"name"`
-	SubName         string                    `json:"subName"`
-	Protocol        string                    `json:"protocol"`
-	URL             string                    `json:"url"`
-	StatusCode      int                       `json:"statusCode"`
-	DownloadedBytes int64                     `json:"downloadedBytes"`
-	DurationMs      int64                     `json:"durationMs"`
-	TTFBMs          int64                     `json:"ttfbMs"`
-	Mbps            float64                   `json:"mbps"`
-	Error           string                    `json:"error"`
-	Offline         bool                      `json:"offline"`
-	HostCheck       *checker.HostCheckDetails `json:"hostCheck,omitempty"`
-	PingCheck       *checker.PingCheckDetails `json:"pingCheck,omitempty"`
-	CheckedAt       time.Time                 `json:"checkedAt"`
-	Source          string                    `json:"source"`
+	StableID                string                    `json:"stableId"`
+	Name                    string                    `json:"name"`
+	SubName                 string                    `json:"subName"`
+	Protocol                string                    `json:"protocol"`
+	URL                     string                    `json:"url"`
+	PrimaryURL              string                    `json:"primaryUrl,omitempty"`
+	PrimaryError            string                    `json:"primaryError,omitempty"`
+	FallbackUsed            bool                      `json:"fallbackUsed,omitempty"`
+	FallbackID              string                    `json:"fallbackId,omitempty"`
+	FallbackProvider        string                    `json:"fallbackProvider,omitempty"`
+	FallbackCity            string                    `json:"fallbackCity,omitempty"`
+	FallbackCountryCode     string                    `json:"fallbackCountryCode,omitempty"`
+	TelegramAlertSuppressed bool                      `json:"telegramAlertSuppressed,omitempty"`
+	StatusCode              int                       `json:"statusCode"`
+	DownloadedBytes         int64                     `json:"downloadedBytes"`
+	DurationMs              int64                     `json:"durationMs"`
+	TTFBMs                  int64                     `json:"ttfbMs"`
+	Mbps                    float64                   `json:"mbps"`
+	Error                   string                    `json:"error"`
+	Offline                 bool                      `json:"offline"`
+	HostCheck               *checker.HostCheckDetails `json:"hostCheck,omitempty"`
+	PingCheck               *checker.PingCheckDetails `json:"pingCheck,omitempty"`
+	CheckedAt               time.Time                 `json:"checkedAt"`
+	Source                  string                    `json:"source"`
 }
 
 type RunInfo struct {
@@ -147,8 +155,17 @@ type Manager struct {
 	reporter Reporter
 	runGate  sync.Locker
 
-	resultPersistMu   sync.Mutex
-	schedulePersistMu sync.Mutex
+	resultPersistMu        sync.Mutex
+	schedulePersistMu      sync.Mutex
+	fallbackMu             sync.Mutex
+	fallbackCatalogPath    string
+	fallbackHealthPath     string
+	fallbackCatalog        countryTestURLCatalog
+	fallbackCatalogModTime time.Time
+	fallbackCatalogLoaded  bool
+	fallbackHealth         fallbackHealthState
+	countryResolver        func(stableID string) string
+	testAttempt            func(proxy *models.ProxyConfig, cfg TestConfig, source string) Result
 
 	stopCh     chan struct{}
 	scheduleCh chan struct{}
@@ -535,6 +552,9 @@ func (m *Manager) updateScheduleTestURL(testURL string) error {
 
 func (m *Manager) Run(req RunRequest, source string) error {
 	req.Config = m.normalizeConfig(req.Config)
+	if err := m.reloadCountryFallbackCatalog(false); err != nil {
+		logger.Warn("Failed to reload country Test URL catalog; keeping last valid catalog: %v", err)
+	}
 	if source == "manual" {
 		if err := m.updateScheduleTestURL(req.Config.URL); err != nil {
 			return fmt.Errorf("save test URL: %w", err)
@@ -652,7 +672,7 @@ func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source stri
 					return
 				}
 			}
-			results <- m.testProxy(p, proxyCfg, source)
+			results <- m.testProxyWithFallback(p, proxyCfg, source)
 		}(proxy)
 	}
 
@@ -695,6 +715,9 @@ func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source stri
 
 	if err := m.persistResults(); err != nil {
 		logger.Warn("Failed to save speed-test results: %v", err)
+	}
+	if err := m.persistFallbackHealth(); err != nil {
+		logger.Warn("Failed to save Test URL health: %v", err)
 	}
 
 	if reporter != nil {
@@ -788,6 +811,9 @@ func (m *Manager) testProxy(proxy *models.ProxyConfig, cfg TestConfig, source st
 	result.TTFBMs = ttfb.Milliseconds()
 	if result.DownloadedBytes > 0 && duration > 0 {
 		result.Mbps = float64(result.DownloadedBytes*8) / duration.Seconds() / 1000000
+	}
+	if result.Error == "" && result.DownloadedBytes == 0 {
+		result.Error = "empty response"
 	}
 	return result
 }

@@ -140,6 +140,13 @@ func main() {
 		"data/speedtest_schedule.json",
 		speedtest.TestConfig{URL: config.CLIConfig.SpeedTest.URL},
 	)
+	speedTestManager.ConfigureCountryFallbacks(
+		"data/country-test-urls.yaml",
+		"data/speedtest_url_health.json",
+	)
+	if err := speedTestManager.LoadCountryFallbacks(); err != nil {
+		logger.Warn("Failed to load country Test URL fallbacks; continuing without invalid state: %v", err)
+	}
 	speedTestManager.SetRunGate(xrayLifecycle.RLocker())
 	handleStateLoadError("speed-test", speedTestManager.Load())
 
@@ -151,6 +158,7 @@ func main() {
 	if err := nodeArchive.SyncSpeedHistory(speedTestManager.AllResultHistory()); err != nil {
 		logger.Warn("Failed to sync speed history into node registry: %v", err)
 	}
+	speedTestManager.SetCountryResolver(nodeArchive.ClaimedCountryCode)
 
 	telegramService := telegram.NewService(
 		"data/telegram_config.json",

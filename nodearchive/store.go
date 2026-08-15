@@ -172,6 +172,18 @@ func NewStore(path string, proxyChecker *checker.ProxyChecker) *Store {
 	}
 }
 
+// ClaimedCountryCode returns the user-declared country inferred from the node
+// name or subscription name. GeoIP sources are deliberately not consulted.
+func (s *Store) ClaimedCountryCode(stableID string) string {
+	stableID = strings.TrimSpace(stableID)
+	if stableID == "" {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return strings.ToUpper(strings.TrimSpace(s.nodes[stableID].ClaimedCountryCode))
+}
+
 func (s *Store) Load() error {
 	if s.path == "" {
 		return nil

@@ -1497,14 +1497,20 @@
         if (!result) return "n/a";
         if (result.offline) return "Offline";
         if (result.error) return "Failed";
-        return `${result.mbps.toFixed(2)} Mbps`;
+        return `${result.mbps.toFixed(2)} Mbps${result.fallbackUsed ? " ↪" : ""}`;
       }
 
       function formatSpeedStatus(result) {
         if (result.offline) return "Offline";
         if (result.error) return "Failed";
-        if (isLowSpeed(result)) return `${result.mbps.toFixed(2)} Mbps`;
-        return `${result.mbps.toFixed(2)} Mbps`;
+        return `${result.mbps.toFixed(2)} Mbps${result.fallbackUsed ? " ↪" : ""}`;
+      }
+
+      function fallbackResultTitle(result) {
+        if (!result || !result.fallbackUsed) return "";
+        const endpoint = [result.fallbackProvider, result.fallbackCity].filter(Boolean).join(" · ");
+        const country = result.fallbackCountryCode ? ` · ${result.fallbackCountryCode}` : "";
+        return `Reserve Test URL${endpoint ? ` · ${endpoint}` : ""}${country}`;
       }
 
       function speedStatusClass(result) {
@@ -1833,7 +1839,9 @@
         if (!result) return `<span class="chip neutral">n/a</span>`;
         const severity = resultSeverity(result);
         const chipClass = severity === "error" ? "error" : severity === "warn" ? "warn" : severity === "ok" ? "ok" : "neutral";
-        return `<span class="chip ${chipClass}">${escapeHtml(formatSpeedStatus(result))}</span>`;
+        const fallbackTitle = fallbackResultTitle(result);
+        const title = fallbackTitle ? ` title="${escapeHtml(fallbackTitle)}" aria-label="${escapeHtml(`${formatSpeedStatus(result)}; ${fallbackTitle}`)}"` : "";
+        return `<span class="chip ${chipClass}"${title}>${escapeHtml(formatSpeedStatus(result))}</span>`;
       }
 
       function nodeRowClass(proxy, result, muted) {

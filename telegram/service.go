@@ -611,6 +611,7 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 	}
 
 	report = filterMutedRunReport(report, cfg)
+	report = filterTelegramAlertSuppressedRunReport(report)
 	failed, slow, issuesOnly, shouldSend := speedReportDecision(report, cfg)
 	if !shouldSend {
 		return
@@ -3529,6 +3530,19 @@ func countSpeedIssues(results []speedtest.Result, threshold float64) (failed int
 func filterMutedRunReport(report speedtest.RunReport, cfg Config) speedtest.RunReport {
 	report.Results = filterMutedSpeedResults(report.Results, cfg)
 	report.Selected = len(report.Results)
+	return report
+}
+
+func filterTelegramAlertSuppressedRunReport(report speedtest.RunReport) speedtest.RunReport {
+	filtered := make([]speedtest.Result, 0, len(report.Results))
+	for _, result := range report.Results {
+		if result.TelegramAlertSuppressed {
+			continue
+		}
+		filtered = append(filtered, result)
+	}
+	report.Results = filtered
+	report.Selected = len(filtered)
 	return report
 }
 

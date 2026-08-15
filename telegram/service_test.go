@@ -655,6 +655,76 @@ func TestRequestedTelegramSpeedReportUsesOriginEvenWhenAutomatedReportsAreDisabl
 	}
 }
 
+func TestSuccessfulFallbackSuppressesAutomatedTelegramReport(t *testing.T) {
+	service := NewService("", nil, nil, 10000)
+	defer service.Stop()
+	service.setConfig(Config{
+		Enabled:               true,
+		ChatID:                "alerts-chat",
+		SpeedReportsEnabled:   true,
+		SpeedReportMode:       "always",
+		LowSpeedThresholdMbps: 10,
+		TimeoutSec:            1,
+	})
+
+	var sent []formattedMessage
+	service.speedReportSendFunc = func(_ string, _ int, content formattedMessage) {
+		sent = append(sent, content)
+	}
+	service.NotifySpeedTest(speedtest.RunReport{
+		Source:     "schedule",
+		FinishedAt: time.Now(),
+		Selected:   1,
+		Results: []speedtest.Result{{
+			StableID:                "node-1",
+			Name:                    "Node 1",
+			Mbps:                    2,
+			FallbackUsed:            true,
+			TelegramAlertSuppressed: true,
+		}},
+	})
+
+	if len(sent) != 0 {
+		t.Fatalf("successful fallback sent %d automated reports, want none", len(sent))
+	}
+	service.speedRetryMu.Lock()
+	pending := service.speedRetryPending["node-1"]
+	service.speedRetryMu.Unlock()
+	if pending {
+		t.Fatal("successful fallback scheduled a low-speed confirmation alert")
+	}
+}
+
+func TestRequestedTelegramSpeedReportStillReturnsSuccessfulFallback(t *testing.T) {
+	service := NewService("", nil, nil, 10000)
+	defer service.Stop()
+	service.setConfig(Config{Enabled: true, TimeoutSec: 1})
+
+	sent := make(chan formattedMessage, 1)
+	service.speedReportSendFunc = func(_ string, _ int, content formattedMessage) {
+		sent <- content
+	}
+	service.NotifySpeedTest(speedtest.RunReport{
+		Source:       "telegram",
+		FinishedAt:   time.Now(),
+		Selected:     1,
+		ReportTarget: speedtest.ReportTarget{ChatID: "origin-chat", MessageThreadID: 42},
+		Results: []speedtest.Result{{
+			StableID:                "node-1",
+			Name:                    "Node 1",
+			Mbps:                    50,
+			FallbackUsed:            true,
+			TelegramAlertSuppressed: true,
+		}},
+	})
+
+	select {
+	case <-sent:
+	default:
+		t.Fatal("requested Telegram fallback result was suppressed")
+	}
+}
+
 func TestAutomaticLowSpeedAlertRequiresFailedConfirmation(t *testing.T) {
 	service := NewService("", nil, nil, 10000)
 	defer service.Stop()

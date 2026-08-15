@@ -1014,6 +1014,26 @@ components:
           type: string
         url:
           type: string
+        primaryUrl:
+          type: string
+          description: Original per-node or global Test URL when a country fallback was used.
+        primaryError:
+          type: string
+          description: Technical error returned by the original Test URL before fallback.
+        fallbackUsed:
+          type: boolean
+        fallbackId:
+          type: string
+        fallbackProvider:
+          type: string
+        fallbackCity:
+          type: string
+        fallbackCountryCode:
+          type: string
+          description: ISO 3166-1 alpha-2 code inferred from the node declaration, never GeoIP.
+        telegramAlertSuppressed:
+          type: boolean
+          description: Successful fallback result is omitted from automated Telegram reports and alerts.
         statusCode:
           type: integer
         downloadedBytes:

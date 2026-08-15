@@ -1,0 +1,327 @@
+# Country-specific reserve Test URLs for xray-checker.
+#
+# Copy this file to data/country-test-urls.yaml and edit the local copy.
+# Country keys are ISO 3166-1 alpha-2 codes. The checker matches them against
+# the country declared by the node name/subscription, never against GeoIP.
+#
+# priority is only the deterministic initial order. Runtime health, per-node
+# last success and cooldowns take precedence. The checker does not rank URLs by
+# measured Mbps, because that would make node-speed history incomparable.
+#
+# enabled defaults to true when omitted. Endpoint ids must be globally unique.
+
+version: 1
+
+countries:
+  DE:
+    - id: hostkey-frankfurt
+      provider: HOSTKEY
+      city: Frankfurt
+      url: https://spd-desrv.hostkey.com/files/100mb.bin
+      priority: 10
+      enabled: true
+      source: https://hostkey.com/documentation/technical/exist_server_using/speedtest/
+
+    - id: edis-frankfurt
+      provider: EDIS Global
+      city: Frankfurt
+      url: https://de.edisglobal.com/100MB.test
+      priority: 20
+      enabled: true
+      source: https://de.edisglobal.com/
+
+    - id: leaseweb-frankfurt-fra1
+      provider: Leaseweb
+      city: Frankfurt
+      url: http://speedtest.fra1.de.leaseweb.net/100mb.bin
+      priority: 30
+      enabled: true
+      source: https://kb.leaseweb.com/kb/network/network-link-speeds/
+
+    - id: hetzner-falkenstein-fsn1
+      provider: Hetzner
+      city: Falkenstein
+      url: https://fsn1-speed.hetzner.com/100MB.bin
+      priority: 40
+      # Official endpoint, but disabled after repeated TLS failures from the
+      # validation network on 2026-08-15. Enable after checking from your VPS.
+      enabled: false
+      source: https://docs.hetzner.com/storage/object-storage/troubleshooting/bandwidth-latency-issues/
+
+  NL:
+    - id: hostkey-amsterdam
+      provider: HOSTKEY
+      city: Amsterdam
+      url: https://spd-nlsrv.hostkey.com/files/100mb.bin
+      priority: 10
+      enabled: true
+      source: https://hostkey.com/documentation/technical/exist_server_using/speedtest/
+
+    - id: edis-amsterdam
+      provider: EDIS Global
+      city: Amsterdam
+      url: https://nl.edisglobal.com/100MB.test
+      priority: 20
+      enabled: true
+      source: https://nl.edisglobal.com/
+
+    - id: leaseweb-amsterdam-ams1
+      provider: Leaseweb
+      city: Amsterdam AMS-01
+      url: http://speedtest.ams1.nl.leaseweb.net/100mb.bin
+      priority: 30
+      enabled: true
+      source: https://kb.leaseweb.com/kb/network/network-link-speeds/
+
+    - id: leaseweb-amsterdam-ams2
+      provider: Leaseweb
+      city: Amsterdam AMS-02
+      url: http://speedtest.ams2.nl.leaseweb.net/100mb.bin
+      priority: 40
+      enabled: true
+      source: https://kb.leaseweb.com/kb/network/network-link-speeds/
+
+  EE:
+    - id: edis-tallinn
+      provider: EDIS Global
+      city: Tallinn
+      url: https://ee.edisglobal.com/100MB.test
+      priority: 10
+      enabled: true
+      source: https://ee.edisglobal.com/
+
+    - id: fairyhosting-estonia
+      provider: FairyHosting
+      city: Estonia
+      url: https://lg.fairyhosting.com/100MB.test
+      priority: 20
+      enabled: true
+      source: https://lg.fairyhosting.com/ee
+
+  FI:
+    - id: hostkey-helsinki
+      provider: HOSTKEY
+      city: Helsinki
+      url: https://spd-fisrv.hostkey.com/files/100mb.bin
+      priority: 10
+      enabled: true
+      source: https://hostkey.com/documentation/technical/exist_server_using/speedtest/
+
+    - id: edis-helsinki
+      provider: EDIS Global
+      city: Helsinki
+      url: https://fi.edisglobal.com/100MB.test
+      priority: 20
+      enabled: true
+      source: https://fi.edisglobal.com/
+
+    - id: mynymbox-helsinki
+      provider: MyNymBox
+      city: Helsinki
+      url: https://fi-lg.mynymbox.io/100MB.bin
+      priority: 30
+      enabled: true
+      source: https://fi-lg.mynymbox.io/
+
+    - id: hetzner-helsinki-hel1
+      provider: Hetzner
+      city: Helsinki HEL1
+      url: https://hel1-speed.hetzner.com/100MB.bin
+      priority: 40
+      # Official endpoint, but disabled after repeated TLS failures from the
+      # validation network on 2026-08-15. Enable after checking from your VPS.
+      enabled: false
+      source: https://hel1-speed.hetzner.com/
+
+  US:
+    - id: hostkey-new-york
+      provider: HOSTKEY
+      city: New York
+      url: https://spd-uswb.hostkey.com/files/1000mb.bin
+      priority: 10
+      enabled: true
+      source: https://hostkey.com/documentation/technical/exist_server_using/speedtest/
+
+    - id: edis-new-york
+      provider: EDIS Global
+      city: New York
+      url: https://us.edisglobal.com/100MB.test
+      priority: 20
+      enabled: true
+      source: https://us.edisglobal.com/
+
+    - id: leaseweb-new-york-nyc1
+      provider: Leaseweb
+      city: New York NYC-01
+      url: http://speedtest.nyc1.us.leaseweb.net/100mb.bin
+      priority: 30
+      enabled: true
+      source: https://kb.leaseweb.com/kb/network/network-link-speeds/
+
+    - id: leaseweb-washington-wdc2
+      provider: Leaseweb
+      city: Washington WDC-02
+      url: http://speedtest.wdc2.us.leaseweb.net/100mb.bin
+      priority: 40
+      enabled: true
+      source: https://kb.leaseweb.com/kb/network/network-link-speeds/
+
+    - id: edis-los-angeles
+      provider: EDIS Global
+      city: Los Angeles
+      url: https://uslax.edisglobal.com/100MB.test
+      priority: 50
+      enabled: true
+      source: https://uslax.edisglobal.com/
+
+    - id: leaseweb-los-angeles-lax12
+      provider: Leaseweb
+      city: Los Angeles LAX-12
+      url: http://speedtest.lax12.us.leaseweb.net/100mb.bin
+      priority: 60
+      enabled: true
+      source: https://kb.leaseweb.com/kb/network/network-link-speeds/
+
+    - id: edis-miami
+      provider: EDIS Global
+      city: Miami
+      url: https://usmia.edisglobal.com/100MB.test
+      priority: 70
+      enabled: true
+      source: https://usmia.edisglobal.com/
+
+  GB:
+    - id: hostkey-london
+      provider: HOSTKEY
+      city: London
+      url: http://spd-uksrv.hostkey.com/files/100mb.bin
+      priority: 10
+      enabled: true
+      source: https://hostkey.com/documentation/technical/exist_server_using/speedtest/
+
+    - id: leaseweb-london-lon1
+      provider: Leaseweb
+      city: London LON-01
+      url: http://speedtest.lon1.uk.leaseweb.net/100mb.bin
+      priority: 20
+      enabled: true
+      source: https://kb.leaseweb.com/kb/network/network-link-speeds/
+
+    - id: edis-london
+      provider: EDIS Global
+      city: London
+      url: https://uk.edisglobal.com/100MB.test
+      priority: 30
+      enabled: true
+      source: https://uk.edisglobal.com/
+
+  IS:
+    - id: hostkey-reykjavik
+      provider: HOSTKEY
+      city: Reykjavik
+      url: https://spd-icsrv.hostkey.com/files/100mb.bin
+      priority: 10
+      enabled: true
+      source: https://hostkey.com/documentation/technical/exist_server_using/speedtest/
+
+    - id: edis-hafnarfjordur
+      provider: EDIS Global
+      city: Hafnarfjordur
+      url: https://is.edisglobal.com/100MB.test
+      priority: 20
+      enabled: true
+      source: https://is.edisglobal.com/
+
+  FR:
+    - id: hostkey-paris
+      provider: HOSTKEY
+      city: Paris
+      url: https://spd-frsrv.hostkey.com/files/100mb.bin
+      priority: 10
+      enabled: true
+      source: https://hostkey.com/documentation/technical/exist_server_using/speedtest/
+
+    - id: edis-paris
+      provider: EDIS Global
+      city: Paris
+      url: https://fr.edisglobal.com/100MB.test
+      priority: 20
+      enabled: true
+      source: https://fr.edisglobal.com/
+
+  ES:
+    - id: hostkey-madrid
+      provider: HOSTKEY
+      city: Madrid
+      url: https://spd-essrv.hostkey.com/files/100mb.bin
+      priority: 10
+      enabled: true
+      source: https://hostkey.com/documentation/technical/exist_server_using/speedtest/
+
+    - id: edis-seville
+      provider: EDIS Global
+      city: Seville
+      url: https://es.edisglobal.com/100MB.test
+      priority: 20
+      enabled: true
+      source: https://es.edisglobal.com/
+
+  IT:
+    - id: hostkey-milan
+      provider: HOSTKEY
+      city: Milan
+      url: https://spd-itsrv.hostkey.com/files/100mb.bin
+      priority: 10
+      enabled: true
+      source: https://hostkey.com/documentation/technical/exist_server_using/speedtest/
+
+    - id: edis-milan
+      provider: EDIS Global
+      city: Milan
+      url: https://it.edisglobal.com/100MB.test
+      priority: 20
+      enabled: true
+      source: https://it.edisglobal.com/
+
+  TR:
+    - id: hostkey-istanbul
+      provider: HOSTKEY
+      city: Istanbul
+      url: http://spd-tr.hostkey.com/files/100mb.bin
+      priority: 10
+      enabled: true
+      source: https://hostkey.com/documentation/technical/exist_server_using/speedtest/
+
+  PL:
+    - id: hostkey-warsaw
+      provider: HOSTKEY
+      city: Warsaw
+      url: http://spd-plsrv.hostkey.com/files/100mb.bin
+      priority: 10
+      enabled: true
+      source: https://hostkey.com/documentation/technical/exist_server_using/speedtest/
+
+    - id: edis-warsaw
+      provider: EDIS Global
+      city: Warsaw
+      url: https://pl.edisglobal.com/100MB.test
+      priority: 20
+      enabled: true
+      source: https://pl.edisglobal.com/
+
+  CH:
+    - id: hostkey-zurich
+      provider: HOSTKEY
+      city: Zurich
+      url: http://spd-chsrv.hostkey.com/files/100mb.bin
+      priority: 10
+      enabled: true
+      source: https://hostkey.com/documentation/technical/exist_server_using/speedtest/
+
+    - id: edis-zurich
+      provider: EDIS Global
+      city: Zurich
+      url: https://ch.edisglobal.com/100MB.test
+      priority: 20
+      enabled: true
+      source: https://ch.edisglobal.com/
