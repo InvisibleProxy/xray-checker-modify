@@ -489,12 +489,34 @@
         display: grid;
         gap: 10px;
       }
+      @keyframes node-card-enter {
+        from {
+          opacity: 0;
+          transform: translateY(7px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      @keyframes chart-line-enter {
+        from { stroke-dashoffset: 1; }
+        to { stroke-dashoffset: 0; }
+      }
+      @keyframes chart-layer-enter {
+        from { opacity: 0; }
+        to { opacity: 1; }
+      }
       .node-card {
         overflow: hidden;
         border: 1px solid var(--border);
         border-radius: 12px;
         background: var(--panel-2);
-        transition: border-color 0.18s ease, box-shadow 0.18s ease;
+        transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+      }
+      .node-card.entering {
+        animation: node-card-enter 0.34s ease both;
+        animation-delay: calc(var(--node-card-index, 0) * 40ms);
       }
       .node-card:hover,
       .node-card.open {
@@ -516,6 +538,20 @@
         align-items: center;
         min-height: 72px;
         padding: 12px 14px;
+        cursor: pointer;
+        transition: background-color 0.18s ease;
+      }
+      .node-card-head:hover {
+        background: rgba(255, 255, 255, 0.018);
+      }
+      .node-card-head:focus-visible {
+        outline: 2px solid rgba(110, 168, 254, 0.72);
+        outline-offset: -3px;
+      }
+      .node-card-head button,
+      .node-card-head input,
+      .node-card-head label {
+        cursor: pointer;
       }
       .node-select {
         display: flex;
@@ -580,6 +616,15 @@
       }
       .node-card.open .node-toggle svg {
         transform: rotate(180deg);
+      }
+      .node-card-panel {
+        max-height: 0;
+        overflow: hidden;
+        opacity: 0;
+        transition: max-height 0.3s cubic-bezier(0.2, 0.72, 0.2, 1), opacity 0.2s ease;
+      }
+      .node-card-panel.open {
+        opacity: 1;
       }
       .node-card-detail {
         display: grid;
@@ -673,10 +718,14 @@
         stroke-width: 2.5;
         stroke-linecap: round;
         stroke-linejoin: round;
+        stroke-dasharray: 1;
+        stroke-dashoffset: 1;
+        animation: chart-line-enter 0.48s ease-out forwards;
       }
       .chart-area {
         fill: url(#speed-area-gradient);
         stroke: none;
+        animation: chart-layer-enter 0.38s ease-out both;
       }
       .chart-gap-bridge {
         fill: none;
@@ -688,6 +737,7 @@
       .chart-error-band {
         fill: rgba(247, 118, 142, 0.11);
         transition: fill 0.15s ease;
+        animation: chart-layer-enter 0.3s ease-out both;
       }
       .chart-error-band:hover {
         fill: rgba(247, 118, 142, 0.2);
@@ -730,10 +780,12 @@
         color: var(--text);
         font-size: 13px;
         line-height: 1.5;
-        transition: opacity 0.08s ease;
+        transform: translateY(4px);
+        transition: opacity 0.08s ease, transform 0.08s ease;
       }
       .speed-chart-tooltip.visible {
         opacity: 1;
+        transform: translateY(0);
       }
       .speed-chart-tooltip-time {
         margin-bottom: 4px;
@@ -771,6 +823,24 @@
         display: inline-flex;
         align-items: center;
         gap: 6px;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .node-card,
+        .node-card.entering,
+        .node-card-head,
+        .node-card-panel,
+        .node-toggle svg,
+        .chart-line,
+        .chart-area,
+        .chart-error-band,
+        .chart-point,
+        .speed-chart-tooltip {
+          animation: none !important;
+          transition-duration: 0.01ms !important;
+        }
+        .chart-line {
+          stroke-dashoffset: 0;
+        }
       }
       .legend-dot {
         width: 8px;
@@ -1451,6 +1521,9 @@
         dashboardRange: "7d",
         dashboardFrom: "",
         dashboardTo: "",
+        dashboardCardsAnimated: false,
+        dashboardPanelTransition: 0,
+        dashboardPanelClosing: "",
       };
 
       const basePath = (() => {
@@ -1819,8 +1892,8 @@
         const yMax = niceSpeedMax(Math.max(observedMax, threshold));
         const width = 960;
         const height = 250;
-        const left = 54;
-        const right = 20;
+        const left = 18;
+        const right = 48;
         const top = 18;
         const bottom = 38;
         const plotWidth = width - left - right;
@@ -1835,13 +1908,14 @@
         [0, 0.5, 1].forEach((ratio) => {
           const y = top + plotHeight - ratio * plotHeight;
           grid.push(`<line class="chart-grid-line" x1="${left}" y1="${y}" x2="${width - right}" y2="${y}" />`);
-          grid.push(`<text class="chart-axis-label" x="${left - 8}" y="${y + 4}" text-anchor="end">${Math.round(yMax * ratio)}</text>`);
+          grid.push(`<text class="chart-axis-label" x="${width - 8}" y="${y + 4}" text-anchor="end">${Math.round(yMax * ratio)}</text>`);
         });
         for (let index = 0; index < 5; index += 1) {
           const ratio = index / 4;
           const x = left + ratio * plotWidth;
           const timestamp = fromMs + ratio * spanMs;
-          grid.push(`<text class="chart-axis-label" x="${x}" y="${height - 10}" text-anchor="middle">${escapeHtml(speedChartAxisTime(timestamp, spanMs))}</text>`);
+          const anchor = index === 0 ? "start" : index === 4 ? "end" : "middle";
+          grid.push(`<text class="chart-axis-label" x="${x}" y="${height - 10}" text-anchor="${anchor}">${escapeHtml(speedChartAxisTime(timestamp, spanMs))}</text>`);
         }
 
         const intervals = [];
@@ -1877,16 +1951,17 @@
           const lastX = xOf(items[items.length - 1].checkedAt).toFixed(1);
           const baselineY = (top + plotHeight).toFixed(1);
           const runWidth = Math.max(1, Number(lastX) - Number(firstX));
+          const maskLastX = (Number(firstX) + runWidth).toFixed(1);
           const fadePercent = Math.min(22, Math.max(3, (18 / runWidth) * 100));
           const maskID = `speed-area-mask-${index}`;
           const gradientID = `speed-area-mask-gradient-${index}`;
-          areaMasks.push(`<linearGradient id="${gradientID}" x1="0" y1="0" x2="1" y2="0">
-              <stop offset="0%" stop-color="black" />
-              <stop offset="${fadePercent.toFixed(1)}%" stop-color="white" />
-              <stop offset="${(100 - fadePercent).toFixed(1)}%" stop-color="white" />
-              <stop offset="100%" stop-color="black" />
+          areaMasks.push(`<linearGradient id="${gradientID}" gradientUnits="userSpaceOnUse" x1="${firstX}" y1="0" x2="${maskLastX}" y2="0">
+              <stop offset="0%" stop-color="white" stop-opacity="0" />
+              <stop offset="${fadePercent.toFixed(1)}%" stop-color="white" stop-opacity="1" />
+              <stop offset="${(100 - fadePercent).toFixed(1)}%" stop-color="white" stop-opacity="1" />
+              <stop offset="100%" stop-color="white" stop-opacity="0" />
             </linearGradient>
-            <mask id="${maskID}">
+            <mask id="${maskID}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="${firstX}" y="${top}" width="${runWidth.toFixed(1)}" height="${plotHeight}" style="mask-type: alpha">
               <rect x="${firstX}" y="${top}" width="${runWidth.toFixed(1)}" height="${plotHeight}" fill="url(#${gradientID})" />
             </mask>`);
           const path = items.map((result) => `L ${xOf(result.checkedAt).toFixed(1)} ${yOf(result.mbps).toFixed(1)}`).join(" ");
@@ -1897,7 +1972,7 @@
             const command = index === 0 ? "M" : "L";
             return `${command} ${xOf(result.checkedAt).toFixed(1)} ${yOf(result.mbps).toFixed(1)}`;
           }).join(" ");
-          return `<path class="chart-line" d="${path}" />`;
+          return `<path class="chart-line" pathLength="1" d="${path}" />`;
         }).join("");
         const gapBridges = runs.slice(1).map((items, index) => {
           const previousRun = runs[index];
@@ -1927,16 +2002,20 @@
         const latestX = xOf(latest.checkedAt).toFixed(1);
         const latestMarker = `<line class="chart-last-marker" x1="${latestX}" y1="${top}" x2="${latestX}" y2="${top + plotHeight}"><title>Latest measurement: ${escapeHtml(formatTime(latest.checkedAt))}</title></line>`;
         const cursor = `<line class="chart-cursor" x1="${left}" y1="${top}" x2="${left}" y2="${top + plotHeight}" opacity="0" aria-hidden="true" />`;
-        return `<svg class="speed-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Speed-test history in Mbps">
+        return `<svg class="speed-chart" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="Speed-test history in Mbps">
           <defs>
             <linearGradient id="speed-area-gradient" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stop-color="var(--blue)" stop-opacity="0.28" />
               <stop offset="100%" stop-color="var(--blue)" stop-opacity="0.02" />
             </linearGradient>
+            <clipPath id="speed-chart-plot">
+              <rect x="${left}" y="${top}" width="${plotWidth}" height="${plotHeight}" />
+            </clipPath>
             ${areaMasks.join("")}
           </defs>
-          ${grid.join("")}${areas}${errors}${thresholdLine}${gapBridges}${lines}${latestMarker}${cursor}${points}
-          <text class="chart-axis-label" x="12" y="14">Mbps</text>
+          ${grid.join("")}
+          <g clip-path="url(#speed-chart-plot)">${areas}${errors}${thresholdLine}${gapBridges}${lines}${latestMarker}${cursor}${points}</g>
+          <text class="chart-axis-label" x="${left}" y="13">Mbps</text>
         </svg>`;
       }
 
@@ -1987,8 +2066,8 @@
         if (ordered.length === 0) return;
 
         const width = 960;
-        const left = 54;
-        const right = 20;
+        const left = 18;
+        const right = 48;
         const plotWidth = width - left - right;
         const fromMs = bounds.from.getTime();
         const spanMs = Math.max(1, bounds.to.getTime() - fromMs);
@@ -2582,9 +2661,94 @@
           : "Last updated: n/a";
       }
 
-      function renderNodes() {
+      function prefersReducedMotion() {
+        return window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      }
+
+      function nodeCardElement(stableId) {
+        return [...$("nodes").querySelectorAll("[data-node-card]")]
+          .find((card) => card.dataset.nodeCard === stableId) || null;
+      }
+
+      function currentNodePanelHeight() {
+        const card = nodeCardElement(state.openNodeStableId);
+        const panel = card?.querySelector("[data-node-panel]");
+        return panel ? panel.getBoundingClientRect().height : 0;
+      }
+
+      function syncOpenNodePanel(options = {}) {
+        const stableId = state.openNodeStableId;
+        if (!stableId || state.dashboardPanelClosing === stableId) return;
+        const card = nodeCardElement(stableId);
+        const panel = card?.querySelector("[data-node-panel]");
+        if (!panel) return;
+        const targetHeight = panel.scrollHeight;
+        const animateOpen = Boolean(options.animatePanelOpen) && !prefersReducedMotion();
+        const animateResize = Number.isFinite(options.panelFromHeight) && !prefersReducedMotion();
+
+        if (!animateOpen && !animateResize) {
+          panel.classList.add("open");
+          panel.style.maxHeight = `${targetHeight}px`;
+          panel.setAttribute("aria-hidden", "false");
+          return;
+        }
+
+        if (animateOpen) {
+          panel.classList.remove("open");
+          panel.style.maxHeight = "0px";
+          panel.setAttribute("aria-hidden", "true");
+        } else {
+          panel.classList.add("open");
+          panel.style.maxHeight = `${Math.max(0, options.panelFromHeight)}px`;
+          panel.setAttribute("aria-hidden", "false");
+        }
+        panel.getBoundingClientRect();
+        window.requestAnimationFrame(() => {
+          if (!panel.isConnected || state.openNodeStableId !== stableId) return;
+          panel.classList.add("open");
+          panel.style.maxHeight = `${panel.scrollHeight}px`;
+          panel.setAttribute("aria-hidden", "false");
+        });
+      }
+
+      async function animateNodePanelClose(stableId) {
+        const card = nodeCardElement(stableId);
+        const panel = card?.querySelector("[data-node-panel]");
+        if (!card || !panel || prefersReducedMotion()) return;
+
+        const visibleHeight = panel.getBoundingClientRect().height;
+        panel.classList.add("open");
+        panel.style.maxHeight = `${visibleHeight > 0 ? visibleHeight : panel.scrollHeight}px`;
+        panel.setAttribute("aria-hidden", "false");
+        panel.getBoundingClientRect();
+        card.classList.remove("open");
+        card.querySelector(".node-card-head")?.setAttribute("aria-expanded", "false");
+        card.querySelector("[data-node-toggle]")?.setAttribute("aria-expanded", "false");
+        panel.classList.remove("open");
+        panel.style.maxHeight = "0px";
+        panel.setAttribute("aria-hidden", "true");
+
+        await new Promise((resolve) => {
+          let finished = false;
+          const finish = () => {
+            if (finished) return;
+            finished = true;
+            panel.removeEventListener("transitionend", onTransitionEnd);
+            window.clearTimeout(timeout);
+            resolve();
+          };
+          const onTransitionEnd = (event) => {
+            if (event.target === panel && event.propertyName === "max-height") finish();
+          };
+          const timeout = window.setTimeout(finish, 380);
+          panel.addEventListener("transitionend", onTransitionEnd);
+        });
+      }
+
+      function renderNodes(options = {}) {
         hideSpeedChartTooltip();
-        const cards = filteredProxies().map((proxy) => {
+        const animateCards = !state.dashboardCardsAnimated && state.proxies.length > 0;
+        const cards = filteredProxies().map((proxy, index) => {
           const result = resultFor(proxy.stableId);
           const muted = telegramAnyMutedNodeSet().has(proxy.stableId);
           const checked = state.selected.has(proxy.stableId) ? "checked" : "";
@@ -2593,16 +2757,17 @@
           const checking = state.availabilityCheckRunning && state.availabilityCheckIDs.has(proxy.stableId);
           const checkDisabled = state.availabilityCheckRunning ? "disabled" : "";
           const runDisabled = run && run.running ? "disabled" : "";
-          const open = state.openNodeStableId === proxy.stableId;
+          const open = state.openNodeStableId === proxy.stableId && state.dashboardPanelClosing !== proxy.stableId;
           const availabilityClass = proxy.online ? "ok" : "error";
           const availabilityText = proxy.online
             ? (proxy.latencyMs > 0 ? `${proxy.latencyMs} ms` : "Online")
             : (proxy.downSince ? `Offline · ${formatDurationSec(proxy.downtimeSec)}` : "Offline");
           const speedClass = result ? speedStatusClass(result) : "";
           const speedText = result ? formatSpeedStatus(result) : "No result";
+          const panelID = `node-card-panel-${index}`;
           return `
-            <article class="node-card ${rowClass} ${open ? "open" : ""}" data-node-card="${escapeHtml(proxy.stableId)}">
-              <div class="node-card-head">
+            <article class="node-card ${rowClass} ${open ? "open" : ""} ${animateCards ? "entering" : ""}" data-node-card="${escapeHtml(proxy.stableId)}"${animateCards ? ` style="--node-card-index: ${Math.min(index, 12)}"` : ""}>
+              <div class="node-card-head" data-node-toggle-area="${escapeHtml(proxy.stableId)}" tabindex="0" aria-expanded="${open}" aria-controls="${panelID}">
                 <label class="node-select" aria-label="Select ${escapeHtml(proxy.name || "node")}">
                   <input type="checkbox" data-id="${escapeHtml(proxy.stableId)}" ${checked}>
                 </label>
@@ -2626,10 +2791,11 @@
                   <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
                 </button>
               </div>
-              ${open ? nodeDetailHTML(proxy, result) : ""}
+              <div id="${panelID}" class="node-card-panel" data-node-panel="${escapeHtml(proxy.stableId)}" aria-hidden="${!open}">${open ? nodeDetailHTML(proxy, result) : ""}</div>
             </article>`;
         });
         $("nodes").innerHTML = cards.join("") || `<div class="panel muted">No nodes match filters</div>`;
+        if (animateCards && cards.length > 0) state.dashboardCardsAnimated = true;
         $("nodes").querySelectorAll("input[type=checkbox]").forEach((input) => {
           input.addEventListener("change", () => {
             input.checked ? state.selected.add(input.dataset.id) : state.selected.delete(input.dataset.id);
@@ -2643,7 +2809,21 @@
           button.addEventListener("click", () => runNodes([button.dataset.runId]));
         });
         $("nodes").querySelectorAll("[data-node-toggle]").forEach((button) => {
-          button.addEventListener("click", () => toggleNodeDetails(button.dataset.nodeToggle));
+          button.addEventListener("click", (event) => {
+            event.stopPropagation();
+            toggleNodeDetails(button.dataset.nodeToggle);
+          });
+        });
+        $("nodes").querySelectorAll("[data-node-toggle-area]").forEach((head) => {
+          head.addEventListener("click", (event) => {
+            if (event.target.closest("button, input, label, a, select, textarea")) return;
+            toggleNodeDetails(head.dataset.nodeToggleArea);
+          });
+          head.addEventListener("keydown", (event) => {
+            if (event.target !== head || !["Enter", " "].includes(event.key)) return;
+            event.preventDefault();
+            toggleNodeDetails(head.dataset.nodeToggleArea);
+          });
         });
         $("nodes").querySelectorAll("[data-chart-range]").forEach((button) => {
           button.addEventListener("click", () => setDashboardRange(button.dataset.chartRange));
@@ -2667,6 +2847,7 @@
           });
         });
         bindSpeedChartInteractions();
+        syncOpenNodePanel(options);
         renderSelectionCount();
       }
 
@@ -2912,6 +3093,7 @@
         state.selected = new Set([...state.selected].filter((id) => knownIds.has(id)));
         if (state.openNodeStableId && !knownIds.has(state.openNodeStableId)) {
           state.openNodeStableId = "";
+          state.dashboardPanelClosing = "";
           state.dashboardHistoryResults = [];
           state.dashboardHistoryRequest += 1;
         }
@@ -2922,19 +3104,32 @@
       }
 
       async function toggleNodeDetails(stableId) {
-        if (state.openNodeStableId === stableId) {
+        const transition = state.dashboardPanelTransition + 1;
+        state.dashboardPanelTransition = transition;
+        const previousStableId = state.openNodeStableId;
+        const closingCurrent = Boolean(previousStableId);
+        if (closingCurrent) {
+          state.dashboardPanelClosing = previousStableId;
+          state.dashboardHistoryRequest += 1;
+          await animateNodePanelClose(previousStableId);
+          if (transition !== state.dashboardPanelTransition) return;
           state.openNodeStableId = "";
+          state.dashboardPanelClosing = "";
           state.dashboardHistoryResults = [];
           state.dashboardHistoryError = "";
           state.dashboardHistoryLoading = false;
-          state.dashboardHistoryRequest += 1;
+        }
+
+        if (previousStableId === stableId) {
           renderNodes();
           return;
         }
+
         state.openNodeStableId = stableId;
+        state.dashboardPanelClosing = "";
         state.dashboardHistoryResults = [];
         state.dashboardHistoryError = "";
-        renderNodes();
+        renderNodes({ animatePanelOpen: true });
         await loadDashboardHistory();
       }
 
@@ -2959,16 +3154,17 @@
           state.dashboardHistoryResults = [];
           state.dashboardHistoryError = bounds.error;
           state.dashboardHistoryLoading = false;
-          renderNodes();
+          renderNodes({ panelFromHeight: currentNodePanelHeight() });
           return;
         }
 
         const requestID = state.dashboardHistoryRequest + 1;
         state.dashboardHistoryRequest = requestID;
+        const loadingFromHeight = currentNodePanelHeight();
         state.dashboardHistoryLoading = true;
         state.dashboardHistoryError = "";
         state.dashboardHistoryResults = [];
-        renderNodes();
+        renderNodes({ panelFromHeight: loadingFromHeight });
         const query = new URLSearchParams({
           stableId,
           from: bounds.from.toISOString(),
@@ -2984,8 +3180,9 @@
           state.dashboardHistoryError = err.message;
         } finally {
           if (requestID === state.dashboardHistoryRequest && stableId === state.openNodeStableId) {
+            const resultFromHeight = currentNodePanelHeight();
             state.dashboardHistoryLoading = false;
-            renderNodes();
+            renderNodes({ panelFromHeight: resultFromHeight });
           }
         }
       }
@@ -3556,6 +3753,11 @@
       ["url", "max-mb", "timeout", "concurrency"].forEach((id) => {
         $(id).addEventListener("input", saveSpeedDraft);
         $(id).addEventListener("change", saveSpeedDraft);
+      });
+      let nodePanelResizeFrame = 0;
+      window.addEventListener("resize", () => {
+        window.cancelAnimationFrame(nodePanelResizeFrame);
+        nodePanelResizeFrame = window.requestAnimationFrame(() => syncOpenNodePanel());
       });
 
       switchSettingsPane(state.settingsPane);
