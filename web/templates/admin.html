@@ -487,7 +487,7 @@
       }
       .nodes-list {
         display: grid;
-        gap: 10px;
+        gap: 9px;
       }
       @keyframes node-card-enter {
         from {
@@ -510,9 +510,10 @@
       .node-card {
         overflow: hidden;
         border: 1px solid var(--border);
-        border-radius: 12px;
+        border-radius: 14px;
         background: var(--panel-2);
-        transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+        transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
       }
       .node-card.entering {
         animation: node-card-enter 0.34s ease both;
@@ -520,10 +521,10 @@
       }
       .node-card:hover,
       .node-card.open {
-        border-color: #46515e;
+        border-color: rgba(127, 140, 158, 0.44);
       }
-      .node-card.open {
-        box-shadow: 0 14px 36px rgba(0, 0, 0, 0.18);
+      .node-card:hover {
+        box-shadow: 0 3px 12px rgba(0, 0, 0, 0.12);
       }
       .node-card.row-error {
         border-color: rgba(255, 93, 93, 0.42);
@@ -534,15 +535,15 @@
       .node-card-head {
         display: grid;
         grid-template-columns: auto minmax(210px, 1.3fr) minmax(140px, 0.72fr) minmax(140px, 0.72fr) auto auto;
-        gap: 14px;
+        gap: 12px;
         align-items: center;
-        min-height: 72px;
-        padding: 12px 14px;
+        min-height: 62px;
+        padding: 9px 14px;
         cursor: pointer;
-        transition: background-color 0.18s ease;
+        transition: background-color 0.14s ease;
       }
       .node-card-head:hover {
-        background: rgba(255, 255, 255, 0.018);
+        background: rgba(127, 140, 158, 0.07);
       }
       .node-card-head:focus-visible {
         outline: 2px solid rgba(110, 168, 254, 0.72);
@@ -567,14 +568,15 @@
         align-items: center;
         gap: 8px;
         min-width: 0;
-        font-weight: 700;
+        font-size: 15px;
+        font-weight: 600;
       }
       .node-title-text {
         overflow-wrap: anywhere;
       }
       .node-subline,
       .node-summary-label {
-        margin-top: 4px;
+        margin-top: 3px;
         color: var(--muted);
         font-size: 12px;
       }
@@ -602,8 +604,8 @@
       }
       button.node-toggle {
         display: inline-flex;
-        width: 34px;
-        height: 34px;
+        width: 28px;
+        height: 28px;
         padding: 0;
         align-items: center;
         justify-content: center;
@@ -612,7 +614,7 @@
         color: var(--muted);
       }
       .node-toggle svg {
-        transition: transform 0.18s ease;
+        transition: transform 0.22s ease;
       }
       .node-card.open .node-toggle svg {
         transform: rotate(180deg);
@@ -621,40 +623,38 @@
         max-height: 0;
         overflow: hidden;
         opacity: 0;
-        transition: max-height 0.3s cubic-bezier(0.2, 0.72, 0.2, 1), opacity 0.2s ease;
+        padding: 0 20px;
+        border-top: 1px solid transparent;
+        background: rgba(14, 18, 23, 0.34);
+        transition: max-height 0.3s ease, opacity 0.24s ease, padding 0.28s ease, border-color 0.28s ease;
       }
-      .node-card-panel.open {
+      .node-card.open .node-card-panel {
         opacity: 1;
+        padding: 16px 20px 18px;
+        border-top-color: var(--border);
       }
       .node-card-detail {
         display: grid;
-        gap: 16px;
-        padding: 18px;
-        border-top: 1px solid var(--border);
-        background: rgba(14, 18, 23, 0.34);
+        gap: 12px;
       }
       .node-detail-grid {
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 10px;
+        gap: 10px 24px;
       }
       .node-detail-stat {
         min-width: 0;
-        padding: 11px 12px;
-        border: 1px solid var(--border);
-        border-radius: 9px;
-        background: rgba(32, 37, 44, 0.78);
       }
       .node-detail-stat span {
         display: block;
         color: var(--muted);
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
+        font-size: 12px;
       }
       .node-detail-stat strong {
         display: block;
-        margin-top: 5px;
+        margin-top: 3px;
+        font-size: 16px;
+        font-weight: 600;
         overflow-wrap: anywhere;
       }
       .chart-toolbar {
@@ -690,18 +690,17 @@
       }
       .speed-chart-wrap {
         position: relative;
-        min-height: 260px;
+        min-height: 198px;
         overflow-x: auto;
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        background: rgba(15, 19, 24, 0.58);
-        padding: 10px;
+        overflow-y: hidden;
+        scrollbar-width: thin;
+        scrollbar-color: var(--border) transparent;
       }
       .speed-chart {
         display: block;
         width: 100%;
         min-width: 620px;
-        height: 250px;
+        height: 198px;
         cursor: crosshair;
       }
       .chart-grid-line {
@@ -723,7 +722,6 @@
         animation: chart-line-enter 0.48s ease-out forwards;
       }
       .chart-area {
-        fill: url(#speed-area-gradient);
         stroke: none;
         animation: chart-layer-enter 0.38s ease-out both;
       }
@@ -808,7 +806,7 @@
       }
       .chart-empty {
         display: grid;
-        min-height: 235px;
+        min-height: 198px;
         place-items: center;
         color: var(--muted);
       }
@@ -1513,17 +1511,9 @@
         availabilityCheckIDs: new Set(),
         nodeURLDraftID: "",
         nodeURLDirty: false,
-        openNodeStableId: "",
-        dashboardHistoryResults: [],
-        dashboardHistoryLoading: false,
-        dashboardHistoryError: "",
-        dashboardHistoryRequest: 0,
-        dashboardRange: "7d",
-        dashboardFrom: "",
-        dashboardTo: "",
+        openNodeStableIds: new Set(),
+        dashboardCardHistory: new Map(),
         dashboardCardsAnimated: false,
-        dashboardPanelTransition: 0,
-        dashboardPanelClosing: "",
       };
 
       const basePath = (() => {
@@ -1827,14 +1817,32 @@
         return `${year}-${month}-${day}`;
       }
 
-      function dashboardRangeBounds() {
+      function dashboardHistoryFor(stableId) {
+        let history = state.dashboardCardHistory.get(stableId);
+        if (!history) {
+          history = {
+            results: [],
+            loading: false,
+            error: "",
+            request: 0,
+            loaded: false,
+            range: "7d",
+            from: "",
+            to: "",
+          };
+          state.dashboardCardHistory.set(stableId, history);
+        }
+        return history;
+      }
+
+      function dashboardRangeBounds(history) {
         const now = new Date();
-        if (state.dashboardRange === "custom") {
-          if (!state.dashboardFrom || !state.dashboardTo) {
+        if (history.range === "custom") {
+          if (!history.from || !history.to) {
             return { error: "Choose both start and end dates" };
           }
-          const from = new Date(`${state.dashboardFrom}T00:00:00`);
-          const to = new Date(`${state.dashboardTo}T00:00:00`);
+          const from = new Date(`${history.from}T00:00:00`);
+          const to = new Date(`${history.to}T00:00:00`);
           to.setDate(to.getDate() + 1);
           if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || from >= to) {
             return { error: "Start date must be before or equal to end date" };
@@ -1849,7 +1857,11 @@
           "14d": 14 * 24 * 60 * 60 * 1000,
           "30d": 30 * 24 * 60 * 60 * 1000,
         };
-        return { from: new Date(now.getTime() - (durations[state.dashboardRange] || durations["7d"])), to: now };
+        return { from: new Date(now.getTime() - (durations[history.range] || durations["7d"])), to: now };
+      }
+
+      function chartDOMToken(stableId) {
+        return Array.from(String(stableId || "node"), (char) => char.codePointAt(0).toString(16)).join("-");
       }
 
       function speedChartAxisTime(timestamp, spanMs) {
@@ -1868,14 +1880,14 @@
         return step * exponent;
       }
 
-      function renderNodeSpeedChart(results) {
-        if (state.dashboardHistoryLoading) {
+      function renderNodeSpeedChart(results, stableId, history) {
+        if (history.loading && results.length === 0) {
           return `<div class="chart-empty">Loading speed-test history…</div>`;
         }
-        if (state.dashboardHistoryError) {
-          return `<div class="chart-empty error">${escapeHtml(state.dashboardHistoryError)}</div>`;
+        if (history.error) {
+          return `<div class="chart-empty error">${escapeHtml(history.error)}</div>`;
         }
-        const bounds = dashboardRangeBounds();
+        const bounds = dashboardRangeBounds(history);
         if (bounds.error) {
           return `<div class="chart-empty warn">${escapeHtml(bounds.error)}</div>`;
         }
@@ -1946,6 +1958,9 @@
 
         const successfulRuns = runs.filter((items) => items.length > 1);
         const areaMasks = [];
+        const chartPrefix = `node-speed-${chartDOMToken(stableId)}`;
+        const areaGradientID = `${chartPrefix}-area-gradient`;
+        const clipID = `${chartPrefix}-plot`;
         const areas = successfulRuns.map((items, index) => {
           const firstX = xOf(items[0].checkedAt).toFixed(1);
           const lastX = xOf(items[items.length - 1].checkedAt).toFixed(1);
@@ -1953,8 +1968,8 @@
           const runWidth = Math.max(1, Number(lastX) - Number(firstX));
           const maskLastX = (Number(firstX) + runWidth).toFixed(1);
           const fadePercent = Math.min(22, Math.max(3, (18 / runWidth) * 100));
-          const maskID = `speed-area-mask-${index}`;
-          const gradientID = `speed-area-mask-gradient-${index}`;
+          const maskID = `${chartPrefix}-area-mask-${index}`;
+          const gradientID = `${chartPrefix}-area-mask-gradient-${index}`;
           areaMasks.push(`<linearGradient id="${gradientID}" gradientUnits="userSpaceOnUse" x1="${firstX}" y1="0" x2="${maskLastX}" y2="0">
               <stop offset="0%" stop-color="white" stop-opacity="0" />
               <stop offset="${fadePercent.toFixed(1)}%" stop-color="white" stop-opacity="1" />
@@ -1965,7 +1980,7 @@
               <rect x="${firstX}" y="${top}" width="${runWidth.toFixed(1)}" height="${plotHeight}" fill="url(#${gradientID})" />
             </mask>`);
           const path = items.map((result) => `L ${xOf(result.checkedAt).toFixed(1)} ${yOf(result.mbps).toFixed(1)}`).join(" ");
-          return `<path class="chart-area" mask="url(#${maskID})" d="M ${firstX} ${baselineY} ${path} L ${lastX} ${baselineY} Z" />`;
+          return `<path class="chart-area" style="fill:url(#${areaGradientID})" mask="url(#${maskID})" d="M ${firstX} ${baselineY} ${path} L ${lastX} ${baselineY} Z" />`;
         }).join("");
         const lines = successfulRuns.map((items) => {
           const path = items.map((result, index) => {
@@ -2004,17 +2019,17 @@
         const cursor = `<line class="chart-cursor" x1="${left}" y1="${top}" x2="${left}" y2="${top + plotHeight}" opacity="0" aria-hidden="true" />`;
         return `<svg class="speed-chart" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="Speed-test history in Mbps">
           <defs>
-            <linearGradient id="speed-area-gradient" x1="0" y1="0" x2="0" y2="1">
+            <linearGradient id="${areaGradientID}" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stop-color="var(--blue)" stop-opacity="0.28" />
               <stop offset="100%" stop-color="var(--blue)" stop-opacity="0.02" />
             </linearGradient>
-            <clipPath id="speed-chart-plot">
+            <clipPath id="${clipID}">
               <rect x="${left}" y="${top}" width="${plotWidth}" height="${plotHeight}" />
             </clipPath>
             ${areaMasks.join("")}
           </defs>
           ${grid.join("")}
-          <g clip-path="url(#speed-chart-plot)">${areas}${errors}${thresholdLine}${gapBridges}${lines}${latestMarker}${cursor}${points}</g>
+          <g clip-path="url(#${clipID})">${areas}${errors}${thresholdLine}${gapBridges}${lines}${latestMarker}${cursor}${points}</g>
           <text class="chart-axis-label" x="${left}" y="13">Mbps</text>
         </svg>`;
       }
@@ -2053,51 +2068,58 @@
           ${measurement}`;
       }
 
-      function bindSpeedChartInteractions() {
-        const svg = $("node-speed-chart")?.querySelector("svg.speed-chart");
+      function bindSpeedChartInteractions(root = $("nodes")) {
         const tooltip = $("node-speed-tooltip");
-        if (!svg || !tooltip) return;
-        const cursor = svg.querySelector(".chart-cursor");
-        const bounds = dashboardRangeBounds();
-        if (!cursor || bounds.error) return;
-        const ordered = [...(state.dashboardHistoryResults || [])]
-          .filter((result) => result.checkedAt && !result.checkedAt.startsWith("0001-"))
-          .sort((a, b) => new Date(a.checkedAt) - new Date(b.checkedAt));
-        if (ordered.length === 0) return;
+        if (!root || !tooltip) return;
+        root.querySelectorAll("[data-node-speed-chart] svg.speed-chart").forEach((svg) => {
+          if (svg.dataset.interactionsBound === "true") return;
+          const wrap = svg.closest("[data-node-speed-chart]");
+          const stableId = wrap?.dataset.nodeSpeedChart || "";
+          const history = state.dashboardCardHistory.get(stableId);
+          const cursor = svg.querySelector(".chart-cursor");
+          if (!history || !cursor) return;
+          const bounds = dashboardRangeBounds(history);
+          if (bounds.error) return;
+          const ordered = [...(history.results || [])]
+            .filter((result) => result.checkedAt && !result.checkedAt.startsWith("0001-"))
+            .sort((a, b) => new Date(a.checkedAt) - new Date(b.checkedAt));
+          if (ordered.length === 0) return;
 
-        const width = 960;
-        const left = 18;
-        const right = 48;
-        const plotWidth = width - left - right;
-        const fromMs = bounds.from.getTime();
-        const spanMs = Math.max(1, bounds.to.getTime() - fromMs);
-        const xOf = (result) => left + Math.max(0, Math.min(1, (new Date(result.checkedAt).getTime() - fromMs) / spanMs)) * plotWidth;
+          const width = 960;
+          const left = 18;
+          const right = 48;
+          const plotWidth = width - left - right;
+          const fromMs = bounds.from.getTime();
+          const spanMs = Math.max(1, bounds.to.getTime() - fromMs);
+          const xOf = (result) => left + Math.max(0, Math.min(1, (new Date(result.checkedAt).getTime() - fromMs) / spanMs)) * plotWidth;
 
-        svg.addEventListener("mousemove", (event) => {
-          const rect = svg.getBoundingClientRect();
-          const svgX = ((event.clientX - rect.left) / Math.max(1, rect.width)) * width;
-          const ratio = Math.max(0, Math.min(1, (svgX - left) / plotWidth));
-          const targetTime = fromMs + ratio * spanMs;
-          let nearest = ordered[0];
-          let nearestDistance = Math.abs(new Date(nearest.checkedAt).getTime() - targetTime);
-          for (let index = 1; index < ordered.length; index += 1) {
-            const distance = Math.abs(new Date(ordered[index].checkedAt).getTime() - targetTime);
-            if (distance < nearestDistance) {
-              nearest = ordered[index];
-              nearestDistance = distance;
+          svg.dataset.interactionsBound = "true";
+          svg.addEventListener("mousemove", (event) => {
+            const rect = svg.getBoundingClientRect();
+            const svgX = ((event.clientX - rect.left) / Math.max(1, rect.width)) * width;
+            const ratio = Math.max(0, Math.min(1, (svgX - left) / plotWidth));
+            const targetTime = fromMs + ratio * spanMs;
+            let nearest = ordered[0];
+            let nearestDistance = Math.abs(new Date(nearest.checkedAt).getTime() - targetTime);
+            for (let index = 1; index < ordered.length; index += 1) {
+              const distance = Math.abs(new Date(ordered[index].checkedAt).getTime() - targetTime);
+              if (distance < nearestDistance) {
+                nearest = ordered[index];
+                nearestDistance = distance;
+              }
             }
-          }
-          const x = xOf(nearest).toFixed(1);
-          cursor.setAttribute("x1", x);
-          cursor.setAttribute("x2", x);
-          cursor.setAttribute("opacity", "1");
-          tooltip.innerHTML = speedChartTooltipHTML(nearest);
-          tooltip.classList.add("visible");
-          moveSpeedChartTooltip(event);
-        });
-        svg.addEventListener("mouseleave", () => {
-          cursor.setAttribute("opacity", "0");
-          hideSpeedChartTooltip();
+            const x = xOf(nearest).toFixed(1);
+            cursor.setAttribute("x1", x);
+            cursor.setAttribute("x2", x);
+            cursor.setAttribute("opacity", "1");
+            tooltip.innerHTML = speedChartTooltipHTML(nearest);
+            tooltip.classList.add("visible");
+            moveSpeedChartTooltip(event);
+          });
+          svg.addEventListener("mouseleave", () => {
+            cursor.setAttribute("opacity", "0");
+            hideSpeedChartTooltip();
+          });
         });
       }
 
@@ -2557,25 +2579,25 @@
         return code ? `<span class="chip blue country-chip">${escapeHtml(code)}</span>` : "";
       }
 
-      function dashboardRangeControls() {
-        const active = (value) => state.dashboardRange === value ? "active" : "";
+      function dashboardRangeControls(stableId, history) {
+        const active = (value) => history.range === value ? "active" : "";
         return `<div class="chart-toolbar">
           <div>
             <h3>Measured speed</h3>
-            <div class="muted">Only real speed tests are plotted; gaps mean no measurement.</div>
+            <div class="muted">Only real speed tests are plotted; gaps mean no measurement.${history.loading && history.results.length > 0 ? " Refreshing…" : ""}</div>
           </div>
           <div class="chart-ranges" aria-label="Speed chart period">
-            <button class="chart-range ${active("1d")}" type="button" data-chart-range="1d">24 h</button>
-            <button class="chart-range ${active("3d")}" type="button" data-chart-range="3d">3 d</button>
-            <button class="chart-range ${active("7d")}" type="button" data-chart-range="7d">7 d</button>
-            <button class="chart-range ${active("14d")}" type="button" data-chart-range="14d">14 d</button>
-            <button class="chart-range ${active("30d")}" type="button" data-chart-range="30d">30 d</button>
-            <button class="chart-range ${active("custom")}" type="button" data-chart-range="custom">Dates</button>
+            <button class="chart-range ${active("1d")}" type="button" data-chart-range="1d" data-chart-node="${escapeHtml(stableId)}">24 h</button>
+            <button class="chart-range ${active("3d")}" type="button" data-chart-range="3d" data-chart-node="${escapeHtml(stableId)}">3 d</button>
+            <button class="chart-range ${active("7d")}" type="button" data-chart-range="7d" data-chart-node="${escapeHtml(stableId)}">7 d</button>
+            <button class="chart-range ${active("14d")}" type="button" data-chart-range="14d" data-chart-node="${escapeHtml(stableId)}">14 d</button>
+            <button class="chart-range ${active("30d")}" type="button" data-chart-range="30d" data-chart-node="${escapeHtml(stableId)}">30 d</button>
+            <button class="chart-range ${active("custom")}" type="button" data-chart-range="custom" data-chart-node="${escapeHtml(stableId)}">Dates</button>
           </div>
         </div>
-        <div class="custom-range" ${state.dashboardRange === "custom" ? "" : "hidden"}>
-          <label>From<input id="node-chart-from" type="date" value="${escapeHtml(state.dashboardFrom)}"></label>
-          <label>To<input id="node-chart-to" type="date" value="${escapeHtml(state.dashboardTo)}"></label>
+        <div class="custom-range" ${history.range === "custom" ? "" : "hidden"}>
+          <label>From<input type="date" data-node-chart-from="${escapeHtml(stableId)}" value="${escapeHtml(history.from)}"></label>
+          <label>To<input type="date" data-node-chart-to="${escapeHtml(stableId)}" value="${escapeHtml(history.to)}"></label>
         </div>`;
       }
 
@@ -2604,7 +2626,7 @@
         return parts.join(" · ") || "Diagnostics unavailable";
       }
 
-      function nodeDetailHTML(proxy, result) {
+      function nodeDetailHTML(proxy, result, history) {
         const down = proxy.downSince ? `${formatTime(proxy.downSince)} · ${formatDurationSec(proxy.downtimeSec)}` : "No active downtime";
         const failure = proxy.failureSummary
           ? `${proxy.failureSummary}${proxy.failureCode ? ` · ${proxy.failureCode}` : ""}`
@@ -2613,14 +2635,14 @@
         const checked = result ? formatTime(result.checkedAt) : "n/a";
         return `<div class="node-card-detail">
           <div class="node-detail-grid">
-            <div class="node-detail-stat"><span>Server</span><strong class="mono">${escapeHtml(proxy.server)}:${escapeHtml(proxy.port)}</strong></div>
-            <div class="node-detail-stat"><span>Availability</span><strong class="${proxy.online ? "ok" : "error"}">${escapeHtml(nodeAvailabilityDetails(proxy))}</strong></div>
-            <div class="node-detail-stat"><span>Down since</span><strong>${escapeHtml(down)}</strong></div>
-            <div class="node-detail-stat"><span>Failure</span><strong title="${escapeHtml(proxy.failureDetail || "")}">${escapeHtml(failure)}</strong></div>
+            <div class="node-detail-stat"><span>Server</span><strong class="mono" data-node-detail-server>${escapeHtml(proxy.server)}:${escapeHtml(proxy.port)}</strong></div>
+            <div class="node-detail-stat"><span>Availability</span><strong class="${proxy.online ? "ok" : "error"}" data-node-detail-availability>${escapeHtml(nodeAvailabilityDetails(proxy))}</strong></div>
+            <div class="node-detail-stat"><span>Down since</span><strong data-node-detail-down>${escapeHtml(down)}</strong></div>
+            <div class="node-detail-stat"><span>Failure</span><strong data-node-detail-failure title="${escapeHtml(proxy.failureDetail || "")}">${escapeHtml(failure)}</strong></div>
           </div>
-          ${dashboardRangeControls()}
-          ${nodeSpeedStatsHTML(state.dashboardHistoryResults)}
-          <div id="node-speed-chart" class="speed-chart-wrap">${renderNodeSpeedChart(state.dashboardHistoryResults)}</div>
+          ${dashboardRangeControls(proxy.stableId, history)}
+          ${nodeSpeedStatsHTML(history.results)}
+          <div class="speed-chart-wrap" data-node-speed-chart="${escapeHtml(proxy.stableId)}">${renderNodeSpeedChart(history.results, proxy.stableId, history)}</div>
           <div class="chart-legend">
             <span><i class="legend-dot"></i>Normal speed</span>
             <span><i class="legend-dot warn"></i>Below configured threshold</span>
@@ -2670,184 +2692,222 @@
           .find((card) => card.dataset.nodeCard === stableId) || null;
       }
 
-      function currentNodePanelHeight() {
-        const card = nodeCardElement(state.openNodeStableId);
-        const panel = card?.querySelector("[data-node-panel]");
-        return panel ? panel.getBoundingClientRect().height : 0;
+      function proxyFor(stableId) {
+        return state.proxies.find((proxy) => proxy.stableId === stableId) || null;
       }
 
-      function syncOpenNodePanel(options = {}) {
-        const stableId = state.openNodeStableId;
-        if (!stableId || state.dashboardPanelClosing === stableId) return;
+      function setNodeCardExpanded(card, expanded) {
+        if (!card) return;
+        const head = card.querySelector("[data-node-toggle-area]");
+        const toggle = card.querySelector("[data-node-toggle]");
+        const panel = card.querySelector("[data-node-panel]");
+        card.classList.toggle("open", expanded);
+        head?.setAttribute("aria-expanded", String(expanded));
+        toggle?.setAttribute("aria-expanded", String(expanded));
+        toggle?.setAttribute("aria-label", `${expanded ? "Close" : "Open"} details`);
+        panel?.setAttribute("aria-hidden", String(!expanded));
+      }
+
+      function syncNodePanel(stableId, options = {}) {
+        if (!state.openNodeStableIds.has(stableId)) return;
         const card = nodeCardElement(stableId);
         const panel = card?.querySelector("[data-node-panel]");
         if (!panel) return;
-        const targetHeight = panel.scrollHeight;
-        const animateOpen = Boolean(options.animatePanelOpen) && !prefersReducedMotion();
-        const animateResize = Number.isFinite(options.panelFromHeight) && !prefersReducedMotion();
-
-        if (!animateOpen && !animateResize) {
-          panel.classList.add("open");
-          panel.style.maxHeight = `${targetHeight}px`;
-          panel.setAttribute("aria-hidden", "false");
+        setNodeCardExpanded(card, true);
+        if (options.immediate || prefersReducedMotion()) {
+          panel.style.maxHeight = `${panel.scrollHeight}px`;
           return;
         }
-
-        if (animateOpen) {
-          panel.classList.remove("open");
-          panel.style.maxHeight = "0px";
-          panel.setAttribute("aria-hidden", "true");
-        } else {
-          panel.classList.add("open");
-          panel.style.maxHeight = `${Math.max(0, options.panelFromHeight)}px`;
-          panel.setAttribute("aria-hidden", "false");
-        }
+        const fromHeight = Number.isFinite(options.fromHeight)
+          ? Math.max(0, options.fromHeight)
+          : panel.getBoundingClientRect().height;
+        panel.style.maxHeight = `${fromHeight}px`;
         panel.getBoundingClientRect();
         window.requestAnimationFrame(() => {
-          if (!panel.isConnected || state.openNodeStableId !== stableId) return;
-          panel.classList.add("open");
+          if (!panel.isConnected || !state.openNodeStableIds.has(stableId)) return;
           panel.style.maxHeight = `${panel.scrollHeight}px`;
-          panel.setAttribute("aria-hidden", "false");
         });
       }
 
-      async function animateNodePanelClose(stableId) {
+      function syncOpenNodePanels() {
+        state.openNodeStableIds.forEach((stableId) => syncNodePanel(stableId, { immediate: true }));
+      }
+
+      function animateNodePanelOpen(stableId) {
         const card = nodeCardElement(stableId);
         const panel = card?.querySelector("[data-node-panel]");
-        if (!card || !panel || prefersReducedMotion()) return;
+        if (!card || !panel) return;
+        const fromHeight = panel.getBoundingClientRect().height;
+        setNodeCardExpanded(card, true);
+        syncNodePanel(stableId, { fromHeight });
+      }
 
-        const visibleHeight = panel.getBoundingClientRect().height;
-        panel.classList.add("open");
-        panel.style.maxHeight = `${visibleHeight > 0 ? visibleHeight : panel.scrollHeight}px`;
-        panel.setAttribute("aria-hidden", "false");
+      function animateNodePanelClose(stableId) {
+        const card = nodeCardElement(stableId);
+        const panel = card?.querySelector("[data-node-panel]");
+        if (!card || !panel) return;
+        const visibleHeight = panel.getBoundingClientRect().height || panel.scrollHeight;
+        panel.style.maxHeight = `${visibleHeight}px`;
         panel.getBoundingClientRect();
-        card.classList.remove("open");
-        card.querySelector(".node-card-head")?.setAttribute("aria-expanded", "false");
-        card.querySelector("[data-node-toggle]")?.setAttribute("aria-expanded", "false");
-        panel.classList.remove("open");
-        panel.style.maxHeight = "0px";
-        panel.setAttribute("aria-hidden", "true");
-
-        await new Promise((resolve) => {
-          let finished = false;
-          const finish = () => {
-            if (finished) return;
-            finished = true;
-            panel.removeEventListener("transitionend", onTransitionEnd);
-            window.clearTimeout(timeout);
-            resolve();
-          };
-          const onTransitionEnd = (event) => {
-            if (event.target === panel && event.propertyName === "max-height") finish();
-          };
-          const timeout = window.setTimeout(finish, 380);
-          panel.addEventListener("transitionend", onTransitionEnd);
+        setNodeCardExpanded(card, false);
+        if (prefersReducedMotion()) {
+          panel.style.maxHeight = "0px";
+          return;
+        }
+        window.requestAnimationFrame(() => {
+          if (!panel.isConnected || state.openNodeStableIds.has(stableId)) return;
+          panel.style.maxHeight = "0px";
         });
       }
 
-      function renderNodes(options = {}) {
-        hideSpeedChartTooltip();
-        const animateCards = !state.dashboardCardsAnimated && state.proxies.length > 0;
-        const cards = filteredProxies().map((proxy, index) => {
-          const result = resultFor(proxy.stableId);
-          const muted = telegramAnyMutedNodeSet().has(proxy.stableId);
-          const checked = state.selected.has(proxy.stableId) ? "checked" : "";
-          const rowClass = nodeRowClass(proxy, result, muted);
-          const run = state.snapshot && state.snapshot.lastRun;
-          const checking = state.availabilityCheckRunning && state.availabilityCheckIDs.has(proxy.stableId);
-          const checkDisabled = state.availabilityCheckRunning ? "disabled" : "";
-          const runDisabled = run && run.running ? "disabled" : "";
-          const open = state.openNodeStableId === proxy.stableId && state.dashboardPanelClosing !== proxy.stableId;
-          const availabilityClass = proxy.online ? "ok" : "error";
-          const availabilityText = proxy.online
+      function renderNodePanel(stableId, options = {}) {
+        const card = nodeCardElement(stableId);
+        const panel = card?.querySelector("[data-node-panel]");
+        const proxy = proxyFor(stableId);
+        if (!panel || !proxy) return;
+        const result = resultFor(stableId);
+        const history = dashboardHistoryFor(stableId);
+        const previousHeight = panel.getBoundingClientRect().height;
+        const previousScrollLeft = panel.querySelector("[data-node-speed-chart]")?.scrollLeft || 0;
+        panel.innerHTML = nodeDetailHTML(proxy, result, history);
+        const chart = panel.querySelector("[data-node-speed-chart]");
+        if (chart) chart.scrollLeft = previousScrollLeft;
+        bindSpeedChartInteractions(panel);
+        if (options.sync !== false && state.openNodeStableIds.has(stableId)) {
+          syncNodePanel(stableId, options.immediate ? { immediate: true } : { fromHeight: previousHeight });
+        }
+      }
+
+      function nodeCardPresentation(proxy) {
+        const result = resultFor(proxy.stableId);
+        const muted = telegramAnyMutedNodeSet().has(proxy.stableId);
+        const run = state.snapshot && state.snapshot.lastRun;
+        const checking = state.availabilityCheckRunning && state.availabilityCheckIDs.has(proxy.stableId);
+        return {
+          result,
+          rowClass: nodeRowClass(proxy, result, muted),
+          checking,
+          checkDisabled: state.availabilityCheckRunning,
+          runDisabled: Boolean(run && run.running),
+          availabilityClass: proxy.online ? "ok" : "error",
+          availabilityText: proxy.online
             ? (proxy.latencyMs > 0 ? `${proxy.latencyMs} ms` : "Online")
-            : (proxy.downSince ? `Offline · ${formatDurationSec(proxy.downtimeSec)}` : "Offline");
-          const speedClass = result ? speedStatusClass(result) : "";
-          const speedText = result ? formatSpeedStatus(result) : "No result";
-          const panelID = `node-card-panel-${index}`;
-          return `
-            <article class="node-card ${rowClass} ${open ? "open" : ""} ${animateCards ? "entering" : ""}" data-node-card="${escapeHtml(proxy.stableId)}"${animateCards ? ` style="--node-card-index: ${Math.min(index, 12)}"` : ""}>
-              <div class="node-card-head" data-node-toggle-area="${escapeHtml(proxy.stableId)}" tabindex="0" aria-expanded="${open}" aria-controls="${panelID}">
-                <label class="node-select" aria-label="Select ${escapeHtml(proxy.name || "node")}">
-                  <input type="checkbox" data-id="${escapeHtml(proxy.stableId)}" ${checked}>
-                </label>
-                <div class="node-identity">
-                  <div class="node-title">${nodeCountryMarker(proxy.stableId)}<span class="dot ${proxy.online ? "online" : "offline"}"></span><span class="node-title-text">${escapeHtml(proxy.name || "Unnamed")}</span></div>
-                  <div class="node-subline">${escapeHtml([proxy.subName, proxy.protocol, proxy.server].filter(Boolean).join(" · "))}</div>
-                </div>
-                <div class="node-current">
-                  <strong class="${availabilityClass}">${escapeHtml(availabilityText)}</strong>
-                  <div class="node-summary-label">Availability</div>
-                </div>
-                <div class="node-speed-summary">
-                  <strong class="${speedClass}">${escapeHtml(speedText)}</strong>
-                  <div class="node-summary-label">${result ? escapeHtml(formatShortTime(result.checkedAt)) : "Last speed test"}</div>
-                </div>
-                <div class="node-card-actions">
-                  <button class="secondary small" type="button" data-check-id="${escapeHtml(proxy.stableId)}" ${checkDisabled}>${checking ? "Checking…" : "Check"}</button>
-                  <button class="primary small" type="button" data-run-id="${escapeHtml(proxy.stableId)}" ${runDisabled}>Run</button>
-                </div>
-                <button class="node-toggle" type="button" data-node-toggle="${escapeHtml(proxy.stableId)}" aria-expanded="${open}" aria-label="${open ? "Close" : "Open"} details">
-                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
-                </button>
+            : (proxy.downSince ? `Offline · ${formatDurationSec(proxy.downtimeSec)}` : "Offline"),
+          speedClass: result ? speedStatusClass(result) : "",
+          speedText: result ? formatSpeedStatus(result) : "No result",
+          speedChecked: result ? formatShortTime(result.checkedAt) : "Last speed test",
+        };
+      }
+
+      function nodeCardHTML(proxy, index, animateCards) {
+        const view = nodeCardPresentation(proxy);
+        const open = state.openNodeStableIds.has(proxy.stableId);
+        const panelID = `node-card-panel-${chartDOMToken(proxy.stableId)}`;
+        const history = open ? dashboardHistoryFor(proxy.stableId) : null;
+        return `
+          <article class="node-card ${view.rowClass} ${open ? "open" : ""} ${animateCards ? "entering" : ""}" data-node-card="${escapeHtml(proxy.stableId)}"${animateCards ? ` style="--node-card-index: ${Math.min(index, 12)}"` : ""}>
+            <div class="node-card-head" data-node-toggle-area="${escapeHtml(proxy.stableId)}" tabindex="0" aria-expanded="${open}" aria-controls="${panelID}">
+              <label class="node-select" aria-label="Select ${escapeHtml(proxy.name || "node")}">
+                <input type="checkbox" data-id="${escapeHtml(proxy.stableId)}" ${state.selected.has(proxy.stableId) ? "checked" : ""}>
+              </label>
+              <div class="node-identity">
+                <div class="node-title"><span data-node-country>${nodeCountryMarker(proxy.stableId)}</span><span class="dot ${proxy.online ? "online" : "offline"}" data-node-dot></span><span class="node-title-text" data-node-name>${escapeHtml(proxy.name || "Unnamed")}</span></div>
+                <div class="node-subline" data-node-subline>${escapeHtml([proxy.subName, proxy.protocol, proxy.server].filter(Boolean).join(" · "))}</div>
               </div>
-              <div id="${panelID}" class="node-card-panel" data-node-panel="${escapeHtml(proxy.stableId)}" aria-hidden="${!open}">${open ? nodeDetailHTML(proxy, result) : ""}</div>
-            </article>`;
-        });
-        $("nodes").innerHTML = cards.join("") || `<div class="panel muted">No nodes match filters</div>`;
-        if (animateCards && cards.length > 0) state.dashboardCardsAnimated = true;
-        $("nodes").querySelectorAll("input[type=checkbox]").forEach((input) => {
-          input.addEventListener("change", () => {
-            input.checked ? state.selected.add(input.dataset.id) : state.selected.delete(input.dataset.id);
-            renderSelectionCount();
-          });
-        });
-        $("nodes").querySelectorAll("[data-check-id]").forEach((button) => {
-          button.addEventListener("click", () => checkAvailability([button.dataset.checkId]));
-        });
-        $("nodes").querySelectorAll("[data-run-id]").forEach((button) => {
-          button.addEventListener("click", () => runNodes([button.dataset.runId]));
-        });
-        $("nodes").querySelectorAll("[data-node-toggle]").forEach((button) => {
-          button.addEventListener("click", (event) => {
-            event.stopPropagation();
-            toggleNodeDetails(button.dataset.nodeToggle);
-          });
-        });
-        $("nodes").querySelectorAll("[data-node-toggle-area]").forEach((head) => {
-          head.addEventListener("click", (event) => {
-            if (event.target.closest("button, input, label, a, select, textarea")) return;
-            toggleNodeDetails(head.dataset.nodeToggleArea);
-          });
-          head.addEventListener("keydown", (event) => {
-            if (event.target !== head || !["Enter", " "].includes(event.key)) return;
-            event.preventDefault();
-            toggleNodeDetails(head.dataset.nodeToggleArea);
-          });
-        });
-        $("nodes").querySelectorAll("[data-chart-range]").forEach((button) => {
-          button.addEventListener("click", () => setDashboardRange(button.dataset.chartRange));
-        });
-        const fromInput = $("node-chart-from");
-        const toInput = $("node-chart-to");
-        if (fromInput && toInput) {
-          fromInput.addEventListener("change", () => {
-            state.dashboardFrom = fromInput.value;
-            loadDashboardHistory();
-          });
-          toInput.addEventListener("change", () => {
-            state.dashboardTo = toInput.value;
-            loadDashboardHistory();
+              <div class="node-current">
+                <strong class="${view.availabilityClass}" data-node-availability>${escapeHtml(view.availabilityText)}</strong>
+                <div class="node-summary-label">Availability</div>
+              </div>
+              <div class="node-speed-summary">
+                <strong class="${view.speedClass}" data-node-speed>${escapeHtml(view.speedText)}</strong>
+                <div class="node-summary-label" data-node-speed-checked>${escapeHtml(view.speedChecked)}</div>
+              </div>
+              <div class="node-card-actions">
+                <button class="secondary small" type="button" data-check-id="${escapeHtml(proxy.stableId)}" ${view.checkDisabled ? "disabled" : ""}>${view.checking ? "Checking…" : "Check"}</button>
+                <button class="primary small" type="button" data-run-id="${escapeHtml(proxy.stableId)}" ${view.runDisabled ? "disabled" : ""}>Run</button>
+              </div>
+              <button class="node-toggle" type="button" data-node-toggle="${escapeHtml(proxy.stableId)}" aria-expanded="${open}" aria-label="${open ? "Close" : "Open"} details">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+              </button>
+            </div>
+            <div id="${panelID}" class="node-card-panel" data-node-panel="${escapeHtml(proxy.stableId)}" aria-hidden="${!open}">${open ? nodeDetailHTML(proxy, view.result, history) : ""}</div>
+          </article>`;
+      }
+
+      function updateNodeDetailSummary(card, proxy) {
+        const server = card.querySelector("[data-node-detail-server]");
+        if (!server) return;
+        const availability = card.querySelector("[data-node-detail-availability]");
+        const down = card.querySelector("[data-node-detail-down]");
+        const failure = card.querySelector("[data-node-detail-failure]");
+        server.textContent = `${proxy.server}:${proxy.port}`;
+        availability.textContent = nodeAvailabilityDetails(proxy);
+        availability.className = proxy.online ? "ok" : "error";
+        down.textContent = proxy.downSince
+          ? `${formatTime(proxy.downSince)} · ${formatDurationSec(proxy.downtimeSec)}`
+          : "No active downtime";
+        failure.textContent = proxy.failureSummary
+          ? `${proxy.failureSummary}${proxy.failureCode ? ` · ${proxy.failureCode}` : ""}`
+          : "No current failure";
+        failure.title = proxy.failureDetail || "";
+      }
+
+      function applyNodeCard(card, proxy) {
+        const view = nodeCardPresentation(proxy);
+        card.classList.toggle("row-error", view.rowClass === "row-error");
+        card.classList.toggle("row-warn", view.rowClass === "row-warn");
+        const checkbox = card.querySelector("input[data-id]");
+        checkbox.checked = state.selected.has(proxy.stableId);
+        checkbox.closest("label")?.setAttribute("aria-label", `Select ${proxy.name || "node"}`);
+        const country = card.querySelector("[data-node-country]");
+        const countryHTML = nodeCountryMarker(proxy.stableId);
+        if (country.innerHTML !== countryHTML) country.innerHTML = countryHTML;
+        const dot = card.querySelector("[data-node-dot]");
+        dot.classList.toggle("online", proxy.online);
+        dot.classList.toggle("offline", !proxy.online);
+        card.querySelector("[data-node-name]").textContent = proxy.name || "Unnamed";
+        card.querySelector("[data-node-subline]").textContent = [proxy.subName, proxy.protocol, proxy.server].filter(Boolean).join(" · ");
+        const availability = card.querySelector("[data-node-availability]");
+        availability.className = view.availabilityClass;
+        availability.textContent = view.availabilityText;
+        const speed = card.querySelector("[data-node-speed]");
+        speed.className = view.speedClass;
+        speed.textContent = view.speedText;
+        card.querySelector("[data-node-speed-checked]").textContent = view.speedChecked;
+        const check = card.querySelector("[data-check-id]");
+        check.disabled = view.checkDisabled;
+        check.textContent = view.checking ? "Checking…" : "Check";
+        card.querySelector("[data-run-id]").disabled = view.runDisabled;
+        const open = state.openNodeStableIds.has(proxy.stableId);
+        setNodeCardExpanded(card, open);
+        if (open && !card.querySelector(".node-card-detail")) {
+          renderNodePanel(proxy.stableId);
+        } else if (open) {
+          updateNodeDetailSummary(card, proxy);
+        }
+      }
+
+      function renderNodes() {
+        const container = $("nodes");
+        const proxies = filteredProxies();
+        const renderedCards = [...container.children].filter((element) => element.dataset.nodeCard);
+        const sameOrder = proxies.length > 0
+          && renderedCards.length === proxies.length
+          && renderedCards.every((card, index) => card.dataset.nodeCard === proxies[index].stableId);
+
+        if (sameOrder) {
+          renderedCards.forEach((card, index) => applyNodeCard(card, proxies[index]));
+        } else {
+          hideSpeedChartTooltip();
+          const animateCards = !state.dashboardCardsAnimated && proxies.length > 0;
+          container.innerHTML = proxies.map((proxy, index) => nodeCardHTML(proxy, index, animateCards)).join("")
+            || `<div class="panel muted">No nodes match filters</div>`;
+          if (animateCards) state.dashboardCardsAnimated = true;
+          bindSpeedChartInteractions(container);
+          state.openNodeStableIds.forEach((stableId) => {
+            if (nodeCardElement(stableId)) syncNodePanel(stableId, { immediate: true });
           });
         }
-        $("nodes").querySelectorAll("[data-open-history]").forEach((button) => {
-          button.addEventListener("click", async () => {
-            state.selected = new Set([button.dataset.openHistory]);
-            await openSelectedHistory();
-          });
-        });
-        bindSpeedChartInteractions();
-        syncOpenNodePanel(options);
         renderSelectionCount();
       }
 
@@ -3091,80 +3151,79 @@
         const knownIds = new Set(state.proxies.map((proxy) => proxy.stableId));
         const knownHistoryIds = new Set(historyNodes().map((node) => node.stableId));
         state.selected = new Set([...state.selected].filter((id) => knownIds.has(id)));
-        if (state.openNodeStableId && !knownIds.has(state.openNodeStableId)) {
-          state.openNodeStableId = "";
-          state.dashboardPanelClosing = "";
-          state.dashboardHistoryResults = [];
-          state.dashboardHistoryRequest += 1;
-        }
+        state.openNodeStableIds = new Set([...state.openNodeStableIds].filter((id) => knownIds.has(id)));
+        [...state.dashboardCardHistory.entries()].forEach(([stableId, history]) => {
+          if (knownIds.has(stableId)) return;
+          history.request += 1;
+          state.dashboardCardHistory.delete(stableId);
+        });
         if (state.historyStableId && !knownHistoryIds.has(state.historyStableId)) {
           state.historyStableId = "";
           state.historyResults = [];
         }
       }
 
-      async function toggleNodeDetails(stableId) {
-        const transition = state.dashboardPanelTransition + 1;
-        state.dashboardPanelTransition = transition;
-        const previousStableId = state.openNodeStableId;
-        const closingCurrent = Boolean(previousStableId);
-        if (closingCurrent) {
-          state.dashboardPanelClosing = previousStableId;
-          state.dashboardHistoryRequest += 1;
-          await animateNodePanelClose(previousStableId);
-          if (transition !== state.dashboardPanelTransition) return;
-          state.openNodeStableId = "";
-          state.dashboardPanelClosing = "";
-          state.dashboardHistoryResults = [];
-          state.dashboardHistoryError = "";
-          state.dashboardHistoryLoading = false;
-        }
-
-        if (previousStableId === stableId) {
-          renderNodes();
+      function toggleNodeDetails(stableId) {
+        if (!proxyFor(stableId)) return;
+        const history = dashboardHistoryFor(stableId);
+        if (state.openNodeStableIds.has(stableId)) {
+          state.openNodeStableIds.delete(stableId);
+          history.request += 1;
+          history.loading = false;
+          animateNodePanelClose(stableId);
           return;
         }
 
-        state.openNodeStableId = stableId;
-        state.dashboardPanelClosing = "";
-        state.dashboardHistoryResults = [];
-        state.dashboardHistoryError = "";
-        renderNodes({ animatePanelOpen: true });
-        await loadDashboardHistory();
+        state.openNodeStableIds.add(stableId);
+        renderNodePanel(stableId, { sync: false });
+        animateNodePanelOpen(stableId);
+        loadDashboardHistory(stableId);
       }
 
-      async function setDashboardRange(range) {
-        state.dashboardRange = ["1d", "3d", "7d", "14d", "30d", "custom"].includes(range) ? range : "7d";
-        if (state.dashboardRange === "custom" && (!state.dashboardFrom || !state.dashboardTo)) {
+      async function setDashboardRange(stableId, range) {
+        const history = dashboardHistoryFor(stableId);
+        history.range = ["1d", "3d", "7d", "14d", "30d", "custom"].includes(range) ? range : "7d";
+        if (history.range === "custom" && (!history.from || !history.to)) {
           const today = new Date();
           const from = new Date(today);
           from.setDate(from.getDate() - 7);
-          state.dashboardFrom = dateInputValue(from);
-          state.dashboardTo = dateInputValue(today);
+          history.from = dateInputValue(from);
+          history.to = dateInputValue(today);
         }
-        renderNodes();
-        await loadDashboardHistory();
+        history.results = [];
+        history.error = "";
+        history.loaded = false;
+        renderNodePanel(stableId);
+        await loadDashboardHistory(stableId);
       }
 
-      async function loadDashboardHistory() {
-        const stableId = state.openNodeStableId;
-        if (!stableId) return;
-        const bounds = dashboardRangeBounds();
+      async function setDashboardCustomDate(stableId, field, value) {
+        const history = dashboardHistoryFor(stableId);
+        history[field] = value;
+        history.results = [];
+        history.error = "";
+        history.loaded = false;
+        renderNodePanel(stableId);
+        await loadDashboardHistory(stableId);
+      }
+
+      async function loadDashboardHistory(stableId) {
+        if (!stableId || !state.openNodeStableIds.has(stableId)) return;
+        const history = dashboardHistoryFor(stableId);
+        const bounds = dashboardRangeBounds(history);
         if (bounds.error) {
-          state.dashboardHistoryResults = [];
-          state.dashboardHistoryError = bounds.error;
-          state.dashboardHistoryLoading = false;
-          renderNodes({ panelFromHeight: currentNodePanelHeight() });
+          history.results = [];
+          history.error = bounds.error;
+          history.loading = false;
+          renderNodePanel(stableId);
           return;
         }
 
-        const requestID = state.dashboardHistoryRequest + 1;
-        state.dashboardHistoryRequest = requestID;
-        const loadingFromHeight = currentNodePanelHeight();
-        state.dashboardHistoryLoading = true;
-        state.dashboardHistoryError = "";
-        state.dashboardHistoryResults = [];
-        renderNodes({ panelFromHeight: loadingFromHeight });
+        const requestID = history.request + 1;
+        history.request = requestID;
+        history.loading = true;
+        history.error = "";
+        if (history.results.length === 0) renderNodePanel(stableId);
         const query = new URLSearchParams({
           stableId,
           from: bounds.from.toISOString(),
@@ -3172,17 +3231,16 @@
         });
         try {
           const results = await request(`/speed-tests/history?${query.toString()}`);
-          if (requestID !== state.dashboardHistoryRequest || stableId !== state.openNodeStableId) return;
-          state.dashboardHistoryResults = results;
+          if (requestID !== history.request || !state.openNodeStableIds.has(stableId)) return;
+          history.results = results;
+          history.loaded = true;
         } catch (err) {
-          if (requestID !== state.dashboardHistoryRequest || stableId !== state.openNodeStableId) return;
-          state.dashboardHistoryResults = [];
-          state.dashboardHistoryError = err.message;
+          if (requestID !== history.request || !state.openNodeStableIds.has(stableId)) return;
+          history.error = err.message;
         } finally {
-          if (requestID === state.dashboardHistoryRequest && stableId === state.openNodeStableId) {
-            const resultFromHeight = currentNodePanelHeight();
-            state.dashboardHistoryLoading = false;
-            renderNodes({ panelFromHeight: resultFromHeight });
+          if (requestID === history.request && state.openNodeStableIds.has(stableId)) {
+            history.loading = false;
+            renderNodePanel(stableId);
           }
         }
       }
@@ -3372,9 +3430,7 @@
         if (state.activeTab === "incidents") {
           await loadIncidents();
         }
-        if (state.openNodeStableId) {
-          await loadDashboardHistory();
-        }
+        await Promise.all([...state.openNodeStableIds].map((stableId) => loadDashboardHistory(stableId)));
       }
 
       async function pollSpeedSnapshot() {
@@ -3676,6 +3732,62 @@
         }
       }
 
+      $("nodes").addEventListener("click", (event) => {
+        const target = event.target instanceof Element ? event.target : null;
+        if (!target) return;
+        const check = target.closest("[data-check-id]");
+        if (check) {
+          checkAvailability([check.dataset.checkId]);
+          return;
+        }
+        const run = target.closest("[data-run-id]");
+        if (run) {
+          runNodes([run.dataset.runId]);
+          return;
+        }
+        const range = target.closest("[data-chart-range]");
+        if (range) {
+          setDashboardRange(range.dataset.chartNode, range.dataset.chartRange);
+          return;
+        }
+        const history = target.closest("[data-open-history]");
+        if (history) {
+          state.selected = new Set([history.dataset.openHistory]);
+          openSelectedHistory();
+          return;
+        }
+        const toggle = target.closest("[data-node-toggle]");
+        if (toggle) {
+          toggleNodeDetails(toggle.dataset.nodeToggle);
+          return;
+        }
+        const head = target.closest("[data-node-toggle-area]");
+        if (!head || target.closest("button, input, label, a, select, textarea")) return;
+        toggleNodeDetails(head.dataset.nodeToggleArea);
+      });
+      $("nodes").addEventListener("change", (event) => {
+        const target = event.target instanceof Element ? event.target : null;
+        if (!target) return;
+        if (target.matches("input[data-id]")) {
+          target.checked ? state.selected.add(target.dataset.id) : state.selected.delete(target.dataset.id);
+          renderSelectionCount();
+          return;
+        }
+        if (target.matches("[data-node-chart-from]")) {
+          setDashboardCustomDate(target.dataset.nodeChartFrom, "from", target.value);
+          return;
+        }
+        if (target.matches("[data-node-chart-to]")) {
+          setDashboardCustomDate(target.dataset.nodeChartTo, "to", target.value);
+        }
+      });
+      $("nodes").addEventListener("keydown", (event) => {
+        const head = event.target instanceof Element ? event.target.closest("[data-node-toggle-area]") : null;
+        if (!head || event.target !== head || !["Enter", " "].includes(event.key)) return;
+        event.preventDefault();
+        toggleNodeDetails(head.dataset.nodeToggleArea);
+      });
+
       $("tab-dashboard").addEventListener("click", () => switchTab("dashboard"));
       $("tab-nodes-overview").addEventListener("click", () => switchTab("nodes-overview"));
       $("tab-incidents").addEventListener("click", () => switchTab("incidents"));
@@ -3757,7 +3869,7 @@
       let nodePanelResizeFrame = 0;
       window.addEventListener("resize", () => {
         window.cancelAnimationFrame(nodePanelResizeFrame);
-        nodePanelResizeFrame = window.requestAnimationFrame(() => syncOpenNodePanel());
+        nodePanelResizeFrame = window.requestAnimationFrame(syncOpenNodePanels);
       });
 
       switchSettingsPane(state.settingsPane);
