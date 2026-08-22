@@ -30,11 +30,11 @@
 - Ручное и плановое обновление подписки должны использовать один workflow и не выполняться параллельно.
 - Пустой refresh или удаление минимум трёх и не менее 50% прежних нод считается подозрительным: scheduled update блокируется, manual требует explicit force, привязанный fingerprint к previewed candidate; candidate Xray config не должен уничтожать last-known-good при неудачном startup.
 - Ручной и плановый speedtest должны применять одинаковую логику URL: per-node URL имеет приоритет над глобальным.
-- Country fallback выбирается только по `ClaimedCountryCode` из node archive; GeoIP не участвует. Низкая скорость без технической ошибки не переключает URL, а успешный fallback не создаёт автоматический Telegram report/alert.
+- Country fallback выбирается только по `ClaimedCountryCode` из node archive; GeoIP не участвует. Низкая скорость без технической ошибки не переключает URL. Успешный fallback обычно не создаёт автоматический Telegram report/alert; исключение — результат ниже threshold после `context deadline exceeded` основного URL, который должен уведомляться сразу.
 - Telegram-запуск speedtest использует сохранённый `ScheduleConfig`, а не нулевой `TestConfig`.
 - Прямой результат Telegram-speedtest должен возвращаться в исходные chat ID и topic ID независимо от настроек фоновых speed-report; report target не персистится и не попадает в admin API.
-- Первый фоновый low-speed результат (schedule/admin) не уведомляет: повторяются только просевшие `StableID` через 30 минут, а алерт отправляется лишь при повторной проблеме. Первичные offline/error не задерживаются.
-- Pending low-speed retry персистится с due time, исходным TestConfig и `StableID`, восстанавливается после restart и очищается для исчезнувших нод.
+- Первый фоновый low-speed результат (schedule/admin) не уведомляет: повторяются только просевшие `StableID` через 30 минут, а алерт отправляется лишь при повторной проблеме. `context deadline exceeded` в `Error` или `PrimaryError` запускает отдельный повтор затронутых `StableID` через 5 минут и не задерживает исходное уведомление; low-speed fallback после timeout и low-speed результат 5-минутного повтора уведомляются сразу, без новой 30-минутной задержки.
+- Pending speed-test retry персистится с типом, due time, исходным TestConfig и `StableID`, восстанавливается после restart и очищается для исчезнувших нод. Legacy-запись без типа считается low-speed retry; low-speed и deadline retry дедуплицируются независимо.
 - Полный availability-check всех нод не использует TCP-гейт. Быстрый recovery-loop проверяет только уже недоступные `StableID`: обновляет TCP/ping и запускает proxy-check лишь после `TCP OK`; ping никогда не является gate.
 - Переход в offline и `DownSince` сохраняются до дополнительной TCP/ping-диагностики. Для непривилегированного ICMP `udp4`/`udp6` не сопоставляйте reply по Echo ID: Linux может переписать его; используйте тип ответа, sequence и уникальный payload.
 - Быстрые recovery-checks не увеличивают Telegram `FailCount` и не сдвигают reminder schedule. Подтверждённый online передаётся immediate-recovery пути без ожидания `AlertCheckMinutes`.
@@ -48,7 +48,7 @@
 - Incident journal хранит node и mass records; массовая корреляция требует одинакового failure code, минимум 3 и минимум 50% active scope. `check_endpoint` всегда маркируется как вероятностный вывод.
 - Failure code строится из proxy-check и прямых TCP/ping diagnostics; отсутствие ICMP reply не является самостоятельным доказательством offline.
 - Активные ноды управляются подпиской; удалять вручную можно только retired-записи.
-- Node merge разрешён только retired source → active target после preview и exact match нормализованных `Name`, `SubName`, protocol, server и port. Confirmation token должен быть привязан к конкретному persisted candidate; одинакового имени недостаточно.
+- Node merge разрешён только retired source → выбранный администратором active target после preview и совпадения нормализованных `SubName`, protocol и server. Name и port могут измениться, но preview обязан явно показать расхождения; confirmation token должен быть привязан к конкретному persisted candidate, а UI не должен выбирать target автоматически.
 - Node merge применяется только на startup к `node_registry.json` и `speedtest_results.json`. До успешного `Load` speedtest, node archive и Telegram исходные файлы сохраняются для byte-for-byte rollback; incident ID не меняются, source StableID re-keyed, а lineage прежних ID не теряется.
 - Backup restore и node merge не должны одновременно находиться в pending/applied/rollback state; их web staging обязан удерживать общий transaction gate до публикации операции.
 - Backup не должен включать environment, geo-файлы, `xray_config.json` и Telegram secrets/admin IDs.
@@ -105,7 +105,7 @@ docker build --build-arg ENABLE_UPX=false -t xray-checker:check .
 - subscription/identity: тесты `xray` и `nodemerge`, сценарии неоднозначных имён, stale confirmation, suspicious diff, interrupted apply/commit и rollback rejected candidate;
 - speedtest: manual и scheduled paths, per-node URL, retention и persistence;
 - backup/restore: manifest, hash, дубликаты JSON-ключей, typed schema, interrupted apply/commit, path traversal, missing files, rollback, secrets и rotation;
-- Telegram: HTML/Rich HTML escaping, структура summary/details, fallback policy, сохранённый TestConfig, persisted low-speed retry, mass incident grouping, mute scopes, alert lifecycle и отсутствие токенов в выводе;
+- Telegram: HTML/Rich HTML escaping, структура summary/details, fallback policy, сохранённый TestConfig, persisted low-speed/deadline retries, mass incident grouping, mute scopes, alert lifecycle и отсутствие токенов в выводе;
 - API: обновить `web/openapi.yaml`, проверить все локальные `$ref` и handler tests;
 - UI: только desktop viewport, filters, selection, admin auth и отсутствие ошибок в console; mobile browser check не запускать;
 - Dockerfile/Compose: builder build и финальный production image.

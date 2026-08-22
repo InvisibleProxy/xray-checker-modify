@@ -901,6 +901,140 @@
       .hint {
         line-height: 1.4;
       }
+      .merge-notice {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px 14px;
+        background: var(--panel-2);
+      }
+      .merge-notice[hidden],
+      .merge-dialog-body[hidden],
+      .merge-dialog-footer[hidden] {
+        display: none;
+      }
+      .merge-notice.ok {
+        border-color: rgba(53, 216, 120, 0.35);
+        background: var(--green-soft);
+      }
+      .merge-notice.warn {
+        border-color: rgba(242, 184, 75, 0.38);
+        background: var(--yellow-soft);
+      }
+      .merge-notice strong,
+      .merge-notice span {
+        display: block;
+      }
+      .merge-notice span {
+        margin-top: 3px;
+        color: var(--muted);
+      }
+      .merge-lineage {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 4px;
+        flex-wrap: wrap;
+      }
+      dialog.merge-dialog {
+        width: min(680px, calc(100vw - 40px));
+        max-height: calc(100vh - 40px);
+        overflow: auto;
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 0;
+        background: var(--panel);
+        color: var(--text);
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.52);
+      }
+      dialog.merge-dialog::backdrop {
+        background: rgba(5, 8, 12, 0.72);
+        backdrop-filter: blur(3px);
+      }
+      .merge-dialog-shell {
+        display: grid;
+      }
+      .merge-dialog-header,
+      .merge-dialog-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 14px 16px;
+      }
+      .merge-dialog-header {
+        border-bottom: 1px solid var(--border);
+      }
+      .merge-dialog-footer {
+        justify-content: flex-end;
+        border-top: 1px solid var(--border);
+      }
+      .merge-dialog-body {
+        display: grid;
+        gap: 14px;
+        padding: 16px;
+      }
+      .merge-dialog-close {
+        width: 32px;
+        height: 32px;
+        padding: 0;
+        font-size: 20px;
+        line-height: 1;
+      }
+      .merge-node-card {
+        min-width: 0;
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        padding: 11px 12px;
+        background: var(--panel-2);
+      }
+      .merge-node-card strong,
+      .merge-node-card span {
+        display: block;
+        overflow-wrap: anywhere;
+      }
+      .merge-node-card span {
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .merge-preview-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+      .merge-preview-grid div {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px;
+        background: var(--panel-3);
+      }
+      .merge-preview-grid span,
+      .merge-preview-grid strong {
+        display: block;
+      }
+      .merge-preview-grid span {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .merge-preview-grid strong {
+        margin-top: 4px;
+      }
+      .merge-warning {
+        border-left: 3px solid var(--yellow);
+        padding: 9px 11px;
+        background: var(--yellow-soft);
+        color: var(--text);
+      }
+      .merge-success {
+        border: 1px solid rgba(53, 216, 120, 0.35);
+        border-radius: 10px;
+        padding: 14px;
+        background: var(--green-soft);
+      }
       @media (max-width: 960px) {
         .dashboard-grid {
           grid-template-columns: 1fr;
@@ -1328,6 +1462,13 @@
               <button id="refresh-node-geo" class="secondary" type="button">Refresh Geo</button>
             </div>
           </div>
+          <div id="node-merge-notice" class="merge-notice" role="status" aria-live="polite" hidden>
+            <div>
+              <strong id="node-merge-notice-title"></strong>
+              <span id="node-merge-notice-detail"></span>
+            </div>
+            <button id="dismiss-node-merge-notice" class="secondary small" type="button">Dismiss</button>
+          </div>
           <div class="overview-controls">
             <label>
               Search
@@ -1507,6 +1648,73 @@
         </section>
       </section>
     </main>
+    <dialog id="node-merge-dialog" class="merge-dialog" aria-labelledby="node-merge-dialog-title">
+      <div class="merge-dialog-shell">
+        <div class="merge-dialog-header">
+          <div>
+            <h2 id="node-merge-dialog-title">Merge retired node</h2>
+            <div id="node-merge-dialog-subtitle" class="muted">Choose the active node that owns the merged history.</div>
+          </div>
+          <button id="close-node-merge-dialog" class="secondary merge-dialog-close" type="button" aria-label="Close merge dialog">×</button>
+        </div>
+
+        <div id="node-merge-select-step" class="merge-dialog-body">
+          <div>
+            <span class="table-meta">Retired source</span>
+            <div id="node-merge-source" class="merge-node-card"></div>
+          </div>
+          <label>
+            Active target
+            <select id="node-merge-target">
+              <option value="">Select an active node</option>
+            </select>
+          </label>
+          <div id="node-merge-target-hint" class="hint"></div>
+          <div id="node-merge-select-error" class="error" role="alert"></div>
+        </div>
+
+        <div id="node-merge-preview-step" class="merge-dialog-body" hidden>
+          <div class="split">
+            <div>
+              <span class="table-meta">From retired node</span>
+              <div id="node-merge-preview-source" class="merge-node-card"></div>
+            </div>
+            <div>
+              <span class="table-meta">Into active node</span>
+              <div id="node-merge-preview-target" class="merge-node-card"></div>
+            </div>
+          </div>
+          <div class="merge-preview-grid">
+            <div><span>Speed results</span><strong id="node-merge-preview-results">0</strong></div>
+            <div><span>Downtime</span><strong id="node-merge-preview-downtime">0</strong></div>
+            <div><span>Incidents</span><strong id="node-merge-preview-incidents">0</strong></div>
+          </div>
+          <div id="node-merge-identity-warnings" class="merge-warning"></div>
+          <div class="hint">The merge is staged now and applied on the next restart. The retired record is removed only after all persisted state loads successfully.</div>
+          <div id="node-merge-preview-error" class="error" role="alert"></div>
+        </div>
+
+        <div id="node-merge-success-step" class="merge-dialog-body" hidden>
+          <div class="merge-success">
+            <strong>Merge staged successfully</strong>
+            <div id="node-merge-success-detail" class="muted"></div>
+          </div>
+          <div class="hint">Restart the service to apply it. After restart, Nodes Overview will verify the target lineage and show a completed confirmation.</div>
+        </div>
+
+        <div id="node-merge-select-actions" class="merge-dialog-footer">
+          <button id="cancel-node-merge" class="secondary" type="button">Cancel</button>
+          <button id="review-node-merge" class="primary" type="button" disabled>Review merge</button>
+        </div>
+        <div id="node-merge-preview-actions" class="merge-dialog-footer" hidden>
+          <button id="back-node-merge" class="secondary" type="button">Back</button>
+          <button id="stage-node-merge" class="primary" type="button">Stage merge</button>
+        </div>
+        <div id="node-merge-success-actions" class="merge-dialog-footer" hidden>
+          <button id="done-node-merge" class="primary" type="button">Done</button>
+        </div>
+      </div>
+    </dialog>
     <div id="node-speed-tooltip" class="speed-chart-tooltip" role="status" aria-live="polite"></div>
 
     <script>
@@ -1532,6 +1740,8 @@
         openNodeStableIds: new Set(),
         dashboardCardHistory: new Map(),
         dashboardCardsAnimated: false,
+        nodeMergeSourceID: "",
+        nodeMergePreview: null,
       };
 
       const basePath = (() => {
@@ -1545,6 +1755,7 @@
       const defaultHistoryRetentionDays = 60;
       const maxHistoryRetentionDays = 3650;
       const speedDraftKey = "xray-checker-admin-speed-test";
+      const pendingNodeMergeKey = "xray-checker-admin-pending-node-merge";
 
       function escapeHtml(value) {
         return String(value || "")
@@ -2539,8 +2750,12 @@
                 <button class="secondary small" type="button" data-merge-node="${escapeHtml(node.stableId || "")}">Merge</button>
                 <button class="secondary danger small" type="button" data-delete-node="${escapeHtml(node.stableId || "")}">Delete</button>
               </div>`;
-          const mergedFrom = Array.isArray(node.mergedFromStableIds) && node.mergedFromStableIds.length > 0
-            ? `<div class="muted mono" title="Merged retired node IDs">merged: ${node.mergedFromStableIds.map(escapeHtml).join(", ")}</div>`
+          const mergedIDs = Array.isArray(node.mergedFromStableIds) ? node.mergedFromStableIds.filter(Boolean) : [];
+          const mergedFrom = mergedIDs.length > 0
+            ? `<div class="merge-lineage" title="Persisted history from retired StableIDs was merged successfully">
+                <span class="chip ok">Merge applied</span>
+                <span class="muted mono">${mergedIDs.map(escapeHtml).join(", ")}</span>
+              </div>`
             : "";
           return `
             <tr>
@@ -2564,6 +2779,7 @@
             </tr>
           `;
         }).join("") || `<tr><td colspan="13" class="muted">No nodes found</td></tr>`;
+        renderNodeMergeNotice();
       }
 
       function formatSpeedChip(result) {
@@ -3346,15 +3562,90 @@
         return (state.nodesOverview || []).filter((target) => (
           target.active &&
           target.stableId !== source.stableId &&
-          normalizedNodeIdentity(target.name) === normalizedNodeIdentity(source.name) &&
           normalizedNodeIdentity(target.subName) === normalizedNodeIdentity(source.subName) &&
           normalizedNodeIdentity(target.protocol) === normalizedNodeIdentity(source.protocol) &&
-          normalizedNodeIdentity(target.server) === normalizedNodeIdentity(source.server) &&
-          Number(target.port || 0) === Number(source.port || 0)
-        ));
+          normalizedNodeIdentity(target.server) === normalizedNodeIdentity(source.server)
+        )).sort((a, b) => nodeOverviewLabel(a).localeCompare(nodeOverviewLabel(b)) || String(a.stableId).localeCompare(String(b.stableId)));
       }
 
-      async function mergeOverviewNode(sourceStableId) {
+      function nodeMergeCardHTML(node) {
+        const endpoint = `${node.server || "n/a"}${node.port ? `:${node.port}` : ""}`;
+        return `<strong>${escapeHtml(node.name || "Unnamed")}</strong>
+          <span>${escapeHtml(node.subName || "No subscription")} · ${escapeHtml(String(node.protocol || "n/a").toUpperCase())} · ${escapeHtml(endpoint)}</span>
+          <span class="mono">${escapeHtml(node.stableId || "")}</span>`;
+      }
+
+      function loadPendingNodeMerge() {
+        try {
+          const value = JSON.parse(localStorage.getItem(pendingNodeMergeKey) || "null");
+          if (!value || !String(value.sourceStableId || "").trim() || !String(value.targetStableId || "").trim()) return null;
+          return value;
+        } catch {
+          return null;
+        }
+      }
+
+      function savePendingNodeMerge(value) {
+        try {
+          localStorage.setItem(pendingNodeMergeKey, JSON.stringify(value));
+        } catch {
+        }
+      }
+
+      function clearPendingNodeMerge() {
+        try {
+          localStorage.removeItem(pendingNodeMergeKey);
+        } catch {
+        }
+      }
+
+      function renderNodeMergeNotice() {
+        const notice = $("node-merge-notice");
+        const pending = loadPendingNodeMerge();
+        if (!pending) {
+          notice.hidden = true;
+          notice.className = "merge-notice";
+          return;
+        }
+
+        const source = (state.nodesOverview || []).find((node) => node.stableId === pending.sourceStableId);
+        const target = (state.nodesOverview || []).find((node) => node.stableId === pending.targetStableId);
+        const lineage = target && Array.isArray(target.mergedFromStableIds) ? target.mergedFromStableIds : [];
+        const sourceLabel = pending.sourceLabel || pending.sourceStableId;
+        const targetLabel = (target && nodeOverviewLabel(target)) || pending.targetLabel || pending.targetStableId;
+
+        notice.hidden = false;
+        if (!source && target && target.active && lineage.includes(pending.sourceStableId)) {
+          notice.className = "merge-notice ok";
+          $("node-merge-notice-title").textContent = "Node merge completed successfully";
+          $("node-merge-notice-detail").textContent = `${sourceLabel} → ${targetLabel}. Persisted lineage and history are attached to ${pending.targetStableId}.`;
+          return;
+        }
+        if (source && !source.active && target && target.active) {
+          notice.className = "merge-notice warn";
+          $("node-merge-notice-title").textContent = "Node merge is staged";
+          $("node-merge-notice-detail").textContent = `${sourceLabel} → ${targetLabel}. Restart the service to apply it.`;
+          return;
+        }
+
+        notice.className = "merge-notice warn";
+        $("node-merge-notice-title").textContent = "Node merge status needs verification";
+        $("node-merge-notice-detail").textContent = `${sourceLabel} → ${targetLabel}. Refresh Nodes Overview or inspect startup logs.`;
+      }
+
+      function setNodeMergeDialogStep(step) {
+        for (const name of ["select", "preview", "success"]) {
+          $(`node-merge-${name}-step`).hidden = name !== step;
+          $(`node-merge-${name}-actions`).hidden = name !== step;
+        }
+      }
+
+      function closeNodeMergeDialog() {
+        const dialog = $("node-merge-dialog");
+        if (dialog.open) dialog.close();
+      }
+
+      function openNodeMergeDialog(sourceStableId) {
         sourceStableId = String(sourceStableId || "").trim();
         const source = (state.nodesOverview || []).find((item) => item.stableId === sourceStableId);
         if (!source) {
@@ -3366,39 +3657,75 @@
           return;
         }
         const targets = matchingActiveMergeTargets(source);
-        if (targets.length !== 1) {
-          $("nodes-overview-summary").textContent = targets.length === 0
-            ? "No matching active node found (name, subscription, protocol and endpoint must match)"
-            : `Found ${targets.length} matching active nodes; merge is intentionally blocked as ambiguous`;
+        if (targets.length === 0) {
+          $("nodes-overview-summary").textContent = "No compatible active node found (subscription, protocol and server must match)";
           return;
         }
 
-        const target = targets[0];
-        $("nodes-overview-summary").textContent = "Preparing merge preview";
+        state.nodeMergeSourceID = sourceStableId;
+        state.nodeMergePreview = null;
+        $("node-merge-source").innerHTML = nodeMergeCardHTML(source);
+        $("node-merge-target").innerHTML = `<option value="">Select an active node</option>` + targets.map((target) => {
+          const endpoint = `${target.server || "n/a"}${target.port ? `:${target.port}` : ""}`;
+          return `<option value="${escapeHtml(target.stableId)}">${escapeHtml(target.name || "Unnamed")} · ${escapeHtml(endpoint)} · ${escapeHtml(target.stableId)}</option>`;
+        }).join("");
+        $("node-merge-target").value = "";
+        $("node-merge-target-hint").textContent = `${targets.length} compatible active ${targets.length === 1 ? "node" : "nodes"}. Name and port may differ; compare the selected target in the next step.`;
+        $("node-merge-select-error").textContent = "";
+        $("review-node-merge").disabled = true;
+        $("node-merge-dialog-subtitle").textContent = "Choose the active node that should own the retired history.";
+        setNodeMergeDialogStep("select");
+        $("node-merge-dialog").showModal();
+        $("node-merge-target").focus();
+      }
+
+      async function previewNodeMerge() {
+        const sourceStableId = state.nodeMergeSourceID;
+        const targetStableId = $("node-merge-target").value;
+        if (!sourceStableId || !targetStableId) return;
+
+        const button = $("review-node-merge");
+        button.disabled = true;
+        button.textContent = "Preparing preview";
+        $("node-merge-select-error").textContent = "";
         try {
           const preview = await request("/nodes-overview/merge/preview", {
             method: "POST",
-            body: JSON.stringify({ sourceStableId, targetStableId: target.stableId }),
+            body: JSON.stringify({ sourceStableId, targetStableId }),
           });
-          const sourceLabel = nodeOverviewLabel(source) || sourceStableId;
-          const targetLabel = nodeOverviewLabel(target) || target.stableId;
+          state.nodeMergePreview = preview;
           const combinedDowntime = Number(preview.source.totalDowntimeSec || 0) + Number(preview.target.totalDowntimeSec || 0);
           const combinedIncidents = Number(preview.source.incidentCount || 0) + Number(preview.target.incidentCount || 0);
-          const confirmed = window.confirm(
-            `Merge retired node into active node?\n\n` +
-            `From: ${sourceLabel}\n${preview.source.stableId}\n` +
-            `To: ${targetLabel}\n${preview.target.stableId}\n\n` +
-            `Saved speed results after merge: ${Number(preview.mergedResultCount || 0)}\n` +
-            `Accumulated downtime: ${formatDurationSec(combinedDowntime)}\n` +
-            `Incidents: ${combinedIncidents}\n\n` +
-            `The retired record will be removed only after a successful restart. A rollback copy is kept until the merged state loads successfully.`
-          );
-          if (!confirmed) {
-            $("nodes-overview-summary").textContent = "Merge cancelled";
-            return;
-          }
+          $("node-merge-preview-source").innerHTML = nodeMergeCardHTML(preview.source);
+          $("node-merge-preview-target").innerHTML = nodeMergeCardHTML(preview.target);
+          $("node-merge-preview-results").textContent = Number(preview.mergedResultCount || 0);
+          $("node-merge-preview-downtime").textContent = formatDurationSec(combinedDowntime);
+          $("node-merge-preview-incidents").textContent = combinedIncidents;
+          const warnings = Array.isArray(preview.identityWarnings) ? preview.identityWarnings : [];
+          $("node-merge-identity-warnings").innerHTML = warnings.length > 0
+            ? `<strong>Changed identity fields</strong><ul>${warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>`
+            : `<strong>Identity check</strong><div>Name and port are unchanged.</div>`;
+          $("node-merge-preview-error").textContent = "";
+          $("node-merge-dialog-subtitle").textContent = "Review the exact source, target and merged counters before staging.";
+          setNodeMergeDialogStep("preview");
+          $("stage-node-merge").focus();
+        } catch (err) {
+          $("node-merge-select-error").textContent = err.message;
+        } finally {
+          button.textContent = "Review merge";
+          button.disabled = !$("node-merge-target").value;
+        }
+      }
 
-          $("nodes-overview-summary").textContent = "Staging node merge";
+      async function stageNodeMerge() {
+        const preview = state.nodeMergePreview;
+        if (!preview) return;
+
+        const button = $("stage-node-merge");
+        button.disabled = true;
+        button.textContent = "Staging merge";
+        $("node-merge-preview-error").textContent = "";
+        try {
           const result = await request("/nodes-overview/merge", {
             method: "POST",
             body: JSON.stringify({
@@ -3407,9 +3734,26 @@
               confirmationToken: preview.confirmationToken,
             }),
           });
+          const sourceLabel = nodeOverviewLabel(preview.source) || preview.source.stableId;
+          const targetLabel = nodeOverviewLabel(preview.target) || preview.target.stableId;
+          savePendingNodeMerge({
+            sourceStableId: preview.source.stableId,
+            targetStableId: preview.target.stableId,
+            sourceLabel,
+            targetLabel,
+            stagedAt: new Date().toISOString(),
+          });
+          $("node-merge-success-detail").textContent = `${sourceLabel} → ${targetLabel}. Restart required.`;
+          $("node-merge-dialog-subtitle").textContent = "The selected merge is safely staged.";
           $("nodes-overview-summary").textContent = result.message || "Node merge staged; restart the application to apply it";
+          renderNodeMergeNotice();
+          setNodeMergeDialogStep("success");
+          $("done-node-merge").focus();
         } catch (err) {
-          $("nodes-overview-summary").textContent = err.message;
+          $("node-merge-preview-error").textContent = err.message;
+        } finally {
+          button.textContent = "Stage merge";
+          button.disabled = false;
         }
       }
 
@@ -3922,11 +4266,35 @@
       $("nodes-overview").addEventListener("click", (event) => {
         const mergeButton = event.target.closest("[data-merge-node]");
         if (mergeButton) {
-          mergeOverviewNode(mergeButton.dataset.mergeNode);
+          openNodeMergeDialog(mergeButton.dataset.mergeNode);
           return;
         }
         const deleteButton = event.target.closest("[data-delete-node]");
         if (deleteButton) deleteOverviewNode(deleteButton.dataset.deleteNode);
+      });
+      $("node-merge-target").addEventListener("change", () => {
+        state.nodeMergePreview = null;
+        $("node-merge-select-error").textContent = "";
+        $("review-node-merge").disabled = !$("node-merge-target").value;
+      });
+      $("review-node-merge").addEventListener("click", previewNodeMerge);
+      $("stage-node-merge").addEventListener("click", stageNodeMerge);
+      $("back-node-merge").addEventListener("click", () => {
+        state.nodeMergePreview = null;
+        $("node-merge-preview-error").textContent = "";
+        $("node-merge-dialog-subtitle").textContent = "Choose the active node that should own the retired history.";
+        setNodeMergeDialogStep("select");
+        $("node-merge-target").focus();
+      });
+      ["close-node-merge-dialog", "cancel-node-merge", "done-node-merge"].forEach((id) => {
+        $(id).addEventListener("click", closeNodeMergeDialog);
+      });
+      $("node-merge-dialog").addEventListener("cancel", () => {
+        state.nodeMergePreview = null;
+      });
+      $("dismiss-node-merge-notice").addEventListener("click", () => {
+        clearPendingNodeMerge();
+        renderNodeMergeNotice();
       });
       $("refresh-history").addEventListener("click", loadHistory);
       $("history-node").addEventListener("change", () => {

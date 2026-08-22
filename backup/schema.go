@@ -29,6 +29,7 @@ type nodeAlertStateSchema struct {
 }
 
 type persistedSpeedRetrySchema struct {
+	Kind      string               `json:"kind,omitempty"`
 	StableIDs []string             `json:"stableIds"`
 	Config    speedtest.TestConfig `json:"config"`
 	DueAt     time.Time            `json:"dueAt"`
@@ -77,7 +78,7 @@ func validateDataFile(name string, data []byte) error {
 			return fmt.Errorf("backup file %s has an unsupported schema", name)
 		}
 		for _, retry := range state.SpeedRetries {
-			if len(retry.StableIDs) == 0 || retry.DueAt.IsZero() {
+			if (retry.Kind != "" && retry.Kind != "low-speed" && retry.Kind != "deadline") || len(retry.StableIDs) == 0 || retry.DueAt.IsZero() {
 				return fmt.Errorf("backup file %s has an invalid pending speed retry", name)
 			}
 		}

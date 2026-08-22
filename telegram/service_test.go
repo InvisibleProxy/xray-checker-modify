@@ -3,6 +3,7 @@ package telegram
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -688,7 +689,7 @@ func TestSuccessfulFallbackSuppressesAutomatedTelegramReport(t *testing.T) {
 		t.Fatalf("successful fallback sent %d automated reports, want none", len(sent))
 	}
 	service.speedRetryMu.Lock()
-	pending := service.speedRetryPending["node-1"]
+	pending := service.speedRetryPending[speedRetryKey{Kind: speedRetryKindLowSpeed, StableID: "node-1"}]
 	service.speedRetryMu.Unlock()
 	if pending {
 		t.Fatal("successful fallback scheduled a low-speed confirmation alert")
@@ -756,7 +757,7 @@ func TestAutomaticLowSpeedAlertRequiresFailedConfirmation(t *testing.T) {
 		t.Fatalf("initial low-speed result sent %d reports, want none", len(sent))
 	}
 	service.speedRetryMu.Lock()
-	pending := service.speedRetryPending["node-1"]
+	pending := service.speedRetryPending[speedRetryKey{Kind: speedRetryKindLowSpeed, StableID: "node-1"}]
 	service.speedRetryMu.Unlock()
 	if !pending {
 		t.Fatal("initial low-speed result did not schedule confirmation")
@@ -821,6 +822,230 @@ func TestInitialTransportFailureIsNotDelayedWithLowSpeedRetry(t *testing.T) {
 	}
 	if strings.Contains(sent[0].HTML, "Slow node") {
 		t.Fatalf("unconfirmed low-speed node leaked into initial alert:\n%s", sent[0].HTML)
+	}
+}
+
+func TestContextDeadlineRetryIsScheduledWithoutDelayingInitialAlert(t *testing.T) {
+	service := NewService("", nil, nil, 10000)
+	defer service.Stop()
+	service.setConfig(Config{
+		Enabled:               true,
+		ChatID:                "alerts-chat",
+		SpeedReportsEnabled:   true,
+		SpeedReportMode:       "issues",
+		LowSpeedThresholdMbps: 10,
+		SpeedReportLimit:      10,
+		TimeoutSec:            1,
+	})
+
+	var sent []formattedMessage
+	service.speedReportSendFunc = func(_ string, _ int, content formattedMessage) {
+		sent = append(sent, content)
+	}
+	before := time.Now()
+	service.NotifySpeedTest(speedtest.RunReport{
+		Source:     "schedule",
+		FinishedAt: time.Now(),
+		Selected:   1,
+		Config:     speedtest.TestConfig{URL: "https://speed.example.test/file.bin", TimeoutSec: 30},
+		Results: []speedtest.Result{{
+			StableID: "deadline-node",
+			Name:     "Deadline node",
+			Error:    "Get https://speed.example.test/file.bin: context deadline exceeded",
+		}},
+	})
+
+	if len(sent) != 1 {
+		t.Fatalf("initial deadline error sent %d reports, want 1", len(sent))
+	}
+	if !strings.Contains(sent[0].HTML, "Deadline node") || !strings.Contains(sent[0].HTML, "context deadline exceeded") {
+		t.Fatalf("initial deadline notification is missing:\n%s", sent[0].HTML)
+	}
+
+	service.speedRetryMu.Lock()
+	pendingDeadline := service.speedRetryPending[speedRetryKey{Kind: speedRetryKindDeadline, StableID: "deadline-node"}]
+	pendingLowSpeed := service.speedRetryPending[speedRetryKey{Kind: speedRetryKindLowSpeed, StableID: "deadline-node"}]
+	var entry pendingSpeedRetry
+	for _, candidate := range service.speedRetryEntries {
+		entry = candidate
+	}
+	service.speedRetryMu.Unlock()
+	if !pendingDeadline || pendingLowSpeed {
+		t.Fatalf("pending deadline=%t low-speed=%t", pendingDeadline, pendingLowSpeed)
+	}
+	if entry.Kind != speedRetryKindDeadline || entry.DueAt.Before(before.Add(4*time.Minute+59*time.Second)) || entry.DueAt.After(before.Add(5*time.Minute+time.Second)) {
+		t.Fatalf("deadline retry entry = %+v, want due in 5 minutes", entry)
+	}
+}
+
+func TestDeadlineFallbackLowSpeedStillNotifiesImmediately(t *testing.T) {
+	service := NewService("", nil, nil, 10000)
+	defer service.Stop()
+	service.setConfig(Config{
+		Enabled:               true,
+		ChatID:                "alerts-chat",
+		SpeedReportsEnabled:   true,
+		SpeedReportMode:       "issues",
+		LowSpeedThresholdMbps: 10,
+		SpeedReportLimit:      10,
+		TimeoutSec:            1,
+	})
+
+	var sent []formattedMessage
+	service.speedReportSendFunc = func(_ string, _ int, content formattedMessage) {
+		sent = append(sent, content)
+	}
+	service.NotifySpeedTest(speedtest.RunReport{
+		Source:     "schedule",
+		FinishedAt: time.Now(),
+		Selected:   2,
+		Config:     speedtest.TestConfig{URL: "https://primary.example.test/file.bin", TimeoutSec: 30},
+		Results: []speedtest.Result{{
+			StableID:                "fallback-node",
+			Name:                    "Fallback node",
+			Mbps:                    2,
+			FallbackUsed:            true,
+			TelegramAlertSuppressed: true,
+			PrimaryError:            "context deadline exceeded",
+		}, {
+			StableID: "ordinary-slow",
+			Name:     "Ordinary slow node",
+			Mbps:     3,
+		}},
+	})
+
+	if len(sent) != 1 {
+		t.Fatalf("deadline-affected low speed sent %d reports, want 1", len(sent))
+	}
+	if !strings.Contains(sent[0].HTML, "Fallback node") || !strings.Contains(sent[0].HTML, "2.00 Mbps") {
+		t.Fatalf("low-speed notification is missing:\n%s", sent[0].HTML)
+	}
+	if strings.Contains(sent[0].HTML, "Ordinary slow node") {
+		t.Fatalf("ordinary unconfirmed low speed leaked into the immediate notification:\n%s", sent[0].HTML)
+	}
+	service.speedRetryMu.Lock()
+	pendingDeadline := service.speedRetryPending[speedRetryKey{Kind: speedRetryKindDeadline, StableID: "fallback-node"}]
+	pendingLowSpeed := service.speedRetryPending[speedRetryKey{Kind: speedRetryKindLowSpeed, StableID: "fallback-node"}]
+	pendingOrdinaryLowSpeed := service.speedRetryPending[speedRetryKey{Kind: speedRetryKindLowSpeed, StableID: "ordinary-slow"}]
+	service.speedRetryMu.Unlock()
+	if !pendingDeadline || pendingLowSpeed || !pendingOrdinaryLowSpeed {
+		t.Fatalf("pending deadline=%t fallback-low-speed=%t ordinary-low-speed=%t", pendingDeadline, pendingLowSpeed, pendingOrdinaryLowSpeed)
+	}
+}
+
+func TestDeadlineRetryLowSpeedResultIsNotDelayedAgain(t *testing.T) {
+	service := NewService("", nil, nil, 10000)
+	defer service.Stop()
+	service.setConfig(Config{
+		Enabled:               true,
+		ChatID:                "alerts-chat",
+		SpeedReportsEnabled:   true,
+		SpeedReportMode:       "issues",
+		LowSpeedThresholdMbps: 10,
+		SpeedReportLimit:      10,
+		TimeoutSec:            1,
+	})
+
+	var sent []formattedMessage
+	service.speedReportSendFunc = func(_ string, _ int, content formattedMessage) {
+		sent = append(sent, content)
+	}
+	service.NotifySpeedTest(speedtest.RunReport{
+		Source:     deadlineRetrySource,
+		FinishedAt: time.Now(),
+		Selected:   1,
+		Results:    []speedtest.Result{{StableID: "deadline-node", Name: "Deadline node", Mbps: 4}},
+	})
+
+	if len(sent) != 1 {
+		t.Fatalf("low-speed deadline retry sent %d reports, want 1", len(sent))
+	}
+	for _, want := range []string{"повтор после timeout через 5 минут", "Deadline node", "4.00 Mbps"} {
+		if !strings.Contains(sent[0].HTML, want) {
+			t.Fatalf("deadline retry notification does not contain %q:\n%s", want, sent[0].HTML)
+		}
+	}
+	service.speedRetryMu.Lock()
+	pendingLowSpeed := service.speedRetryPending[speedRetryKey{Kind: speedRetryKindLowSpeed, StableID: "deadline-node"}]
+	service.speedRetryMu.Unlock()
+	if pendingLowSpeed {
+		t.Fatal("deadline retry low-speed result was delayed by another 30-minute confirmation")
+	}
+}
+
+func TestDeadlineRetryRunsOnlyAffectedNodes(t *testing.T) {
+	service := NewService("", nil, nil, 10000)
+	defer service.Stop()
+	service.deadlineRetryDelay = 20 * time.Millisecond
+
+	type runCall struct {
+		req    speedtest.RunRequest
+		source string
+	}
+	runs := make(chan runCall, 2)
+	service.speedRunFunc = func(req speedtest.RunRequest, source string) error {
+		runs <- runCall{req: req, source: source}
+		return nil
+	}
+	report := speedtest.RunReport{
+		Config: speedtest.TestConfig{URL: "https://speed.example.test/file.bin", TimeoutSec: 30},
+		Results: []speedtest.Result{
+			{StableID: "deadline-b", Error: "context deadline exceeded"},
+			{StableID: "plain-timeout", Error: "request timeout"},
+			{StableID: "healthy", Mbps: 50},
+			{StableID: "deadline-a", PrimaryError: "Get: context deadline exceeded", Mbps: 25},
+		},
+	}
+	if !service.scheduleDeadlineRetry(report) || !service.scheduleDeadlineRetry(report) {
+		t.Fatal("deadline retry was not scheduled")
+	}
+
+	select {
+	case got := <-runs:
+		if got.source != deadlineRetrySource {
+			t.Fatalf("retry source = %q, want %q", got.source, deadlineRetrySource)
+		}
+		if strings.Join(got.req.ProxyIDs, ",") != "deadline-a,deadline-b" {
+			t.Fatalf("retry proxy IDs = %v, want only deadline nodes", got.req.ProxyIDs)
+		}
+		if got.req.Config != report.Config {
+			t.Fatalf("retry config = %+v, want %+v", got.req.Config, report.Config)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for deadline retry")
+	}
+
+	select {
+	case duplicate := <-runs:
+		t.Fatalf("duplicate deadline retry: %+v", duplicate)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestDeadlineAndLowSpeedRetriesRemainIndependent(t *testing.T) {
+	service := NewService("", nil, nil, 10000)
+	defer service.Stop()
+	service.speedRetryDelay = time.Hour
+	service.deadlineRetryDelay = time.Hour
+	service.setConfig(Config{LowSpeedThresholdMbps: 10})
+
+	stableID := "shared-node"
+	if !service.scheduleLowSpeedRetry(speedtest.RunReport{
+		Results: []speedtest.Result{{StableID: stableID, Mbps: 2}},
+	}) || !service.scheduleDeadlineRetry(speedtest.RunReport{
+		Results: []speedtest.Result{{StableID: stableID, Error: "context deadline exceeded"}},
+	}) {
+		t.Fatal("independent retries were not scheduled")
+	}
+
+	service.completeSpeedRetry(speedRetryKindDeadline, []speedtest.Result{{StableID: stableID}})
+	service.speedRetryMu.Lock()
+	pendingLowSpeed := service.speedRetryPending[speedRetryKey{Kind: speedRetryKindLowSpeed, StableID: stableID}]
+	pendingDeadline := service.speedRetryPending[speedRetryKey{Kind: speedRetryKindDeadline, StableID: stableID}]
+	entryCount := len(service.speedRetryEntries)
+	service.speedRetryMu.Unlock()
+	if !pendingLowSpeed || pendingDeadline || entryCount != 1 {
+		t.Fatalf("pending low-speed=%t deadline=%t entries=%d", pendingLowSpeed, pendingDeadline, entryCount)
 	}
 }
 
@@ -895,7 +1120,7 @@ func TestPendingLowSpeedRetrySurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	restored.speedRetryMu.Lock()
-	if !restored.speedRetryPending[proxy.StableID] || len(restored.speedRetryEntries) != 1 {
+	if !restored.speedRetryPending[speedRetryKey{Kind: speedRetryKindLowSpeed, StableID: proxy.StableID}] || len(restored.speedRetryEntries) != 1 {
 		restored.speedRetryMu.Unlock()
 		t.Fatalf("restored retries = %+v", restored.speedRetryEntries)
 	}
@@ -922,6 +1147,107 @@ func TestPendingLowSpeedRetrySurvivesRestart(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("restored retry did not run")
+	}
+}
+
+func TestPendingDeadlineRetrySurvivesRestart(t *testing.T) {
+	dataDir := t.TempDir()
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "Node 1", Protocol: "vless", Server: "node.example", Port: 443}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "https://check.example/ip", 5, "https://check.example/status", "", 5, 1, "status")
+	statePath := filepath.Join(dataDir, "telegram_config.json")
+
+	service := NewService(statePath, proxyChecker, nil, 10000)
+	service.deadlineRetryDelay = time.Hour
+	if !service.scheduleDeadlineRetry(speedtest.RunReport{
+		Config:  speedtest.TestConfig{URL: "https://speed.example/file.bin", TimeoutSec: 30},
+		Results: []speedtest.Result{{StableID: proxy.StableID, Error: "context deadline exceeded"}},
+	}) {
+		t.Fatal("deadline retry was not scheduled")
+	}
+	service.Stop()
+
+	persisted, err := os.ReadFile(filepath.Join(dataDir, "node_alert_state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(persisted), `"kind": "deadline"`) {
+		t.Fatalf("persisted deadline retry has no kind:\n%s", persisted)
+	}
+
+	restored := NewService(statePath, proxyChecker, nil, 10000)
+	if err := restored.Load(); err != nil {
+		t.Fatal(err)
+	}
+	restored.speedRetryMu.Lock()
+	if !restored.speedRetryPending[speedRetryKey{Kind: speedRetryKindDeadline, StableID: proxy.StableID}] || len(restored.speedRetryEntries) != 1 {
+		restored.speedRetryMu.Unlock()
+		t.Fatalf("restored retries = %+v", restored.speedRetryEntries)
+	}
+	for timerID, entry := range restored.speedRetryEntries {
+		if entry.Kind != speedRetryKindDeadline {
+			restored.speedRetryMu.Unlock()
+			t.Fatalf("restored retry kind = %q", entry.Kind)
+		}
+		entry.DueAt = time.Now().Add(-time.Second)
+		restored.speedRetryEntries[timerID] = entry
+	}
+	restored.speedRetryMu.Unlock()
+
+	runs := make(chan speedtest.RunRequest, 1)
+	restored.speedRunFunc = func(req speedtest.RunRequest, source string) error {
+		if source != deadlineRetrySource {
+			t.Errorf("source = %q", source)
+		}
+		runs <- req
+		return nil
+	}
+	restored.Start()
+	defer restored.Stop()
+	select {
+	case req := <-runs:
+		if len(req.ProxyIDs) != 1 || req.ProxyIDs[0] != proxy.StableID {
+			t.Fatalf("restored request = %+v", req)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("restored deadline retry did not run")
+	}
+}
+
+func TestLegacyPendingSpeedRetryDefaultsToLowSpeed(t *testing.T) {
+	dataDir := t.TempDir()
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "Node 1", Protocol: "vless", Server: "node.example", Port: 443}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "https://check.example/ip", 5, "https://check.example/status", "", 5, 1, "status")
+	statePath := filepath.Join(dataDir, "telegram_config.json")
+	data, err := json.Marshal(nodeAlertStateFile{
+		Version: 1,
+		Nodes:   map[string]persistedNodeAlertState{},
+		SpeedRetries: []persistedSpeedRetry{{
+			StableIDs: []string{proxy.StableID},
+			Config:    speedtest.TestConfig{URL: "https://speed.example/file.bin", TimeoutSec: 30},
+			DueAt:     time.Now().Add(time.Hour),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "node_alert_state.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	restored := NewService(statePath, proxyChecker, nil, 10000)
+	defer restored.Stop()
+	if err := restored.Load(); err != nil {
+		t.Fatal(err)
+	}
+	restored.speedRetryMu.Lock()
+	defer restored.speedRetryMu.Unlock()
+	if !restored.speedRetryPending[speedRetryKey{Kind: speedRetryKindLowSpeed, StableID: proxy.StableID}] || len(restored.speedRetryEntries) != 1 {
+		t.Fatalf("legacy retries = %+v", restored.speedRetryEntries)
+	}
+	for _, entry := range restored.speedRetryEntries {
+		if entry.Kind != speedRetryKindLowSpeed {
+			t.Fatalf("legacy retry kind = %q, want %q", entry.Kind, speedRetryKindLowSpeed)
+		}
 	}
 }
 

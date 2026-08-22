@@ -527,7 +527,7 @@ paths:
   /api/v1/admin/nodes-overview/merge/preview:
     post:
       summary: Preview a retired-node merge into an active replacement
-      description: Validates the persisted identity fields and returns a candidate-bound confirmation token. No state is changed.
+      description: Validates subscription, protocol and server compatibility, reports changed name or port, and returns a candidate-bound confirmation token. No state is changed.
       tags: [Admin]
       requestBody:
         required: true
@@ -1244,6 +1244,12 @@ components:
           type: boolean
         identityFieldsMatch:
           type: boolean
+          description: True when the compatible source and target also retain the same normalized name and port.
+        identityWarnings:
+          type: array
+          description: Human-readable name or port changes that require explicit review before staging.
+          items:
+            type: string
 
     NodeMergeStageResult:
       type: object

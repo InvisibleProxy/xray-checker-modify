@@ -37,8 +37,12 @@ const (
 	maxDiagnosticsRefreshConcurrency   = 4
 	maxRichMessageRunes                = 32768
 	lowSpeedRetryDelay                 = 30 * time.Minute
+	deadlineRetryDelay                 = 5 * time.Minute
 	lowSpeedRetryBusyDelay             = time.Minute
 	lowSpeedRetrySource                = "speed-retry"
+	deadlineRetrySource                = "deadline-retry"
+	speedRetryKindLowSpeed             = "low-speed"
+	speedRetryKindDeadline             = "deadline"
 )
 
 var defaultAlertReminderScheduleMinutes = parseMinuteSchedule(defaultAlertReminderScheduleString)
@@ -186,11 +190,12 @@ type Service struct {
 
 	speedRetryMu        sync.Mutex
 	speedRetryWG        sync.WaitGroup
-	speedRetryPending   map[string]bool
+	speedRetryPending   map[speedRetryKey]bool
 	speedRetryTimers    map[uint64]*time.Timer
 	speedRetryEntries   map[uint64]pendingSpeedRetry
 	speedRetrySeq       uint64
 	speedRetryDelay     time.Duration
+	deadlineRetryDelay  time.Duration
 	speedRetryBusy      time.Duration
 	speedRunFunc        func(speedtest.RunRequest, string) error
 	speedReportSendFunc func(string, int, formattedMessage)
@@ -222,15 +227,22 @@ type nodeAlertStateFile struct {
 }
 
 type pendingSpeedRetry struct {
+	Kind      string
 	Request   speedtest.RunRequest
 	StableIDs []string
 	DueAt     time.Time
 }
 
 type persistedSpeedRetry struct {
+	Kind      string               `json:"kind,omitempty"`
 	StableIDs []string             `json:"stableIds"`
 	Config    speedtest.TestConfig `json:"config"`
 	DueAt     time.Time            `json:"dueAt"`
+}
+
+type speedRetryKey struct {
+	Kind     string
+	StableID string
 }
 
 type persistedNodeAlertState struct {
@@ -371,20 +383,21 @@ func NewService(statePath string, proxyChecker *checker.ProxyChecker, speedManag
 	}
 
 	return &Service{
-		proxyChecker:      proxyChecker,
-		speedManager:      speedManager,
-		startPort:         startPort,
-		statePath:         statePath,
-		alertStatePath:    alertStatePath,
-		config:            DefaultConfig(),
-		alerts:            make(map[string]nodeAlertState),
-		menuMessages:      make(map[string]int),
-		stopCh:            make(chan struct{}),
-		speedRetryPending: make(map[string]bool),
-		speedRetryTimers:  make(map[uint64]*time.Timer),
-		speedRetryEntries: make(map[uint64]pendingSpeedRetry),
-		speedRetryDelay:   lowSpeedRetryDelay,
-		speedRetryBusy:    lowSpeedRetryBusyDelay,
+		proxyChecker:       proxyChecker,
+		speedManager:       speedManager,
+		startPort:          startPort,
+		statePath:          statePath,
+		alertStatePath:     alertStatePath,
+		config:             DefaultConfig(),
+		alerts:             make(map[string]nodeAlertState),
+		menuMessages:       make(map[string]int),
+		stopCh:             make(chan struct{}),
+		speedRetryPending:  make(map[speedRetryKey]bool),
+		speedRetryTimers:   make(map[uint64]*time.Timer),
+		speedRetryEntries:  make(map[uint64]pendingSpeedRetry),
+		speedRetryDelay:    lowSpeedRetryDelay,
+		deadlineRetryDelay: deadlineRetryDelay,
+		speedRetryBusy:     lowSpeedRetryBusyDelay,
 	}
 }
 
@@ -525,14 +538,15 @@ func (s *Service) PruneInactiveMutedNodes() error {
 	}
 	var inactiveRetries []string
 	s.speedRetryMu.Lock()
-	for stableID := range s.speedRetryPending {
-		if !active[stableID] {
-			inactiveRetries = append(inactiveRetries, stableID)
+	for key := range s.speedRetryPending {
+		if !active[key.StableID] {
+			inactiveRetries = append(inactiveRetries, key.StableID)
 		}
 	}
 	s.speedRetryMu.Unlock()
 	if len(inactiveRetries) > 0 {
-		s.clearLowSpeedRetry(inactiveRetries)
+		s.clearSpeedRetry(speedRetryKindLowSpeed, inactiveRetries)
+		s.clearSpeedRetry(speedRetryKindDeadline, inactiveRetries)
 		if err := s.saveAlertState(); err != nil {
 			return err
 		}
@@ -554,7 +568,7 @@ func (s *Service) UpdateConfig(cfg Config) error {
 }
 
 func (s *Service) Start() {
-	s.startRestoredLowSpeedRetries()
+	s.startRestoredSpeedRetries()
 	go s.pollingLoop()
 }
 
@@ -570,7 +584,7 @@ func (s *Service) Stop() {
 		s.speedRetryTimers = make(map[uint64]*time.Timer)
 		s.speedRetryMu.Unlock()
 		if err := s.saveAlertState(); err != nil {
-			logger.Warn("Failed to save pending low-speed retries on shutdown: %v", err)
+			logger.Warn("Failed to save pending speed-test retries on shutdown: %v", err)
 		}
 		s.speedRetryWG.Wait()
 	})
@@ -606,12 +620,17 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 		return
 	}
 
-	if report.Source == lowSpeedRetrySource {
-		s.completeLowSpeedRetry(report.Results)
+	if kind, ok := speedRetryKindForSource(report.Source); ok {
+		s.completeSpeedRetry(kind, report.Results)
 	}
 
 	report = filterMutedRunReport(report, cfg)
-	report = filterTelegramAlertSuppressedRunReport(report)
+	if automaticSpeedReportsEnabled(cfg) && report.Source != deadlineRetrySource {
+		// A deadline retry is independent from the 30-minute low-speed
+		// confirmation. Scheduling it must not delay or filter the current alert.
+		s.scheduleDeadlineRetry(report)
+	}
+	report = filterTelegramAlertSuppressedRunReport(report, cfg.LowSpeedThresholdMbps)
 	failed, slow, issuesOnly, shouldSend := speedReportDecision(report, cfg)
 	if !shouldSend {
 		return
@@ -622,14 +641,14 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 			return
 		}
 		issuesOnly = true
-	} else if slow > 0 && s.scheduleLowSpeedRetry(report) {
-		// Low throughput is intentionally absent from the first alert. Explicit
-		// transport failures remain visible immediately and are not hidden behind
-		// the 30-minute confirmation window.
-		report.Results = speedFailureResults(report.Results)
+	} else if report.Source != deadlineRetrySource && slow > 0 && s.scheduleLowSpeedRetry(report) {
+		// Ordinary low throughput is intentionally absent from the first alert.
+		// Explicit transport failures and deadline-affected low-speed results stay
+		// visible immediately and are not hidden behind the confirmation window.
+		report.Results = speedFailureResults(report.Results, cfg.LowSpeedThresholdMbps)
 		report.Selected = len(report.Results)
 		failed, slow = countSpeedIssues(report.Results, cfg.LowSpeedThresholdMbps)
-		if failed == 0 {
+		if failed == 0 && slow == 0 {
 			return
 		}
 		issuesOnly = true
@@ -656,10 +675,15 @@ func isRequestedTelegramSpeedReport(report speedtest.RunReport) bool {
 	return report.Source == "telegram" && strings.TrimSpace(report.ReportTarget.ChatID) != ""
 }
 
-func speedFailureResults(results []speedtest.Result) []speedtest.Result {
+func automaticSpeedReportsEnabled(cfg Config) bool {
+	return cfg.Enabled && cfg.ChatID != "" && cfg.SpeedReportsEnabled && cfg.SpeedReportMode != "disabled"
+}
+
+func speedFailureResults(results []speedtest.Result, threshold float64) []speedtest.Result {
 	filtered := make([]speedtest.Result, 0, len(results))
 	for _, result := range results {
-		if result.Offline || result.Error != "" {
+		deadlineLowSpeed := resultHasContextDeadlineExceeded(result) && threshold > 0 && result.Mbps < threshold
+		if result.Offline || result.Error != "" || deadlineLowSpeed {
 			filtered = append(filtered, result)
 		}
 	}
@@ -674,7 +698,7 @@ func lowSpeedRetryIDs(results []speedtest.Result, threshold float64) []string {
 	var ids []string
 	for _, result := range results {
 		stableID := strings.TrimSpace(result.StableID)
-		if stableID == "" || result.Offline || result.Error != "" || result.Mbps >= threshold || seen[stableID] {
+		if stableID == "" || result.Offline || result.Error != "" || resultHasContextDeadlineExceeded(result) || result.Mbps >= threshold || seen[stableID] {
 			continue
 		}
 		seen[stableID] = true
@@ -684,9 +708,41 @@ func lowSpeedRetryIDs(results []speedtest.Result, threshold float64) []string {
 	return ids
 }
 
+func deadlineRetryIDs(results []speedtest.Result) []string {
+	seen := make(map[string]bool)
+	var ids []string
+	for _, result := range results {
+		stableID := strings.TrimSpace(result.StableID)
+		if stableID == "" || !resultHasContextDeadlineExceeded(result) || seen[stableID] {
+			continue
+		}
+		seen[stableID] = true
+		ids = append(ids, stableID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func resultHasContextDeadlineExceeded(result speedtest.Result) bool {
+	return containsContextDeadlineExceeded(result.Error) || containsContextDeadlineExceeded(result.PrimaryError)
+}
+
+func containsContextDeadlineExceeded(value string) bool {
+	return strings.Contains(strings.ToLower(value), "context deadline exceeded")
+}
+
 func (s *Service) scheduleLowSpeedRetry(report speedtest.RunReport) bool {
 	cfg := s.Config()
 	ids := lowSpeedRetryIDs(report.Results, cfg.LowSpeedThresholdMbps)
+	return s.scheduleSpeedRetry(report, speedRetryKindLowSpeed, ids, s.configuredSpeedRetryDelay())
+}
+
+func (s *Service) scheduleDeadlineRetry(report speedtest.RunReport) bool {
+	ids := deadlineRetryIDs(report.Results)
+	return s.scheduleSpeedRetry(report, speedRetryKindDeadline, ids, s.configuredDeadlineRetryDelay())
+}
+
+func (s *Service) scheduleSpeedRetry(report speedtest.RunReport, kind string, ids []string, delay time.Duration) bool {
 	if len(ids) == 0 {
 		return false
 	}
@@ -699,7 +755,7 @@ func (s *Service) scheduleLowSpeedRetry(report speedtest.RunReport) bool {
 	default:
 	}
 	if s.speedRetryPending == nil {
-		s.speedRetryPending = make(map[string]bool)
+		s.speedRetryPending = make(map[speedRetryKey]bool)
 	}
 	if s.speedRetryTimers == nil {
 		s.speedRetryTimers = make(map[uint64]*time.Timer)
@@ -708,12 +764,13 @@ func (s *Service) scheduleLowSpeedRetry(report speedtest.RunReport) bool {
 		s.speedRetryEntries = make(map[uint64]pendingSpeedRetry)
 	}
 
-	newIDs := ids[:0]
+	newIDs := make([]string, 0, len(ids))
 	for _, stableID := range ids {
-		if s.speedRetryPending[stableID] {
+		key := speedRetryKey{Kind: kind, StableID: stableID}
+		if s.speedRetryPending[key] {
 			continue
 		}
-		s.speedRetryPending[stableID] = true
+		s.speedRetryPending[key] = true
 		newIDs = append(newIDs, stableID)
 	}
 	if len(newIDs) == 0 {
@@ -722,10 +779,10 @@ func (s *Service) scheduleLowSpeedRetry(report speedtest.RunReport) bool {
 	}
 
 	req := speedtest.RunRequest{
-		ProxyIDs: newIDs,
+		ProxyIDs: append([]string(nil), newIDs...),
 		Config:   report.Config,
 	}
-	s.scheduleLowSpeedRetryLocked(req, append([]string(nil), newIDs...), s.configuredSpeedRetryDelay())
+	s.scheduleSpeedRetryLocked(kind, req, newIDs, delay)
 	s.speedRetryMu.Unlock()
 	s.persistRetryStateWithWarn()
 	return true
@@ -738,6 +795,20 @@ func (s *Service) configuredSpeedRetryDelay() time.Duration {
 	return lowSpeedRetryDelay
 }
 
+func (s *Service) configuredDeadlineRetryDelay() time.Duration {
+	if s.deadlineRetryDelay > 0 {
+		return s.deadlineRetryDelay
+	}
+	return deadlineRetryDelay
+}
+
+func (s *Service) configuredRetryDelay(kind string) time.Duration {
+	if normalizedSpeedRetryKind(kind) == speedRetryKindDeadline {
+		return s.configuredDeadlineRetryDelay()
+	}
+	return s.configuredSpeedRetryDelay()
+}
+
 func (s *Service) configuredSpeedRetryBusyDelay() time.Duration {
 	if s.speedRetryBusy > 0 {
 		return s.speedRetryBusy
@@ -745,35 +816,37 @@ func (s *Service) configuredSpeedRetryBusyDelay() time.Duration {
 	return lowSpeedRetryBusyDelay
 }
 
-func (s *Service) scheduleLowSpeedRetryLocked(req speedtest.RunRequest, ids []string, delay time.Duration) {
+func (s *Service) scheduleSpeedRetryLocked(kind string, req speedtest.RunRequest, ids []string, delay time.Duration) {
 	s.speedRetrySeq++
 	timerID := s.speedRetrySeq
 	if delay < 0 {
 		delay = 0
 	}
 	s.speedRetryEntries[timerID] = pendingSpeedRetry{
+		Kind:      kind,
 		Request:   req,
 		StableIDs: append([]string(nil), ids...),
 		DueAt:     time.Now().Add(delay),
 	}
-	s.armLowSpeedRetryLocked(timerID, delay)
+	s.armSpeedRetryLocked(timerID, delay)
 }
 
-func (s *Service) armLowSpeedRetryLocked(timerID uint64, delay time.Duration) {
+func (s *Service) armSpeedRetryLocked(timerID uint64, delay time.Duration) {
 	entry, ok := s.speedRetryEntries[timerID]
 	if !ok {
 		return
 	}
+	kind := normalizedSpeedRetryKind(entry.Kind)
 	req := entry.Request
 	ids := append([]string(nil), entry.StableIDs...)
 	s.speedRetryWG.Add(1)
 	s.speedRetryTimers[timerID] = time.AfterFunc(delay, func() {
 		defer s.speedRetryWG.Done()
-		s.runLowSpeedRetry(timerID, req, ids)
+		s.runSpeedRetry(timerID, kind, req, ids)
 	})
 }
 
-func (s *Service) runLowSpeedRetry(timerID uint64, req speedtest.RunRequest, ids []string) {
+func (s *Service) runSpeedRetry(timerID uint64, kind string, req speedtest.RunRequest, ids []string) {
 	s.speedRetryMu.Lock()
 	delete(s.speedRetryTimers, timerID)
 	s.speedRetryMu.Unlock()
@@ -784,7 +857,14 @@ func (s *Service) runLowSpeedRetry(timerID uint64, req speedtest.RunRequest, ids
 	default:
 	}
 
-	err := s.runSpeedTest(req, lowSpeedRetrySource)
+	source, ok := speedRetrySourceForKind(kind)
+	if !ok {
+		s.clearSpeedRetry(kind, ids)
+		s.persistRetryStateWithWarn()
+		logger.Warn("Discarded speed-test retry with unknown kind %q", kind)
+		return
+	}
+	err := s.runSpeedTest(req, source)
 	if err == nil {
 		return
 	}
@@ -797,38 +877,42 @@ func (s *Service) runLowSpeedRetry(timerID uint64, req speedtest.RunRequest, ids
 		default:
 		}
 		delete(s.speedRetryEntries, timerID)
-		s.scheduleLowSpeedRetryLocked(req, ids, s.configuredSpeedRetryBusyDelay())
+		s.scheduleSpeedRetryLocked(kind, req, ids, s.configuredSpeedRetryBusyDelay())
 		s.speedRetryMu.Unlock()
 		s.persistRetryStateWithWarn()
-		logger.Warn("Low-speed confirmation test postponed because another speed-test is running")
+		logger.Warn("%s speed-test retry postponed because another speed-test is running", speedRetryKindLabel(kind))
 		return
 	}
 
-	s.clearLowSpeedRetry(ids)
+	s.clearSpeedRetry(kind, ids)
 	s.persistRetryStateWithWarn()
-	logger.Warn("Failed to start low-speed confirmation test: %v", err)
+	logger.Warn("Failed to start %s speed-test retry: %v", speedRetryKindLabel(kind), err)
 }
 
-func (s *Service) completeLowSpeedRetry(results []speedtest.Result) {
+func (s *Service) completeSpeedRetry(kind string, results []speedtest.Result) {
 	ids := make([]string, 0, len(results))
 	for _, result := range results {
 		if result.StableID != "" {
 			ids = append(ids, result.StableID)
 		}
 	}
-	s.clearLowSpeedRetry(ids)
+	s.clearSpeedRetry(kind, ids)
 	s.persistRetryStateWithWarn()
 }
 
-func (s *Service) clearLowSpeedRetry(ids []string) {
+func (s *Service) clearSpeedRetry(kind string, ids []string) {
 	s.speedRetryMu.Lock()
 	defer s.speedRetryMu.Unlock()
 	cleared := make(map[string]bool, len(ids))
 	for _, stableID := range ids {
-		delete(s.speedRetryPending, stableID)
+		stableID = strings.TrimSpace(stableID)
+		delete(s.speedRetryPending, speedRetryKey{Kind: kind, StableID: stableID})
 		cleared[stableID] = true
 	}
 	for timerID, entry := range s.speedRetryEntries {
+		if normalizedSpeedRetryKind(entry.Kind) != kind {
+			continue
+		}
 		remaining := entry.StableIDs[:0]
 		for _, stableID := range entry.StableIDs {
 			if !cleared[stableID] {
@@ -849,7 +933,7 @@ func (s *Service) clearLowSpeedRetry(ids []string) {
 	}
 }
 
-func (s *Service) startRestoredLowSpeedRetries() {
+func (s *Service) startRestoredSpeedRetries() {
 	s.speedRetryMu.Lock()
 	defer s.speedRetryMu.Unlock()
 	now := time.Now()
@@ -861,14 +945,50 @@ func (s *Service) startRestoredLowSpeedRetries() {
 		if delay < 0 {
 			delay = 0
 		}
-		s.armLowSpeedRetryLocked(timerID, delay)
+		s.armSpeedRetryLocked(timerID, delay)
 	}
 }
 
 func (s *Service) persistRetryStateWithWarn() {
 	if err := s.saveAlertState(); err != nil {
-		logger.Warn("Failed to save pending low-speed retries: %v", err)
+		logger.Warn("Failed to save pending speed-test retries: %v", err)
 	}
+}
+
+func normalizedSpeedRetryKind(kind string) string {
+	if kind == "" {
+		return speedRetryKindLowSpeed
+	}
+	return kind
+}
+
+func speedRetryKindForSource(source string) (string, bool) {
+	switch source {
+	case lowSpeedRetrySource:
+		return speedRetryKindLowSpeed, true
+	case deadlineRetrySource:
+		return speedRetryKindDeadline, true
+	default:
+		return "", false
+	}
+}
+
+func speedRetrySourceForKind(kind string) (string, bool) {
+	switch normalizedSpeedRetryKind(kind) {
+	case speedRetryKindLowSpeed:
+		return lowSpeedRetrySource, true
+	case speedRetryKindDeadline:
+		return deadlineRetrySource, true
+	default:
+		return "", false
+	}
+}
+
+func speedRetryKindLabel(kind string) string {
+	if normalizedSpeedRetryKind(kind) == speedRetryKindDeadline {
+		return "deadline"
+	}
+	return "low-speed"
 }
 
 func (s *Service) runSpeedTest(req speedtest.RunRequest, source string) error {
@@ -3030,13 +3150,18 @@ func (s *Service) loadAlertState() error {
 	restoredRetries := 0
 	s.speedRetryMu.Lock()
 	for _, persisted := range stateFile.SpeedRetries {
+		kind := normalizedSpeedRetryKind(persisted.Kind)
+		if _, ok := speedRetrySourceForKind(kind); !ok {
+			continue
+		}
 		var ids []string
 		for _, rawStableID := range persisted.StableIDs {
 			stableID := strings.TrimSpace(rawStableID)
-			if stableID == "" || !active[stableID] || s.speedRetryPending[stableID] {
+			key := speedRetryKey{Kind: kind, StableID: stableID}
+			if stableID == "" || !active[stableID] || s.speedRetryPending[key] {
 				continue
 			}
-			s.speedRetryPending[stableID] = true
+			s.speedRetryPending[key] = true
 			ids = append(ids, stableID)
 		}
 		if len(ids) == 0 {
@@ -3045,10 +3170,11 @@ func (s *Service) loadAlertState() error {
 		sort.Strings(ids)
 		dueAt := persisted.DueAt
 		if dueAt.IsZero() {
-			dueAt = time.Now().Add(s.configuredSpeedRetryDelay())
+			dueAt = time.Now().Add(s.configuredRetryDelay(kind))
 		}
 		s.speedRetrySeq++
 		s.speedRetryEntries[s.speedRetrySeq] = pendingSpeedRetry{
+			Kind: kind,
 			Request: speedtest.RunRequest{
 				ProxyIDs: append([]string(nil), ids...),
 				Config:   persisted.Config,
@@ -3069,7 +3195,7 @@ func (s *Service) loadAlertState() error {
 		}
 	}
 
-	logger.Info("Loaded Telegram state: %d alert nodes, %d offline statuses, %d pending low-speed retries", len(loaded), restored, restoredRetries)
+	logger.Info("Loaded Telegram state: %d alert nodes, %d offline statuses, %d pending speed-test retries", len(loaded), restored, restoredRetries)
 	return nil
 }
 
@@ -3115,6 +3241,7 @@ func (s *Service) saveAlertState() error {
 		}
 		sort.Strings(ids)
 		retries = append(retries, persistedSpeedRetry{
+			Kind:      normalizedSpeedRetryKind(entry.Kind),
 			StableIDs: ids,
 			Config:    entry.Request.Config,
 			DueAt:     entry.DueAt,
@@ -3533,10 +3660,11 @@ func filterMutedRunReport(report speedtest.RunReport, cfg Config) speedtest.RunR
 	return report
 }
 
-func filterTelegramAlertSuppressedRunReport(report speedtest.RunReport) speedtest.RunReport {
+func filterTelegramAlertSuppressedRunReport(report speedtest.RunReport, threshold float64) speedtest.RunReport {
 	filtered := make([]speedtest.Result, 0, len(report.Results))
 	for _, result := range report.Results {
-		if result.TelegramAlertSuppressed {
+		deadlineLowSpeed := resultHasContextDeadlineExceeded(result) && !result.Offline && result.Error == "" && threshold > 0 && result.Mbps < threshold
+		if result.TelegramAlertSuppressed && !deadlineLowSpeed {
 			continue
 		}
 		filtered = append(filtered, result)
@@ -3880,6 +4008,8 @@ func reportSourceLabel(source string) string {
 		return "расписание"
 	case lowSpeedRetrySource:
 		return "повтор через 30 минут"
+	case deadlineRetrySource:
+		return "повтор после timeout через 5 минут"
 	default:
 		if source == "" {
 			return "неизвестно"

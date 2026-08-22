@@ -82,7 +82,17 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`id="incidents"`,
 		`proxy.failureSummary`,
 		`data-merge-node="${escapeHtml(node.stableId || "")}"`,
+		`id="node-merge-dialog"`,
+		`id="node-merge-target"`,
 		`function matchingActiveMergeTargets(source)`,
+		`function openNodeMergeDialog(sourceStableId)`,
+		`function previewNodeMerge()`,
+		`function stageNodeMerge()`,
+		`function renderNodeMergeNotice()`,
+		`pendingNodeMergeKey`,
+		`Node merge completed successfully`,
+		`Merge applied`,
+		`.merge-notice[hidden]`,
 		`request("/nodes-overview/merge/preview"`,
 		`confirmationToken: preview.confirmationToken`,
 		`mergedFromStableIds`,
@@ -90,6 +100,9 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		if !strings.Contains(html, marker) {
 			t.Fatalf("admin template does not contain %q", marker)
 		}
+	}
+	if strings.Contains(html, `targets.length !== 1`) {
+		t.Fatal("admin template still blocks multiple compatible merge targets")
 	}
 }
 
@@ -101,6 +114,7 @@ func TestAdminNodeMergePreviewAndStageHandlers(t *testing.T) {
 			MergedResultCount: 490,
 			ConfirmationToken: "confirmed-candidate",
 			RestartRequired:   true,
+			IdentityWarnings:  []string{"Node name changed", "Port changed from 443 to 8443"},
 		},
 		stage: nodemerge.StageResult{
 			SourceStableID: "retired", TargetStableID: "active", RestartRequired: true,
@@ -114,7 +128,7 @@ func TestAdminNodeMergePreviewAndStageHandlers(t *testing.T) {
 	if previewRecorder.Code != http.StatusOK || service.previewRequest != [2]string{"retired", "active"} {
 		t.Fatalf("preview response %d %s, request=%v", previewRecorder.Code, previewRecorder.Body.String(), service.previewRequest)
 	}
-	if !strings.Contains(previewRecorder.Body.String(), `"confirmationToken":"confirmed-candidate"`) || !strings.Contains(previewRecorder.Body.String(), `"mergedResultCount":490`) {
+	if !strings.Contains(previewRecorder.Body.String(), `"confirmationToken":"confirmed-candidate"`) || !strings.Contains(previewRecorder.Body.String(), `"mergedResultCount":490`) || !strings.Contains(previewRecorder.Body.String(), `"identityWarnings":["Node name changed","Port changed from 443 to 8443"]`) {
 		t.Fatalf("unexpected preview response: %s", previewRecorder.Body.String())
 	}
 

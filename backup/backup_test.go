@@ -186,6 +186,7 @@ func TestPrepareDataFileRejectsMalformedPersistedSchemas(t *testing.T) {
 		{name: "null Telegram enabled", file: "telegram_config.json", data: `{"enabled":null}`},
 		{name: "trailing garbage", file: "node_registry.json", data: `{"version":1,"nodes":{}} garbage`},
 		{name: "nested duplicate", file: "node_registry.json", data: `{"version":1,"nodes":{"node":{"name":"first","Name":"second"}}}`},
+		{name: "unknown speed retry kind", file: "node_alert_state.json", data: `{"version":1,"nodes":{},"speedRetries":[{"kind":"unknown","stableIds":["node-1"],"config":{},"dueAt":"2026-08-22T12:00:00Z"}]}`},
 	}
 
 	for _, tt := range tests {
@@ -194,6 +195,17 @@ func TestPrepareDataFileRejectsMalformedPersistedSchemas(t *testing.T) {
 				t.Fatalf("prepareDataFile(%s) accepted malformed state: %s", tt.file, tt.data)
 			}
 		})
+	}
+}
+
+func TestPrepareDataFileAcceptsLegacyAndTypedSpeedRetries(t *testing.T) {
+	for _, data := range []string{
+		`{"version":1,"nodes":{},"speedRetries":[{"stableIds":["node-1"],"config":{},"dueAt":"2026-08-22T12:00:00Z"}]}`,
+		`{"version":1,"nodes":{},"speedRetries":[{"kind":"low-speed","stableIds":["node-1"],"config":{},"dueAt":"2026-08-22T12:00:00Z"},{"kind":"deadline","stableIds":["node-1"],"config":{},"dueAt":"2026-08-22T12:05:00Z"}]}`,
+	} {
+		if _, err := prepareDataFile("node_alert_state.json", []byte(data)); err != nil {
+			t.Fatalf("valid speed retry state was rejected: %v\n%s", err, data)
+		}
 	}
 }
 

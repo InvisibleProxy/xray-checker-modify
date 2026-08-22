@@ -246,6 +246,48 @@ func TestCoordinatorRequiresPreviewTokenAndBlocksRestore(t *testing.T) {
 	}
 }
 
+func TestMergeCompatibilityAllowsNameAndPortChanges(t *testing.T) {
+	source := nodearchive.NodeRecord{
+		StableID: "retired", Name: "Old display name", SubName: "Main", Protocol: "vless",
+		Server: "node.example.com", Port: 443, Active: false, RetiredAt: time.Now().Add(-time.Hour),
+	}
+	target := nodearchive.NodeRecord{
+		StableID: "active", Name: "New display name", SubName: "Main", Protocol: "vless",
+		Server: "node.example.com", Port: 8443, Active: true,
+	}
+
+	if err := validateIdentityMatch(source, target); err != nil {
+		t.Fatalf("name and port change rejected: %v", err)
+	}
+	if got, want := identityWarnings(source, target), []string{"Node name changed", "Port changed from 443 to 8443"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("identity warnings = %#v, want %#v", got, want)
+	}
+
+	target.Server = "other.example.com"
+	if err := validateIdentityMatch(source, target); err == nil || !strings.Contains(err.Error(), "servers do not match") {
+		t.Fatalf("different server error = %v", err)
+	}
+}
+
+func TestCoordinatorPreviewReportsNameAndPortChanges(t *testing.T) {
+	dataDir := t.TempDir()
+	registry, speedState := testStateFixture()
+	source := registry.Nodes[testSourceID]
+	source.Name = "Estonia legacy"
+	source.Port = 8443
+	registry.Nodes[testSourceID] = source
+	writeJSONFile(t, dataDir, nodeRegistryName, registry)
+	writeJSONFile(t, dataDir, speedResultsName, speedState)
+
+	preview, err := testCoordinator(t, dataDir).Preview(testSourceID, testTargetID)
+	if err != nil {
+		t.Fatalf("preview merge with changed name and port: %v", err)
+	}
+	if preview.IdentityFieldsMatch || !reflect.DeepEqual(preview.IdentityWarnings, []string{"Node name changed", "Port changed from 8443 to 3128"}) {
+		t.Fatalf("unexpected compatibility warnings: %#v", preview)
+	}
+}
+
 func TestRestoreGuardSerializesMergeStaging(t *testing.T) {
 	dataDir := t.TempDir()
 	registry, speedState := testStateFixture()

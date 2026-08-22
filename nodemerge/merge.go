@@ -39,6 +39,7 @@ type Preview struct {
 	ConfirmationToken   string       `json:"confirmationToken"`
 	RestartRequired     bool         `json:"restartRequired"`
 	IdentityFieldsMatch bool         `json:"identityFieldsMatch"`
+	IdentityWarnings    []string     `json:"identityWarnings,omitempty"`
 }
 
 type StageResult struct {
@@ -114,6 +115,7 @@ func (c *Coordinator) Preview(sourceStableID, targetStableID string) (Preview, e
 	sourceHistory := c.manager.ResultHistory(sourceStableID)
 	targetHistory := c.manager.ResultHistory(targetStableID)
 	mergedHistory := mergeHistory(sourceHistory, targetHistory, target)
+	warnings := identityWarnings(source, target)
 
 	return Preview{
 		Source:              nodeSnapshot(source, len(sourceHistory)),
@@ -121,7 +123,8 @@ func (c *Coordinator) Preview(sourceStableID, targetStableID string) (Preview, e
 		MergedResultCount:   len(mergedHistory),
 		ConfirmationToken:   confirmationToken(source, target),
 		RestartRequired:     true,
-		IdentityFieldsMatch: true,
+		IdentityFieldsMatch: len(warnings) == 0,
+		IdentityWarnings:    warnings,
 	}, nil
 }
 
@@ -233,19 +236,27 @@ func (c *Coordinator) AcquireRestoreGuard() (func(), error) {
 }
 
 func validateIdentityMatch(source, target nodearchive.NodeRecord) error {
-	if normalizeIdentity(source.Name) != normalizeIdentity(target.Name) {
-		return fmt.Errorf("source and target node names do not match")
-	}
 	if normalizeIdentity(source.SubName) != normalizeIdentity(target.SubName) {
 		return fmt.Errorf("source and target subscriptions do not match")
 	}
 	if normalizeIdentity(source.Protocol) != normalizeIdentity(target.Protocol) {
 		return fmt.Errorf("source and target protocols do not match")
 	}
-	if normalizeIdentity(source.Server) != normalizeIdentity(target.Server) || source.Port != target.Port {
-		return fmt.Errorf("source and target server endpoints do not match")
+	if normalizeIdentity(source.Server) != normalizeIdentity(target.Server) {
+		return fmt.Errorf("source and target servers do not match")
 	}
 	return nil
+}
+
+func identityWarnings(source, target nodearchive.NodeRecord) []string {
+	var warnings []string
+	if normalizeIdentity(source.Name) != normalizeIdentity(target.Name) {
+		warnings = append(warnings, "Node name changed")
+	}
+	if source.Port != target.Port {
+		warnings = append(warnings, fmt.Sprintf("Port changed from %d to %d", source.Port, target.Port))
+	}
+	return warnings
 }
 
 func normalizeIdentity(value string) string {
