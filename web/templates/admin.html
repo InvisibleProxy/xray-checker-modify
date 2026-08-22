@@ -664,6 +664,19 @@
         gap: 12px;
         flex-wrap: wrap;
       }
+      .nodes-heading {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .nodes-select-all {
+        display: inline-flex;
+        align-items: center;
+        cursor: pointer;
+      }
+      .nodes-select-all input {
+        margin: 0;
+      }
       .chart-ranges {
         display: flex;
         gap: 6px;
@@ -1262,7 +1275,12 @@
 
         <section class="panel panel-strong stack">
           <div class="panel-actions">
-            <h2>Nodes</h2>
+            <div class="nodes-heading">
+              <label class="nodes-select-all" title="Select all visible nodes">
+                <input id="select-all-nodes" type="checkbox" aria-label="Select all visible nodes" />
+              </label>
+              <h2>Nodes</h2>
+            </div>
             <span id="nodes-summary" class="table-meta">0 nodes</span>
             <div id="selection-action-bar" class="action-bar" hidden>
               <span id="selection-count" class="muted">0 selected</span>
@@ -1807,6 +1825,18 @@
           avg: total / speeds.length,
           min: Math.min(...speeds),
           max: Math.max(...speeds),
+        };
+      }
+
+      function measurementStats(results) {
+        const measurements = results || [];
+        const completed = measurements.filter(isSuccessfulResult).length;
+        const successful = measurements.filter((result) => isSuccessfulResult(result) && !isLowSpeed(result)).length;
+        return {
+          completed,
+          failed: measurements.length - completed,
+          successful,
+          successPercent: percent(successful, measurements.length),
         };
       }
 
@@ -2603,12 +2633,12 @@
 
       function nodeSpeedStatsHTML(results) {
         const stats = speedStats(results);
-        const errors = (results || []).filter((result) => !isSuccessfulResult(result)).length;
+        const measurements = measurementStats(results);
         return `<div class="node-detail-grid">
           <div class="node-detail-stat"><span>Average</span><strong>${stats ? escapeHtml(formatMbps(stats.avg)) : "n/a"}</strong></div>
           <div class="node-detail-stat"><span>Minimum</span><strong>${stats ? escapeHtml(formatMbps(stats.min)) : "n/a"}</strong></div>
           <div class="node-detail-stat"><span>Maximum</span><strong>${stats ? escapeHtml(formatMbps(stats.max)) : "n/a"}</strong></div>
-          <div class="node-detail-stat"><span>Measurements</span><strong>${stats ? stats.count : 0} ok · ${errors} failed</strong></div>
+          <div class="node-detail-stat"><span>Measurements</span><strong title="${measurements.successful} of ${(results || []).length} measurements met the configured speed threshold">${measurements.completed} ok · ${measurements.failed} failed · ${measurements.successPercent}</strong></div>
         </div>`;
       }
 
@@ -3013,6 +3043,13 @@
         const muted = telegramMuteNodeSet("all");
         const anyMuted = telegramAnyMutedNodeSet();
         const ids = selectedIDs();
+        const visibleIDs = filteredProxies().map((proxy) => proxy.stableId);
+        const selectedVisible = visibleIDs.filter((id) => state.selected.has(id)).length;
+        const selectAll = $("select-all-nodes");
+        selectAll.disabled = visibleIDs.length === 0;
+        selectAll.checked = visibleIDs.length > 0 && selectedVisible === visibleIDs.length;
+        selectAll.indeterminate = selectedVisible > 0 && selectedVisible < visibleIDs.length;
+        selectAll.title = selectAll.checked ? "Clear visible node selection" : "Select all visible nodes";
         $("selection-count").textContent = `${count} selected`;
         $("selection-action-bar").hidden = count === 0;
         $("nodes-summary").hidden = count > 0;
@@ -3833,6 +3870,17 @@
       $("unmute-selected").addEventListener("click", () => updateTelegramMute($("mute-scope").value || "all", false));
       $("mute-scope").addEventListener("change", renderTelegramMuteControls);
       $("test-telegram").addEventListener("click", testTelegram);
+      $("select-all-nodes").addEventListener("change", () => {
+        const selectAll = $("select-all-nodes");
+        filteredProxies().forEach((proxy) => {
+          if (selectAll.checked) {
+            state.selected.add(proxy.stableId);
+          } else {
+            state.selected.delete(proxy.stableId);
+          }
+        });
+        renderNodes();
+      });
       $("select-visible").addEventListener("click", () => {
         filteredProxies().forEach((proxy) => state.selected.add(proxy.stableId));
         renderNodes();
