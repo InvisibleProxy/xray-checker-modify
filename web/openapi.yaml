@@ -524,6 +524,66 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /api/v1/admin/nodes-overview/merge/preview:
+    post:
+      summary: Preview a retired-node merge into an active replacement
+      description: Validates the persisted identity fields and returns a candidate-bound confirmation token. No state is changed.
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeMergePreviewRequest'
+      responses:
+        '200':
+          description: Validated merge preview
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/NodeMergePreview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/nodes-overview/merge:
+    post:
+      summary: Stage a confirmed retired-node merge for the next restart
+      description: The merge is installed transactionally at startup and rolled back unless all persisted-state owners load it successfully.
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeMergeRequest'
+      responses:
+        '200':
+          description: Merge instruction staged; restart is required
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/NodeMergeStageResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /api/v1/admin/nodes-overview/delete:
     post:
       summary: Permanently delete a retired node and its speed history
@@ -1116,6 +1176,88 @@ components:
         stableId:
           type: string
 
+    NodeMergePreviewRequest:
+      type: object
+      required: [sourceStableId, targetStableId]
+      properties:
+        sourceStableId:
+          type: string
+        targetStableId:
+          type: string
+
+    NodeMergeRequest:
+      allOf:
+        - $ref: '#/components/schemas/NodeMergePreviewRequest'
+        - type: object
+          required: [confirmationToken]
+          properties:
+            confirmationToken:
+              type: string
+
+    NodeMergeNodeSnapshot:
+      type: object
+      required: [stableId, name, subName, server, port, protocol, active, resultCount, totalDowntimeSec, incidentCount]
+      properties:
+        stableId:
+          type: string
+        name:
+          type: string
+        subName:
+          type: string
+        server:
+          type: string
+        port:
+          type: integer
+        protocol:
+          type: string
+        active:
+          type: boolean
+        firstSeenAt:
+          type: string
+          format: date-time
+        lastSeenAt:
+          type: string
+          format: date-time
+        resultCount:
+          type: integer
+          minimum: 0
+        totalDowntimeSec:
+          type: integer
+          format: int64
+        incidentCount:
+          type: integer
+
+    NodeMergePreview:
+      type: object
+      required: [source, target, mergedResultCount, confirmationToken, restartRequired, identityFieldsMatch]
+      properties:
+        source:
+          $ref: '#/components/schemas/NodeMergeNodeSnapshot'
+        target:
+          $ref: '#/components/schemas/NodeMergeNodeSnapshot'
+        mergedResultCount:
+          type: integer
+          minimum: 0
+        confirmationToken:
+          type: string
+        restartRequired:
+          type: boolean
+        identityFieldsMatch:
+          type: boolean
+
+    NodeMergeStageResult:
+      type: object
+      required: [sourceStableId, targetStableId, restartRequired, message]
+      properties:
+        sourceStableId:
+          type: string
+        targetStableId:
+          type: string
+        restartRequired:
+          type: boolean
+        message:
+          type: string
+
     GeoRefreshResult:
       type: object
       required: [updated, failed]
@@ -1158,6 +1300,11 @@ components:
       properties:
         stableId:
           type: string
+        mergedFromStableIds:
+          type: array
+          description: Retired StableIDs whose persisted history was merged into this node.
+          items:
+            type: string
         name:
           type: string
         subName:

@@ -53,6 +53,8 @@ func TestOpenAPISpecDocumentsEveryForkAdminRoute(t *testing.T) {
 		"/api/v1/admin/nodes-overview",
 		"/api/v1/admin/incidents",
 		"/api/v1/admin/nodes-overview/geo",
+		"/api/v1/admin/nodes-overview/merge/preview",
+		"/api/v1/admin/nodes-overview/merge",
 		"/api/v1/admin/nodes-overview/delete",
 		"/api/v1/admin/schedules",
 		"/api/v1/admin/telegram",

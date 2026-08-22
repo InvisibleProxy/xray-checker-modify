@@ -17,6 +17,7 @@ import (
 	"xray-checker/checker"
 	"xray-checker/models"
 	"xray-checker/nodearchive"
+	"xray-checker/nodemerge"
 	"xray-checker/speedtest"
 	"xray-checker/telegram"
 )
@@ -85,6 +86,19 @@ type AdminNodesOverviewGeoRequest struct {
 type AdminNodesOverviewDeleteRequest struct {
 	StableID string `json:"stableId"`
 }
+
+type AdminNodesOverviewMergeRequest struct {
+	SourceStableID    string `json:"sourceStableId"`
+	TargetStableID    string `json:"targetStableId"`
+	ConfirmationToken string `json:"confirmationToken,omitempty"`
+}
+
+type AdminNodeMergeService interface {
+	Preview(sourceStableID, targetStableID string) (nodemerge.Preview, error)
+	Stage(sourceStableID, targetStableID, confirmationToken string) (nodemerge.StageResult, error)
+}
+
+type AdminBackupRestoreGuard func() (release func(), err error)
 
 func AdminHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -172,7 +186,7 @@ func AdminBackupHandler(creator *backup.Creator) http.HandlerFunc {
 	}
 }
 
-func AdminBackupRestoreHandler(restorer *backup.Restorer) http.HandlerFunc {
+func AdminBackupRestoreHandler(restorer *backup.Restorer, guards ...AdminBackupRestoreGuard) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -181,6 +195,19 @@ func AdminBackupRestoreHandler(restorer *backup.Restorer) http.HandlerFunc {
 		if r.Header.Get("X-Xray-Checker-Action") != "restore-backup" {
 			writeError(w, "Restore confirmation header is required", http.StatusForbidden)
 			return
+		}
+		for _, guard := range guards {
+			if guard == nil {
+				continue
+			}
+			release, err := guard()
+			if err != nil {
+				writeError(w, err.Error(), http.StatusConflict)
+				return
+			}
+			if release != nil {
+				defer release()
+			}
 		}
 
 		r.Body = http.MaxBytesReader(w, r.Body, backup.MaxArchiveSize+1024*1024)
@@ -462,6 +489,59 @@ func AdminNodesOverviewGeoHandler(store *nodearchive.Store) http.HandlerFunc {
 	}
 }
 
+func AdminNodesOverviewMergePreviewHandler(service AdminNodeMergeService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req AdminNodesOverviewMergeRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, "Invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		preview, err := service.Preview(req.SourceStableID, req.TargetStableID)
+		if err != nil {
+			writeError(w, err.Error(), nodeMergeErrorStatus(err))
+			return
+		}
+		writeJSON(w, preview)
+	}
+}
+
+func AdminNodesOverviewMergeHandler(service AdminNodeMergeService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req AdminNodesOverviewMergeRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, "Invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		result, err := service.Stage(req.SourceStableID, req.TargetStableID, req.ConfirmationToken)
+		if err != nil {
+			writeError(w, err.Error(), nodeMergeErrorStatus(err))
+			return
+		}
+		writeJSON(w, result)
+	}
+}
+
+func nodeMergeErrorStatus(err error) int {
+	if err == nil {
+		return http.StatusOK
+	}
+	message := strings.ToLower(err.Error())
+	for _, fragment := range []string{"already pending", "being applied", "candidate changed", "identity changed", "backup restore", "became active", "no longer active"} {
+		if strings.Contains(message, fragment) {
+			return http.StatusConflict
+		}
+	}
+	return http.StatusBadRequest
+}
+
 func AdminNodesOverviewDeleteHandler(store *nodearchive.Store, manager *speedtest.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost && r.Method != http.MethodDelete {
@@ -484,12 +564,13 @@ func AdminNodesOverviewDeleteHandler(store *nodearchive.Store, manager *speedtes
 			writeError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		mergedFrom := store.MergedFromStableIDs(stableID)
 		if err := store.DeleteArchived(stableID); err != nil {
 			writeError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		if err := manager.DeleteHistory(stableID); err != nil {
-			if rollbackErr := store.RestoreArchived(record); rollbackErr != nil {
+			if rollbackErr := store.RestoreArchived(record, mergedFrom...); rollbackErr != nil {
 				err = errors.Join(err, errors.New("restore archived node: "+rollbackErr.Error()))
 			}
 			writeError(w, err.Error(), http.StatusInternalServerError)

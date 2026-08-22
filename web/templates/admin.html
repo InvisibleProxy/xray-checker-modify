@@ -2533,14 +2533,21 @@
           const statusChip = node.active
             ? `<span class="chip ok">Active</span>`
             : `<span class="chip neutral">Retired</span>`;
-          const deleteAction = node.active
+          const nodeActions = node.active
             ? `<button class="secondary small" type="button" disabled title="Active nodes are managed by subscription">Delete</button>`
-            : `<button class="secondary danger small" type="button" data-delete-node="${escapeHtml(node.stableId || "")}">Delete</button>`;
+            : `<div class="node-actions">
+                <button class="secondary small" type="button" data-merge-node="${escapeHtml(node.stableId || "")}">Merge</button>
+                <button class="secondary danger small" type="button" data-delete-node="${escapeHtml(node.stableId || "")}">Delete</button>
+              </div>`;
+          const mergedFrom = Array.isArray(node.mergedFromStableIds) && node.mergedFromStableIds.length > 0
+            ? `<div class="muted mono" title="Merged retired node IDs">merged: ${node.mergedFromStableIds.map(escapeHtml).join(", ")}</div>`
+            : "";
           return `
             <tr>
               <td class="node-name">
                 <div class="node-title-row">${countryChip(node)}<span>${escapeHtml(displayNodeName(node))}</span></div>
                 <div class="muted mono">${escapeHtml(node.stableId || "")}</div>
+                ${mergedFrom}
               </td>
               <td>${statusChip}</td>
               <td class="mono">${ipLink}${node.port ? `:${escapeHtml(node.port)}` : ""}</td>
@@ -2553,7 +2560,7 @@
               <td>${formatDurationSec(effectiveDowntimeSec(node))}<div class="muted">${Number(node.incidentCount || 0)} incidents</div></td>
               <td>${formatTime(node.lastSeenAt) || "n/a"}</td>
               <td>${escapeHtml(node.subName || "n/a")}</td>
-              <td>${deleteAction}</td>
+              <td class="node-actions-cell">${nodeActions}</td>
             </tr>
           `;
         }).join("") || `<tr><td colspan="13" class="muted">No nodes found</td></tr>`;
@@ -3331,6 +3338,81 @@
         }
       }
 
+      function normalizedNodeIdentity(value) {
+        return String(value || "").trim().toLowerCase();
+      }
+
+      function matchingActiveMergeTargets(source) {
+        return (state.nodesOverview || []).filter((target) => (
+          target.active &&
+          target.stableId !== source.stableId &&
+          normalizedNodeIdentity(target.name) === normalizedNodeIdentity(source.name) &&
+          normalizedNodeIdentity(target.subName) === normalizedNodeIdentity(source.subName) &&
+          normalizedNodeIdentity(target.protocol) === normalizedNodeIdentity(source.protocol) &&
+          normalizedNodeIdentity(target.server) === normalizedNodeIdentity(source.server) &&
+          Number(target.port || 0) === Number(source.port || 0)
+        ));
+      }
+
+      async function mergeOverviewNode(sourceStableId) {
+        sourceStableId = String(sourceStableId || "").trim();
+        const source = (state.nodesOverview || []).find((item) => item.stableId === sourceStableId);
+        if (!source) {
+          $("nodes-overview-summary").textContent = "Source node not found";
+          return;
+        }
+        if (source.active) {
+          $("nodes-overview-summary").textContent = "Only a retired node can be merged";
+          return;
+        }
+        const targets = matchingActiveMergeTargets(source);
+        if (targets.length !== 1) {
+          $("nodes-overview-summary").textContent = targets.length === 0
+            ? "No matching active node found (name, subscription, protocol and endpoint must match)"
+            : `Found ${targets.length} matching active nodes; merge is intentionally blocked as ambiguous`;
+          return;
+        }
+
+        const target = targets[0];
+        $("nodes-overview-summary").textContent = "Preparing merge preview";
+        try {
+          const preview = await request("/nodes-overview/merge/preview", {
+            method: "POST",
+            body: JSON.stringify({ sourceStableId, targetStableId: target.stableId }),
+          });
+          const sourceLabel = nodeOverviewLabel(source) || sourceStableId;
+          const targetLabel = nodeOverviewLabel(target) || target.stableId;
+          const combinedDowntime = Number(preview.source.totalDowntimeSec || 0) + Number(preview.target.totalDowntimeSec || 0);
+          const combinedIncidents = Number(preview.source.incidentCount || 0) + Number(preview.target.incidentCount || 0);
+          const confirmed = window.confirm(
+            `Merge retired node into active node?\n\n` +
+            `From: ${sourceLabel}\n${preview.source.stableId}\n` +
+            `To: ${targetLabel}\n${preview.target.stableId}\n\n` +
+            `Saved speed results after merge: ${Number(preview.mergedResultCount || 0)}\n` +
+            `Accumulated downtime: ${formatDurationSec(combinedDowntime)}\n` +
+            `Incidents: ${combinedIncidents}\n\n` +
+            `The retired record will be removed only after a successful restart. A rollback copy is kept until the merged state loads successfully.`
+          );
+          if (!confirmed) {
+            $("nodes-overview-summary").textContent = "Merge cancelled";
+            return;
+          }
+
+          $("nodes-overview-summary").textContent = "Staging node merge";
+          const result = await request("/nodes-overview/merge", {
+            method: "POST",
+            body: JSON.stringify({
+              sourceStableId: preview.source.stableId,
+              targetStableId: preview.target.stableId,
+              confirmationToken: preview.confirmationToken,
+            }),
+          });
+          $("nodes-overview-summary").textContent = result.message || "Node merge staged; restart the application to apply it";
+        } catch (err) {
+          $("nodes-overview-summary").textContent = err.message;
+        }
+      }
+
       async function deleteOverviewNode(stableId) {
         stableId = String(stableId || "").trim();
         const node = (state.nodesOverview || []).find((item) => item.stableId === stableId);
@@ -3838,9 +3920,13 @@
       $("refresh-incidents").addEventListener("click", loadIncidents);
       $("refresh-node-geo").addEventListener("click", refreshNodeGeo);
       $("nodes-overview").addEventListener("click", (event) => {
-        const button = event.target.closest("[data-delete-node]");
-        if (!button) return;
-        deleteOverviewNode(button.dataset.deleteNode);
+        const mergeButton = event.target.closest("[data-merge-node]");
+        if (mergeButton) {
+          mergeOverviewNode(mergeButton.dataset.mergeNode);
+          return;
+        }
+        const deleteButton = event.target.closest("[data-delete-node]");
+        if (deleteButton) deleteOverviewNode(deleteButton.dataset.deleteNode);
       });
       $("refresh-history").addEventListener("click", loadHistory);
       $("history-node").addEventListener("change", () => {

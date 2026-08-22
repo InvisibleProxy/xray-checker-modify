@@ -48,6 +48,9 @@
 - Incident journal хранит node и mass records; массовая корреляция требует одинакового failure code, минимум 3 и минимум 50% active scope. `check_endpoint` всегда маркируется как вероятностный вывод.
 - Failure code строится из proxy-check и прямых TCP/ping diagnostics; отсутствие ICMP reply не является самостоятельным доказательством offline.
 - Активные ноды управляются подпиской; удалять вручную можно только retired-записи.
+- Node merge разрешён только retired source → active target после preview и exact match нормализованных `Name`, `SubName`, protocol, server и port. Confirmation token должен быть привязан к конкретному persisted candidate; одинакового имени недостаточно.
+- Node merge применяется только на startup к `node_registry.json` и `speedtest_results.json`. До успешного `Load` speedtest, node archive и Telegram исходные файлы сохраняются для byte-for-byte rollback; incident ID не меняются, source StableID re-keyed, а lineage прежних ID не теряется.
+- Backup restore и node merge не должны одновременно находиться в pending/applied/rollback state; их web staging обязан удерживать общий transaction gate до публикации операции.
 - Backup не должен включать environment, geo-файлы, `xray_config.json` и Telegram secrets/admin IDs.
 - `Caddyfile.example` является источником шаблона reverse proxy; локальный `Caddyfile` игнорируется и не должен попадать в коммиты.
 - Автоматические backup: максимум один за UTC-день, максимум 7 файлов и максимум 7 суток.
@@ -85,7 +88,7 @@ go vet ./...
 Для конкурентного кода в `checker`, `speedtest`, `telegram`, `backup` или `web` дополнительно:
 
 ```powershell
-go test -race ./backup ./checker ./speedtest ./telegram ./web
+go test -race ./backup ./checker ./nodemerge ./speedtest ./telegram ./web
 ```
 
 Если host Go отсутствует, используйте Docker:
@@ -99,7 +102,7 @@ docker build --build-arg ENABLE_UPX=false -t xray-checker:check .
 
 Дополнительные проверки по области:
 
-- subscription/identity: тесты `xray`, сценарии неоднозначных имён, suspicious diff и rollback rejected candidate;
+- subscription/identity: тесты `xray` и `nodemerge`, сценарии неоднозначных имён, stale confirmation, suspicious diff, interrupted apply/commit и rollback rejected candidate;
 - speedtest: manual и scheduled paths, per-node URL, retention и persistence;
 - backup/restore: manifest, hash, дубликаты JSON-ключей, typed schema, interrupted apply/commit, path traversal, missing files, rollback, secrets и rotation;
 - Telegram: HTML/Rich HTML escaping, структура summary/details, fallback policy, сохранённый TestConfig, persisted low-speed retry, mass incident grouping, mute scopes, alert lifecycle и отсутствие токенов в выводе;

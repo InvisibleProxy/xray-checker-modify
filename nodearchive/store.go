@@ -34,16 +34,18 @@ type Store struct {
 	proxyChecker *checker.ProxyChecker
 	httpClient   *http.Client
 
-	mu        sync.RWMutex
-	nodes     map[string]NodeRecord
-	incidents []IncidentRecord
+	mu          sync.RWMutex
+	nodes       map[string]NodeRecord
+	mergedNodes map[string][]string
+	incidents   []IncidentRecord
 }
 
 type StateFile struct {
-	Version   int                   `json:"version"`
-	UpdatedAt time.Time             `json:"updatedAt"`
-	Nodes     map[string]NodeRecord `json:"nodes"`
-	Incidents []IncidentRecord      `json:"incidents,omitempty"`
+	Version     int                   `json:"version"`
+	UpdatedAt   time.Time             `json:"updatedAt"`
+	Nodes       map[string]NodeRecord `json:"nodes"`
+	MergedNodes map[string][]string   `json:"mergedNodes,omitempty"`
+	Incidents   []IncidentRecord      `json:"incidents,omitempty"`
 }
 
 // IncidentRecord is an append-oriented operational journal entry. Node
@@ -105,21 +107,22 @@ type NodeRecord struct {
 
 type Summary struct {
 	NodeRecord
-	IPInfoURL         string            `json:"ipInfoUrl"`
-	CountryMatch      string            `json:"countryMatch"`
-	GeoSources        []GeoSource       `json:"geoSources"`
-	GeoBlacklistHits  []GeoBlacklistHit `json:"geoBlacklistHits,omitempty"`
-	GeoBlacklisted    bool              `json:"geoBlacklisted"`
-	ResultCount       int               `json:"resultCount"`
-	SuccessfulResults int               `json:"successfulResults"`
-	FailedResults     int               `json:"failedResults"`
-	AvgMbps           float64           `json:"avgMbps"`
-	MinMbps           float64           `json:"minMbps"`
-	MaxMbps           float64           `json:"maxMbps"`
-	LastMbps          float64           `json:"lastMbps"`
-	LastSpeedAt       time.Time         `json:"lastSpeedAt,omitempty"`
-	LastSpeedError    string            `json:"lastSpeedError,omitempty"`
-	LastSpeedOffline  bool              `json:"lastSpeedOffline"`
+	MergedFromStableIDs []string          `json:"mergedFromStableIds,omitempty"`
+	IPInfoURL           string            `json:"ipInfoUrl"`
+	CountryMatch        string            `json:"countryMatch"`
+	GeoSources          []GeoSource       `json:"geoSources"`
+	GeoBlacklistHits    []GeoBlacklistHit `json:"geoBlacklistHits,omitempty"`
+	GeoBlacklisted      bool              `json:"geoBlacklisted"`
+	ResultCount         int               `json:"resultCount"`
+	SuccessfulResults   int               `json:"successfulResults"`
+	FailedResults       int               `json:"failedResults"`
+	AvgMbps             float64           `json:"avgMbps"`
+	MinMbps             float64           `json:"minMbps"`
+	MaxMbps             float64           `json:"maxMbps"`
+	LastMbps            float64           `json:"lastMbps"`
+	LastSpeedAt         time.Time         `json:"lastSpeedAt,omitempty"`
+	LastSpeedError      string            `json:"lastSpeedError,omitempty"`
+	LastSpeedOffline    bool              `json:"lastSpeedOffline"`
 }
 
 type GeoSource struct {
@@ -167,8 +170,9 @@ func NewStore(path string, proxyChecker *checker.ProxyChecker) *Store {
 		httpClient: &http.Client{
 			Timeout: 8 * time.Second,
 		},
-		nodes:     make(map[string]NodeRecord),
-		incidents: make([]IncidentRecord, 0),
+		nodes:       make(map[string]NodeRecord),
+		mergedNodes: make(map[string][]string),
+		incidents:   make([]IncidentRecord, 0),
 	}
 }
 
@@ -214,10 +218,12 @@ func (s *Store) Load() error {
 		normalizeRecordCountries(&record)
 		nodes[stableID] = record
 	}
+	mergedNodes := normalizeMergedNodes(state.MergedNodes, nodes)
 	incidents := normalizeIncidents(state.Incidents)
 
 	s.mu.Lock()
 	s.nodes = nodes
+	s.mergedNodes = mergedNodes
 	s.incidents = incidents
 	s.mu.Unlock()
 	return nil
@@ -410,6 +416,7 @@ func (s *Store) Summaries(history map[string][]speedtest.Result) []Summary {
 	for stableID, record := range s.nodes {
 		records[stableID] = record
 	}
+	mergedNodes := copyMergedNodes(s.mergedNodes)
 	s.mu.RUnlock()
 
 	for stableID, entries := range history {
@@ -442,7 +449,10 @@ func (s *Store) Summaries(history map[string][]speedtest.Result) []Summary {
 
 	result := make([]Summary, 0, len(records))
 	for stableID, record := range records {
-		summary := Summary{NodeRecord: record}
+		summary := Summary{
+			NodeRecord:          record,
+			MergedFromStableIDs: append([]string(nil), mergedNodes[stableID]...),
+		}
 		summary.IPInfoURL = ipInfoURL(record.Server)
 		summary.GeoSources = geoSources(record)
 		summary.GeoBlacklistHits = geoBlacklistHits(summary.GeoSources)
@@ -572,9 +582,14 @@ func (s *Store) DeleteArchived(stableID string) error {
 	if record.Active {
 		return fmt.Errorf("active nodes are managed by subscription and cannot be deleted")
 	}
+	mergedFrom := append([]string(nil), s.mergedNodes[stableID]...)
 	delete(s.nodes, stableID)
+	delete(s.mergedNodes, stableID)
 	if err := s.saveLocked(); err != nil {
 		s.nodes[stableID] = record
+		if len(mergedFrom) > 0 {
+			s.mergedNodes[stableID] = mergedFrom
+		}
 		return err
 	}
 	return nil
@@ -597,7 +612,7 @@ func (s *Store) ArchivedRecord(stableID string) (NodeRecord, error) {
 	return record, nil
 }
 
-func (s *Store) RestoreArchived(record NodeRecord) error {
+func (s *Store) RestoreArchived(record NodeRecord, mergedFrom ...string) error {
 	stableID := strings.TrimSpace(record.StableID)
 	if stableID == "" {
 		return fmt.Errorf("stableId is required")
@@ -609,16 +624,54 @@ func (s *Store) RestoreArchived(record NodeRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	previous, existed := s.nodes[stableID]
+	previousMerged, hadMerged := s.mergedNodes[stableID]
 	s.nodes[stableID] = record
+	restoredMerged := uniqueSortedStrings(mergedFrom)
+	if len(restoredMerged) > 0 {
+		s.mergedNodes[stableID] = restoredMerged
+	} else {
+		delete(s.mergedNodes, stableID)
+	}
 	if err := s.saveLocked(); err != nil {
 		if existed {
 			s.nodes[stableID] = previous
 		} else {
 			delete(s.nodes, stableID)
 		}
+		if hadMerged {
+			s.mergedNodes[stableID] = previousMerged
+		} else {
+			delete(s.mergedNodes, stableID)
+		}
 		return err
 	}
 	return nil
+}
+
+// MergedFromStableIDs returns the persisted identity lineage for a node.
+func (s *Store) MergedFromStableIDs(stableID string) []string {
+	stableID = strings.TrimSpace(stableID)
+	if stableID == "" {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]string(nil), s.mergedNodes[stableID]...)
+}
+
+// Record returns a copy of a persisted node record regardless of active state.
+func (s *Store) Record(stableID string) (NodeRecord, error) {
+	stableID = strings.TrimSpace(stableID)
+	if stableID == "" {
+		return NodeRecord{}, fmt.Errorf("stableId is required")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	record, ok := s.nodes[stableID]
+	if !ok {
+		return NodeRecord{}, fmt.Errorf("node not found")
+	}
+	return record, nil
 }
 
 func (s *Store) lookupGeo(ctx context.Context, record NodeRecord) (NodeRecord, int, []error) {
@@ -1099,6 +1152,40 @@ func normalizeIncidents(input []IncidentRecord) []IncidentRecord {
 	return result
 }
 
+func normalizeMergedNodes(input map[string][]string, nodes map[string]NodeRecord) map[string][]string {
+	result := make(map[string][]string)
+	for rawTarget, rawSources := range input {
+		target := strings.TrimSpace(rawTarget)
+		if target == "" {
+			continue
+		}
+		if _, ok := nodes[target]; !ok {
+			continue
+		}
+		sources := make([]string, 0, len(rawSources))
+		for _, source := range rawSources {
+			source = strings.TrimSpace(source)
+			if source == "" || source == target {
+				continue
+			}
+			sources = append(sources, source)
+		}
+		sources = uniqueSortedStrings(sources)
+		if len(sources) > 0 {
+			result[target] = sources
+		}
+	}
+	return result
+}
+
+func copyMergedNodes(input map[string][]string) map[string][]string {
+	result := make(map[string][]string, len(input))
+	for target, sources := range input {
+		result[target] = append([]string(nil), sources...)
+	}
+	return result
+}
+
 func uniqueSortedStrings(values []string) []string {
 	seen := make(map[string]bool)
 	result := make([]string, 0, len(values))
@@ -1366,10 +1453,11 @@ func (s *Store) saveLocked() error {
 		return err
 	}
 	state := StateFile{
-		Version:   stateVersion,
-		UpdatedAt: time.Now(),
-		Nodes:     s.nodes,
-		Incidents: s.incidents,
+		Version:     stateVersion,
+		UpdatedAt:   time.Now(),
+		Nodes:       s.nodes,
+		MergedNodes: s.mergedNodes,
+		Incidents:   s.incidents,
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {

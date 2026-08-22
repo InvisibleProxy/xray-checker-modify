@@ -21,6 +21,7 @@
 | `metrics/` | Prometheus-метрики и Pushgateway |
 | `speedtest/` | ручные и плановые тесты скорости, Test URL нод и temporal retention |
 | `nodearchive/` | долгоживущий реестр активных/выбывших нод, downtime, persisted incident journal, GeoIP и speedtest summary |
+| `nodemerge/` | preview и crash-safe перенос persisted identity/history с retired StableID в active StableID |
 | `telegram/` | компактный HTML и Rich Messages, команды, отчёты, алерты, recovery и настройки mute |
 | `backup/` | создание ZIP, автоматическая ротация, типизированная проверка и транзакционный staged restore |
 | `web/` | dashboard, admin UI, REST API, OpenAPI и Basic Auth middleware |
@@ -30,17 +31,18 @@ Frontend встроен в Go-бинарник через `embed`. `docs/` — �
 ## Startup sequence
 
 1. Разбираются CLI-флаги и переменные окружения; обычный server-mode требует явно заданные Basic Auth credentials.
-2. Незавершённая restore-транзакция предыдущего процесса завершается или откатывается.
-3. Если существует staged restore, оно применяется к `data/`, но rollback-копия сохраняется.
+2. Незавершённые node-merge и restore-транзакции предыдущего процесса завершаются или откатываются по durable commit marker.
+3. Если существует staged restore, оно применяется к `data/`, но rollback-копия сохраняется; node merge в этот startup не применяется.
 4. Инициализируются пользовательские web assets.
 5. Проверяется наличие GeoIP/GeoSite-файлов; отсутствующие файлы скачиваются.
 6. Загружаются подписки, назначаются индексы и проверяется уникальность `StableID`.
-7. Генерируется `xray_config.json`, запускается встроенный Xray Core.
-8. Загружаются speedtest, node archive и Telegram state. Ошибка любого владельца откатывает применённый restore и останавливает startup.
-9. Только после успешной загрузки всех владельцев restore подтверждается и rollback-копия удаляется.
-10. Восстанавливается накопленный downtime и синхронизируется speedtest history.
-11. Запускаются автоматические бэкапы, Telegram, speedtest scheduler, полные proxy-checks и быстрый recovery-loop недоступных нод.
-12. Поднимается HTTP-сервер.
+7. Если restore не применялся, staged node merge проверяется против фактически активных StableID и транзакционно заменяет `node_registry.json` и `speedtest_results.json`, сохраняя оригиналы для rollback.
+8. Запускается встроенный Xray Core с уже сгенерированным `xray_config.json`.
+9. Загружаются speedtest, node archive и Telegram state. Ошибка любого владельца откатывает применённый node merge либо restore и останавливает startup.
+10. Только после успешной загрузки всех владельцев активная транзакция подтверждается и rollback-копия удаляется.
+11. Восстанавливается накопленный downtime и синхронизируется speedtest history.
+12. Запускаются автоматические бэкапы, Telegram, speedtest scheduler, полные proxy-checks и быстрый recovery-loop недоступных нод.
+13. Поднимается HTTP-сервер.
 
 ## Основные workflow
 
@@ -67,6 +69,16 @@ Frontend встроен в Go-бинарник через `embed`. `docs/` — �
 7. При изменении refresh получает Xray lifecycle write-lock, дожидается активного speedtest и генерирует candidate рядом с `xray_config.json`. Если Xray отклоняет candidate, предыдущий файл восстанавливается и last-known-good процесс запускается повторно.
 8. Только после успешного restart checker и web endpoints получают новый список.
 9. Node archive синхронизирует активные/выбывшие записи; mute и pending speed retries исчезнувших ID очищаются.
+
+### Merge идентичности после смены ключа
+
+Смена UUID/пароля/public key закономерно создаёт новый generated `StableID`, даже если оператор считает ноду тем же сервером. Автоматически склеивать такие записи нельзя: одинаковое имя не доказывает идентичность. Admin workflow разрешает merge только из retired source в active target при точном совпадении нормализованных `Name`, `SubName`, protocol, server и port.
+
+`POST /api/v1/admin/nodes-overview/merge/preview` повторно читает node archive и speedtest history, вычисляет итоговый размер истории и выдаёт SHA-256 confirmation token, привязанный к source/target, `RetiredAt` и полям идентичности. `POST /api/v1/admin/nodes-overview/merge` заново строит preview и ставит инструкцию в `data/.node-merge-pending`; повтор того же запроса идемпотентен, а новый подтверждённый preview может заменить ещё не применённую инструкцию. Staging restore и merge сериализованы одним in-process gate и дополнительно проверяют transaction-каталоги друг друга.
+
+На следующем startup merge применяется только если target всё ещё активен, source не вернулся в подписку, persisted identity не изменилась и оба JSON проходят те же typed/duplicate-key проверки, что backup restore. Source history и latest result re-keyed в target, нормализуются к активным display-полям, сортируются newest-first и дедуплицируются. В node archive суммируются cumulative downtime и incident count, берутся earliest `FirstSeenAt`, latest status timestamps, maximum longest downtime и более свежие GeoIP-группы; incident journal сохраняет opaque ID, но заменяет source StableID и дедуплицирует mass scope. `MergedNodes[target]` хранит отсортированный lineage всех прежних StableID. Live-поля active target остаются целевыми, retired source удаляется.
+
+Оригиналы обоих файлов остаются в `data/.node-merge-rollback`, пока speedtest, node archive и Telegram не завершат `Load`. Любая ошибка вызывает byte-for-byte rollback и обязательный restart. Durable marker позволяет отличить неподтверждённое применение от оборванной очистки уже подтверждённого merge.
 
 ### Speedtest
 
@@ -127,12 +139,13 @@ Recovery alert хранит `RecoveryPending`, время и latency до усп
 
 | Файл | Владелец | Правило |
 | --- | --- | --- |
-| `data/node_registry.json` | `nodearchive` | долгоживущая статистика, retired-ноды и incident journal |
+| `data/node_registry.json` | `nodearchive` | долгоживущая статистика, retired-ноды, incident journal и lineage объединённых StableID |
 | `data/speedtest_results.json` | `speedtest` | latest result и temporal history |
 | `data/speedtest_schedule.json` | `speedtest` | расписание, фильтры, URL и retention |
 | `data/telegram_config.json` | `telegram` | editable settings; secrets могут переопределяться env |
 | `data/node_alert_state.json` | `telegram` | состояние последовательностей алертов, диагностические причины и pending low-speed retries |
 | `data/backups/*.zip` | `backup` | до 7 автоматических архивов за последние 7 суток |
+| `data/.node-merge-{pending,applied,rollback}` | `nodemerge` | временная crash-safe транзакция переноса identity/history |
 
 `data/` должен быть постоянным volume и доступен UID `1000` внутри production image.
 
@@ -148,7 +161,7 @@ Recovery alert хранит `RecoveryPending`, время и latency до усп
 ## Известные ограничения
 
 - Имена нод отображаются ровно как в источнике; косметические суффиксы Remnawave checker не исправляет.
-- Retired-ноды сохраняются в Nodes Overview до ручного удаления.
+- Retired-ноды сохраняются в Nodes Overview до ручного удаления либо подтверждённого merge в однозначно совпавшую active-ноду.
 - Восстановление требует перезапуска приложения.
 - Rich Messages зависят от версии Telegram Bot API; при отсутствии метода бот использует менее выразительный компактный HTML.
 - GeoIP refresh использует внешние сервисы и может быть недоступен из-за сети или rate limit.
@@ -156,4 +169,4 @@ Recovery alert хранит `RecoveryPending`, время и latency до усп
 
 ## Текущее состояние
 
-Реализованы и покрыты Go-тестами: сохранение и проверка StableID при refresh, suspicious-diff guard и Xray config rollback, Xray lifecycle-lock speedtest, единый scheduled/Telegram TestConfig, temporal speedtest retention, persisted low-speed retries, node archive и incident journal, детерминированные failure codes, корреляция массовых сбоев, структурированный Telegram output, retryable recovery alerts, ручные/автоматические backup и транзакционный staged restore. GitHub Actions и Dependabot в форке отключены; CI, Docker Hub description и release jobs на GitHub не выполняются. Перед релизом обязательны локальные проверки из [`AGENTS.md`](AGENTS.md).
+Реализованы и покрыты Go-тестами: сохранение и проверка StableID при refresh, suspicious-diff guard и Xray config rollback, staged node identity merge с rollback/lineage, Xray lifecycle-lock speedtest, единый scheduled/Telegram TestConfig, temporal speedtest retention, persisted low-speed retries, node archive и incident journal, детерминированные failure codes, корреляция массовых сбоев, структурированный Telegram output, retryable recovery alerts, ручные/автоматические backup и транзакционный staged restore. GitHub Actions и Dependabot в форке отключены; CI, Docker Hub description и release jobs на GitHub не выполняются. Перед релизом обязательны локальные проверки из [`AGENTS.md`](AGENTS.md).

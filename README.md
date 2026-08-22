@@ -7,7 +7,7 @@
 - приватная веб-админка;
 - ручное и плановое обновление подписок с защитой от массового удаления нод и rollback Xray;
 - ручной и плановый speedtest с отдельным Test URL для каждой ноды;
-- Nodes Overview с downtime, историей speedtest и GeoIP-сверкой;
+- Nodes Overview с downtime, историей speedtest, GeoIP-сверкой и безопасным merge retired-ноды после смены ключа;
 - persisted-журнал одиночных и массовых инцидентов с диагностическими кодами причин;
 - настраиваемое хранение истории speedtest, по умолчанию 60 дней;
 - структурированные Telegram-команды, отчёты и уведомления о недоступности;
@@ -129,6 +129,18 @@ Dashboard админки использует компактные раскры�
 
 Перед применением строится diff по `StableID`. Пустой результат или удаление минимум трёх и одновременно не менее половины прежних нод считается подозрительным: плановый refresh отклоняется, а ручной требует отдельного подтверждения со списком удаляемых нод. Подтверждение привязано opaque fingerprint к конкретному previewed candidate, поэтому повторно изменившийся ответ подписки не применится по старому согласию. Новый Xray config сначала генерируется как candidate. Если Xray не запускается, восстанавливается предыдущий файл и повторно стартует last-known-good конфигурация; checker и web endpoints переключаются только после успешного restart.
 
+### Перенос истории после смены ключа ноды
+
+Если сервер и имя ноды остались прежними, но UUID/пароль/ключ изменился, generated `StableID` тоже меняется: старая запись становится retired, а новая появляется как active. Во вкладке `Nodes Overview` у retired-записи нажмите `Merge`. Действие доступно только когда найдена ровно одна active-нода с теми же нормализованными `Name`, `SubName`, protocol, server и port; неоднозначное или неполное совпадение блокируется.
+
+Preview показывает обе пары StableID и итоговые количества. После подтверждения merge только ставится в staging. Перезапустите сервис:
+
+```powershell
+docker compose restart xray-checker
+```
+
+На startup в active StableID переносятся сохранённая speedtest history/latest result, накопленный downtime, incident count и ссылки incident journal, наиболее ранний `FirstSeenAt`, максимальный downtime, актуальнейшие GeoIP-данные и lineage прежних StableID. Текущая active-конфигурация и её live-состояние остаются целевыми. Retired-запись удаляется лишь после того, как speedtest, node archive и Telegram успешно загрузили новое состояние. До этого исходные `node_registry.json` и `speedtest_results.json` лежат в rollback-копии; ошибка загрузки возвращает их и останавливает startup с требованием повторного запуска. Backup restore и node merge нельзя ставить в staging одновременно.
+
 ### Проверка доступности и recovery
 
 Полный обход всех нод выполняется с периодом `PROXY_CHECK_INTERVAL` и всегда запускает настроенный proxy-check. Для уже недоступных нод дополнительно работает быстрый цикл `PROXY_RECOVERY_INTERVAL`: TCP и ping проверяются параллельно, а proxy-check запускается в том же цикле только при успешном TCP-соединении. Ping остаётся диагностикой и никогда не блокирует proxy-check, потому что ICMP может быть запрещён у рабочей ноды. Состояние `TCP No` вместе с `Ping OK` означает, что хост отвечает, но порт ноды не принимает TCP-соединение. Обычный полный обход не использует TCP-гейт и остаётся контрольной проверкой на случай расхождения диагностики.
@@ -185,7 +197,7 @@ Recovery-уведомление хранится как pending до подтв�
 
 | Путь | Содержимое |
 | --- | --- |
-| `data/node_registry.json` | архив нод, downtime, incident journal и GeoIP-состояние |
+| `data/node_registry.json` | архив нод, downtime, incident journal, GeoIP-состояние и lineage объединённых StableID |
 | `data/speedtest_results.json` | результаты и история speedtest |
 | `data/speedtest_schedule.json` | расписание, срок хранения и Test URL нод |
 | `data/country-test-urls.yaml` | редактируемый каталог резервных Test URL по ISO-кодам стран |
@@ -193,6 +205,7 @@ Recovery-уведомление хранится как pending до подтв�
 | `data/telegram_config.json` | редактируемая Telegram-конфигурация |
 | `data/node_alert_state.json` | состояние Telegram-уведомлений, причины и pending low-speed retries |
 | `data/backups/` | автоматические ZIP-архивы |
+| `data/.node-merge-*` | временные staging/rollback-каталоги node merge; очищаются после подтверждённого startup |
 | `geo/` | загруженные GeoIP/GeoSite-файлы |
 
 `xray_config.json` генерируется заново и не считается пользовательским состоянием.

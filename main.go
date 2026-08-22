@@ -14,6 +14,7 @@ import (
 	"xray-checker/metrics"
 	"xray-checker/models"
 	"xray-checker/nodearchive"
+	"xray-checker/nodemerge"
 	"xray-checker/speedtest"
 	"xray-checker/subscription"
 	"xray-checker/telegram"
@@ -40,12 +41,18 @@ func main() {
 	if logLevel == logger.LevelNone {
 		logger.Startup("Log level: none (silent mode)")
 	}
+	if recovered, err := nodemerge.RecoverUnconfirmed("data"); err != nil {
+		logger.Fatal("Failed to roll back unconfirmed node merge: %v", err)
+	} else if recovered {
+		logger.Warn("Recovered an incomplete node merge transaction from the previous startup")
+	}
 	if recovered, err := backup.RecoverUnconfirmedRestore("data"); err != nil {
 		logger.Fatal("Failed to roll back unconfirmed backup restore: %v", err)
 	} else if recovered {
 		logger.Warn("Recovered an incomplete backup restore transaction from the previous startup")
 	}
 	restoreApplied := false
+	mergeApplied := false
 	if applied, err := backup.ApplyPendingRestore("data"); err != nil {
 		logger.Warn("Failed to apply pending backup restore: %v", err)
 	} else if applied {
@@ -55,6 +62,12 @@ func main() {
 	handleStateLoadError := func(owner string, loadErr error) {
 		if loadErr == nil {
 			return
+		}
+		if mergeApplied {
+			if rollbackErr := nodemerge.RollbackApplied("data"); rollbackErr != nil {
+				logger.Fatal("Failed to load node-merged %s state (%v) and rollback failed: %v", owner, loadErr, rollbackErr)
+			}
+			logger.Fatal("Node-merged %s state was rejected and rolled back; restart the application: %v", owner, loadErr)
 		}
 		if !restoreApplied {
 			logger.Warn("Failed to load %s state: %v", owner, loadErr)
@@ -82,6 +95,14 @@ func main() {
 	}
 
 	logger.Info("Loaded %d proxy configurations", len(*proxyConfigs))
+	if !restoreApplied {
+		if applied, applyErr := nodemerge.ApplyPending("data", activeStableIDSet(*proxyConfigs)); applyErr != nil {
+			logger.Warn("Failed to apply pending node merge: %v", applyErr)
+		} else if applied {
+			mergeApplied = true
+			logger.Startup("Applied pending node merge")
+		}
+	}
 
 	if config.CLIConfig.Web.Public {
 		if name := subscription.GetSubscriptionName(); name != "" {
@@ -159,6 +180,7 @@ func main() {
 		logger.Warn("Failed to sync speed history into node registry: %v", err)
 	}
 	speedTestManager.SetCountryResolver(nodeArchive.ClaimedCountryCode)
+	nodeMergeCoordinator := nodemerge.NewCoordinator("data", nodeArchive, speedTestManager)
 
 	telegramService := telegram.NewService(
 		"data/telegram_config.json",
@@ -167,7 +189,12 @@ func main() {
 		config.CLIConfig.Xray.StartPort,
 	)
 	handleStateLoadError("Telegram", telegramService.Load())
-	if restoreApplied {
+	if mergeApplied {
+		if err := nodemerge.ConfirmApplied("data"); err != nil {
+			logger.Fatal("Failed to confirm applied node merge: %v", err)
+		}
+		logger.Startup("Confirmed applied node merge")
+	} else if restoreApplied {
 		if err := backup.ConfirmAppliedRestore("data"); err != nil {
 			logger.Fatal("Failed to confirm applied backup restore: %v", err)
 		}
@@ -402,12 +429,14 @@ func main() {
 		return refreshSubscription("manual", request.Force, request.ConfirmationToken)
 	}))
 	protectedHandler.Handle("/api/v1/admin/backup", web.AdminBackupHandler(backupCreator))
-	protectedHandler.Handle("/api/v1/admin/backup/restore", web.AdminBackupRestoreHandler(backupRestorer))
+	protectedHandler.Handle("/api/v1/admin/backup/restore", web.AdminBackupRestoreHandler(backupRestorer, nodeMergeCoordinator.AcquireRestoreGuard))
 	protectedHandler.Handle("/api/v1/admin/speed-tests/run", web.AdminSpeedTestRunHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/speed-tests/node-url", web.AdminSpeedTestNodeURLHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/speed-tests/history", web.AdminSpeedTestHistoryHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/speed-tests", web.AdminSpeedTestSnapshotHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/nodes-overview/geo", web.AdminNodesOverviewGeoHandler(nodeArchive))
+	protectedHandler.Handle("/api/v1/admin/nodes-overview/merge/preview", web.AdminNodesOverviewMergePreviewHandler(nodeMergeCoordinator))
+	protectedHandler.Handle("/api/v1/admin/nodes-overview/merge", web.AdminNodesOverviewMergeHandler(nodeMergeCoordinator))
 	protectedHandler.Handle("/api/v1/admin/nodes-overview/delete", web.AdminNodesOverviewDeleteHandler(nodeArchive, speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/nodes-overview", web.AdminNodesOverviewHandler(nodeArchive, speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/incidents", web.AdminIncidentsHandler(nodeArchive))
@@ -503,6 +532,23 @@ func offlineStableIDSet(proxyChecker *checker.ProxyChecker) map[string]bool {
 		}
 	}
 	return offline
+}
+
+func activeStableIDSet(proxies []*models.ProxyConfig) map[string]bool {
+	active := make(map[string]bool, len(proxies))
+	for _, proxy := range proxies {
+		if proxy == nil {
+			continue
+		}
+		stableID := strings.TrimSpace(proxy.StableID)
+		if stableID == "" {
+			stableID = proxy.GenerateStableID()
+		}
+		if stableID != "" {
+			active[stableID] = true
+		}
+	}
+	return active
 }
 
 func recoveredStableIDs(proxyChecker *checker.ProxyChecker, offlineBefore map[string]bool) []string {

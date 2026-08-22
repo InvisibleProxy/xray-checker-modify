@@ -18,8 +18,28 @@ import (
 	"xray-checker/checker"
 	"xray-checker/models"
 	"xray-checker/nodearchive"
+	"xray-checker/nodemerge"
 	"xray-checker/speedtest"
 )
+
+type nodeMergeServiceStub struct {
+	previewRequest [2]string
+	stageRequest   [3]string
+	preview        nodemerge.Preview
+	previewErr     error
+	stage          nodemerge.StageResult
+	stageErr       error
+}
+
+func (s *nodeMergeServiceStub) Preview(sourceStableID, targetStableID string) (nodemerge.Preview, error) {
+	s.previewRequest = [2]string{sourceStableID, targetStableID}
+	return s.preview, s.previewErr
+}
+
+func (s *nodeMergeServiceStub) Stage(sourceStableID, targetStableID, confirmationToken string) (nodemerge.StageResult, error) {
+	s.stageRequest = [3]string{sourceStableID, targetStableID, confirmationToken}
+	return s.stage, s.stageErr
+}
 
 func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 	var rendered bytes.Buffer
@@ -61,10 +81,61 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`id="tab-incidents"`,
 		`id="incidents"`,
 		`proxy.failureSummary`,
+		`data-merge-node="${escapeHtml(node.stableId || "")}"`,
+		`function matchingActiveMergeTargets(source)`,
+		`request("/nodes-overview/merge/preview"`,
+		`confirmationToken: preview.confirmationToken`,
+		`mergedFromStableIds`,
 	} {
 		if !strings.Contains(html, marker) {
 			t.Fatalf("admin template does not contain %q", marker)
 		}
+	}
+}
+
+func TestAdminNodeMergePreviewAndStageHandlers(t *testing.T) {
+	service := &nodeMergeServiceStub{
+		preview: nodemerge.Preview{
+			Source:            nodemerge.NodeSnapshot{StableID: "retired", ResultCount: 490},
+			Target:            nodemerge.NodeSnapshot{StableID: "active"},
+			MergedResultCount: 490,
+			ConfirmationToken: "confirmed-candidate",
+			RestartRequired:   true,
+		},
+		stage: nodemerge.StageResult{
+			SourceStableID: "retired", TargetStableID: "active", RestartRequired: true,
+			Message: "Node merge staged; restart the application to apply it",
+		},
+	}
+
+	previewRecorder := httptest.NewRecorder()
+	previewRequest := httptest.NewRequest(http.MethodPost, "/api/v1/admin/nodes-overview/merge/preview", strings.NewReader(`{"sourceStableId":"retired","targetStableId":"active"}`))
+	AdminNodesOverviewMergePreviewHandler(service).ServeHTTP(previewRecorder, previewRequest)
+	if previewRecorder.Code != http.StatusOK || service.previewRequest != [2]string{"retired", "active"} {
+		t.Fatalf("preview response %d %s, request=%v", previewRecorder.Code, previewRecorder.Body.String(), service.previewRequest)
+	}
+	if !strings.Contains(previewRecorder.Body.String(), `"confirmationToken":"confirmed-candidate"`) || !strings.Contains(previewRecorder.Body.String(), `"mergedResultCount":490`) {
+		t.Fatalf("unexpected preview response: %s", previewRecorder.Body.String())
+	}
+
+	stageRecorder := httptest.NewRecorder()
+	stageRequest := httptest.NewRequest(http.MethodPost, "/api/v1/admin/nodes-overview/merge", strings.NewReader(`{"sourceStableId":"retired","targetStableId":"active","confirmationToken":"confirmed-candidate"}`))
+	AdminNodesOverviewMergeHandler(service).ServeHTTP(stageRecorder, stageRequest)
+	if stageRecorder.Code != http.StatusOK || service.stageRequest != [3]string{"retired", "active", "confirmed-candidate"} {
+		t.Fatalf("stage response %d %s, request=%v", stageRecorder.Code, stageRecorder.Body.String(), service.stageRequest)
+	}
+	if !strings.Contains(stageRecorder.Body.String(), `"restartRequired":true`) {
+		t.Fatalf("unexpected stage response: %s", stageRecorder.Body.String())
+	}
+}
+
+func TestAdminNodeMergeHandlerReportsStaleCandidateAsConflict(t *testing.T) {
+	service := &nodeMergeServiceStub{stageErr: fmt.Errorf("node merge candidate changed since preview; review it again")}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/nodes-overview/merge", strings.NewReader(`{"sourceStableId":"retired","targetStableId":"active","confirmationToken":"stale"}`))
+	AdminNodesOverviewMergeHandler(service).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -346,6 +417,19 @@ func TestAdminBackupRestoreHandlerRequiresConfirmationHeader(t *testing.T) {
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected status %d, got %d", http.StatusForbidden, rec.Code)
+	}
+}
+
+func TestAdminBackupRestoreHandlerRunsTransactionGuardBeforeUpload(t *testing.T) {
+	handler := AdminBackupRestoreHandler(backup.NewRestorer(t.TempDir()), func() (func(), error) {
+		return nil, fmt.Errorf("backup restore cannot be staged while a node merge is pending")
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/backup/restore", nil)
+	req.Header.Set("X-Xray-Checker-Action", "restore-backup")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "node merge is pending") {
+		t.Fatalf("expected guarded conflict, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

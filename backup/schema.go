@@ -129,6 +129,12 @@ func validateDataFile(name string, data []byte) error {
 	return nil
 }
 
+// ValidateDataFile validates one persisted state file with the same duplicate
+// key and typed-schema checks used by backup restore.
+func ValidateDataFile(name string, data []byte) error {
+	return validateDataFile(name, data)
+}
+
 func decodeRequiredField(object map[string]json.RawMessage, name string, destination any) error {
 	raw, ok := object[name]
 	if !ok {

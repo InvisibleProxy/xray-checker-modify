@@ -3,6 +3,7 @@ package nodearchive
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -270,6 +271,7 @@ func TestArchivedRecordAndRestoreArchivedKeepRetiredInvariant(t *testing.T) {
 	store := NewStore("", nil)
 	want := NodeRecord{StableID: "retired", Name: "Retired", Active: false}
 	store.nodes[want.StableID] = want
+	store.mergedNodes[want.StableID] = []string{"old-key"}
 	record, err := store.ArchivedRecord(want.StableID)
 	if err != nil || record != want {
 		t.Fatalf("ArchivedRecord() = %+v, %v; want %+v", record, err, want)
@@ -277,11 +279,14 @@ func TestArchivedRecordAndRestoreArchivedKeepRetiredInvariant(t *testing.T) {
 	if err := store.DeleteArchived(want.StableID); err != nil {
 		t.Fatalf("DeleteArchived() error = %v", err)
 	}
-	if err := store.RestoreArchived(record); err != nil {
+	if err := store.RestoreArchived(record, "old-key"); err != nil {
 		t.Fatalf("RestoreArchived() error = %v", err)
 	}
 	if got := store.nodes[want.StableID]; got != want {
 		t.Fatalf("restored record = %+v, want %+v", got, want)
+	}
+	if got := store.MergedFromStableIDs(want.StableID); !reflect.DeepEqual(got, []string{"old-key"}) {
+		t.Fatalf("restored lineage = %#v", got)
 	}
 	if err := store.RestoreArchived(NodeRecord{StableID: "active", Active: true}); err == nil {
 		t.Fatal("RestoreArchived() accepted an active record")
