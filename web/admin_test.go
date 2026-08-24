@@ -96,6 +96,8 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`request("/nodes-overview/merge/preview"`,
 		`confirmationToken: preview.confirmationToken`,
 		`mergedFromStableIds`,
+		`.filter((node) => node.active === true)`,
+		`No active nodes to refresh`,
 	} {
 		if !strings.Contains(html, marker) {
 			t.Fatalf("admin template does not contain %q", marker)

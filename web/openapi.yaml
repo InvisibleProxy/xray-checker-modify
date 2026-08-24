@@ -499,7 +499,8 @@ paths:
 
   /api/v1/admin/nodes-overview/geo:
     post:
-      summary: Refresh GeoIP information for selected nodes
+      summary: Refresh GeoIP information for selected active nodes
+      description: Retired node IDs are ignored; an empty selection refreshes all active nodes only.
       tags: [Admin]
       requestBody:
         required: true

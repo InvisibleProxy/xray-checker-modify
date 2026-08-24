@@ -510,6 +510,9 @@ func (s *Store) RefreshGeo(ctx context.Context, stableIDs []string) (GeoRefreshR
 		if len(selected) > 0 && !selected[stableID] {
 			continue
 		}
+		if !record.Active {
+			continue
+		}
 		if strings.TrimSpace(record.Server) == "" {
 			continue
 		}
@@ -534,7 +537,7 @@ func (s *Store) RefreshGeo(ctx context.Context, stableIDs []string) (GeoRefreshR
 	s.mu.Lock()
 	for stableID, record := range updates {
 		current, ok := s.nodes[stableID]
-		if !ok {
+		if !ok || !current.Active {
 			continue
 		}
 		// The server may have changed while the external lookups were in

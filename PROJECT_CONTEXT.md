@@ -20,7 +20,7 @@
 | `checker/` | проверки доступности, latency, host/ping diagnostics, классификация причин и текущее состояние нод |
 | `metrics/` | Prometheus-метрики и Pushgateway |
 | `speedtest/` | ручные и плановые тесты скорости, Test URL нод и temporal retention |
-| `nodearchive/` | долгоживущий реестр активных/выбывших нод, downtime, persisted incident journal, GeoIP и speedtest summary |
+| `nodearchive/` | долгоживущий реестр активных/выбывших нод, downtime, persisted incident journal, GeoIP активных нод и speedtest summary |
 | `nodemerge/` | preview и crash-safe перенос persisted identity/history с retired StableID в active StableID |
 | `telegram/` | компактный HTML и Rich Messages, команды, отчёты, алерты, recovery и настройки mute |
 | `backup/` | создание ZIP, автоматическая ротация, типизированная проверка и транзакционный staged restore |
@@ -60,7 +60,7 @@ Frontend встроен в Go-бинарник через `embed`. `docs/` — �
 
 Автоматическое и ручное обновление используют один и тот же callback и защищены от параллельного запуска.
 
-1. Загружаются все источники.
+1. Настроенные через повторяемый CLI-флаг или comma-separated `SUBSCRIPTION_URL` источники загружаются параллельно и объединяются. Дублирующийся между источниками `StableID` отклоняется общей проверкой идентичности.
 2. При необходимости домены разворачиваются в IP-конфигурации.
 3. `xray.PreserveStableIDs` пытается сопоставить новые ноды со старыми.
 4. `xray.ValidateStableIDs` отклоняет пустые и дублирующиеся без учёта регистра ID до сравнения или restart.
@@ -166,7 +166,7 @@ Recovery alert хранит `RecoveryPending`, время и latency до усп
 - Retired-ноды сохраняются в Nodes Overview до ручного удаления либо подтверждённого merge в однозначно совпавшую active-ноду.
 - Восстановление требует перезапуска приложения.
 - Rich Messages зависят от версии Telegram Bot API; при отсутствии метода бот использует менее выразительный компактный HTML.
-- GeoIP refresh использует внешние сервисы и может быть недоступен из-за сети или rate limit.
+- GeoIP refresh выполняется только для active-нод, использует внешние сервисы и может быть недоступен из-за сети или rate limit.
 - `check_endpoint` является корреляционным выводом по нескольким нодам; он не доказывает отказ внешнего сервиса без отдельной проверки с другой точки.
 
 ## Текущее состояние

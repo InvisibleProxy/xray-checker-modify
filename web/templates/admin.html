@@ -3537,9 +3537,12 @@
 
       async function refreshNodeGeo() {
         $("nodes-overview-summary").textContent = "Refreshing Geo";
-        const stableIds = filteredNodesOverview().map((node) => node.stableId).filter(Boolean);
+        const stableIds = filteredNodesOverview()
+          .filter((node) => node.active === true)
+          .map((node) => node.stableId)
+          .filter(Boolean);
         if (stableIds.length === 0) {
-          $("nodes-overview-summary").textContent = "No nodes to refresh";
+          $("nodes-overview-summary").textContent = "No active nodes to refresh";
           return;
         }
         try {

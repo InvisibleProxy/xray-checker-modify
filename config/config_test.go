@@ -1,9 +1,31 @@
 package config
 
 import (
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/alecthomas/kong"
 )
+
+func TestSubscriptionURLsFromCommaSeparatedEnvironment(t *testing.T) {
+	t.Setenv("SUBSCRIPTION_URL", "https://one.example/sub,https://two.example/sub")
+	t.Setenv("RUN_ONCE", "true")
+
+	var cfg CLI
+	parser, err := kong.New(&cfg, kong.Vars{"version": "test"})
+	if err != nil {
+		t.Fatalf("kong.New() error = %v", err)
+	}
+	if _, err := parser.Parse(nil); err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	want := []string{"https://one.example/sub", "https://two.example/sub"}
+	if !reflect.DeepEqual(cfg.Subscription.URLs, want) {
+		t.Fatalf("subscription URLs = %#v, want %#v", cfg.Subscription.URLs, want)
+	}
+}
 
 func TestValidateRequiresExplicitAdminCredentials(t *testing.T) {
 	tests := []struct {

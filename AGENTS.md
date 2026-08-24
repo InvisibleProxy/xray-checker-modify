@@ -45,6 +45,7 @@
 - Speedtest history хранится по возрасту; default 60 дней. Не возвращайте count-based limit.
 - График speedtest в admin UI строится только по сохранённым замерам Mbps и не интерполирует пропуски. Пунктирный gap bridge и error-зона являются только визуальными индикаторами отсутствующих результатов и не участвуют в статистике. Success percentage выбранного периода использует все history results как знаменатель; успешен только завершённый замер с Mbps не ниже low-speed threshold, а low-speed/offline/error считаются неуспешными. Диапазоны history API используют `from` включительно и `to` не включительно; обе границы передаются в RFC3339.
 - Downtime в node archive накопительный и не должен очищаться вместе со speedtest history.
+- GeoCheck выполняется только для active-нод. Retired StableID должен игнорироваться и при явном запросе через admin API.
 - Incident journal хранит node и mass records; массовая корреляция требует одинакового failure code, минимум 3 и минимум 50% active scope. `check_endpoint` всегда маркируется как вероятностный вывод.
 - Failure code строится из proxy-check и прямых TCP/ping diagnostics; отсутствие ICMP reply не является самостоятельным доказательством offline.
 - Активные ноды управляются подпиской; удалять вручную можно только retired-записи.

@@ -1,9 +1,13 @@
 package nodearchive
 
 import (
+	"context"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +15,12 @@ import (
 	"xray-checker/models"
 	"xray-checker/speedtest"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
 
 func TestSyncProxiesMarksMissingNodeRetiredAndClosesDowntime(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "node_registry.json")
@@ -401,5 +411,61 @@ func TestMergeGeoFieldsPreservesConcurrentAvailabilityChanges(t *testing.T) {
 	}
 	if merged.GeoCountryCode != "DE" || merged.IfconfigCountryCode != "DE" {
 		t.Fatalf("geo fields were not applied: %+v", merged)
+	}
+}
+
+func TestRefreshGeoSkipsRetiredNodes(t *testing.T) {
+	store := NewStore("", nil)
+	store.nodes["active"] = NodeRecord{
+		StableID: "active",
+		Name:     "Active",
+		Server:   "active.example.com",
+		Active:   true,
+	}
+	store.nodes["retired"] = NodeRecord{
+		StableID: "retired",
+		Name:     "Retired",
+		Server:   "retired.example.com",
+		Active:   false,
+	}
+
+	var requested []string
+	store.httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requested = append(requested, request.URL.String())
+		body := `{"ip":"203.0.113.10","country":"DE","org":"Example"}`
+		if request.URL.Host == "ifconfig.net" {
+			body = `{"ip":"203.0.113.10","country":"Germany","country_iso":"DE","asn":"AS64500","asn_org":"Example"}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    request,
+		}, nil
+	})}
+
+	result, err := store.RefreshGeo(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("RefreshGeo() error = %v", err)
+	}
+	if result.Updated != 1 || result.Failed != 0 {
+		t.Fatalf("RefreshGeo() result = %+v, want one active node updated", result)
+	}
+	if len(requested) != 2 {
+		t.Fatalf("Geo requests = %d, want 2 requests for one active node: %v", len(requested), requested)
+	}
+	for _, requestURL := range requested {
+		if strings.Contains(requestURL, "retired.example.com") {
+			t.Fatalf("retired node was queried: %s", requestURL)
+		}
+	}
+
+	requested = nil
+	result, err = store.RefreshGeo(context.Background(), []string{"retired"})
+	if err != nil {
+		t.Fatalf("RefreshGeo(retired) error = %v", err)
+	}
+	if result.Updated != 0 || result.Failed != 0 || len(requested) != 0 {
+		t.Fatalf("explicit retired refresh was not ignored: result=%+v requests=%v", result, requested)
 	}
 }
