@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"xray-checker/nodearchive"
+	"xray-checker/remnawave"
 	"xray-checker/speedtest"
 	"xray-checker/telegram"
 )
@@ -89,6 +90,10 @@ func validateDataFile(name string, data []byte) error {
 		}
 		if state.Version != 1 || state.Nodes == nil {
 			return fmt.Errorf("backup file %s has an unsupported schema", name)
+		}
+	case "remnawave_announce_config.json":
+		if err := remnawave.ValidateConfigData(data); err != nil {
+			return fmt.Errorf("backup file %s has invalid Remnawave announce settings: %w", name, err)
 		}
 	case "speedtest_results.json":
 		var state speedResultStateSchema

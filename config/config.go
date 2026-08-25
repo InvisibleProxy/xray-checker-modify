@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/alecthomas/kong"
@@ -69,6 +70,15 @@ type CLI struct {
 		URL string `name:"speed-test-url" help:"Default URL for private speed tests" default:"https://proof.ovh.net/files/10Mb.dat" env:"SPEED_TEST_URL"`
 	} `embed:"" prefix:""`
 
+	Remnawave struct {
+		Enabled                  bool   `name:"remnawave-announce-enabled" help:"Enable managed Remnawave subscription announce integration" default:"false" env:"REMNAWAVE_ANNOUNCE_ENABLED"`
+		APIURL                   string `name:"remnawave-api-url" help:"Remnawave panel base URL (with or without /api)" default:"" env:"REMNAWAVE_API_URL"`
+		APIToken                 string `name:"remnawave-api-token" help:"Remnawave API token; never persisted or exposed by the admin API" default:"" env:"REMNAWAVE_API_TOKEN"`
+		TimeoutSeconds           int    `name:"remnawave-api-timeout" help:"Remnawave API request timeout in seconds" default:"10" env:"REMNAWAVE_API_TIMEOUT_SECONDS"`
+		ReconcileIntervalSeconds int    `name:"remnawave-reconcile-interval" help:"Managed announce reconciliation interval in seconds" default:"60" env:"REMNAWAVE_RECONCILE_INTERVAL_SECONDS"`
+		TopologyIntervalSeconds  int    `name:"remnawave-topology-interval" help:"Remnawave hosts and squads refresh interval in seconds" default:"300" env:"REMNAWAVE_TOPOLOGY_INTERVAL_SECONDS"`
+	} `embed:"" prefix:""`
+
 	Version  VersionFlag `name:"version" help:"Print version information and quit"`
 	RunOnce  bool        `name:"run-once" help:"Run one check cycle and exit" default:"false" env:"RUN_ONCE"`
 	LogLevel string      `name:"log-level" help:"Log level (debug|info|warn|error|none)" default:"info" env:"LOG_LEVEL"`
@@ -80,6 +90,22 @@ func (c *CLI) Validate() error {
 	}
 	if !c.RunOnce && (strings.TrimSpace(c.Metrics.Username) == "" || strings.TrimSpace(c.Metrics.Password) == "") {
 		return fmt.Errorf("--metrics-username and --metrics-password are required because /admin and /api/v1/admin/* are enabled")
+	}
+	if c.Remnawave.Enabled {
+		apiURL := strings.TrimSpace(c.Remnawave.APIURL)
+		parsed, err := url.Parse(apiURL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return fmt.Errorf("--remnawave-api-url must be a valid http or https URL when Remnawave announce is enabled")
+		}
+		if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return fmt.Errorf("--remnawave-api-url must not contain credentials, query or fragment")
+		}
+		if strings.TrimSpace(c.Remnawave.APIToken) == "" {
+			return fmt.Errorf("--remnawave-api-token is required when Remnawave announce is enabled")
+		}
+		if c.Remnawave.TimeoutSeconds < 1 || c.Remnawave.ReconcileIntervalSeconds < 10 || c.Remnawave.TopologyIntervalSeconds < 30 {
+			return fmt.Errorf("Remnawave timeout must be positive, reconcile interval at least 10 seconds, and topology interval at least 30 seconds")
+		}
 	}
 	return nil
 }

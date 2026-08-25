@@ -723,6 +723,74 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /api/v1/admin/remnawave:
+    get:
+      summary: Get sanitized Remnawave announce settings and topology
+      description: Never returns the Remnawave API token or raw internal-squad inbound configuration.
+      tags: [Admin]
+      responses:
+        '200':
+          description: Current settings, safe topology fields and reconciliation status
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/RemnawaveSnapshot'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      summary: Replace Remnawave announce policy and mappings
+      description: Persists only non-secret policy, Internal-to-External Squad pairs and StableID-to-Host mappings.
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RemnawaveSettings'
+      responses:
+        '200':
+          description: Normalized saved settings and current status
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/RemnawaveSnapshot'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/remnawave/sync:
+    post:
+      summary: Refresh Remnawave topology and reconcile managed announce headers
+      description: Requires the environment master switch and API connection. Unknown existing announce values are reported and left untouched.
+      tags: [Admin]
+      responses:
+        '200':
+          description: Refreshed topology and reconciliation status
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/RemnawaveSnapshot'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
 components:
   securitySchemes:
     basicAuth:
@@ -1506,6 +1574,214 @@ components:
         adminUserCount:
           type: integer
           readOnly: true
+
+    RemnawavePolicy:
+      type: object
+      required: [enabled, outageMinutes, minimumFailures, recoveryMinutes]
+      properties:
+        enabled:
+          type: boolean
+        outageMinutes:
+          type: integer
+          minimum: 1
+          maximum: 1440
+        minimumFailures:
+          type: integer
+          minimum: 2
+          maximum: 100
+          description: Consecutive full availability iterations; manual and fast-recovery checks do not increment this counter.
+        recoveryMinutes:
+          type: integer
+          minimum: 1
+          maximum: 1440
+        normalMessage:
+          type: string
+          maxLength: 240
+          description: Optional stable-state announce. Empty removes only an announce owned by xray-checker.
+
+    RemnawaveSquadPair:
+      type: object
+      required: [internalSquadUuid, externalSquadUuid]
+      properties:
+        internalSquadUuid:
+          type: string
+        externalSquadUuid:
+          type: string
+        monitoringOnly:
+          type: boolean
+          default: false
+          description: The pair participates in topology modeling but its External Squad is never targeted.
+
+    RemnawaveNodeMapping:
+      type: object
+      required: [hostUuid]
+      properties:
+        hostUuid:
+          type: string
+        groupKey:
+          type: string
+          maxLength: 128
+          description: Stable public-location redundancy key; defaults to Host UUID.
+        publicLabel:
+          type: string
+          maxLength: 80
+          description: User-facing location label; defaults to the Host remark.
+
+    RemnawaveSettings:
+      type: object
+      required: [policy, squadPairs, nodeMappings]
+      properties:
+        policy:
+          $ref: '#/components/schemas/RemnawavePolicy'
+        squadPairs:
+          type: array
+          items:
+            $ref: '#/components/schemas/RemnawaveSquadPair'
+        nodeMappings:
+          type: object
+          description: Map keyed by exact checker StableID.
+          additionalProperties:
+            $ref: '#/components/schemas/RemnawaveNodeMapping'
+
+    RemnawaveHost:
+      type: object
+      properties:
+        uuid:
+          type: string
+        remark:
+          type: string
+        address:
+          type: string
+        port:
+          type: integer
+        isDisabled:
+          type: boolean
+        isHidden:
+          type: boolean
+        inbound:
+          type: object
+          properties:
+            configProfileUuid:
+              type: string
+            configProfileInboundUuid:
+              type: string
+        excludedInternalSquads:
+          type: array
+          items:
+            type: string
+
+    RemnawaveInternalSquad:
+      type: object
+      properties:
+        uuid:
+          type: string
+        name:
+          type: string
+        inbounds:
+          type: array
+          description: Safe identity fields only; rawInbound is never exposed.
+          items:
+            type: object
+            properties:
+              uuid:
+                type: string
+              profileUuid:
+                type: string
+              tag:
+                type: string
+              type:
+                type: string
+
+    RemnawaveExternalSquad:
+      type: object
+      properties:
+        uuid:
+          type: string
+        name:
+          type: string
+
+    RemnawaveSnapshot:
+      type: object
+      required: [connection, settings, topology, proxies, status]
+      properties:
+        connection:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+            configured:
+              type: boolean
+            apiUrl:
+              type: string
+            apiTokenConfigured:
+              type: boolean
+        settings:
+          $ref: '#/components/schemas/RemnawaveSettings'
+        topology:
+          type: object
+          properties:
+            loadedAt:
+              type: string
+              format: date-time
+            hosts:
+              type: array
+              items:
+                $ref: '#/components/schemas/RemnawaveHost'
+            internalSquads:
+              type: array
+              items:
+                $ref: '#/components/schemas/RemnawaveInternalSquad'
+            externalSquads:
+              type: array
+              items:
+                $ref: '#/components/schemas/RemnawaveExternalSquad'
+        proxies:
+          type: array
+          items:
+            type: object
+            properties:
+              stableId:
+                type: string
+              name:
+                type: string
+              subName:
+                type: string
+              server:
+                type: string
+              port:
+                type: integer
+              protocol:
+                type: string
+        status:
+          type: object
+          properties:
+            lastTopologyAt:
+              type: string
+              format: date-time
+            lastReconcileAt:
+              type: string
+              format: date-time
+            lastError:
+              type: string
+            conflicts:
+              type: array
+              items:
+                type: string
+            announcements:
+              type: array
+              items:
+                type: object
+                properties:
+                  externalSquadUuid:
+                    type: string
+                  externalSquadName:
+                    type: string
+                  present:
+                    type: boolean
+                  managed:
+                    type: boolean
+                  message:
+                    type: string
 
   responses:
     Unauthorized:

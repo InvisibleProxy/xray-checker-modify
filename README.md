@@ -114,6 +114,12 @@ go run . --help
 | `TELEGRAM_CHAT_ID` | пусто | целевой chat ID |
 | `TELEGRAM_MESSAGE_THREAD_ID` | пусто | topic/thread ID |
 | `TELEGRAM_ADMIN_IDS` | пусто | разрешённые Telegram user ID через запятую |
+| `REMNAWAVE_ANNOUNCE_ENABLED` | `false` | master-switch интеграции управляемого subscription `announce` |
+| `REMNAWAVE_API_URL` | пусто | базовый URL панели Remnawave, с `/api` или без него |
+| `REMNAWAVE_API_TOKEN` | пусто | API token Remnawave; читается только из env и не сохраняется |
+| `REMNAWAVE_API_TIMEOUT_SECONDS` | `10` | timeout одного обращения к API Remnawave |
+| `REMNAWAVE_RECONCILE_INTERVAL_SECONDS` | `60` | период сверки управляемых `announce`, минимум 10 секунд |
+| `REMNAWAVE_TOPOLOGY_INTERVAL_SECONDS` | `300` | период обновления Hosts/Squads, минимум 30 секунд |
 
 Настройки расписания speedtest, глубины истории и поведения Telegram редактируются в `/admin` и сохраняются в volume `data`.
 
@@ -145,6 +151,8 @@ docker compose restart xray-checker
 
 На startup в active StableID переносятся сохранённая speedtest history/latest result, накопленный downtime, incident count и ссылки incident journal, наиболее ранний `FirstSeenAt`, максимальный downtime, актуальнейшие GeoIP-данные и lineage прежних StableID. Текущая active-конфигурация и её live-состояние остаются целевыми. Retired-запись удаляется лишь после того, как speedtest, node archive и Telegram успешно загрузили новое состояние. До этого исходные `node_registry.json` и `speedtest_results.json` лежат в rollback-копии; ошибка загрузки возвращает их и останавливает startup с требованием повторного запуска. После подтверждённого startup `Nodes Overview` сверяет исчезновение source с `MergedFromStableIDs` target и показывает `Node merge completed successfully`; у target также остаётся постоянный `Merge applied` marker. Backup restore и node merge нельзя ставить в staging одновременно.
 
+Remnawave Host mapping в node merge намеренно не переносится: транзакция merge по-прежнему меняет только node archive и speedtest history. Если source StableID был привязан во вкладке `Remnawave`, после успешного merge вручную привяжите новый active StableID к тому же Host и сохраните настройки.
+
 ### Проверка доступности и recovery
 
 Полный обход всех нод выполняется с периодом `PROXY_CHECK_INTERVAL` и всегда запускает настроенный proxy-check. Для уже недоступных нод дополнительно работает быстрый цикл `PROXY_RECOVERY_INTERVAL`: TCP и ping проверяются параллельно, а proxy-check запускается в том же цикле только при успешном TCP-соединении. Ping остаётся диагностикой и никогда не блокирует proxy-check, потому что ICMP может быть запрещён у рабочей ноды. Состояние `TCP No` вместе с `Ping OK` означает, что хост отвечает, но порт ноды не принимает TCP-соединение. Обычный полный обход не использует TCP-гейт и остаётся контрольной проверкой на случай расхождения диагностики.
@@ -154,6 +162,43 @@ docker compose restart xray-checker
 Ошибка proxy-check классифицируется стабильным кодом: `dns`, `tcp_refused`, `tcp_timeout`, `host_unreachable`, `proxy_handshake`, `proxy_timeout`, `tls`, `http_status`, `source_ip_unchanged`, `download_incomplete`, `check_endpoint` или `unknown`. Прямые TCP/ping-результаты уточняют причину, но отсутствие ICMP-ответа само по себе не объявляет хост мёртвым. Вкладка `Incidents` хранит начало, восстановление, длительность, причину и затронутые `StableID`.
 
 Быстрые попытки не увеличивают Telegram `Failed checks` и не сдвигают расписание напоминаний. Когда настоящий proxy-check подтверждает восстановление, downtime закрывается сразу, а pending recovery передаётся Telegram без ожидания следующего alert-цикла. В админке `Check` доступен и в строке конкретной ноды, и как групповое действие для выбранных нод; в карточке ноды Telegram для администратора доступна кнопка «Проверить доступность». Все ручные точки используют тот же каскадный workflow и обновляют TCP/ping.
+
+### Remnawave subscription announce
+
+Интеграция меняет только header `announce` у выбранных External Squads. Имена Hosts, конфигурации нод, пользователи и состав сквадов не редактируются. Для отдельного API token в Remnawave нужны минимальные scopes:
+
+- `hosts:list`;
+- `internal-squads:list`;
+- `external-squads:list`;
+- `external-squads:update`.
+
+Последний scope разрешает PATCH всего External Squad endpoint, а не только одного header, поэтому токен всё равно считается привилегированным. Храните его только в `REMNAWAVE_API_TOKEN`, ограничьте сетевой доступ checker → panel и не используйте административный JWT.
+
+После добавления `REMNAWAVE_ANNOUNCE_ENABLED=true`, `REMNAWAVE_API_URL` и token перезапустите checker, откройте вкладку `Remnawave` и нажмите `Sync topology & reconcile`. Затем:
+
+1. Добавьте пары `Internal Squad → External Squad`. Для схемы `1 in содержит только 1 ext`, `2 in → 2 ext`, `3 in → 3 ext` это три отдельные рабочие строки.
+2. Добавьте сервисную пару checker и отметьте её `Monitoring-only`. Её External Squad никогда не изменяется.
+3. Для каждого active `StableID` выберите Remnawave Host. Имена используются только для отображения; сохранённая связь строится по UUID.
+4. Если несколько Hosts являются резервами одной пользовательской локации, задайте им одинаковый `Redundancy group` и одинаковый `Public label`.
+5. Сохраните настройки и только после проверки topology включите `Automatic announce`.
+
+Host сам по себе не принадлежит External Squad. Аудитория вычисляется через фактическую модель Remnawave:
+
+```text
+StableID → Host UUID → inbound Host → Internal Squad → явно выбранный External Squad
+```
+
+При этом учитываются `excludedInternalSquads`, а disabled/hidden Hosts не считаются доступными пользователю. Если хотя бы один StableID в redundancy group доступен, локация считается рабочей. Сообщение появляется только после непрерывного downtime не короче 15 минут и минимум трёх полных обходов. Ручной единичный `Check` и быстрый recovery-loop этот счётчик не увеличивают. Активный массовый incident с вероятностной причиной `check_endpoint` подавляет новое пользовательское сообщение: такая корреляция может означать отказ самого проверочного endpoint, а не всех нод.
+
+Варианты автоматически формируемого текста не содержат URL и технических причин:
+
+- одна из нескольких локаций: `⚠️ Временно недоступна локация «Германия». Остальные доступные вам локации работают.`;
+- несколько локаций: `⚠️ Временно недоступны локации: «Германия», «Нидерланды». Остальные доступные вам локации работают.`;
+- все локации аудитории: `⚠️ Все доступные вам локации временно недоступны. Идёт восстановление работы.`.
+
+После подтверждённого восстановления действует пятиминутный hysteresis. По умолчанию управляемый `announce` затем удаляется; опционально можно задать нейтральный stable-message вроде `Всё стабильно`. Checker сначала читает полный `responseHeadersAdd`, меняет только регистронезависимый ключ `announce` и PATCH-ит объединённую карту. Чужой `announce` не перезаписывается. Если оператор изменил ранее управляемое значение вручную, checker отказывается от ownership и показывает конфликт в админке.
+
+Remnawave сохраняет значение как `rwEncodeBase64:<текст>` и при выдаче подписки преобразует его в клиентский `base64:...`. Если отдельное Response Rule пользователя также переопределяет `announce`, оно имеет более высокий приоритет, чем External Squad, и сообщение этой интеграции пользователь не увидит.
 
 ### Speedtest и история
 
@@ -189,7 +234,7 @@ Recovery-уведомление хранится как pending до подтв�
 
 ### Резервные копии
 
-Вкладка `Backup` позволяет скачать ZIP и загрузить его для восстановления. Архив содержит persisted JSON-состояние, manifest и SHA-256 каждого файла. JSON проверяется по типизированной схеме и на дублирующиеся ключи. Из Telegram-конфигурации токен, chat ID, thread ID, список администраторов и неизвестные поля в архив не попадают независимо от регистра ключа.
+Вкладка `Backup` позволяет скачать ZIP и загрузить его для восстановления. Архив содержит persisted JSON-состояние, manifest и SHA-256 каждого файла. JSON проверяется по типизированной схеме и на дублирующиеся ключи. Из Telegram-конфигурации токен, chat ID, thread ID, список администраторов и неизвестные поля в архив не попадают независимо от регистра ключа. Remnawave policy/mappings входят в backup, но API token и runtime ownership удалённых header-значений исключены.
 
 Автоматический архив создаётся при старте, затем ежедневно около `00:05 UTC` в `/app/data/backups`. Хранятся не более семи архивов и не дольше семи дней.
 
@@ -208,6 +253,8 @@ Recovery-уведомление хранится как pending до подтв�
 | `data/speedtest_url_health.json` | доступность, cooldown и последние успешные резервные URL |
 | `data/telegram_config.json` | редактируемая Telegram-конфигурация |
 | `data/node_alert_state.json` | состояние Telegram-уведомлений, причины и pending low-speed/deadline retries |
+| `data/remnawave_announce_config.json` | policy, пары Internal/External Squads и `StableID → Host UUID` mappings; входит в backup |
+| `data/remnawave_announce_state.json` | runtime ownership управляемых `announce`; не входит в backup |
 | `data/backups/` | автоматические ZIP-архивы |
 | `data/.node-merge-*` | временные staging/rollback-каталоги node merge; очищаются после подтверждённого startup |
 | `geo/` | загруженные GeoIP/GeoSite-файлы |

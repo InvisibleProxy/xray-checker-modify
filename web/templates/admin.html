@@ -485,6 +485,51 @@
         gap: 12px;
         flex-wrap: wrap;
       }
+      .remnawave-policy-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(150px, 1fr));
+        gap: 10px;
+      }
+      .remnawave-table {
+        min-width: 880px;
+      }
+      .remnawave-table select {
+        min-width: 210px;
+      }
+      .remnawave-table input[type="text"] {
+        min-width: 150px;
+      }
+      .remnawave-node-meta {
+        min-width: 220px;
+      }
+      .remnawave-node-meta strong,
+      .remnawave-node-meta span {
+        display: block;
+        overflow-wrap: anywhere;
+      }
+      .remnawave-node-meta span {
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .remnawave-message-list {
+        display: grid;
+        gap: 8px;
+      }
+      .remnawave-message-list > div {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--panel-2);
+        padding: 10px 12px;
+      }
+      .remnawave-message-list strong,
+      .remnawave-message-list span {
+        display: block;
+      }
+      .remnawave-message-list span {
+        margin-top: 4px;
+        color: var(--muted);
+      }
       .nodes-list {
         display: grid;
         gap: 9px;
@@ -1059,6 +1104,9 @@
         .control-panel {
           position: static;
         }
+        .remnawave-policy-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
         header {
           align-items: flex-start;
           flex-direction: column;
@@ -1088,6 +1136,7 @@
         <button id="tab-dashboard" class="tab active" type="button">Dashboard</button>
         <button id="tab-nodes-overview" class="tab" type="button">Nodes Overview</button>
         <button id="tab-incidents" class="tab" type="button">Incidents</button>
+        <button id="tab-remnawave" class="tab" type="button">Remnawave</button>
         <button id="tab-history" class="tab" type="button">Speed History</button>
       </nav>
 
@@ -1552,6 +1601,135 @@
         </section>
       </section>
 
+      <section id="remnawave-view" class="view stack" hidden>
+        <section class="panel stack">
+          <div class="panel-actions">
+            <div>
+              <h2>Remnawave subscription announce</h2>
+              <div class="muted">Audience-aware outage messages in the subscription response header</div>
+            </div>
+            <div class="row">
+              <button id="remnawave-sync" class="secondary" type="button">Sync topology &amp; reconcile</button>
+              <button id="remnawave-save" class="primary" type="button">Save settings</button>
+            </div>
+          </div>
+          <div class="config-status">
+            <div>
+              <span>Environment gate</span>
+              <strong id="remnawave-gate-state">Loading</strong>
+            </div>
+            <div>
+              <span>API token</span>
+              <strong id="remnawave-token-state">Loading</strong>
+            </div>
+            <div>
+              <span>Topology</span>
+              <strong id="remnawave-topology-state">Not loaded</strong>
+            </div>
+            <div>
+              <span>Last reconcile</span>
+              <strong id="remnawave-reconcile-state">Never</strong>
+            </div>
+          </div>
+          <div class="hint">
+            Token stays in <code>REMNAWAVE_API_TOKEN</code>. Required token scopes:
+            <code>hosts:list</code>, <code>internal-squads:list</code>,
+            <code>external-squads:list</code>, <code>external-squads:update</code>.
+          </div>
+          <div id="remnawave-state" class="muted" role="status" aria-live="polite"></div>
+        </section>
+
+        <section class="panel stack">
+          <div>
+            <h2>Policy</h2>
+            <div class="muted">Both the duration and full-check confirmation threshold must be reached.</div>
+          </div>
+          <div class="remnawave-policy-grid">
+            <label class="row">
+              <input id="remnawave-policy-enabled" type="checkbox" />
+              Automatic announce
+            </label>
+            <label>
+              Outage minutes
+              <input id="remnawave-outage-minutes" type="number" min="1" max="1440" step="1" />
+            </label>
+            <label>
+              Full failed checks
+              <input id="remnawave-minimum-failures" type="number" min="2" max="100" step="1" />
+            </label>
+            <label>
+              Stable recovery minutes
+              <input id="remnawave-recovery-minutes" type="number" min="1" max="1440" step="1" />
+            </label>
+          </div>
+          <label>
+            Message when everything is stable (optional)
+            <input id="remnawave-normal-message" type="text" maxlength="240" placeholder="Leave blank to remove the managed announce" />
+          </label>
+          <div class="hint">
+            A blank stable message removes only an <code>announce</code> previously written by xray-checker.
+            A manual or otherwise unknown <code>announce</code> is never overwritten.
+          </div>
+        </section>
+
+        <section class="panel stack">
+          <div class="panel-actions">
+            <div>
+              <h2>Audience pairs</h2>
+              <div class="muted">Internal Squad determines visible Hosts; External Squad receives the message.</div>
+            </div>
+            <button id="remnawave-add-pair" class="secondary" type="button">Add pair</button>
+          </div>
+          <div class="table-wrap">
+            <table class="remnawave-table">
+              <thead>
+                <tr>
+                  <th>Internal Squad</th>
+                  <th>External Squad</th>
+                  <th>Mode</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="remnawave-pairs"></tbody>
+            </table>
+          </div>
+          <div class="hint">
+            Mark the checker service pair as monitoring-only. It remains visible for topology checks but its External Squad is never modified.
+          </div>
+        </section>
+
+        <section class="panel stack">
+          <div>
+            <h2>StableID to Host mapping</h2>
+            <div class="muted">Host names are display-only. The persisted identity is StableID → Remnawave Host UUID.</div>
+          </div>
+          <div class="table-wrap">
+            <table class="remnawave-table">
+              <thead>
+                <tr>
+                  <th>Checker node</th>
+                  <th>Remnawave Host</th>
+                  <th>Redundancy group</th>
+                  <th>Public label</th>
+                </tr>
+              </thead>
+              <tbody id="remnawave-node-mappings"></tbody>
+            </table>
+          </div>
+          <div class="hint">
+            StableIDs with the same group key are one public location: a failed member does not announce an outage while another member is healthy.
+          </div>
+        </section>
+
+        <section class="panel stack">
+          <div>
+            <h2>Current announce ownership</h2>
+            <div class="muted">Only values shown as managed may later be changed or removed automatically.</div>
+          </div>
+          <div id="remnawave-announcements" class="remnawave-message-list"></div>
+        </section>
+      </section>
+
       <section id="incidents-view" class="view stack" hidden>
         <section class="panel stack">
           <div class="row" style="justify-content: space-between">
@@ -1730,6 +1908,7 @@
         historyResults: [],
         nodesOverview: [],
         incidents: [],
+        remnawave: null,
         nodesOverviewSort: "avgMbps",
         nodesOverviewSortDir: "desc",
         speedPollRunning: false,
@@ -1776,6 +1955,197 @@
           throw new Error((payload && payload.error) || `HTTP ${res.status}`);
         }
         return payload.data;
+      }
+
+      function selectOption(value, label, selected) {
+        return `<option value="${escapeHtml(value)}"${value === selected ? " selected" : ""}>${escapeHtml(label)}</option>`;
+      }
+
+      function remnawaveOptions(items, selected, placeholder, label) {
+        const values = new Set(items.map((item) => item.uuid));
+        let html = selectOption("", placeholder, selected || "");
+        if (selected && !values.has(selected)) {
+          html += selectOption(selected, `Missing: ${selected}`, selected);
+        }
+        html += items.map((item) => selectOption(item.uuid, label(item), selected)).join("");
+        return html;
+      }
+
+      function remnawavePairRowsFromForm() {
+        return [...document.querySelectorAll("[data-remnawave-pair]")].map((row) => ({
+          internalSquadUuid: row.querySelector("[data-remnawave-internal]").value,
+          externalSquadUuid: row.querySelector("[data-remnawave-external]").value,
+          monitoringOnly: row.querySelector("[data-remnawave-monitoring]").checked,
+        }));
+      }
+
+      function renderRemnawavePairs(pairs) {
+        const snapshot = state.remnawave || {};
+        const topology = snapshot.topology || {};
+        const internal = Array.isArray(topology.internalSquads) ? topology.internalSquads : [];
+        const external = Array.isArray(topology.externalSquads) ? topology.externalSquads : [];
+        const rows = Array.isArray(pairs) ? pairs : [];
+        $("remnawave-pairs").innerHTML = rows.map((pair, index) => `
+          <tr data-remnawave-pair>
+            <td>
+              <select data-remnawave-internal aria-label="Internal Squad">
+                ${remnawaveOptions(internal, pair.internalSquadUuid || "", "Select Internal Squad", (item) => item.name || item.uuid)}
+              </select>
+            </td>
+            <td>
+              <select data-remnawave-external aria-label="External Squad">
+                ${remnawaveOptions(external, pair.externalSquadUuid || "", "Select External Squad", (item) => item.name || item.uuid)}
+              </select>
+            </td>
+            <td>
+              <label class="row">
+                <input data-remnawave-monitoring type="checkbox"${pair.monitoringOnly ? " checked" : ""} />
+                Monitoring-only
+              </label>
+            </td>
+            <td><button class="danger small" type="button" data-remnawave-remove-pair="${index}">Remove</button></td>
+          </tr>
+        `).join("") || `<tr><td colspan="4" class="muted">No audience pairs configured</td></tr>`;
+      }
+
+      function renderRemnawaveNodeMappings() {
+        const snapshot = state.remnawave || {};
+        const settings = snapshot.settings || {};
+        const mappings = settings.nodeMappings || {};
+        const topology = snapshot.topology || {};
+        const hosts = Array.isArray(topology.hosts) ? topology.hosts : [];
+        const proxies = Array.isArray(snapshot.proxies) ? snapshot.proxies : [];
+        $("remnawave-node-mappings").innerHTML = proxies.map((proxy) => {
+          const mapping = mappings[proxy.stableId] || {};
+          const hostOptions = remnawaveOptions(hosts, mapping.hostUuid || "", "Not mapped", (host) => {
+            const flags = [host.isDisabled ? "disabled" : "", host.isHidden ? "hidden" : ""].filter(Boolean);
+            const suffix = flags.length ? ` [${flags.join(", ")}]` : "";
+            return `${host.remark || host.uuid} · ${host.address || "n/a"}:${host.port || "n/a"}${suffix}`;
+          });
+          return `
+            <tr data-remnawave-node data-stable-id="${escapeHtml(proxy.stableId)}">
+              <td class="remnawave-node-meta">
+                <strong>${escapeHtml(proxy.name || "Unnamed")}</strong>
+                <span>${escapeHtml(proxy.subName || "No subscription")} · ${escapeHtml(proxy.server || "n/a")}:${escapeHtml(proxy.port || "n/a")}</span>
+                <span class="mono">${escapeHtml(proxy.stableId)}</span>
+              </td>
+              <td><select data-remnawave-host aria-label="Remnawave Host for ${escapeHtml(proxy.name || proxy.stableId)}">${hostOptions}</select></td>
+              <td><input data-remnawave-group type="text" maxlength="128" value="${escapeHtml(mapping.groupKey || "")}" placeholder="Defaults to Host UUID" /></td>
+              <td><input data-remnawave-label type="text" maxlength="80" value="${escapeHtml(mapping.publicLabel || "")}" placeholder="Defaults to Host remark" /></td>
+            </tr>
+          `;
+        }).join("") || `<tr><td colspan="4" class="muted">No active checker nodes</td></tr>`;
+      }
+
+      function renderRemnawave() {
+        const snapshot = state.remnawave;
+        if (!snapshot) return;
+        const connection = snapshot.connection || {};
+        const settings = snapshot.settings || {};
+        const policy = settings.policy || {};
+        const topology = snapshot.topology || {};
+        const status = snapshot.status || {};
+
+        $("remnawave-gate-state").textContent = connection.enabled ? "Enabled" : "Disabled";
+        $("remnawave-gate-state").className = connection.enabled ? "ok" : "warn";
+        $("remnawave-token-state").textContent = connection.apiTokenConfigured ? "Configured" : "Not set";
+        $("remnawave-token-state").className = connection.apiTokenConfigured ? "ok" : "warn";
+        $("remnawave-topology-state").textContent = topology.loadedAt ? formatTime(topology.loadedAt) : "Not loaded";
+        $("remnawave-topology-state").className = topology.loadedAt ? "ok" : "warn";
+        $("remnawave-reconcile-state").textContent = status.lastReconcileAt ? formatTime(status.lastReconcileAt) : "Never";
+
+        $("remnawave-policy-enabled").checked = !!policy.enabled;
+        $("remnawave-outage-minutes").value = policy.outageMinutes || 15;
+        $("remnawave-minimum-failures").value = policy.minimumFailures || 3;
+        $("remnawave-recovery-minutes").value = policy.recoveryMinutes || 5;
+        $("remnawave-normal-message").value = policy.normalMessage || "";
+        renderRemnawavePairs(settings.squadPairs || []);
+        renderRemnawaveNodeMappings();
+
+        const issues = [];
+        if (status.lastError) issues.push(status.lastError);
+        if (Array.isArray(status.conflicts)) issues.push(...status.conflicts);
+        const stateText = $("remnawave-state");
+        stateText.textContent = issues.join(" · ") || (connection.enabled && connection.configured ? "Ready" : "Configure environment variables and restart xray-checker");
+        stateText.className = issues.length ? "error" : "muted";
+        $("remnawave-sync").disabled = !(connection.enabled && connection.configured);
+
+        const announcements = Array.isArray(status.announcements) ? status.announcements : [];
+        $("remnawave-announcements").innerHTML = announcements.map((announcement) => `
+          <div>
+            <strong class="${announcement.managed ? "ok" : "warn"}">${escapeHtml(announcement.externalSquadName || announcement.externalSquadUuid)} · ${announcement.managed ? "Managed" : "Unmanaged"}</strong>
+            <span>${escapeHtml(announcement.message || (announcement.present ? "Existing announce is left untouched" : "Managed value is no longer present remotely"))}</span>
+          </div>
+        `).join("") || `<div class="muted">No announce headers are currently tracked.</div>`;
+      }
+
+      function remnawaveSettingsFromForm() {
+        const nodeMappings = {};
+        document.querySelectorAll("[data-remnawave-node]").forEach((row) => {
+          const hostUuid = row.querySelector("[data-remnawave-host]").value;
+          if (!hostUuid) return;
+          nodeMappings[row.dataset.stableId] = {
+            hostUuid,
+            groupKey: row.querySelector("[data-remnawave-group]").value.trim(),
+            publicLabel: row.querySelector("[data-remnawave-label]").value.trim(),
+          };
+        });
+        return {
+          policy: {
+            enabled: $("remnawave-policy-enabled").checked,
+            outageMinutes: Math.max(1, Number($("remnawave-outage-minutes").value || 15)),
+            minimumFailures: Math.max(2, Number($("remnawave-minimum-failures").value || 3)),
+            recoveryMinutes: Math.max(1, Number($("remnawave-recovery-minutes").value || 5)),
+            normalMessage: $("remnawave-normal-message").value.trim(),
+          },
+          squadPairs: remnawavePairRowsFromForm(),
+          nodeMappings,
+        };
+      }
+
+      async function loadRemnawave() {
+        $("remnawave-state").textContent = "Loading Remnawave settings";
+        try {
+          state.remnawave = await request("/remnawave");
+          renderRemnawave();
+        } catch (err) {
+          $("remnawave-state").textContent = err.message;
+          $("remnawave-state").className = "error";
+        }
+      }
+
+      async function saveRemnawave() {
+        $("remnawave-state").textContent = "Saving settings";
+        try {
+          state.remnawave = await request("/remnawave", {
+            method: "PUT",
+            body: JSON.stringify(remnawaveSettingsFromForm()),
+          });
+          renderRemnawave();
+          $("remnawave-state").textContent = "Remnawave settings saved; reconciliation queued";
+          $("remnawave-state").className = "ok";
+        } catch (err) {
+          $("remnawave-state").textContent = err.message;
+          $("remnawave-state").className = "error";
+        }
+      }
+
+      async function syncRemnawave() {
+        const button = $("remnawave-sync");
+        button.disabled = true;
+        $("remnawave-state").textContent = "Loading topology and reconciling announce headers";
+        try {
+          state.remnawave = await request("/remnawave/sync", { method: "POST" });
+          renderRemnawave();
+          $("remnawave-state").textContent = "Topology and announce headers reconciled";
+          $("remnawave-state").className = "ok";
+        } catch (err) {
+          $("remnawave-state").textContent = err.message;
+          $("remnawave-state").className = "error";
+        } finally {
+          const connection = (state.remnawave && state.remnawave.connection) || {};
+          button.disabled = !(connection.enabled && connection.configured);
+        }
       }
 
       function configFromForm() {
@@ -3833,10 +4203,12 @@
         $("dashboard-view").hidden = tab !== "dashboard";
         $("nodes-overview-view").hidden = tab !== "nodes-overview";
         $("incidents-view").hidden = tab !== "incidents";
+        $("remnawave-view").hidden = tab !== "remnawave";
         $("history-view").hidden = tab !== "history";
         $("tab-dashboard").classList.toggle("active", tab === "dashboard");
         $("tab-nodes-overview").classList.toggle("active", tab === "nodes-overview");
         $("tab-incidents").classList.toggle("active", tab === "incidents");
+        $("tab-remnawave").classList.toggle("active", tab === "remnawave");
         $("tab-history").classList.toggle("active", tab === "history");
 
         if (tab === "history") {
@@ -3851,6 +4223,9 @@
         }
         if (tab === "incidents") {
           await loadIncidents();
+        }
+        if (tab === "remnawave") {
+          await loadRemnawave();
         }
       }
 
@@ -4257,6 +4632,7 @@
       $("tab-dashboard").addEventListener("click", () => switchTab("dashboard"));
       $("tab-nodes-overview").addEventListener("click", () => switchTab("nodes-overview"));
       $("tab-incidents").addEventListener("click", () => switchTab("incidents"));
+      $("tab-remnawave").addEventListener("click", () => switchTab("remnawave"));
       $("tab-history").addEventListener("click", () => switchTab("history"));
       ["run", "filters", "schedule", "telegram", "backup"].forEach((pane) => {
         $(`settings-tab-${pane}`).addEventListener("click", () => switchSettingsPane(pane));
@@ -4265,6 +4641,20 @@
       $("refresh-subscription").addEventListener("click", refreshSubscription);
       $("refresh-nodes-overview").addEventListener("click", loadNodesOverview);
       $("refresh-incidents").addEventListener("click", loadIncidents);
+      $("remnawave-save").addEventListener("click", saveRemnawave);
+      $("remnawave-sync").addEventListener("click", syncRemnawave);
+      $("remnawave-add-pair").addEventListener("click", () => {
+        const pairs = remnawavePairRowsFromForm();
+        pairs.push({ internalSquadUuid: "", externalSquadUuid: "", monitoringOnly: false });
+        renderRemnawavePairs(pairs);
+      });
+      $("remnawave-pairs").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-remnawave-remove-pair]");
+        if (!button) return;
+        const pairs = remnawavePairRowsFromForm();
+        pairs.splice(Number(button.dataset.remnawaveRemovePair), 1);
+        renderRemnawavePairs(pairs);
+      });
       $("refresh-node-geo").addEventListener("click", refreshNodeGeo);
       $("nodes-overview").addEventListener("click", (event) => {
         const mergeButton = event.target.closest("[data-merge-node]");

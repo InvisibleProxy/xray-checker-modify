@@ -15,6 +15,7 @@ import (
 	"xray-checker/models"
 	"xray-checker/nodearchive"
 	"xray-checker/nodemerge"
+	remnawaveannounce "xray-checker/remnawave"
 	"xray-checker/speedtest"
 	"xray-checker/subscription"
 	"xray-checker/telegram"
@@ -182,6 +183,42 @@ func main() {
 	speedTestManager.SetCountryResolver(nodeArchive.ClaimedCountryCode)
 	nodeMergeCoordinator := nodemerge.NewCoordinator("data", nodeArchive, speedTestManager)
 
+	var remnawaveAPI remnawaveannounce.API
+	if config.CLIConfig.Remnawave.Enabled {
+		client, clientErr := remnawaveannounce.NewHTTPClient(
+			config.CLIConfig.Remnawave.APIURL,
+			config.CLIConfig.Remnawave.APIToken,
+			time.Duration(config.CLIConfig.Remnawave.TimeoutSeconds)*time.Second,
+		)
+		if clientErr != nil {
+			logger.Fatal("Failed to configure Remnawave announce integration: %v", clientErr)
+		}
+		remnawaveAPI = client
+	}
+	remnawaveService := remnawaveannounce.NewService(remnawaveannounce.Options{
+		MasterEnabled:      config.CLIConfig.Remnawave.Enabled,
+		APIURL:             config.CLIConfig.Remnawave.APIURL,
+		APITokenConfigured: strings.TrimSpace(config.CLIConfig.Remnawave.APIToken) != "",
+		ConfigPath:         "data/remnawave_announce_config.json",
+		RuntimePath:        "data/remnawave_announce_state.json",
+		API:                remnawaveAPI,
+		ProxySource:        proxyChecker,
+		IncidentSource:     nodeArchive,
+		RequestTimeout:     time.Duration(config.CLIConfig.Remnawave.TimeoutSeconds) * time.Second,
+		ReconcileInterval:  time.Duration(config.CLIConfig.Remnawave.ReconcileIntervalSeconds) * time.Second,
+		TopologyInterval:   time.Duration(config.CLIConfig.Remnawave.TopologyIntervalSeconds) * time.Second,
+	})
+	if err := remnawaveService.LoadConfig(); err != nil {
+		if restoreApplied {
+			handleStateLoadError("Remnawave announce config", err)
+		} else {
+			logger.Warn("Failed to load Remnawave announce config; using disabled defaults: %v", err)
+		}
+	}
+	if err := remnawaveService.LoadRuntime(); err != nil {
+		logger.Warn("Failed to load Remnawave announce ownership state; remote writes are disabled: %v", err)
+	}
+
 	telegramService := telegram.NewService(
 		"data/telegram_config.json",
 		proxyChecker,
@@ -203,6 +240,8 @@ func main() {
 	if err := nodeArchive.RecordAvailability(); err != nil {
 		logger.Warn("Failed to record restored node availability: %v", err)
 	}
+	remnawaveService.Start()
+	defer remnawaveService.Stop()
 	automaticBackups := backup.NewAutomaticScheduler(backupCreator, "data/backups")
 	automaticBackups.Start()
 	defer automaticBackups.Stop()
@@ -228,6 +267,7 @@ func main() {
 		if err := nodeArchive.RecordAvailability(); err != nil {
 			logger.Warn("Failed to record node availability after manual check: %v", err)
 		}
+		remnawaveService.Trigger()
 		notifyRecoveredNodes(recovered)
 		return checkErr
 	}
@@ -248,6 +288,7 @@ func main() {
 		if err := nodeArchive.RecordAvailability(); err != nil {
 			logger.Warn("Failed to record node availability: %v", err)
 		}
+		remnawaveService.ObserveFullCheck()
 		go func() {
 			if !telegramService.NotifyNodeStatuses() {
 				notifyRecoveredNodes(recovered)
@@ -299,6 +340,7 @@ func main() {
 							logger.Warn("Failed to record recovered node availability: %v", archiveErr)
 						}
 						notifyRecoveredNodes(recovered)
+						remnawaveService.Trigger()
 					}
 					if err != nil {
 						logger.Warn("Fast recovery check failed: %v", err)
@@ -384,6 +426,7 @@ func main() {
 		if err := telegramService.PruneInactiveMutedNodes(); err != nil {
 			logger.Warn("Failed to prune inactive muted Telegram nodes: %v", err)
 		}
+		remnawaveService.Trigger()
 
 		refreshResult.Updated = true
 		refreshResult.Message = "Configuration updated"
@@ -443,6 +486,8 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/schedules", web.AdminScheduleHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/telegram/test", web.AdminTelegramTestHandler(telegramService))
 	protectedHandler.Handle("/api/v1/admin/telegram", web.AdminTelegramHandler(telegramService))
+	protectedHandler.Handle("/api/v1/admin/remnawave/sync", web.AdminRemnawaveSyncHandler(remnawaveService))
+	protectedHandler.Handle("/api/v1/admin/remnawave", web.AdminRemnawaveHandler(remnawaveService))
 
 	if config.CLIConfig.Web.Public {
 		mux.Handle("/", web.IndexHandler(version, proxyChecker))

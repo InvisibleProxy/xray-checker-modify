@@ -47,12 +47,18 @@
 - Downtime в node archive накопительный и не должен очищаться вместе со speedtest history.
 - GeoCheck выполняется только для active-нод. Retired StableID должен игнорироваться и при явном запросе через admin API.
 - Incident journal хранит node и mass records; массовая корреляция требует одинакового failure code, минимум 3 и минимум 50% active scope. `check_endpoint` всегда маркируется как вероятностный вывод.
+- Remnawave announce mapping всегда строится по `StableID → Host UUID`; имя checker-ноды и Host remark остаются только display-полями. Несколько StableID могут ссылаться на один Host, а redundancy нескольких Hosts задаётся явным `GroupKey`.
+- Host не принадлежит External Squad напрямую. Audience определяется через Host inbound, membership inbound во внутреннем скваде, `excludedInternalSquads` и явную persisted пару Internal → External. Disabled/hidden Hosts исключаются; сервисная пара checker обязана быть `MonitoringOnly` и не может стать target.
+- Новый Remnawave announce требует и минимального downtime, и нескольких полных availability-итераций. Manual check и быстрый recovery-loop не увеличивают confirmation counter; active массовый `check_endpoint` не создаёт новый пользовательский announce. Recovery требует отдельного стабильного окна и не публикует специальное recovery-сообщение.
+- Remnawave write сначала перечитывает External Squads, case-insensitively merge-ит только `announce` в полной карте `responseHeadersAdd` и использует `rwEncodeBase64:`. Не перезаписывайте неизвестный header и не удаляйте значение, не совпадающее с persisted ownership state.
+- Remnawave API token читается только из env и не попадает в persisted config, admin API, логи или backup. Минимальные scopes: `hosts:list`, `internal-squads:list`, `external-squads:list`, `external-squads:update`; последний scope всё равно даёт endpoint-wide write access.
 - Failure code строится из proxy-check и прямых TCP/ping diagnostics; отсутствие ICMP reply не является самостоятельным доказательством offline.
 - Активные ноды управляются подпиской; удалять вручную можно только retired-записи.
 - Node merge разрешён только retired source → выбранный администратором active target после preview и совпадения нормализованных `SubName`, protocol и server. Name и port могут измениться, но preview обязан явно показать расхождения; confirmation token должен быть привязан к конкретному persisted candidate, а UI не должен выбирать target автоматически.
 - Node merge применяется только на startup к `node_registry.json` и `speedtest_results.json`. До успешного `Load` speedtest, node archive и Telegram исходные файлы сохраняются для byte-for-byte rollback; incident ID не меняются, source StableID re-keyed, а lineage прежних ID не теряется.
+- Node merge не переносит Remnawave `StableID → Host UUID`; после merge mapping active target меняется оператором вручную. Не расширяйте merge-транзакцию на Remnawave config без отдельного дизайна rollback и проверки аудитории.
 - Backup restore и node merge не должны одновременно находиться в pending/applied/rollback state; их web staging обязан удерживать общий transaction gate до публикации операции.
-- Backup не должен включать environment, geo-файлы, `xray_config.json` и Telegram secrets/admin IDs.
+- Backup не должен включать environment, geo-файлы, `xray_config.json`, Telegram secrets/admin IDs, Remnawave API token и `remnawave_announce_state.json`. Versioned `remnawave_announce_config.json` с non-secret policy/mappings входит в typed backup.
 - `Caddyfile.example` является источником шаблона reverse proxy; локальный `Caddyfile` игнорируется и не должен попадать в коммиты.
 - Автоматические backup: максимум один за UTC-день, максимум 7 файлов и максимум 7 суток.
 - Restore всегда проходит типизированную JSON-валидацию и staging; применение — только на следующем startup с rollback. Commit допустим лишь после успешного `Load` у всех владельцев restored state.
@@ -72,6 +78,7 @@
 - Не коммитьте secrets, `.env`, runtime `data/`, `geo/`, `xray_config.json`, логи и backup ZIP.
 - Новая persisted-схема должна иметь безопасную нормализацию старых файлов и тест миграции.
 - Новые map по нодам должны использовать `StableID`; отдельно учитывайте возможные ID-коллизии.
+- Изменение persisted Remnawave policy/mappings требует migration/normalization test; ownership runtime не переносится через backup/restore между инсталляциями.
 - После заметной UI-правки требуется desktop browser check, а не только парсинг шаблона. Mobile viewport и отдельная mobile browser QA для админки не требуются и не выполняются.
 - GitHub Actions и Dependabot в этом форке отключены. Не добавляйте `.github/workflows/` и `.github/dependabot.yml`; обязательные проверки выполняются локально перед push.
 
@@ -107,6 +114,7 @@ docker build --build-arg ENABLE_UPX=false -t xray-checker:check .
 - speedtest: manual и scheduled paths, per-node URL, retention и persistence;
 - backup/restore: manifest, hash, дубликаты JSON-ключей, typed schema, interrupted apply/commit, path traversal, missing files, rollback, secrets и rotation;
 - Telegram: HTML/Rich HTML escaping, структура summary/details, fallback policy, сохранённый TestConfig, persisted low-speed/deadline retries, mass incident grouping, mute scopes, alert lifecycle и отсутствие токенов в выводе;
+- Remnawave: API paths/scopes, bearer secrecy, topology exclusions, Internal → External audience pairs, StableID mapping, redundancy groups, full-check confirmation, `check_endpoint` suppression, recovery hysteresis, header merge/ownership conflicts и отсутствие token/raw inbound в admin snapshot;
 - API: обновить `web/openapi.yaml`, проверить все локальные `$ref` и handler tests;
 - UI: только desktop viewport, filters, selection, admin auth и отсутствие ошибок в console; mobile browser check не запускать;
 - Dockerfile/Compose: builder build и финальный production image.

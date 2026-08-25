@@ -18,6 +18,7 @@ import (
 	"xray-checker/models"
 	"xray-checker/nodearchive"
 	"xray-checker/nodemerge"
+	"xray-checker/remnawave"
 	"xray-checker/speedtest"
 	"xray-checker/telegram"
 )
@@ -100,6 +101,12 @@ type AdminNodeMergeService interface {
 
 type AdminBackupRestoreGuard func() (release func(), err error)
 
+type AdminRemnawaveService interface {
+	Snapshot() remnawave.Snapshot
+	UpdateSettings(remnawave.Settings) (remnawave.Snapshot, error)
+	SyncNow(context.Context) (remnawave.Snapshot, error)
+}
+
 func AdminHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/admin" && r.URL.Path != "/admin/" {
@@ -112,6 +119,52 @@ func AdminHandler() http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+	}
+}
+
+func AdminRemnawaveHandler(service AdminRemnawaveService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, service.Snapshot())
+		case http.MethodPut:
+			r.Body = http.MaxBytesReader(w, r.Body, 2*1024*1024)
+			var settings remnawave.Settings
+			decoder := json.NewDecoder(r.Body)
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&settings); err != nil {
+				writeError(w, "Invalid JSON body", http.StatusBadRequest)
+				return
+			}
+			var trailing any
+			if err := decoder.Decode(&trailing); err != io.EOF {
+				writeError(w, "JSON body must contain one object", http.StatusBadRequest)
+				return
+			}
+			snapshot, err := service.UpdateSettings(settings)
+			if err != nil {
+				writeError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, snapshot)
+		default:
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	}
+}
+
+func AdminRemnawaveSyncHandler(service AdminRemnawaveService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		snapshot, err := service.SyncNow(r.Context())
+		if err != nil {
+			writeError(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(w, snapshot)
 	}
 }
 

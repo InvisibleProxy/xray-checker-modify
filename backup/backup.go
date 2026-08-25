@@ -19,6 +19,7 @@ const formatVersion = 1
 var dataFileNames = []string{
 	"node_alert_state.json",
 	"node_registry.json",
+	"remnawave_announce_config.json",
 	"speedtest_results.json",
 	"speedtest_schedule.json",
 	"telegram_config.json",
@@ -29,6 +30,7 @@ var excludedData = []string{
 	"geo files",
 	"xray_config.json",
 	"Telegram credentials and administrator IDs",
+	"Remnawave API token and announce ownership runtime",
 }
 
 type FileInfo struct {

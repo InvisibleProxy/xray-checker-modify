@@ -73,3 +73,32 @@ func TestValidateStillRequiresProtectedMetricsForPublicDashboard(t *testing.T) {
 		t.Fatal("public dashboard without protected metrics was accepted")
 	}
 }
+
+func TestValidateRemnawaveAnnounceConfiguration(t *testing.T) {
+	base := func() CLI {
+		var cfg CLI
+		cfg.RunOnce = true
+		cfg.Remnawave.Enabled = true
+		cfg.Remnawave.APIURL = "https://panel.example"
+		cfg.Remnawave.APIToken = "token"
+		cfg.Remnawave.TimeoutSeconds = 10
+		cfg.Remnawave.ReconcileIntervalSeconds = 60
+		cfg.Remnawave.TopologyIntervalSeconds = 300
+		return cfg
+	}
+
+	valid := base()
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid Remnawave config rejected: %v", err)
+	}
+	missingToken := base()
+	missingToken.Remnawave.APIToken = " "
+	if err := missingToken.Validate(); err == nil {
+		t.Fatal("missing Remnawave API token was accepted")
+	}
+	credentialedURL := base()
+	credentialedURL.Remnawave.APIURL = "https://user:password@panel.example"
+	if err := credentialedURL.Validate(); err == nil {
+		t.Fatal("credentialed Remnawave API URL was accepted")
+	}
+}

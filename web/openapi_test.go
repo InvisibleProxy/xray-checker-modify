@@ -59,6 +59,8 @@ func TestOpenAPISpecDocumentsEveryForkAdminRoute(t *testing.T) {
 		"/api/v1/admin/schedules",
 		"/api/v1/admin/telegram",
 		"/api/v1/admin/telegram/test",
+		"/api/v1/admin/remnawave",
+		"/api/v1/admin/remnawave/sync",
 	}
 	for _, path := range want {
 		if _, ok := paths[path]; !ok {

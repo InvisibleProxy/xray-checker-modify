@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -106,6 +107,35 @@ func TestCreatorCreatesManifestWhenDataFilesAreMissing(t *testing.T) {
 	}
 	if len(result.Manifest.Files) != 0 {
 		t.Fatalf("expected empty file list, got %+v", result.Manifest.Files)
+	}
+}
+
+func TestCreatorIncludesRemnawaveSettingsButExcludesOwnershipRuntime(t *testing.T) {
+	dataDir := t.TempDir()
+	config := []byte(`{"version":1,"policy":{"enabled":true,"outageMinutes":15,"minimumFailures":3,"recoveryMinutes":5},"squadPairs":[],"nodeMappings":{}}`)
+	writeTestFile(t, filepath.Join(dataDir, "remnawave_announce_config.json"), config)
+	writeTestFile(t, filepath.Join(dataDir, "remnawave_announce_state.json"), []byte(`{"version":1,"managed":{"external-1":{"value":"rwEncodeBase64:secret runtime","message":"secret runtime"}}}`))
+
+	var archive bytes.Buffer
+	result, err := NewCreator(dataDir, "test").Create(&archive)
+	if err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+	entries := readArchive(t, archive.Bytes())
+	if _, ok := entries["data/remnawave_announce_config.json"]; !ok {
+		t.Fatal("Remnawave settings were not included")
+	}
+	if _, ok := entries["data/remnawave_announce_state.json"]; ok {
+		t.Fatal("Remnawave ownership runtime was included")
+	}
+	foundExclusion := false
+	for _, exclusion := range result.Manifest.Excluded {
+		if strings.Contains(exclusion, "Remnawave API token") {
+			foundExclusion = true
+		}
+	}
+	if !foundExclusion {
+		t.Fatalf("manifest does not explain Remnawave exclusions: %+v", result.Manifest.Excluded)
 	}
 }
 
