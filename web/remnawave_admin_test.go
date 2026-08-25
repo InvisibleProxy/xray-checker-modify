@@ -45,14 +45,14 @@ func TestAdminRemnawaveHandlerGetsAndUpdatesSanitizedSettings(t *testing.T) {
 		t.Fatalf("GET status/body = %d %s", getRecorder.Code, getRecorder.Body.String())
 	}
 
-	putBody := `{"policy":{"enabled":true,"outageMinutes":15,"minimumFailures":3,"recoveryMinutes":5},"squadPairs":[{"internalSquadUuid":"internal-1","externalSquadUuid":"external-1"}],"nodeMappings":{"stable-1":{"hostUuid":"host-1","groupKey":"de","publicLabel":"Германия"}}}`
+	putBody := `{"policy":{"enabled":true,"outageMinutes":15,"minimumFailures":3,"recoveryMinutes":5,"messages":{"singleLocation":{"enabled":true,"template":"Недоступна: {location}"},"multipleLocations":{"enabled":true,"template":"Недоступны: {locations}"},"allLocations":{"enabled":true,"template":"Все недоступны"},"healthy":{"enabled":false,"template":"Всё стабильно"},"partialFallback":"Недоступно: {unavailable}/{total}"}},"squadPairs":[{"internalSquadUuid":"internal-1","externalSquadUuid":"external-1"}],"nodeMappings":{"stable-1":{"hostUuid":"host-1","groupKey":"de","publicLabel":"Германия"}}}`
 	put := httptest.NewRequest(http.MethodPut, "/api/v1/admin/remnawave", strings.NewReader(putBody))
 	putRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(putRecorder, put)
 	if putRecorder.Code != http.StatusOK {
 		t.Fatalf("PUT status/body = %d %s", putRecorder.Code, putRecorder.Body.String())
 	}
-	if !service.updated.Policy.Enabled || service.updated.NodeMappings["stable-1"].HostUUID != "host-1" {
+	if !service.updated.Policy.Enabled || service.updated.NodeMappings["stable-1"].HostUUID != "host-1" || service.updated.Policy.Messages.SingleLocation.Template != "Недоступна: {location}" {
 		t.Fatalf("updated settings = %+v", service.updated)
 	}
 	var envelope struct {

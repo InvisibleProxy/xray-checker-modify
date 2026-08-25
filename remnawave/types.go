@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	ConfigVersion  = 1
+	ConfigVersion  = 2
 	RuntimeVersion = 2
 
 	announceHeader       = "announce"
@@ -25,11 +25,27 @@ const (
 // Enabled is deliberately persisted separately from the environment master
 // switch so restoring or copying settings cannot enable API access by itself.
 type Policy struct {
-	Enabled         bool   `json:"enabled"`
-	OutageMinutes   int    `json:"outageMinutes"`
-	MinimumFailures int    `json:"minimumFailures"`
-	RecoveryMinutes int    `json:"recoveryMinutes"`
-	NormalMessage   string `json:"normalMessage,omitempty"`
+	Enabled         bool             `json:"enabled"`
+	OutageMinutes   int              `json:"outageMinutes"`
+	MinimumFailures int              `json:"minimumFailures"`
+	RecoveryMinutes int              `json:"recoveryMinutes"`
+	Messages        MessageScenarios `json:"messages"`
+	// NormalMessage is accepted only to migrate v1 files and older API
+	// clients. normalizeConfig moves it into Messages.Healthy and clears it.
+	NormalMessage string `json:"normalMessage,omitempty"`
+}
+
+type MessageScenario struct {
+	Enabled  bool   `json:"enabled"`
+	Template string `json:"template"`
+}
+
+type MessageScenarios struct {
+	SingleLocation    MessageScenario `json:"singleLocation"`
+	MultipleLocations MessageScenario `json:"multipleLocations"`
+	AllLocations      MessageScenario `json:"allLocations"`
+	Healthy           MessageScenario `json:"healthy"`
+	PartialFallback   string          `json:"partialFallback"`
 }
 
 type SquadPair struct {
@@ -165,6 +181,7 @@ func defaultPolicy() Policy {
 		OutageMinutes:   defaultOutageMinutes,
 		MinimumFailures: defaultMinFailures,
 		RecoveryMinutes: defaultRecoveryMins,
+		Messages:        defaultMessageScenarios(),
 	}
 }
 
@@ -185,9 +202,11 @@ func defaultRuntime() RuntimeFile {
 }
 
 func normalizeConfig(config *ConfigFile) {
-	if config.Version == 0 {
-		// Version 0 is the short-lived unversioned development format. Its
-		// fields are identical to v1, so migration is lossless.
+	sourceVersion := config.Version
+	if config.Version == 0 || config.Version == 1 {
+		// v0 was the unversioned development format. v1 had hardcoded outage
+		// messages and one optional normalMessage. Both migrate losslessly to
+		// the configurable scenario model.
 		config.Version = ConfigVersion
 	}
 	if config.Policy.OutageMinutes == 0 {
@@ -199,7 +218,13 @@ func normalizeConfig(config *ConfigFile) {
 	if config.Policy.RecoveryMinutes == 0 {
 		config.Policy.RecoveryMinutes = defaultRecoveryMins
 	}
-	config.Policy.NormalMessage = strings.TrimSpace(config.Policy.NormalMessage)
+	legacyNormalMessage := strings.TrimSpace(config.Policy.NormalMessage)
+	messagesWereMissing := messageScenariosMissing(config.Policy.Messages)
+	normalizeMessageScenarios(&config.Policy.Messages)
+	if legacyNormalMessage != "" && (sourceVersion < ConfigVersion || messagesWereMissing) {
+		config.Policy.Messages.Healthy = MessageScenario{Enabled: true, Template: legacyNormalMessage}
+	}
+	config.Policy.NormalMessage = ""
 	if config.SquadPairs == nil {
 		config.SquadPairs = []SquadPair{}
 	}
@@ -249,6 +274,9 @@ func validateConfig(config ConfigFile) error {
 		return fmt.Errorf("recoveryMinutes must be between 1 and 1440")
 	}
 	if err := validateDisplayText("normalMessage", config.Policy.NormalMessage, maxMessageRunes); err != nil {
+		return err
+	}
+	if err := validateMessageScenarios(config.Policy.Messages); err != nil {
 		return err
 	}
 

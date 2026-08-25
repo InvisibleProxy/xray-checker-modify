@@ -108,6 +108,32 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 	}
 }
 
+func TestAdminTemplateExposesRemnawaveMessageConstructor(t *testing.T) {
+	var rendered bytes.Buffer
+	if err := RenderAdmin(&rendered); err != nil {
+		t.Fatalf("RenderAdmin() error = %v", err)
+	}
+	html := rendered.String()
+	for _, marker := range []string{
+		`id="remnawave-message-constructor"`,
+		`id="remnawave-message-single-template"`,
+		`id="remnawave-message-multiple-template"`,
+		`id="remnawave-message-all-template"`,
+		`id="remnawave-message-healthy-template"`,
+		`id="remnawave-message-fallback-template"`,
+		`data-remnawave-token="{location}"`,
+		`data-remnawave-token="{locations}"`,
+		`function renderRemnawaveMessagePreviews()`,
+		`function insertRemnawaveTemplateToken(targetID, token)`,
+		`singleLocation: remnawaveScenarioFromForm("single")`,
+		`partialFallback: $("remnawave-message-fallback-template").value.trim()`,
+	} {
+		if !strings.Contains(html, marker) {
+			t.Fatalf("admin template does not contain %q", marker)
+		}
+	}
+}
+
 func TestAdminNodeMergePreviewAndStageHandlers(t *testing.T) {
 	service := &nodeMergeServiceStub{
 		preview: nodemerge.Preview{

@@ -189,6 +189,7 @@
       }
       input,
       select,
+      textarea,
       button {
         border-radius: 6px;
         border: 1px solid var(--border);
@@ -198,8 +199,13 @@
         font: inherit;
       }
       input:not([type="checkbox"]),
-      select {
+      select,
+      textarea {
         width: 100%;
+      }
+      textarea {
+        min-height: 78px;
+        resize: vertical;
       }
       input[type="checkbox"] {
         width: 16px;
@@ -489,6 +495,58 @@
         display: grid;
         grid-template-columns: repeat(4, minmax(150px, 1fr));
         gap: 10px;
+      }
+      .remnawave-template-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .remnawave-template-card {
+        display: grid;
+        align-content: start;
+        gap: 10px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--panel-2);
+        padding: 12px;
+      }
+      .remnawave-template-card.wide {
+        grid-column: 1 / -1;
+      }
+      .remnawave-template-card > .row {
+        justify-content: space-between;
+      }
+      .remnawave-template-tokens {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .remnawave-template-tokens button {
+        padding: 5px 8px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 11px;
+      }
+      .remnawave-template-preview {
+        min-height: 54px;
+        border-left: 3px solid var(--blue);
+        border-radius: 4px;
+        background: var(--panel-3);
+        padding: 8px 10px;
+      }
+      .remnawave-template-preview span,
+      .remnawave-template-preview strong {
+        display: block;
+      }
+      .remnawave-template-preview span {
+        margin-bottom: 4px;
+        color: var(--muted);
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .remnawave-template-preview strong {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
       }
       .remnawave-table {
         min-width: 880px;
@@ -1107,6 +1165,12 @@
         .remnawave-policy-grid {
           grid-template-columns: repeat(2, minmax(0, 1fr));
         }
+        .remnawave-template-grid {
+          grid-template-columns: 1fr;
+        }
+        .remnawave-template-card.wide {
+          grid-column: auto;
+        }
         header {
           align-items: flex-start;
           flex-direction: column;
@@ -1662,14 +1726,105 @@
               <input id="remnawave-recovery-minutes" type="number" min="1" max="1440" step="1" />
             </label>
           </div>
-          <label>
-            Message when everything is stable (optional)
-            <input id="remnawave-normal-message" type="text" maxlength="240" placeholder="Leave blank to restore the base or remove checker-only announce" />
-          </label>
+        </section>
+
+        <section id="remnawave-message-constructor" class="panel stack">
+          <div>
+            <h2>Message constructor</h2>
+            <div class="muted">Enable the user-impact states that should keep a checker status line in the subscription announce.</div>
+          </div>
+          <div class="hint">
+            Reconcile runs after a confirmed outage, a change in affected locations, a partial/total transition,
+            stable recovery, or saved settings. Manual checks and the fast recovery loop do not count as outage
+            confirmations by themselves. A healthy redundancy member, unknown state, and probable
+            <code>check_endpoint</code> incidents do not create a new outage message.
+          </div>
+          <div class="remnawave-template-grid">
+            <article class="remnawave-template-card">
+              <label class="row">
+                <span>One unavailable location</span>
+                <input id="remnawave-message-single-enabled" type="checkbox" />
+              </label>
+              <label>
+                Template
+                <textarea id="remnawave-message-single-template" maxlength="240" rows="3"></textarea>
+              </label>
+              <div class="remnawave-template-tokens" aria-label="Single-location placeholders">
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-single-template" data-remnawave-token="{location}">{location}</button>
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-single-template" data-remnawave-token="{unavailable}">{unavailable}</button>
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-single-template" data-remnawave-token="{total}">{total}</button>
+              </div>
+              <div class="remnawave-template-preview"><span>Preview</span><strong id="remnawave-message-single-preview"></strong></div>
+            </article>
+
+            <article class="remnawave-template-card">
+              <label class="row">
+                <span>Several unavailable locations</span>
+                <input id="remnawave-message-multiple-enabled" type="checkbox" />
+              </label>
+              <label>
+                Template
+                <textarea id="remnawave-message-multiple-template" maxlength="240" rows="3"></textarea>
+              </label>
+              <div class="remnawave-template-tokens" aria-label="Multiple-location placeholders">
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-multiple-template" data-remnawave-token="{locations}">{locations}</button>
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-multiple-template" data-remnawave-token="{unavailable}">{unavailable}</button>
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-multiple-template" data-remnawave-token="{total}">{total}</button>
+              </div>
+              <div class="remnawave-template-preview"><span>Preview</span><strong id="remnawave-message-multiple-preview"></strong></div>
+            </article>
+
+            <article class="remnawave-template-card">
+              <label class="row">
+                <span>All audience locations unavailable</span>
+                <input id="remnawave-message-all-enabled" type="checkbox" />
+              </label>
+              <label>
+                Template
+                <textarea id="remnawave-message-all-template" maxlength="240" rows="3"></textarea>
+              </label>
+              <div class="remnawave-template-tokens" aria-label="Total-outage placeholders">
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-all-template" data-remnawave-token="{unavailable}">{unavailable}</button>
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-all-template" data-remnawave-token="{total}">{total}</button>
+              </div>
+              <div class="remnawave-template-preview"><span>Preview</span><strong id="remnawave-message-all-preview"></strong></div>
+            </article>
+
+            <article class="remnawave-template-card">
+              <label class="row">
+                <span>Everything stable</span>
+                <input id="remnawave-message-healthy-enabled" type="checkbox" />
+              </label>
+              <label>
+                Template
+                <textarea id="remnawave-message-healthy-template" maxlength="240" rows="3"></textarea>
+              </label>
+              <div class="remnawave-template-tokens" aria-label="Healthy-state placeholders">
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-healthy-template" data-remnawave-token="{unavailable}">{unavailable}</button>
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-healthy-template" data-remnawave-token="{total}">{total}</button>
+              </div>
+              <div class="remnawave-template-preview"><span>Preview</span><strong id="remnawave-message-healthy-preview"></strong></div>
+            </article>
+
+            <article class="remnawave-template-card wide">
+              <strong>Long location-list fallback</strong>
+              <div class="muted">Used when more than three locations are down or the rendered location list exceeds 240 characters.</div>
+              <label>
+                Template
+                <textarea id="remnawave-message-fallback-template" maxlength="240" rows="2"></textarea>
+              </label>
+              <div class="remnawave-template-tokens" aria-label="Fallback placeholders">
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-fallback-template" data-remnawave-token="{unavailable}">{unavailable}</button>
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-fallback-template" data-remnawave-token="{total}">{total}</button>
+              </div>
+              <div class="remnawave-template-preview"><span>Preview</span><strong id="remnawave-message-fallback-preview"></strong></div>
+            </article>
+          </div>
           <div class="hint">
             An existing single-line <code>rwEncodeBase64:</code> announce stays unchanged on the first line;
             xray-checker appends only its status line and restores the original value after recovery.
-            Without a base, a checker-only header is removed. Other or manually changed values are never overwritten.
+            If the healthy scenario is disabled, recovery restores the base or removes a checker-only header.
+            Other or manually changed values are never overwritten. Templates are single-line, URL-free, and limited to 240 characters after rendering.
           </div>
         </section>
 
@@ -1972,6 +2127,64 @@
         return html;
       }
 
+      function remnawaveScenarioFromForm(prefix) {
+        return {
+          enabled: $(`remnawave-message-${prefix}-enabled`).checked,
+          template: $(`remnawave-message-${prefix}-template`).value.trim(),
+        };
+      }
+
+      function renderRemnawaveTemplateExample(template, replacements) {
+        let message = template || "";
+        Object.entries(replacements).forEach(([token, value]) => {
+          message = message.split(token).join(value);
+        });
+        return message || "Empty template — the server will restore the default on save";
+      }
+
+      function renderRemnawaveMessagePreviews() {
+        const previews = [
+          {
+            prefix: "single",
+            replacements: { "{location}": "Германия", "{unavailable}": "1", "{total}": "3" },
+          },
+          {
+            prefix: "multiple",
+            replacements: { "{locations}": "«Германия», «Нидерланды»", "{unavailable}": "2", "{total}": "3" },
+          },
+          {
+            prefix: "all",
+            replacements: { "{unavailable}": "3", "{total}": "3" },
+          },
+          {
+            prefix: "healthy",
+            replacements: { "{unavailable}": "0", "{total}": "3" },
+          },
+        ];
+        previews.forEach(({ prefix, replacements }) => {
+          const enabled = $(`remnawave-message-${prefix}-enabled`).checked;
+          const preview = $(`remnawave-message-${prefix}-preview`);
+          preview.textContent = enabled
+            ? renderRemnawaveTemplateExample($(`remnawave-message-${prefix}-template`).value, replacements)
+            : "Scenario disabled — the owned checker status line is cleared for this state";
+          preview.className = enabled ? "" : "muted";
+        });
+        $("remnawave-message-fallback-preview").textContent = renderRemnawaveTemplateExample(
+          $("remnawave-message-fallback-template").value,
+          { "{unavailable}": "4", "{total}": "5" },
+        );
+      }
+
+      function insertRemnawaveTemplateToken(targetID, token) {
+        const input = $(targetID);
+        if (!input || !token) return;
+        const start = Number.isInteger(input.selectionStart) ? input.selectionStart : input.value.length;
+        const end = Number.isInteger(input.selectionEnd) ? input.selectionEnd : start;
+        input.setRangeText(token, start, end, "end");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.focus();
+      }
+
       function remnawavePairRowsFromForm() {
         return [...document.querySelectorAll("[data-remnawave-pair]")].map((row) => ({
           internalSquadUuid: row.querySelector("[data-remnawave-internal]").value,
@@ -2059,7 +2272,19 @@
         $("remnawave-outage-minutes").value = policy.outageMinutes || 15;
         $("remnawave-minimum-failures").value = policy.minimumFailures || 3;
         $("remnawave-recovery-minutes").value = policy.recoveryMinutes || 5;
-        $("remnawave-normal-message").value = policy.normalMessage || "";
+        const messages = policy.messages || {};
+        const messageFields = [
+          ["single", messages.singleLocation || {}, true],
+          ["multiple", messages.multipleLocations || {}, true],
+          ["all", messages.allLocations || {}, true],
+          ["healthy", messages.healthy || {}, false],
+        ];
+        messageFields.forEach(([prefix, scenario, defaultEnabled]) => {
+          $(`remnawave-message-${prefix}-enabled`).checked = typeof scenario.enabled === "boolean" ? scenario.enabled : defaultEnabled;
+          $(`remnawave-message-${prefix}-template`).value = scenario.template || "";
+        });
+        $("remnawave-message-fallback-template").value = messages.partialFallback || "";
+        renderRemnawaveMessagePreviews();
         renderRemnawavePairs(settings.squadPairs || []);
         renderRemnawaveNodeMappings();
 
@@ -2106,7 +2331,13 @@
             outageMinutes: Math.max(1, Number($("remnawave-outage-minutes").value || 15)),
             minimumFailures: Math.max(2, Number($("remnawave-minimum-failures").value || 3)),
             recoveryMinutes: Math.max(1, Number($("remnawave-recovery-minutes").value || 5)),
-            normalMessage: $("remnawave-normal-message").value.trim(),
+            messages: {
+              singleLocation: remnawaveScenarioFromForm("single"),
+              multipleLocations: remnawaveScenarioFromForm("multiple"),
+              allLocations: remnawaveScenarioFromForm("all"),
+              healthy: remnawaveScenarioFromForm("healthy"),
+              partialFallback: $("remnawave-message-fallback-template").value.trim(),
+            },
           },
           squadPairs: remnawavePairRowsFromForm(),
           nodeMappings,
@@ -4653,6 +4884,13 @@
       $("refresh-incidents").addEventListener("click", loadIncidents);
       $("remnawave-save").addEventListener("click", saveRemnawave);
       $("remnawave-sync").addEventListener("click", syncRemnawave);
+      $("remnawave-message-constructor").addEventListener("input", renderRemnawaveMessagePreviews);
+      $("remnawave-message-constructor").addEventListener("change", renderRemnawaveMessagePreviews);
+      $("remnawave-message-constructor").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-remnawave-template-target]");
+        if (!button) return;
+        insertRemnawaveTemplateToken(button.dataset.remnawaveTemplateTarget, button.dataset.remnawaveToken || "");
+      });
       $("remnawave-add-pair").addEventListener("click", () => {
         const pairs = remnawavePairRowsFromForm();
         pairs.push({ internalSquadUuid: "", externalSquadUuid: "", monitoringOnly: false });

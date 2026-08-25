@@ -133,7 +133,7 @@ func TestServiceUsesAudienceTopologyAndGroupRedundancy(t *testing.T) {
 	service := testService(t, api, proxies, &fakeIncidentSource{}, &now)
 	service.config = ConfigFile{
 		Version: ConfigVersion,
-		Policy:  Policy{Enabled: true, OutageMinutes: 15, MinimumFailures: 3, RecoveryMinutes: 5},
+		Policy:  Policy{Enabled: true, OutageMinutes: 15, MinimumFailures: 3, RecoveryMinutes: 5, Messages: defaultMessageScenarios()},
 		SquadPairs: []SquadPair{
 			{InternalSquadUUID: "internal-users", ExternalSquadUUID: "external-users"},
 			{InternalSquadUUID: "internal-service", ExternalSquadUUID: "external-service", MonitoringOnly: true},
@@ -388,7 +388,7 @@ func TestServicePreservesDuplicateCaseInsensitiveAnnounceHeaders(t *testing.T) {
 	}
 }
 
-func TestServicePublishesNormalMessageOnlyAfterHealthyStatus(t *testing.T) {
+func TestServicePublishesHealthyScenarioOnlyAfterHealthyStatus(t *testing.T) {
 	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
 	api, proxies := oneAudienceFixture(now, map[string]string{})
 	delete(proxies.statuses, "stable-a")
@@ -406,6 +406,39 @@ func TestServicePublishesNormalMessageOnlyAfterHealthyStatus(t *testing.T) {
 	}
 	if len(api.updates) != 1 || api.updates[0].Headers[announceHeader] != announceValuePrefix+"Всё стабильно" {
 		t.Fatalf("stable message update = %+v", api.updates)
+	}
+}
+
+func TestUpdateSettingsPreservesScenarioTemplatesForLegacyClient(t *testing.T) {
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	service := testService(t, &fakeAPI{}, &fakeProxySource{}, &fakeIncidentSource{}, &now)
+	service.config = audienceConfig("")
+	service.config.Policy.Messages.SingleLocation.Template = "CUSTOM {location}"
+	service.config.Policy.Messages.MultipleLocations.Enabled = false
+
+	legacy := configSettings(service.config)
+	legacy.Policy.Messages = MessageScenarios{}
+	legacy.Policy.NormalMessage = "Стабильно по старому API"
+	snapshot, err := service.UpdateSettings(legacy)
+	if err != nil {
+		t.Fatalf("legacy UpdateSettings: %v", err)
+	}
+	if snapshot.Settings.Policy.Messages.SingleLocation.Template != "CUSTOM {location}" || snapshot.Settings.Policy.Messages.MultipleLocations.Enabled {
+		t.Fatalf("legacy update reset outage scenarios: %+v", snapshot.Settings.Policy.Messages)
+	}
+	if !snapshot.Settings.Policy.Messages.Healthy.Enabled || snapshot.Settings.Policy.Messages.Healthy.Template != "Стабильно по старому API" {
+		t.Fatalf("legacy normalMessage was not migrated: %+v", snapshot.Settings.Policy.Messages.Healthy)
+	}
+
+	legacy = snapshot.Settings
+	legacy.Policy.Messages = MessageScenarios{}
+	legacy.Policy.NormalMessage = ""
+	snapshot, err = service.UpdateSettings(legacy)
+	if err != nil {
+		t.Fatalf("legacy empty UpdateSettings: %v", err)
+	}
+	if snapshot.Settings.Policy.Messages.Healthy.Enabled || snapshot.Settings.Policy.Messages.SingleLocation.Template != "CUSTOM {location}" {
+		t.Fatalf("legacy empty normalMessage changed the wrong scenarios: %+v", snapshot.Settings.Policy.Messages)
 	}
 }
 
@@ -433,7 +466,7 @@ func TestServiceTargetsOnlyHostAudienceInternalSquad(t *testing.T) {
 	service := testService(t, api, proxies, &fakeIncidentSource{}, &now)
 	service.config = ConfigFile{
 		Version: ConfigVersion,
-		Policy:  Policy{Enabled: true, OutageMinutes: 15, MinimumFailures: 3, RecoveryMinutes: 5},
+		Policy:  Policy{Enabled: true, OutageMinutes: 15, MinimumFailures: 3, RecoveryMinutes: 5, Messages: defaultMessageScenarios()},
 		SquadPairs: []SquadPair{
 			{InternalSquadUUID: "internal-1", ExternalSquadUUID: "external-1"},
 			{InternalSquadUUID: "internal-2", ExternalSquadUUID: "external-2"},
@@ -454,6 +487,100 @@ func TestServiceTargetsOnlyHostAudienceInternalSquad(t *testing.T) {
 	}
 }
 
+func TestServiceUpdatesAnnounceAcrossConfiguredImpactScenarios(t *testing.T) {
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	api := &fakeAPI{
+		hosts: []Host{
+			{UUID: "host-de", Remark: "Германия", Inbound: HostInbound{ConfigProfileInboundUUID: "inbound-users"}},
+			{UUID: "host-nl", Remark: "Нидерланды", Inbound: HostInbound{ConfigProfileInboundUUID: "inbound-users"}},
+			{UUID: "host-us", Remark: "США", Inbound: HostInbound{ConfigProfileInboundUUID: "inbound-users"}},
+		},
+		internal: []InternalSquad{{UUID: "internal-users", Name: "Users", Inbounds: []InternalInbound{{UUID: "inbound-users"}}}},
+		external: []ExternalSquad{{UUID: "external-users", Name: "Plan 1", ResponseHeadersAdd: map[string]string{}}},
+	}
+	proxies := &fakeProxySource{
+		proxies: []*models.ProxyConfig{
+			{StableID: "stable-de", Name: "DE"},
+			{StableID: "stable-nl", Name: "NL"},
+			{StableID: "stable-us", Name: "US"},
+		},
+		statuses: map[string]checker.ProxyStatusDetails{},
+	}
+	proxies.setOffline(now.Add(-20*time.Minute), "stable-de")
+	proxies.setOnline("stable-nl", "stable-us")
+	messages := defaultMessageScenarios()
+	messages.SingleLocation.Template = "ONE {location}"
+	messages.MultipleLocations.Template = "MANY {locations}"
+	messages.AllLocations.Template = "ALL {unavailable}/{total}"
+	service := testService(t, api, proxies, &fakeIncidentSource{}, &now)
+	service.config = ConfigFile{
+		Version: ConfigVersion,
+		Policy: Policy{
+			Enabled: true, OutageMinutes: 15, MinimumFailures: 3, RecoveryMinutes: 5, Messages: messages,
+		},
+		SquadPairs: []SquadPair{{InternalSquadUUID: "internal-users", ExternalSquadUUID: "external-users"}},
+		NodeMappings: map[string]NodeMapping{
+			"stable-de": {HostUUID: "host-de", GroupKey: "de", PublicLabel: "Германия"},
+			"stable-nl": {HostUUID: "host-nl", GroupKey: "nl", PublicLabel: "Нидерланды"},
+			"stable-us": {HostUUID: "host-us", GroupKey: "us", PublicLabel: "США"},
+		},
+	}
+
+	for range 3 {
+		service.ObserveFullCheck()
+	}
+	if _, err := service.SyncNow(context.Background()); err != nil {
+		t.Fatalf("single-location SyncNow: %v", err)
+	}
+	if len(api.updates) != 1 || api.updates[0].Headers[announceHeader] != announceValuePrefix+"ONE Германия" {
+		t.Fatalf("single-location update = %+v", api.updates)
+	}
+	settings := configSettings(service.config)
+	settings.Policy.Messages.SingleLocation.Template = "ONE UPDATED {location}"
+	if _, err := service.UpdateSettings(settings); err != nil {
+		t.Fatalf("template UpdateSettings: %v", err)
+	}
+	if _, err := service.ReconcileNow(context.Background()); err != nil {
+		t.Fatalf("template ReconcileNow: %v", err)
+	}
+	if len(api.updates) != 2 || api.updates[1].Headers[announceHeader] != announceValuePrefix+"ONE UPDATED Германия" {
+		t.Fatalf("template update = %+v", api.updates)
+	}
+
+	proxies.setOffline(now.Add(-20*time.Minute), "stable-nl")
+	for range 3 {
+		service.ObserveFullCheck()
+	}
+	if _, err := service.ReconcileNow(context.Background()); err != nil {
+		t.Fatalf("multiple-location ReconcileNow: %v", err)
+	}
+	if len(api.updates) != 3 || api.updates[2].Headers[announceHeader] != announceValuePrefix+"MANY «Германия», «Нидерланды»" {
+		t.Fatalf("multiple-location update = %+v", api.updates)
+	}
+
+	proxies.setOffline(now.Add(-20*time.Minute), "stable-us")
+	for range 3 {
+		service.ObserveFullCheck()
+	}
+	if _, err := service.ReconcileNow(context.Background()); err != nil {
+		t.Fatalf("total-outage ReconcileNow: %v", err)
+	}
+	if len(api.updates) != 4 || api.updates[3].Headers[announceHeader] != announceValuePrefix+"ALL 3/3" {
+		t.Fatalf("total-outage update = %+v", api.updates)
+	}
+
+	service.config.Policy.Messages.AllLocations.Enabled = false
+	if _, err := service.ReconcileNow(context.Background()); err != nil {
+		t.Fatalf("disabled total-outage ReconcileNow: %v", err)
+	}
+	if len(api.updates) != 5 {
+		t.Fatalf("disabled scenario did not clear managed announce: %+v", api.updates)
+	}
+	if _, present := api.updates[4].Headers[announceHeader]; present {
+		t.Fatalf("disabled scenario retained announce: %+v", api.updates[4].Headers)
+	}
+}
+
 func oneAudienceFixture(now time.Time, headers map[string]string) (*fakeAPI, *fakeProxySource) {
 	api := &fakeAPI{
 		hosts:    []Host{{UUID: "host-a", Remark: "Германия", Inbound: HostInbound{ConfigProfileInboundUUID: "inbound-users"}}},
@@ -469,9 +596,13 @@ func oneAudienceFixture(now time.Time, headers map[string]string) (*fakeAPI, *fa
 }
 
 func audienceConfig(normalMessage string) ConfigFile {
+	messages := defaultMessageScenarios()
+	if normalMessage != "" {
+		messages.Healthy = MessageScenario{Enabled: true, Template: normalMessage}
+	}
 	return ConfigFile{
 		Version:      ConfigVersion,
-		Policy:       Policy{Enabled: true, OutageMinutes: 15, MinimumFailures: 3, RecoveryMinutes: 5, NormalMessage: normalMessage},
+		Policy:       Policy{Enabled: true, OutageMinutes: 15, MinimumFailures: 3, RecoveryMinutes: 5, Messages: messages},
 		SquadPairs:   []SquadPair{{InternalSquadUUID: "internal-users", ExternalSquadUUID: "external-users"}},
 		NodeMappings: map[string]NodeMapping{"stable-a": {HostUUID: "host-a", GroupKey: "de", PublicLabel: "Германия"}},
 	}

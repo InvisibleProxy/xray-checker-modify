@@ -1575,6 +1575,45 @@ components:
           type: integer
           readOnly: true
 
+    RemnawaveMessageScenario:
+      type: object
+      required: [enabled, template]
+      properties:
+        enabled:
+          type: boolean
+          description: Whether this user-impact state may publish or retain a managed status line.
+        template:
+          type: string
+          minLength: 1
+          maxLength: 240
+          description: Single-line URL-free template. Supported placeholders depend on the scenario.
+
+    RemnawaveMessageScenarios:
+      type: object
+      required: [singleLocation, multipleLocations, allLocations, healthy, partialFallback]
+      properties:
+        singleLocation:
+          allOf:
+            - $ref: '#/components/schemas/RemnawaveMessageScenario'
+            - description: Supports {location}, {unavailable}, and {total}.
+        multipleLocations:
+          allOf:
+            - $ref: '#/components/schemas/RemnawaveMessageScenario'
+            - description: Supports {locations}, {unavailable}, and {total}.
+        allLocations:
+          allOf:
+            - $ref: '#/components/schemas/RemnawaveMessageScenario'
+            - description: Supports {unavailable} and {total}.
+        healthy:
+          allOf:
+            - $ref: '#/components/schemas/RemnawaveMessageScenario'
+            - description: Supports {unavailable} and {total}. Disabled restores the preserved base after recovery.
+        partialFallback:
+          type: string
+          minLength: 1
+          maxLength: 240
+          description: Supports {unavailable} and {total}; used for more than three unavailable locations or an oversized rendered list.
+
     RemnawavePolicy:
       type: object
       required: [enabled, outageMinutes, minimumFailures, recoveryMinutes]
@@ -1594,10 +1633,13 @@ components:
           type: integer
           minimum: 1
           maximum: 1440
+        messages:
+          $ref: '#/components/schemas/RemnawaveMessageScenarios'
         normalMessage:
           type: string
           maxLength: 240
-          description: Optional stable-state announce. Empty removes only an announce owned by xray-checker.
+          deprecated: true
+          description: Legacy v1 input accepted for compatibility and migrated to messages.healthy.
 
     RemnawaveSquadPair:
       type: object

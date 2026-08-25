@@ -247,6 +247,25 @@ func (s *Service) ObserveFullCheck() {
 }
 
 func (s *Service) UpdateSettings(settings Settings) (Snapshot, error) {
+	s.operationMu.Lock()
+	if messageScenariosMissing(settings.Policy.Messages) {
+		// A v1 admin/API client sends only normalMessage. Preserve the current
+		// outage templates instead of resetting them when such a client saves
+		// unrelated settings, while retaining the old empty/non-empty healthy
+		// message semantics.
+		s.mu.RLock()
+		messages := s.config.Policy.Messages
+		s.mu.RUnlock()
+		normalizeMessageScenarios(&messages)
+		legacyNormalMessage := strings.TrimSpace(settings.Policy.NormalMessage)
+		if legacyNormalMessage == "" {
+			messages.Healthy.Enabled = false
+		} else {
+			messages.Healthy = MessageScenario{Enabled: true, Template: legacyNormalMessage}
+		}
+		settings.Policy.Messages = messages
+		settings.Policy.NormalMessage = ""
+	}
 	config := ConfigFile{
 		Version:      ConfigVersion,
 		Policy:       settings.Policy,
@@ -255,10 +274,10 @@ func (s *Service) UpdateSettings(settings Settings) (Snapshot, error) {
 	}
 	normalizeConfig(&config)
 	if err := validateConfig(config); err != nil {
+		s.operationMu.Unlock()
 		return Snapshot{}, err
 	}
 
-	s.operationMu.Lock()
 	now := s.now().UTC()
 	if err := writeConfigFile(s.configPath, config, now); err != nil {
 		s.operationMu.Unlock()
@@ -678,11 +697,18 @@ func computeDesiredAnnouncements(
 				announced[key] = group.Label
 			}
 		}
+		healthy, err := healthyMessage(config.Policy.Messages, len(groups))
+		if err != nil {
+			return nil, recoverySince, err
+		}
 		message := ""
 		if len(announced) > 0 {
-			message = outageMessage(announced, len(groups))
-		} else if allHealthy || (len(previous.Groups) == 0 && previous.Message == config.Policy.NormalMessage) {
-			message = config.Policy.NormalMessage
+			message, err = outageMessage(config.Policy.Messages, announced, len(groups))
+			if err != nil {
+				return nil, recoverySince, err
+			}
+		} else if allHealthy || (len(previous.Groups) == 0 && previous.Message == healthy) {
+			message = healthy
 		}
 		desired[pair.ExternalSquadUUID] = desiredAnnouncement{Message: message, Groups: announced}
 	}
@@ -791,31 +817,6 @@ func evaluateGroups(
 		result[key] = groupEvaluation{Key: key, Label: item.label, State: state}
 	}
 	return result
-}
-
-func outageMessage(groups map[string]string, totalGroups int) string {
-	labels := make([]string, 0, len(groups))
-	for _, label := range groups {
-		labels = append(labels, label)
-	}
-	sort.Strings(labels)
-	if totalGroups > 0 && len(groups) == totalGroups {
-		return "⚠️ Все доступные вам локации временно недоступны. Идёт восстановление работы."
-	}
-	if len(labels) == 1 {
-		return fmt.Sprintf("⚠️ Временно недоступна локация «%s». Остальные доступные вам локации работают.", labels[0])
-	}
-	if len(labels) <= 3 {
-		quoted := make([]string, 0, len(labels))
-		for _, label := range labels {
-			quoted = append(quoted, "«"+label+"»")
-		}
-		message := fmt.Sprintf("⚠️ Временно недоступны локации: %s. Остальные доступные вам локации работают.", strings.Join(quoted, ", "))
-		if validateDisplayText("generated announce", message, maxMessageRunes) == nil {
-			return message
-		}
-	}
-	return "⚠️ Временно недоступны несколько локаций. Остальные доступные вам локации работают."
 }
 
 func publicGroupLabel(mapping NodeMapping, host Host, groupKey string) (string, bool) {
