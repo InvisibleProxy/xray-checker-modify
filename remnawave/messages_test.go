@@ -76,3 +76,44 @@ func TestHealthyMessageUsesCounts(t *testing.T) {
 		t.Fatalf("healthy message = %q", got)
 	}
 }
+
+func TestPartialAvailabilityMessageUsesConfiguredScenarios(t *testing.T) {
+	messages := defaultMessageScenarios()
+	messages.PartialSingleLocation.Template = "ONE PARTIAL {location} {affected}/{total}"
+	messages.PartialMultipleLocations.Template = "MANY PARTIAL {locations} {affected}/{total}"
+	messages.PartialAvailabilityFallback = "PARTIAL FALLBACK {affected}/{total}"
+
+	tests := []struct {
+		name   string
+		groups map[string]string
+		total  int
+		want   string
+	}{
+		{"single", map[string]string{"de": "Германия"}, 3, "ONE PARTIAL Германия 1/3"},
+		{"multiple", map[string]string{"nl": "Нидерланды", "de": "Германия"}, 3, "MANY PARTIAL «Германия», «Нидерланды» 2/3"},
+		{"fallback", map[string]string{"a": "A", "b": "B", "c": "C", "d": "D"}, 5, "PARTIAL FALLBACK 4/5"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := partialAvailabilityMessage(messages, test.groups, test.total)
+			if err != nil {
+				t.Fatalf("partialAvailabilityMessage: %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("message = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestPartialAvailabilityMessageHonorsDisabledScenario(t *testing.T) {
+	messages := defaultMessageScenarios()
+	messages.PartialSingleLocation.Enabled = false
+	got, err := partialAvailabilityMessage(messages, map[string]string{"de": "Германия"}, 3)
+	if err != nil {
+		t.Fatalf("partialAvailabilityMessage: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("disabled partial scenario message = %q", got)
+	}
+}

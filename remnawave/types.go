@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	ConfigVersion  = 2
-	RuntimeVersion = 2
+	ConfigVersion  = 3
+	RuntimeVersion = 3
 
 	announceHeader       = "announce"
 	announceValuePrefix  = "rwEncodeBase64:"
@@ -41,11 +41,14 @@ type MessageScenario struct {
 }
 
 type MessageScenarios struct {
-	SingleLocation    MessageScenario `json:"singleLocation"`
-	MultipleLocations MessageScenario `json:"multipleLocations"`
-	AllLocations      MessageScenario `json:"allLocations"`
-	Healthy           MessageScenario `json:"healthy"`
-	PartialFallback   string          `json:"partialFallback"`
+	SingleLocation              MessageScenario `json:"singleLocation"`
+	MultipleLocations           MessageScenario `json:"multipleLocations"`
+	AllLocations                MessageScenario `json:"allLocations"`
+	PartialSingleLocation       MessageScenario `json:"partialSingleLocation"`
+	PartialMultipleLocations    MessageScenario `json:"partialMultipleLocations"`
+	Healthy                     MessageScenario `json:"healthy"`
+	PartialFallback             string          `json:"partialFallback"`
+	PartialAvailabilityFallback string          `json:"partialAvailabilityFallback"`
 }
 
 type SquadPair struct {
@@ -79,12 +82,13 @@ type Settings struct {
 }
 
 type ManagedAnnouncement struct {
-	Value       string            `json:"value"`
-	Message     string            `json:"message"`
-	BasePresent bool              `json:"basePresent,omitempty"`
-	BaseValue   string            `json:"baseValue,omitempty"`
-	Groups      map[string]string `json:"groups,omitempty"`
-	UpdatedAt   time.Time         `json:"updatedAt"`
+	Value         string            `json:"value"`
+	Message       string            `json:"message"`
+	BasePresent   bool              `json:"basePresent,omitempty"`
+	BaseValue     string            `json:"baseValue,omitempty"`
+	Groups        map[string]string `json:"groups,omitempty"`
+	PartialGroups map[string]string `json:"partialGroups,omitempty"`
+	UpdatedAt     time.Time         `json:"updatedAt"`
 }
 
 type RuntimeFile struct {
@@ -203,10 +207,10 @@ func defaultRuntime() RuntimeFile {
 
 func normalizeConfig(config *ConfigFile) {
 	sourceVersion := config.Version
-	if config.Version == 0 || config.Version == 1 {
+	if config.Version >= 0 && config.Version < ConfigVersion {
 		// v0 was the unversioned development format. v1 had hardcoded outage
-		// messages and one optional normalMessage. Both migrate losslessly to
-		// the configurable scenario model.
+		// messages and one optional normalMessage. v2 added configurable outage
+		// scenarios. Older versions migrate to the current scenario model.
 		config.Version = ConfigVersion
 	}
 	if config.Policy.OutageMinutes == 0 {
@@ -244,9 +248,10 @@ func normalizeConfig(config *ConfigFile) {
 }
 
 func normalizeRuntime(runtime *RuntimeFile) {
-	if runtime.Version == 0 || runtime.Version == 1 {
+	if runtime.Version >= 0 && runtime.Version < RuntimeVersion {
 		// v1 owned the whole announce value. Migrating it with no base keeps
 		// the old exact-delete behavior while new writes can preserve a base.
+		// v2 had no separate partial-redundancy ownership map.
 		runtime.Version = RuntimeVersion
 	}
 	if runtime.Managed == nil {
@@ -255,6 +260,9 @@ func normalizeRuntime(runtime *RuntimeFile) {
 	for externalUUID, managed := range runtime.Managed {
 		if managed.Groups == nil {
 			managed.Groups = map[string]string{}
+		}
+		if managed.PartialGroups == nil {
+			managed.PartialGroups = map[string]string{}
 		}
 		runtime.Managed[externalUUID] = managed
 	}
@@ -346,7 +354,7 @@ func validateRuntime(runtime RuntimeFile) error {
 			return fmt.Errorf("managed announce for %s has an invalid value", externalUUID)
 		}
 		if managed.BasePresent {
-			if !isAppendableBaseAnnounce(managed.BaseValue) {
+			if !isManagedBaseAnnounce(managed.BaseValue) {
 				return fmt.Errorf("managed announce for %s has an invalid base value", externalUUID)
 			}
 		} else if managed.BaseValue != "" {
@@ -363,10 +371,36 @@ func validateRuntime(runtime RuntimeFile) error {
 }
 
 func isAppendableBaseAnnounce(value string) bool {
+	return isManagedBaseAnnounce(value) &&
+		!strings.ContainsAny(value, "\r\n")
+}
+
+func isManagedBaseAnnounce(value string) bool {
 	return len(value) > len(announceValuePrefix) &&
 		len(value) <= maxBaseAnnounceBytes &&
 		strings.HasPrefix(value, announceValuePrefix) &&
-		!strings.ContainsAny(value, "\r\n")
+		!strings.ContainsRune(value, '\x00') &&
+		!strings.Contains(value, "\r")
+}
+
+func splitKnownManagedAnnounce(value string, messages ...string) (bool, string, bool) {
+	for _, message := range messages {
+		if message == "" {
+			continue
+		}
+		if value == announceValuePrefix+message {
+			return false, "", true
+		}
+		suffix := "\n" + message
+		if !strings.HasSuffix(value, suffix) {
+			continue
+		}
+		base := strings.TrimSuffix(value, suffix)
+		if isManagedBaseAnnounce(base) {
+			return true, base, true
+		}
+	}
+	return false, "", false
 }
 
 func composeManagedAnnounce(basePresent bool, baseValue, message string) string {
@@ -423,6 +457,7 @@ func cloneManaged(input map[string]ManagedAnnouncement) map[string]ManagedAnnoun
 	result := make(map[string]ManagedAnnouncement, len(input))
 	for externalUUID, managed := range input {
 		managed.Groups = cloneStringMap(managed.Groups)
+		managed.PartialGroups = cloneStringMap(managed.PartialGroups)
 		result[externalUUID] = managed
 	}
 	return result

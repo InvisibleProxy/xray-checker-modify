@@ -20,7 +20,9 @@ func TestDecodeConfigMigratesUnversionedSparseState(t *testing.T) {
 	if config.Policy.OutageMinutes != defaultOutageMinutes || config.Policy.MinimumFailures != defaultMinFailures || config.Policy.RecoveryMinutes != defaultRecoveryMins {
 		t.Fatalf("policy was not normalized: %+v", config.Policy)
 	}
-	if !config.Policy.Messages.SingleLocation.Enabled || config.Policy.Messages.SingleLocation.Template != defaultSingleLocationTemplate || config.Policy.Messages.Healthy.Enabled {
+	if !config.Policy.Messages.SingleLocation.Enabled || config.Policy.Messages.SingleLocation.Template != defaultSingleLocationTemplate ||
+		!config.Policy.Messages.PartialSingleLocation.Enabled || config.Policy.Messages.PartialSingleLocation.Template != defaultPartialSingleLocationTemplate ||
+		config.Policy.Messages.Healthy.Enabled {
 		t.Fatalf("message scenarios were not normalized: %+v", config.Policy.Messages)
 	}
 	if config.SquadPairs == nil || config.NodeMappings == nil {
@@ -88,6 +90,39 @@ func TestDecodeConfigMigratesV1NormalMessageToHealthyScenario(t *testing.T) {
 	}
 }
 
+func TestDecodeConfigMigratesV2PartialAvailabilityScenarios(t *testing.T) {
+	config, err := DecodeConfig([]byte(`{
+  "version": 2,
+  "policy": {
+    "enabled": true,
+    "outageMinutes": 15,
+    "minimumFailures": 3,
+    "recoveryMinutes": 5,
+    "messages": {
+      "singleLocation": {"enabled": true, "template": "Недоступна: {location}"},
+      "multipleLocations": {"enabled": true, "template": "Недоступны: {locations}"},
+      "allLocations": {"enabled": true, "template": "Недоступны все"},
+      "healthy": {"enabled": true, "template": "Всё стабильно"},
+      "partialFallback": "Недоступно: {unavailable}/{total}"
+    }
+  },
+  "squadPairs": [],
+  "nodeMappings": {}
+}`))
+	if err != nil {
+		t.Fatalf("DecodeConfig: %v", err)
+	}
+	if config.Version != ConfigVersion ||
+		!config.Policy.Messages.PartialSingleLocation.Enabled ||
+		config.Policy.Messages.PartialSingleLocation.Template != defaultPartialSingleLocationTemplate ||
+		config.Policy.Messages.PartialAvailabilityFallback != defaultPartialAvailabilityFallbackTemplate {
+		t.Fatalf("v2 partial-availability migration = %+v", config.Policy.Messages)
+	}
+	if config.Policy.Messages.SingleLocation.Template != "Недоступна: {location}" {
+		t.Fatalf("v2 existing scenario was not preserved: %+v", config.Policy.Messages)
+	}
+}
+
 func TestConfigRejectsRemnawaveTemplateInjection(t *testing.T) {
 	config := defaultConfig()
 	config.Policy.Messages.Healthy.Template = "{{USERNAME}}"
@@ -142,7 +177,7 @@ func TestDecodeRuntimeMigratesV1WholeValueOwnership(t *testing.T) {
 	}
 }
 
-func TestDecodeRuntimeAcceptsV2BaseAndManagedSuffix(t *testing.T) {
+func TestDecodeRuntimeMigratesV2BaseAndManagedSuffix(t *testing.T) {
 	base := "rwEncodeBase64:{{USERNAME}} | Нажми, чтобы продлить подписку →"
 	message := "⚠️ Временно недоступна локация «Германия»."
 	data := []byte(fmt.Sprintf(`{
@@ -164,5 +199,8 @@ func TestDecodeRuntimeAcceptsV2BaseAndManagedSuffix(t *testing.T) {
 	managed := runtime.Managed["external-users"]
 	if !managed.BasePresent || managed.BaseValue != base || managed.Value != base+"\n"+message {
 		t.Fatalf("v2 base ownership = %+v", managed)
+	}
+	if managed.PartialGroups == nil || runtime.Version != RuntimeVersion {
+		t.Fatalf("v2 partial groups were not normalized: %+v", runtime)
 	}
 }

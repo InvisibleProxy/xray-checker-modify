@@ -1590,7 +1590,7 @@ components:
 
     RemnawaveMessageScenarios:
       type: object
-      required: [singleLocation, multipleLocations, allLocations, healthy, partialFallback]
+      required: [singleLocation, multipleLocations, allLocations, partialSingleLocation, partialMultipleLocations, healthy, partialFallback, partialAvailabilityFallback]
       properties:
         singleLocation:
           allOf:
@@ -1604,6 +1604,14 @@ components:
           allOf:
             - $ref: '#/components/schemas/RemnawaveMessageScenario'
             - description: Supports {unavailable} and {total}.
+        partialSingleLocation:
+          allOf:
+            - $ref: '#/components/schemas/RemnawaveMessageScenario'
+            - description: Used when at least one server remains healthy in one redundancy group. Supports {location}, {affected}, and {total}.
+        partialMultipleLocations:
+          allOf:
+            - $ref: '#/components/schemas/RemnawaveMessageScenario'
+            - description: Used when at least one server remains healthy in several redundancy groups. Supports {locations}, {affected}, and {total}.
         healthy:
           allOf:
             - $ref: '#/components/schemas/RemnawaveMessageScenario'
@@ -1613,6 +1621,11 @@ components:
           minLength: 1
           maxLength: 240
           description: Supports {unavailable} and {total}; used for more than three unavailable locations or an oversized rendered list.
+        partialAvailabilityFallback:
+          type: string
+          minLength: 1
+          maxLength: 240
+          description: Supports {affected} and {total}; used for more than three partially unavailable locations or an oversized rendered list.
 
     RemnawavePolicy:
       type: object

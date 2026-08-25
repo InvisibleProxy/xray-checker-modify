@@ -119,14 +119,21 @@ func TestAdminTemplateExposesRemnawaveMessageConstructor(t *testing.T) {
 		`id="remnawave-message-single-template"`,
 		`id="remnawave-message-multiple-template"`,
 		`id="remnawave-message-all-template"`,
+		`id="remnawave-message-partial-single-template"`,
+		`id="remnawave-message-partial-multiple-template"`,
 		`id="remnawave-message-healthy-template"`,
 		`id="remnawave-message-fallback-template"`,
+		`id="remnawave-message-partial-fallback-template"`,
 		`data-remnawave-token="{location}"`,
 		`data-remnawave-token="{locations}"`,
+		`data-remnawave-token="{affected}"`,
 		`function renderRemnawaveMessagePreviews()`,
 		`function insertRemnawaveTemplateToken(targetID, token)`,
 		`singleLocation: remnawaveScenarioFromForm("single")`,
+		`partialSingleLocation: remnawaveScenarioFromForm("partial-single")`,
+		`partialMultipleLocations: remnawaveScenarioFromForm("partial-multiple")`,
 		`partialFallback: $("remnawave-message-fallback-template").value.trim()`,
+		`partialAvailabilityFallback: $("remnawave-message-partial-fallback-template").value.trim()`,
 	} {
 		if !strings.Contains(html, marker) {
 			t.Fatalf("admin template does not contain %q", marker)

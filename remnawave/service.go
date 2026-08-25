@@ -70,8 +70,10 @@ type Service struct {
 }
 
 type desiredAnnouncement struct {
-	Message string
-	Groups  map[string]string
+	Message             string
+	KnownHealthyMessage string
+	Groups              map[string]string
+	PartialGroups       map[string]string
 }
 
 type groupEvaluation struct {
@@ -83,6 +85,7 @@ type groupEvaluation struct {
 const (
 	groupHealthy   = "healthy"
 	groupDown      = "down"
+	groupPartial   = "partial"
 	groupPending   = "pending"
 	groupAmbiguous = "ambiguous"
 )
@@ -265,6 +268,16 @@ func (s *Service) UpdateSettings(settings Settings) (Snapshot, error) {
 		}
 		settings.Policy.Messages = messages
 		settings.Policy.NormalMessage = ""
+	} else if partialAvailabilityScenariosMissing(settings.Policy.Messages) {
+		// A v2 admin/API client knows the original outage scenarios but not the
+		// partial-redundancy fields. Preserve the current partial templates so
+		// saving unrelated settings cannot reset operator customizations.
+		s.mu.RLock()
+		current := s.config.Policy.Messages
+		s.mu.RUnlock()
+		settings.Policy.Messages.PartialSingleLocation = current.PartialSingleLocation
+		settings.Policy.Messages.PartialMultipleLocations = current.PartialMultipleLocations
+		settings.Policy.Messages.PartialAvailabilityFallback = current.PartialAvailabilityFallback
 	}
 	config := ConfigFile{
 		Version:      ConfigVersion,
@@ -472,12 +485,16 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 				// operator-owned base announce.
 				continue
 			}
-			if !isAppendableBaseAnnounce(currentValue) {
-				conflicts = append(conflicts, fmt.Sprintf("%s: existing announce is not an appendable single-line rwEncodeBase64 value and was left untouched", squad.Name))
+			if knownBasePresent, knownBaseValue, known := splitKnownManagedAnnounce(currentValue, target.Message, target.KnownHealthyMessage); known {
+				basePresent = knownBasePresent
+				baseValue = knownBaseValue
+			} else if !isAppendableBaseAnnounce(currentValue) {
+				conflicts = append(conflicts, fmt.Sprintf("%s: existing announce is neither an appendable single-line rwEncodeBase64 value nor a recognized managed suffix and was left untouched", squad.Name))
 				continue
+			} else {
+				basePresent = true
+				baseValue = currentValue
 			}
-			basePresent = true
-			baseValue = currentValue
 		}
 
 		targetValue := composeManagedAnnounce(basePresent, baseValue, target.Message)
@@ -485,9 +502,12 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 			continue
 		}
 		if owned && target.Message != "" && currentValue == targetValue {
-			if previous.Message != target.Message || !stringMapEqual(previous.Groups, target.Groups) {
+			if previous.Message != target.Message ||
+				!stringMapEqual(previous.Groups, target.Groups) ||
+				!stringMapEqual(previous.PartialGroups, target.PartialGroups) {
 				previous.Message = target.Message
 				previous.Groups = cloneStringMap(target.Groups)
+				previous.PartialGroups = cloneStringMap(target.PartialGroups)
 				previous.UpdatedAt = now
 				runtime.Managed[externalUUID] = previous
 				runtimeChanged = true
@@ -514,12 +534,13 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 			delete(runtime.Managed, externalUUID)
 		} else {
 			runtime.Managed[externalUUID] = ManagedAnnouncement{
-				Value:       targetValue,
-				Message:     target.Message,
-				BasePresent: basePresent,
-				BaseValue:   baseValue,
-				Groups:      cloneStringMap(target.Groups),
-				UpdatedAt:   now,
+				Value:         targetValue,
+				Message:       target.Message,
+				BasePresent:   basePresent,
+				BaseValue:     baseValue,
+				Groups:        cloneStringMap(target.Groups),
+				PartialGroups: cloneStringMap(target.PartialGroups),
+				UpdatedAt:     now,
 			}
 		}
 		runtimeChanged = true
@@ -670,31 +691,54 @@ func computeDesiredAnnouncements(
 			continue
 		}
 		announced := make(map[string]string)
+		partial := make(map[string]string)
 		allHealthy := true
 		for key, group := range groups {
 			if group.State != groupHealthy {
 				allHealthy = false
 			}
+
+			previousState := ""
+			if _, wasDown := previous.Groups[key]; wasDown {
+				previousState = groupDown
+			} else if _, wasPartial := previous.PartialGroups[key]; wasPartial {
+				previousState = groupPartial
+			}
 			if group.State == groupDown {
 				announced[key] = group.Label
 				continue
 			}
-			if _, wasAnnounced := previous.Groups[key]; !wasAnnounced {
+			if group.State == groupPartial && previousState != groupDown {
+				partial[key] = group.Label
 				continue
 			}
+			if previousState == "" {
+				continue
+			}
+
 			recoveryKey := pair.ExternalSquadUUID + "\x00" + key
 			switch group.State {
-			case groupHealthy:
+			case groupHealthy, groupPartial:
 				since, seen := recoverySince[recoveryKey]
 				if !seen {
 					since = now
 				}
 				if now.Sub(since) < time.Duration(config.Policy.RecoveryMinutes)*time.Minute {
-					announced[key] = group.Label
+					if previousState == groupDown {
+						announced[key] = group.Label
+					} else {
+						partial[key] = group.Label
+					}
 					nextRecovery[recoveryKey] = since
+				} else if group.State == groupPartial {
+					partial[key] = group.Label
 				}
 			case groupPending, groupAmbiguous:
-				announced[key] = group.Label
+				if previousState == groupDown {
+					announced[key] = group.Label
+				} else {
+					partial[key] = group.Label
+				}
 			}
 		}
 		healthy, err := healthyMessage(config.Policy.Messages, len(groups))
@@ -707,10 +751,20 @@ func computeDesiredAnnouncements(
 			if err != nil {
 				return nil, recoverySince, err
 			}
-		} else if allHealthy || (len(previous.Groups) == 0 && previous.Message == healthy) {
+		} else if len(partial) > 0 {
+			message, err = partialAvailabilityMessage(config.Policy.Messages, partial, len(groups))
+			if err != nil {
+				return nil, recoverySince, err
+			}
+		} else if allHealthy || (len(previous.Groups) == 0 && len(previous.PartialGroups) == 0 && previous.Message == healthy) {
 			message = healthy
 		}
-		desired[pair.ExternalSquadUUID] = desiredAnnouncement{Message: message, Groups: announced}
+		desired[pair.ExternalSquadUUID] = desiredAnnouncement{
+			Message:             message,
+			KnownHealthyMessage: healthy,
+			Groups:              announced,
+			PartialGroups:       partial,
+		}
 	}
 	return desired, nextRecovery, nil
 }
@@ -807,6 +861,8 @@ func evaluateGroups(
 	for key, item := range aggregates {
 		state := groupDown
 		switch {
+		case item.hasHealthy && item.down > 0:
+			state = groupPartial
 		case item.hasHealthy:
 			state = groupHealthy
 		case item.hasAmbiguous:

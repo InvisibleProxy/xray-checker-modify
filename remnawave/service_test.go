@@ -149,8 +149,11 @@ func TestServiceUsesAudienceTopologyAndGroupRedundancy(t *testing.T) {
 	if _, err := service.SyncNow(context.Background()); err != nil {
 		t.Fatalf("initial SyncNow: %v", err)
 	}
-	if len(api.updates) != 0 {
-		t.Fatalf("one healthy redundant member produced an update: %+v", api.updates)
+	if len(api.updates) != 1 || !strings.Contains(api.updates[0].Headers[announceHeader], "Часть серверов локации «Германия»") {
+		t.Fatalf("confirmed partial redundancy did not produce its scenario: %+v", api.updates)
+	}
+	if managed := service.runtime.Managed["external-users"]; managed.PartialGroups["de"] != "Германия" || len(managed.Groups) != 0 {
+		t.Fatalf("partial ownership state = %+v", managed)
 	}
 
 	proxies.setOffline(now.Add(-20*time.Minute), "stable-b")
@@ -158,8 +161,8 @@ func TestServiceUsesAudienceTopologyAndGroupRedundancy(t *testing.T) {
 	if _, err := service.ReconcileNow(context.Background()); err != nil {
 		t.Fatalf("single-failure ReconcileNow: %v", err)
 	}
-	if len(api.updates) != 0 {
-		t.Fatalf("one full failed check produced an update: %+v", api.updates)
+	if len(api.updates) != 1 {
+		t.Fatalf("one full failed check changed the partial announce: %+v", api.updates)
 	}
 	for range 2 {
 		service.ObserveFullCheck()
@@ -167,13 +170,13 @@ func TestServiceUsesAudienceTopologyAndGroupRedundancy(t *testing.T) {
 	if _, err := service.ReconcileNow(context.Background()); err != nil {
 		t.Fatalf("outage ReconcileNow: %v", err)
 	}
-	if len(api.updates) != 1 || api.updates[0].UUID != "external-users" {
+	if len(api.updates) != 2 || api.updates[1].UUID != "external-users" {
 		t.Fatalf("updates = %+v", api.updates)
 	}
-	if api.updates[0].Headers["x-test"] != "keep" {
-		t.Fatalf("unrelated header was lost: %+v", api.updates[0].Headers)
+	if api.updates[1].Headers["x-test"] != "keep" {
+		t.Fatalf("unrelated header was lost: %+v", api.updates[1].Headers)
 	}
-	announce := api.updates[0].Headers[announceHeader]
+	announce := api.updates[1].Headers[announceHeader]
 	if !strings.HasPrefix(announce, announceValuePrefix) || strings.Contains(announce, "http") {
 		t.Fatalf("unexpected announce = %q", announce)
 	}
@@ -183,22 +186,37 @@ func TestServiceUsesAudienceTopologyAndGroupRedundancy(t *testing.T) {
 		}
 	}
 
-	proxies.setOnline("stable-a", "stable-b")
+	proxies.setOnline("stable-a")
 	if _, err := service.ReconcileNow(context.Background()); err != nil {
-		t.Fatalf("start recovery reconcile: %v", err)
+		t.Fatalf("start full-to-partial recovery reconcile: %v", err)
 	}
-	if len(api.updates) != 1 {
-		t.Fatalf("announce cleared before recovery grace: %+v", api.updates)
+	if len(api.updates) != 2 {
+		t.Fatalf("full outage changed before recovery grace: %+v", api.updates)
 	}
 	now = now.Add(6 * time.Minute)
 	if _, err := service.ReconcileNow(context.Background()); err != nil {
-		t.Fatalf("finish recovery reconcile: %v", err)
+		t.Fatalf("finish full-to-partial recovery reconcile: %v", err)
 	}
-	if len(api.updates) != 2 {
+	if len(api.updates) != 3 || !strings.Contains(api.updates[2].Headers[announceHeader], "Часть серверов локации «Германия»") {
+		t.Fatalf("expected partial-redundancy update after recovery grace, got %+v", api.updates)
+	}
+
+	proxies.setOnline("stable-b")
+	if _, err := service.ReconcileNow(context.Background()); err != nil {
+		t.Fatalf("start partial-to-healthy recovery reconcile: %v", err)
+	}
+	if len(api.updates) != 3 {
+		t.Fatalf("partial announce cleared before recovery grace: %+v", api.updates)
+	}
+	now = now.Add(6 * time.Minute)
+	if _, err := service.ReconcileNow(context.Background()); err != nil {
+		t.Fatalf("finish partial-to-healthy recovery reconcile: %v", err)
+	}
+	if len(api.updates) != 4 {
 		t.Fatalf("expected recovery clear update, got %+v", api.updates)
 	}
-	if _, present := api.updates[1].Headers[announceHeader]; present {
-		t.Fatalf("announce was not cleared: %+v", api.updates[1].Headers)
+	if _, present := api.updates[3].Headers[announceHeader]; present {
+		t.Fatalf("announce was not cleared: %+v", api.updates[3].Headers)
 	}
 }
 
@@ -236,7 +254,7 @@ func TestServicePreservesUnmanagedAnnounce(t *testing.T) {
 	if len(api.updates) != 0 {
 		t.Fatalf("unmanaged announce was overwritten: %+v", api.updates)
 	}
-	if len(snapshot.Status.Conflicts) != 1 || !strings.Contains(snapshot.Status.Conflicts[0], "not an appendable") {
+	if len(snapshot.Status.Conflicts) != 1 || !strings.Contains(snapshot.Status.Conflicts[0], "appendable single-line") {
 		t.Fatalf("ownership conflict was not reported: %+v", snapshot.Status)
 	}
 }
@@ -293,6 +311,35 @@ func TestServiceAppendsStatusToExistingBaseAndRestoresItAfterRecovery(t *testing
 	}
 	if len(snapshot.Status.Announcements) != 1 || snapshot.Status.Announcements[0].Managed || !snapshot.Status.Announcements[0].PreservesBase {
 		t.Fatalf("restored base status = %+v", snapshot.Status.Announcements)
+	}
+}
+
+func TestServiceAdoptsKnownHealthySuffixFromMultilineBase(t *testing.T) {
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	healthy := "Все сервера работают стабильно ✅"
+	base := "rwEncodeBase64:{{USERNAME}} | Нажми, чтобы перейти в кабинет →\n\nНажми 🔄️, если сервер недоступен\n"
+	current := base + "\n" + healthy
+	api, proxies := oneAudienceFixture(now, map[string]string{announceHeader: current, "x-test": "keep"})
+	service := testService(t, api, proxies, &fakeIncidentSource{}, &now)
+	service.config = audienceConfig(healthy)
+	for range 3 {
+		service.ObserveFullCheck()
+	}
+
+	snapshot, err := service.SyncNow(context.Background())
+	if err != nil {
+		t.Fatalf("outage SyncNow: %v", err)
+	}
+	want := base + "\n" + defaultAllLocationsTemplate
+	if len(api.updates) != 1 || api.updates[0].Headers[announceHeader] != want {
+		t.Fatalf("known healthy suffix was not replaced safely: %+v", api.updates)
+	}
+	managed := service.runtime.Managed["external-users"]
+	if !managed.BasePresent || managed.BaseValue != base || managed.Message != defaultAllLocationsTemplate {
+		t.Fatalf("multiline base ownership was not reconstructed: %+v", managed)
+	}
+	if len(snapshot.Status.Conflicts) != 0 {
+		t.Fatalf("known healthy suffix produced a conflict: %+v", snapshot.Status)
 	}
 }
 
@@ -442,6 +489,29 @@ func TestUpdateSettingsPreservesScenarioTemplatesForLegacyClient(t *testing.T) {
 	}
 }
 
+func TestUpdateSettingsPreservesPartialScenariosForV2Client(t *testing.T) {
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	service := testService(t, &fakeAPI{}, &fakeProxySource{}, &fakeIncidentSource{}, &now)
+	service.config = audienceConfig("")
+	service.config.Policy.Messages.PartialSingleLocation.Template = "CUSTOM PARTIAL {location}"
+	service.config.Policy.Messages.PartialMultipleLocations.Enabled = false
+	service.config.Policy.Messages.PartialAvailabilityFallback = "CUSTOM PARTIAL FALLBACK {affected}/{total}"
+
+	v2 := configSettings(service.config)
+	v2.Policy.Messages.PartialSingleLocation = MessageScenario{}
+	v2.Policy.Messages.PartialMultipleLocations = MessageScenario{}
+	v2.Policy.Messages.PartialAvailabilityFallback = ""
+	snapshot, err := service.UpdateSettings(v2)
+	if err != nil {
+		t.Fatalf("v2 UpdateSettings: %v", err)
+	}
+	messages := snapshot.Settings.Policy.Messages
+	if messages.PartialSingleLocation.Template != "CUSTOM PARTIAL {location}" || messages.PartialMultipleLocations.Enabled ||
+		messages.PartialAvailabilityFallback != "CUSTOM PARTIAL FALLBACK {affected}/{total}" {
+		t.Fatalf("v2 update reset partial scenarios: %+v", messages)
+	}
+}
+
 func TestServiceTargetsOnlyHostAudienceInternalSquad(t *testing.T) {
 	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
 	api := &fakeAPI{
@@ -484,6 +554,56 @@ func TestServiceTargetsOnlyHostAudienceInternalSquad(t *testing.T) {
 	}
 	if len(api.updates) != 1 || api.updates[0].UUID != "external-1" {
 		t.Fatalf("audience updates = %+v", api.updates)
+	}
+}
+
+func TestServiceScopesSameRedundancyGroupKeyPerAudience(t *testing.T) {
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	api := &fakeAPI{
+		hosts: []Host{
+			{UUID: "host-standard-de", Remark: "Germany Standard", Inbound: HostInbound{ConfigProfileInboundUUID: "inbound-standard"}},
+			{UUID: "host-extended-de", Remark: "Germany Extended", Inbound: HostInbound{ConfigProfileInboundUUID: "inbound-extended"}},
+		},
+		internal: []InternalSquad{
+			{UUID: "internal-standard", Name: "Standard", Inbounds: []InternalInbound{{UUID: "inbound-standard"}}},
+			{UUID: "internal-extended", Name: "Extended", Inbounds: []InternalInbound{{UUID: "inbound-extended"}}},
+		},
+		external: []ExternalSquad{
+			{UUID: "external-standard", Name: "Standard", ResponseHeadersAdd: map[string]string{}},
+			{UUID: "external-extended", Name: "Extended", ResponseHeadersAdd: map[string]string{}},
+		},
+	}
+	proxies := &fakeProxySource{
+		proxies: []*models.ProxyConfig{
+			{StableID: "stable-standard-de", Name: "DE Standard"},
+			{StableID: "stable-extended-de", Name: "DE Extended"},
+		},
+		statuses: map[string]checker.ProxyStatusDetails{},
+	}
+	proxies.setOnline("stable-standard-de")
+	proxies.setOffline(now.Add(-20*time.Minute), "stable-extended-de")
+	service := testService(t, api, proxies, &fakeIncidentSource{}, &now)
+	service.config = ConfigFile{
+		Version: ConfigVersion,
+		Policy:  Policy{Enabled: true, OutageMinutes: 15, MinimumFailures: 3, RecoveryMinutes: 5, Messages: defaultMessageScenarios()},
+		SquadPairs: []SquadPair{
+			{InternalSquadUUID: "internal-standard", ExternalSquadUUID: "external-standard"},
+			{InternalSquadUUID: "internal-extended", ExternalSquadUUID: "external-extended"},
+		},
+		NodeMappings: map[string]NodeMapping{
+			"stable-standard-de": {HostUUID: "host-standard-de", GroupKey: "de", PublicLabel: "Германия"},
+			"stable-extended-de": {HostUUID: "host-extended-de", GroupKey: "de", PublicLabel: "Германия"},
+		},
+	}
+	for range 3 {
+		service.ObserveFullCheck()
+	}
+	if _, err := service.SyncNow(context.Background()); err != nil {
+		t.Fatalf("SyncNow: %v", err)
+	}
+	if len(api.updates) != 1 || api.updates[0].UUID != "external-extended" ||
+		!strings.Contains(api.updates[0].Headers[announceHeader], "Все доступные вам локации") {
+		t.Fatalf("same group key leaked health across audiences: %+v", api.updates)
 	}
 }
 

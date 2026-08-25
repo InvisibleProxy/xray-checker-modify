@@ -1736,8 +1736,9 @@
           <div class="hint">
             Reconcile runs after a confirmed outage, a change in affected locations, a partial/total transition,
             stable recovery, or saved settings. Manual checks and the fast recovery loop do not count as outage
-            confirmations by themselves. A healthy redundancy member, unknown state, and probable
-            <code>check_endpoint</code> incidents do not create a new outage message.
+            confirmations by themselves. A confirmed failed member of an otherwise healthy redundancy group uses
+            the partial-availability scenarios. Unknown state and probable <code>check_endpoint</code> incidents do
+            not create a new message.
           </div>
           <div class="remnawave-template-grid">
             <article class="remnawave-template-card">
@@ -1792,6 +1793,40 @@
 
             <article class="remnawave-template-card">
               <label class="row">
+                <span>Part of one location unavailable</span>
+                <input id="remnawave-message-partial-single-enabled" type="checkbox" />
+              </label>
+              <label>
+                Template
+                <textarea id="remnawave-message-partial-single-template" maxlength="240" rows="3"></textarea>
+              </label>
+              <div class="remnawave-template-tokens" aria-label="Partial single-location placeholders">
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-partial-single-template" data-remnawave-token="{location}">{location}</button>
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-partial-single-template" data-remnawave-token="{affected}">{affected}</button>
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-partial-single-template" data-remnawave-token="{total}">{total}</button>
+              </div>
+              <div class="remnawave-template-preview"><span>Preview</span><strong id="remnawave-message-partial-single-preview"></strong></div>
+            </article>
+
+            <article class="remnawave-template-card">
+              <label class="row">
+                <span>Part of several locations unavailable</span>
+                <input id="remnawave-message-partial-multiple-enabled" type="checkbox" />
+              </label>
+              <label>
+                Template
+                <textarea id="remnawave-message-partial-multiple-template" maxlength="240" rows="3"></textarea>
+              </label>
+              <div class="remnawave-template-tokens" aria-label="Partial multiple-location placeholders">
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-partial-multiple-template" data-remnawave-token="{locations}">{locations}</button>
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-partial-multiple-template" data-remnawave-token="{affected}">{affected}</button>
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-partial-multiple-template" data-remnawave-token="{total}">{total}</button>
+              </div>
+              <div class="remnawave-template-preview"><span>Preview</span><strong id="remnawave-message-partial-multiple-preview"></strong></div>
+            </article>
+
+            <article class="remnawave-template-card">
+              <label class="row">
                 <span>Everything stable</span>
                 <input id="remnawave-message-healthy-enabled" type="checkbox" />
               </label>
@@ -1808,7 +1843,7 @@
 
             <article class="remnawave-template-card wide">
               <strong>Long location-list fallback</strong>
-              <div class="muted">Used when more than three locations are down or the rendered location list exceeds 240 characters.</div>
+              <div class="muted">Used when more than three whole locations are down or the rendered location list exceeds 240 characters.</div>
               <label>
                 Template
                 <textarea id="remnawave-message-fallback-template" maxlength="240" rows="2"></textarea>
@@ -1819,10 +1854,25 @@
               </div>
               <div class="remnawave-template-preview"><span>Preview</span><strong id="remnawave-message-fallback-preview"></strong></div>
             </article>
+
+            <article class="remnawave-template-card wide">
+              <strong>Long partial-location-list fallback</strong>
+              <div class="muted">Used when parts of more than three locations are down or the rendered partial-location list exceeds 240 characters.</div>
+              <label>
+                Template
+                <textarea id="remnawave-message-partial-fallback-template" maxlength="240" rows="2"></textarea>
+              </label>
+              <div class="remnawave-template-tokens" aria-label="Partial fallback placeholders">
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-partial-fallback-template" data-remnawave-token="{affected}">{affected}</button>
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-partial-fallback-template" data-remnawave-token="{total}">{total}</button>
+              </div>
+              <div class="remnawave-template-preview"><span>Preview</span><strong id="remnawave-message-partial-fallback-preview"></strong></div>
+            </article>
           </div>
           <div class="hint">
-            An existing single-line <code>rwEncodeBase64:</code> announce stays unchanged on the first line;
-            xray-checker appends only its status line and restores the original value after recovery.
+            An existing single-line <code>rwEncodeBase64:</code> announce stays unchanged as the base;
+            xray-checker appends only its status line and restores the original value after recovery. A multiline
+            value can be reclaimed only when its last suffix exactly matches the rendered target or healthy scenario.
             If the healthy scenario is disabled, recovery restores the base or removes a checker-only header.
             Other or manually changed values are never overwritten. Templates are single-line, URL-free, and limited to 240 characters after rendering.
           </div>
@@ -1873,7 +1923,8 @@
             </table>
           </div>
           <div class="hint">
-            StableIDs with the same group key are one public location: a failed member does not announce an outage while another member is healthy.
+            StableIDs with the same group key are one public location: a healthy member prevents a full outage,
+            while a confirmed failed member uses the partial-availability scenario.
           </div>
         </section>
 
@@ -2157,6 +2208,14 @@
             replacements: { "{unavailable}": "3", "{total}": "3" },
           },
           {
+            prefix: "partial-single",
+            replacements: { "{location}": "Германия", "{affected}": "1", "{total}": "3" },
+          },
+          {
+            prefix: "partial-multiple",
+            replacements: { "{locations}": "«Германия», «Нидерланды»", "{affected}": "2", "{total}": "3" },
+          },
+          {
             prefix: "healthy",
             replacements: { "{unavailable}": "0", "{total}": "3" },
           },
@@ -2172,6 +2231,10 @@
         $("remnawave-message-fallback-preview").textContent = renderRemnawaveTemplateExample(
           $("remnawave-message-fallback-template").value,
           { "{unavailable}": "4", "{total}": "5" },
+        );
+        $("remnawave-message-partial-fallback-preview").textContent = renderRemnawaveTemplateExample(
+          $("remnawave-message-partial-fallback-template").value,
+          { "{affected}": "4", "{total}": "5" },
         );
       }
 
@@ -2277,6 +2340,8 @@
           ["single", messages.singleLocation || {}, true],
           ["multiple", messages.multipleLocations || {}, true],
           ["all", messages.allLocations || {}, true],
+          ["partial-single", messages.partialSingleLocation || {}, true],
+          ["partial-multiple", messages.partialMultipleLocations || {}, true],
           ["healthy", messages.healthy || {}, false],
         ];
         messageFields.forEach(([prefix, scenario, defaultEnabled]) => {
@@ -2284,6 +2349,7 @@
           $(`remnawave-message-${prefix}-template`).value = scenario.template || "";
         });
         $("remnawave-message-fallback-template").value = messages.partialFallback || "";
+        $("remnawave-message-partial-fallback-template").value = messages.partialAvailabilityFallback || "";
         renderRemnawaveMessagePreviews();
         renderRemnawavePairs(settings.squadPairs || []);
         renderRemnawaveNodeMappings();
@@ -2335,8 +2401,11 @@
               singleLocation: remnawaveScenarioFromForm("single"),
               multipleLocations: remnawaveScenarioFromForm("multiple"),
               allLocations: remnawaveScenarioFromForm("all"),
+              partialSingleLocation: remnawaveScenarioFromForm("partial-single"),
+              partialMultipleLocations: remnawaveScenarioFromForm("partial-multiple"),
               healthy: remnawaveScenarioFromForm("healthy"),
               partialFallback: $("remnawave-message-fallback-template").value.trim(),
+              partialAvailabilityFallback: $("remnawave-message-partial-fallback-template").value.trim(),
             },
           },
           squadPairs: remnawavePairRowsFromForm(),
