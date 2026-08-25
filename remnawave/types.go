@@ -10,7 +10,7 @@ import (
 
 const (
 	ConfigVersion  = 1
-	RuntimeVersion = 1
+	RuntimeVersion = 2
 
 	announceHeader       = "announce"
 	announceValuePrefix  = "rwEncodeBase64:"
@@ -18,6 +18,7 @@ const (
 	defaultMinFailures   = 3
 	defaultRecoveryMins  = 5
 	maxMessageRunes      = 240
+	maxBaseAnnounceBytes = 16 * 1024
 )
 
 // Policy controls when the integration may publish a subscription announce.
@@ -62,10 +63,12 @@ type Settings struct {
 }
 
 type ManagedAnnouncement struct {
-	Value     string            `json:"value"`
-	Message   string            `json:"message"`
-	Groups    map[string]string `json:"groups,omitempty"`
-	UpdatedAt time.Time         `json:"updatedAt"`
+	Value       string            `json:"value"`
+	Message     string            `json:"message"`
+	BasePresent bool              `json:"basePresent,omitempty"`
+	BaseValue   string            `json:"baseValue,omitempty"`
+	Groups      map[string]string `json:"groups,omitempty"`
+	UpdatedAt   time.Time         `json:"updatedAt"`
 }
 
 type RuntimeFile struct {
@@ -137,6 +140,7 @@ type RemoteAnnouncementStatus struct {
 	ExternalSquadName string `json:"externalSquadName,omitempty"`
 	Present           bool   `json:"present"`
 	Managed           bool   `json:"managed"`
+	PreservesBase     bool   `json:"preservesBase,omitempty"`
 	Message           string `json:"message,omitempty"`
 }
 
@@ -215,7 +219,9 @@ func normalizeConfig(config *ConfigFile) {
 }
 
 func normalizeRuntime(runtime *RuntimeFile) {
-	if runtime.Version == 0 {
+	if runtime.Version == 0 || runtime.Version == 1 {
+		// v1 owned the whole announce value. Migrating it with no base keeps
+		// the old exact-delete behavior while new writes can preserve a base.
 		runtime.Version = RuntimeVersion
 	}
 	if runtime.Managed == nil {
@@ -305,10 +311,20 @@ func validateRuntime(runtime RuntimeFile) error {
 		if invalidIdentifier(externalUUID) {
 			return fmt.Errorf("managed announce contains an invalid external squad UUID")
 		}
+		if managed.Message == "" {
+			return fmt.Errorf("managed announce for %s has an empty status message", externalUUID)
+		}
 		if !strings.HasPrefix(managed.Value, announceValuePrefix) {
 			return fmt.Errorf("managed announce for %s has an invalid value", externalUUID)
 		}
-		if managed.Value != announceValuePrefix+managed.Message {
+		if managed.BasePresent {
+			if !isAppendableBaseAnnounce(managed.BaseValue) {
+				return fmt.Errorf("managed announce for %s has an invalid base value", externalUUID)
+			}
+		} else if managed.BaseValue != "" {
+			return fmt.Errorf("managed announce for %s has a base value without basePresent", externalUUID)
+		}
+		if managed.Value != composeManagedAnnounce(managed.BasePresent, managed.BaseValue, managed.Message) {
 			return fmt.Errorf("managed announce for %s has inconsistent value and message", externalUUID)
 		}
 		if err := validateDisplayText("managed announce", managed.Message, maxMessageRunes); err != nil {
@@ -316,6 +332,26 @@ func validateRuntime(runtime RuntimeFile) error {
 		}
 	}
 	return nil
+}
+
+func isAppendableBaseAnnounce(value string) bool {
+	return len(value) > len(announceValuePrefix) &&
+		len(value) <= maxBaseAnnounceBytes &&
+		strings.HasPrefix(value, announceValuePrefix) &&
+		!strings.ContainsAny(value, "\r\n")
+}
+
+func composeManagedAnnounce(basePresent bool, baseValue, message string) string {
+	if message == "" {
+		if basePresent {
+			return baseValue
+		}
+		return ""
+	}
+	if basePresent {
+		return baseValue + "\n" + message
+	}
+	return announceValuePrefix + message
 }
 
 func validateDisplayText(name, value string, maxRunes int) error {

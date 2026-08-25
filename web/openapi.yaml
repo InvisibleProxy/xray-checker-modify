@@ -1780,6 +1780,9 @@ components:
                     type: boolean
                   managed:
                     type: boolean
+                  preservesBase:
+                    type: boolean
+                    description: The original single-line rwEncodeBase64 announce is preserved as the first line
                   message:
                     type: string
 

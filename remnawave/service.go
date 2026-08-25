@@ -70,7 +70,6 @@ type Service struct {
 }
 
 type desiredAnnouncement struct {
-	Value   string
 	Message string
 	Groups  map[string]string
 }
@@ -436,25 +435,37 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 			conflicts = append(conflicts, fmt.Sprintf("%s: multiple case-insensitive announce headers were left untouched", squad.Name))
 			continue
 		}
-		if wasManaged && currentPresent && currentValue != previous.Value {
+		if wasManaged && (!currentPresent || currentValue != previous.Value) {
 			delete(runtime.Managed, externalUUID)
 			runtimeChanged = true
-			conflicts = append(conflicts, fmt.Sprintf("%s: announce was changed outside xray-checker and was left untouched", squad.Name))
-			continue
-		}
-		if !wasManaged && currentPresent {
-			conflicts = append(conflicts, fmt.Sprintf("%s: existing announce is not owned by xray-checker", squad.Name))
+			conflicts = append(conflicts, fmt.Sprintf("%s: managed announce was changed or removed outside xray-checker and was left untouched", squad.Name))
 			continue
 		}
 
-		if target.Value == "" && !currentPresent {
-			if wasManaged {
-				delete(runtime.Managed, externalUUID)
-				runtimeChanged = true
+		basePresent := false
+		baseValue := ""
+		if wasManaged {
+			basePresent = previous.BasePresent
+			baseValue = previous.BaseValue
+		} else if currentPresent {
+			if target.Message == "" {
+				// A healthy/no-status reconcile must not claim or rewrite an
+				// operator-owned base announce.
+				continue
 			}
+			if !isAppendableBaseAnnounce(currentValue) {
+				conflicts = append(conflicts, fmt.Sprintf("%s: existing announce is not an appendable single-line rwEncodeBase64 value and was left untouched", squad.Name))
+				continue
+			}
+			basePresent = true
+			baseValue = currentValue
+		}
+
+		targetValue := composeManagedAnnounce(basePresent, baseValue, target.Message)
+		if target.Message == "" && !wasManaged {
 			continue
 		}
-		if owned && currentValue == target.Value {
+		if owned && target.Message != "" && currentValue == targetValue {
 			if previous.Message != target.Message || !stringMapEqual(previous.Groups, target.Groups) {
 				previous.Message = target.Message
 				previous.Groups = cloneStringMap(target.Groups)
@@ -466,8 +477,10 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 		}
 
 		headers := withoutHeader(squad.ResponseHeadersAdd, announceHeader)
-		if target.Value != "" {
-			headers[announceHeader] = target.Value
+		if target.Message != "" {
+			headers[announceHeader] = targetValue
+		} else if basePresent {
+			headers[announceHeader] = baseValue
 		}
 		ctx, cancel = s.requestContext(parent)
 		updateErr := s.api.UpdateExternalHeaders(ctx, externalUUID, headers)
@@ -478,14 +491,16 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 		}
 		squad.ResponseHeadersAdd = headers
 		externalByUUID[externalUUID] = squad
-		if target.Value == "" {
+		if target.Message == "" {
 			delete(runtime.Managed, externalUUID)
 		} else {
 			runtime.Managed[externalUUID] = ManagedAnnouncement{
-				Value:     target.Value,
-				Message:   target.Message,
-				Groups:    cloneStringMap(target.Groups),
-				UpdatedAt: now,
+				Value:       targetValue,
+				Message:     target.Message,
+				BasePresent: basePresent,
+				BaseValue:   baseValue,
+				Groups:      cloneStringMap(target.Groups),
+				UpdatedAt:   now,
 			}
 		}
 		runtimeChanged = true
@@ -669,11 +684,7 @@ func computeDesiredAnnouncements(
 		} else if allHealthy || (len(previous.Groups) == 0 && previous.Message == config.Policy.NormalMessage) {
 			message = config.Policy.NormalMessage
 		}
-		target := desiredAnnouncement{Message: message, Groups: announced}
-		if message != "" {
-			target.Value = announceValuePrefix + message
-		}
-		desired[pair.ExternalSquadUUID] = target
+		desired[pair.ExternalSquadUUID] = desiredAnnouncement{Message: message, Groups: announced}
 	}
 	return desired, nextRecovery, nil
 }
@@ -963,6 +974,7 @@ func announcementStatuses(external []ExternalSquad, managed map[string]ManagedAn
 			ExternalSquadName: squad.Name,
 			Present:           present,
 			Managed:           isManaged && present && !duplicateHeader && value == owned.Value,
+			PreservesBase:     (!isManaged && present && !duplicateHeader && isAppendableBaseAnnounce(value)) || (isManaged && owned.BasePresent),
 		}
 		if status.Managed {
 			status.Message = owned.Message
@@ -979,6 +991,7 @@ func announcementStatuses(external []ExternalSquad, managed map[string]ManagedAn
 		result = append(result, RemoteAnnouncementStatus{
 			ExternalSquadUUID: externalUUID,
 			Managed:           true,
+			PreservesBase:     owned.BasePresent,
 			Message:           owned.Message,
 		})
 	}

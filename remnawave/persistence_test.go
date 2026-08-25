@@ -1,6 +1,7 @@
 package remnawave
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,5 +70,60 @@ func TestConfigRejectsUserFacingURL(t *testing.T) {
 	config.Policy.NormalMessage = "Подробности: https://status.example"
 	if err := validateConfig(config); err == nil {
 		t.Fatal("URL in user-facing announce was accepted")
+	}
+}
+
+func TestDecodeRuntimeMigratesV1WholeValueOwnership(t *testing.T) {
+	runtime, err := DecodeRuntime([]byte(`{
+  "version": 1,
+  "managed": {
+    "external-users": {
+      "value": "rwEncodeBase64:old managed value",
+      "message": "old managed value",
+      "groups": null,
+      "updatedAt": "2026-08-25T12:00:00Z"
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("DecodeRuntime: %v", err)
+	}
+	if runtime.Version != RuntimeVersion {
+		t.Fatalf("version = %d", runtime.Version)
+	}
+	managed := runtime.Managed["external-users"]
+	if managed.BasePresent || managed.BaseValue != "" {
+		t.Fatalf("v1 ownership unexpectedly gained a base announce: %+v", managed)
+	}
+	if managed.Value != composeManagedAnnounce(false, "", managed.Message) {
+		t.Fatalf("v1 whole-value ownership changed during migration: %+v", managed)
+	}
+	if managed.Groups == nil {
+		t.Fatal("v1 nil groups were not normalized")
+	}
+}
+
+func TestDecodeRuntimeAcceptsV2BaseAndManagedSuffix(t *testing.T) {
+	base := "rwEncodeBase64:{{USERNAME}} | Нажми, чтобы продлить подписку →"
+	message := "⚠️ Временно недоступна локация «Германия»."
+	data := []byte(fmt.Sprintf(`{
+  "version": 2,
+  "managed": {
+    "external-users": {
+      "value": %q,
+      "message": %q,
+      "basePresent": true,
+      "baseValue": %q,
+      "updatedAt": "2026-08-25T12:00:00Z"
+    }
+  }
+}`, base+"\n"+message, message, base))
+	runtime, err := DecodeRuntime(data)
+	if err != nil {
+		t.Fatalf("DecodeRuntime: %v", err)
+	}
+	managed := runtime.Managed["external-users"]
+	if !managed.BasePresent || managed.BaseValue != base || managed.Value != base+"\n"+message {
+		t.Fatalf("v2 base ownership = %+v", managed)
 	}
 }

@@ -1664,11 +1664,12 @@
           </div>
           <label>
             Message when everything is stable (optional)
-            <input id="remnawave-normal-message" type="text" maxlength="240" placeholder="Leave blank to remove the managed announce" />
+            <input id="remnawave-normal-message" type="text" maxlength="240" placeholder="Leave blank to restore the base or remove checker-only announce" />
           </label>
           <div class="hint">
-            A blank stable message removes only an <code>announce</code> previously written by xray-checker.
-            A manual or otherwise unknown <code>announce</code> is never overwritten.
+            An existing single-line <code>rwEncodeBase64:</code> announce stays unchanged on the first line;
+            xray-checker appends only its status line and restores the original value after recovery.
+            Without a base, a checker-only header is removed. Other or manually changed values are never overwritten.
           </div>
         </section>
 
@@ -1723,8 +1724,8 @@
 
         <section class="panel stack">
           <div>
-            <h2>Current announce ownership</h2>
-            <div class="muted">Only values shown as managed may later be changed or removed automatically.</div>
+            <h2>Current announce state</h2>
+            <div class="muted">Only a status shown as managed may later be changed or removed automatically; the preserved first line remains operator-owned.</div>
           </div>
           <div id="remnawave-announcements" class="remnawave-message-list"></div>
         </section>
@@ -2071,12 +2072,21 @@
         $("remnawave-sync").disabled = !(connection.enabled && connection.configured);
 
         const announcements = Array.isArray(status.announcements) ? status.announcements : [];
-        $("remnawave-announcements").innerHTML = announcements.map((announcement) => `
-          <div>
-            <strong class="${announcement.managed ? "ok" : "warn"}">${escapeHtml(announcement.externalSquadName || announcement.externalSquadUuid)} · ${announcement.managed ? "Managed" : "Unmanaged"}</strong>
-            <span>${escapeHtml(announcement.message || (announcement.present ? "Existing announce is left untouched" : "Managed value is no longer present remotely"))}</span>
-          </div>
-        `).join("") || `<div class="muted">No announce headers are currently tracked.</div>`;
+        $("remnawave-announcements").innerHTML = announcements.map((announcement) => {
+          const label = announcement.managed
+            ? (announcement.preservesBase ? "Managed status line" : "Managed")
+            : (announcement.preservesBase ? "Base announce preserved" : "Unmanaged");
+          const message = announcement.message || (announcement.preservesBase
+            ? "Existing rwEncodeBase64 announce stays on the first line"
+            : (announcement.present ? "Existing announce is left untouched" : "Managed value is no longer present remotely"));
+          const stateClass = announcement.managed ? "ok" : (announcement.preservesBase ? "muted" : "warn");
+          return `
+            <div>
+              <strong class="${stateClass}">${escapeHtml(announcement.externalSquadName || announcement.externalSquadUuid)} · ${label}</strong>
+              <span>${escapeHtml(message)}</span>
+            </div>
+          `;
+        }).join("") || `<div class="muted">No announce headers are currently tracked.</div>`;
       }
 
       function remnawaveSettingsFromForm() {

@@ -236,8 +236,108 @@ func TestServicePreservesUnmanagedAnnounce(t *testing.T) {
 	if len(api.updates) != 0 {
 		t.Fatalf("unmanaged announce was overwritten: %+v", api.updates)
 	}
-	if len(snapshot.Status.Conflicts) != 1 || !strings.Contains(snapshot.Status.Conflicts[0], "not owned") {
+	if len(snapshot.Status.Conflicts) != 1 || !strings.Contains(snapshot.Status.Conflicts[0], "not an appendable") {
 		t.Fatalf("ownership conflict was not reported: %+v", snapshot.Status)
+	}
+}
+
+func TestServiceAppendsStatusToExistingBaseAndRestoresItAfterRecovery(t *testing.T) {
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	base := "rwEncodeBase64:{{USERNAME}} | Нажми, чтобы продлить подписку →"
+	api, proxies := oneAudienceFixture(now, map[string]string{announceHeader: base, "x-test": "keep"})
+	service := testService(t, api, proxies, &fakeIncidentSource{}, &now)
+	service.config = audienceConfig("")
+	for range 3 {
+		service.ObserveFullCheck()
+	}
+
+	snapshot, err := service.SyncNow(context.Background())
+	if err != nil {
+		t.Fatalf("outage SyncNow: %v", err)
+	}
+	if len(api.updates) != 1 {
+		t.Fatalf("outage updates = %+v", api.updates)
+	}
+	announce := api.updates[0].Headers[announceHeader]
+	if !strings.HasPrefix(announce, base+"\n⚠️ ") {
+		t.Fatalf("status was not appended on a new line: %q", announce)
+	}
+	if api.updates[0].Headers["x-test"] != "keep" {
+		t.Fatalf("unrelated header was lost: %+v", api.updates[0].Headers)
+	}
+	managed := service.runtime.Managed["external-users"]
+	if !managed.BasePresent || managed.BaseValue != base || managed.Value != announce {
+		t.Fatalf("base ownership was not persisted exactly: %+v", managed)
+	}
+	if len(snapshot.Status.Announcements) != 1 || !snapshot.Status.Announcements[0].Managed || !snapshot.Status.Announcements[0].PreservesBase {
+		t.Fatalf("managed suffix status = %+v", snapshot.Status.Announcements)
+	}
+
+	proxies.setOnline("stable-a")
+	if _, err := service.ReconcileNow(context.Background()); err != nil {
+		t.Fatalf("start recovery ReconcileNow: %v", err)
+	}
+	if len(api.updates) != 1 {
+		t.Fatalf("base was restored before recovery grace: %+v", api.updates)
+	}
+	now = now.Add(6 * time.Minute)
+	snapshot, err = service.ReconcileNow(context.Background())
+	if err != nil {
+		t.Fatalf("finish recovery ReconcileNow: %v", err)
+	}
+	if len(api.updates) != 2 || api.updates[1].Headers[announceHeader] != base {
+		t.Fatalf("base announce was not restored exactly: %+v", api.updates)
+	}
+	if _, exists := service.runtime.Managed["external-users"]; exists {
+		t.Fatal("suffix ownership remained after restoring the base announce")
+	}
+	if len(snapshot.Status.Announcements) != 1 || snapshot.Status.Announcements[0].Managed || !snapshot.Status.Announcements[0].PreservesBase {
+		t.Fatalf("restored base status = %+v", snapshot.Status.Announcements)
+	}
+}
+
+func TestServiceLeavesHealthyBaseUnclaimed(t *testing.T) {
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	base := "rwEncodeBase64:{{USERNAME}} | Нажми, чтобы продлить подписку →"
+	api, proxies := oneAudienceFixture(now, map[string]string{announceHeader: base})
+	proxies.setOnline("stable-a")
+	service := testService(t, api, proxies, &fakeIncidentSource{}, &now)
+	service.config = audienceConfig("")
+
+	snapshot, err := service.SyncNow(context.Background())
+	if err != nil {
+		t.Fatalf("SyncNow: %v", err)
+	}
+	if len(api.updates) != 0 || len(snapshot.Status.Conflicts) != 0 {
+		t.Fatalf("healthy base was claimed or reported as a conflict: updates=%+v status=%+v", api.updates, snapshot.Status)
+	}
+	if len(snapshot.Status.Announcements) != 1 || snapshot.Status.Announcements[0].Managed || !snapshot.Status.Announcements[0].PreservesBase {
+		t.Fatalf("healthy base status = %+v", snapshot.Status.Announcements)
+	}
+}
+
+func TestServiceDoesNotAdoptUnmanagedMultilineAnnounce(t *testing.T) {
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	value := "rwEncodeBase64:operator base\noperator-owned second line"
+	api, proxies := oneAudienceFixture(now, map[string]string{announceHeader: value})
+	service := testService(t, api, proxies, &fakeIncidentSource{}, &now)
+	service.config = audienceConfig("")
+	for range 3 {
+		service.ObserveFullCheck()
+	}
+
+	snapshot, err := service.SyncNow(context.Background())
+	if err != nil {
+		t.Fatalf("SyncNow: %v", err)
+	}
+	if len(api.updates) != 0 {
+		t.Fatalf("unmanaged multiline announce was overwritten: %+v", api.updates)
+	}
+	if len(snapshot.Status.Conflicts) != 1 || !strings.Contains(snapshot.Status.Conflicts[0], "single-line") {
+		t.Fatalf("multiline ownership conflict was not reported: %+v", snapshot.Status)
+	}
+	if len(snapshot.Status.Announcements) != 1 || snapshot.Status.Announcements[0].PreservesBase {
+		t.Fatalf("multiline announce was reported as appendable: %+v", snapshot.Status.Announcements)
 	}
 }
 
@@ -261,7 +361,7 @@ func TestServiceRelinquishesOwnershipAfterManualAnnounceChange(t *testing.T) {
 	if _, exists := service.runtime.Managed["external-users"]; exists {
 		t.Fatal("ownership was retained after the remote announce changed")
 	}
-	if len(snapshot.Status.Conflicts) != 1 || !strings.Contains(snapshot.Status.Conflicts[0], "changed outside") {
+	if len(snapshot.Status.Conflicts) != 1 || !strings.Contains(snapshot.Status.Conflicts[0], "changed or removed outside") {
 		t.Fatalf("manual-change conflict was not reported: %+v", snapshot.Status)
 	}
 }
