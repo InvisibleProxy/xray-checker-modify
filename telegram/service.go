@@ -2388,7 +2388,7 @@ func (s *Service) formatIssuesSummary() string {
 		}
 	}
 
-	speedLines := speedIssuesHTML(filterMutedSpeedResults(s.speedManager.Snapshot().Results, cfg), cfg.LowSpeedThresholdMbps)
+	speedLines := speedIssuesHTML(filterMutedSpeedResults(s.activeSpeedResults(s.speedManager.Snapshot().Results), cfg), cfg.LowSpeedThresholdMbps)
 	lines := []string{
 		"<b>Проблемные ноды</b>",
 	}
@@ -2421,7 +2421,7 @@ func (s *Service) formatIssuesSummaryMessage() formattedMessage {
 			offlineItems = append(offlineItems, formatProxyRichItem(proxy, false, details.Latency, details.DownSince, details.HostCheck, details.PingCheck))
 		}
 	}
-	speedResults := speedIssueResults(filterMutedSpeedResults(s.speedManager.Snapshot().Results, cfg), cfg.LowSpeedThresholdMbps)
+	speedResults := speedIssueResults(filterMutedSpeedResults(s.activeSpeedResults(s.speedManager.Snapshot().Results), cfg), cfg.LowSpeedThresholdMbps)
 
 	var rich strings.Builder
 	rich.WriteString("<h2>Проблемные ноды</h2>")
@@ -2513,7 +2513,7 @@ func (s *Service) formatSpeedHistoryMessage(query string) formattedMessage {
 }
 
 func (s *Service) formatRecentSpeedOverview() string {
-	results := s.speedManager.Snapshot().Results
+	results := s.activeSpeedResults(s.speedManager.Snapshot().Results)
 	if len(results) == 0 {
 		return "<b>Замеры</b>\n\nПока нет результатов speed-test."
 	}
@@ -2544,7 +2544,7 @@ func (s *Service) formatRecentSpeedOverview() string {
 
 func (s *Service) formatRecentSpeedOverviewMessage() formattedMessage {
 	fallback := s.formatRecentSpeedOverview()
-	results := s.speedManager.Snapshot().Results
+	results := s.activeSpeedResults(s.speedManager.Snapshot().Results)
 	if len(results) == 0 {
 		return formattedMessage{HTML: fallback, RichHTML: "<h2>Замеры</h2><p>Результатов пока нет.</p>"}
 	}
@@ -3689,6 +3689,21 @@ func filterMutedSpeedResults(results []speedtest.Result, cfg Config) []speedtest
 	return filtered
 }
 
+func (s *Service) activeSpeedResults(results []speedtest.Result) []speedtest.Result {
+	active := s.activeNodeIDs()
+	if len(results) == 0 || len(active) == 0 {
+		return nil
+	}
+
+	filtered := make([]speedtest.Result, 0, len(results))
+	for _, result := range results {
+		if result.StableID != "" && active[result.StableID] {
+			filtered = append(filtered, result)
+		}
+	}
+	return filtered
+}
+
 func speedIssuesHTML(results []speedtest.Result, threshold float64) []string {
 	var lines []string
 	for _, result := range results {
@@ -3908,7 +3923,7 @@ func (s *Service) nodeDetailMarkup(stableID string, isAdmin bool) string {
 }
 
 func (s *Service) speedHistoryMarkup() string {
-	results := s.speedManager.Snapshot().Results
+	results := s.activeSpeedResults(s.speedManager.Snapshot().Results)
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].CheckedAt.After(results[j].CheckedAt)
 	})

@@ -1486,6 +1486,72 @@ func TestRecentMeasurementsUseRichFormattedTable(t *testing.T) {
 	}
 }
 
+func TestTelegramInteractiveSpeedViewsExcludeInactiveResults(t *testing.T) {
+	active := &models.ProxyConfig{
+		StableID: "active-node",
+		Name:     "Current Active",
+		Protocol: "vless",
+		Server:   "active.example.com",
+		Port:     443,
+		UUID:     "active-uuid",
+	}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{active}, 10000, "", 1, "", "", 1, 0, "status")
+
+	dir := t.TempDir()
+	schedulePath := filepath.Join(dir, "speedtest_schedule.json")
+	checkedAt := time.Now().UTC().Add(-time.Minute)
+	state := map[string]interface{}{
+		"version":   1,
+		"updatedAt": checkedAt,
+		"results": map[string]speedtest.Result{
+			active.StableID: {
+				StableID:  active.StableID,
+				Name:      active.Name,
+				Error:     "active failure",
+				CheckedAt: checkedAt,
+			},
+			"retired-node": {
+				StableID:  "retired-node",
+				Name:      "Old Retired",
+				Error:     "retired failure",
+				CheckedAt: checkedAt.Add(-time.Minute),
+			},
+		},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "speedtest_results.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := speedtest.NewManager(proxyChecker, 10000, schedulePath, speedtest.TestConfig{})
+	if err := manager.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(manager.Snapshot().Results); got != 2 {
+		t.Fatalf("test fixture latest results = %d, want active and retired results", got)
+	}
+
+	service := NewService("", proxyChecker, manager, 10000)
+	views := map[string]string{
+		"issues compact": service.formatIssuesSummary(),
+		"issues rich":    service.formatIssuesSummaryMessage().RichHTML,
+		"recent compact": service.formatRecentSpeedOverview(),
+		"recent rich":    service.formatRecentSpeedOverviewMessage().RichHTML,
+		"recent buttons": service.speedHistoryMarkup(),
+	}
+	for name, view := range views {
+		if strings.Contains(view, "Old Retired") || strings.Contains(view, "retired-node") {
+			t.Fatalf("%s contains inactive speed-test result:\n%s", name, view)
+		}
+		if !strings.Contains(view, "Current Active") && !strings.Contains(view, active.StableID) {
+			t.Fatalf("%s does not contain active speed-test result:\n%s", name, view)
+		}
+	}
+}
+
 func withReportMode(cfg Config, mode string) Config {
 	cfg.SpeedReportMode = mode
 	return cfg
