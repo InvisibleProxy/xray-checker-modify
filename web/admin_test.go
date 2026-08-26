@@ -144,7 +144,8 @@ func TestWebTemplatesExposeSharedEnglishRussianLocalization(t *testing.T) {
 		`new MutationObserver`,
 		`document.documentElement.lang = language`,
 		`"Nodes Overview": "Обзор нод"`,
-		`"StableID to Host mapping": "Сопоставление StableID с Host"`,
+		`"StableID to Host mapping": "Маппинг StableID → Host"`,
+		`"Loading speed-test history…": "Загрузка speedtest history…"`,
 	} {
 		if !strings.Contains(localization, marker) {
 			t.Fatalf("localization asset does not contain %q", marker)
