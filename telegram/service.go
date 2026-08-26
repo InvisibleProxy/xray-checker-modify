@@ -3408,6 +3408,9 @@ func (s *Service) setConfig(cfg Config) {
 	s.mu.Lock()
 	s.config = cfg
 	s.mu.Unlock()
+	if s.speedManager != nil {
+		s.speedManager.SetLowSpeedThresholdMbps(cfg.LowSpeedThresholdMbps)
+	}
 }
 
 func applyLegacyAlertRepeat(data []byte, cfg *Config) {

@@ -165,6 +165,7 @@ type Manager struct {
 	fallbackCatalogLoaded  bool
 	fallbackHealth         fallbackHealthState
 	countryResolver        func(stableID string) string
+	lowSpeedThresholdMbps  float64
 	testAttempt            func(proxy *models.ProxyConfig, cfg TestConfig, source string) Result
 
 	stopCh     chan struct{}

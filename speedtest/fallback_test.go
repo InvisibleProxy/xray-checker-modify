@@ -114,7 +114,117 @@ countries:
 	}
 }
 
-func TestLowSpeedDoesNotSwitchToFallback(t *testing.T) {
+func TestLowSpeedSwitchesToHealthyFallback(t *testing.T) {
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "DE Node", Protocol: "vless"}
+	manager := newFallbackTestManager(proxy)
+	manager.SetLowSpeedThresholdMbps(10)
+	manager.fallbackCatalog = mustParseFallbackCatalog(t, `
+version: 1
+countries:
+  DE:
+    - id: reserve
+      url: https://reserve.example.test/100mb.bin
+      priority: 10
+`)
+	manager.SetCountryResolver(func(string) string { return "DE" })
+	attempts := 0
+	manager.testAttempt = func(_ *models.ProxyConfig, cfg TestConfig, source string) Result {
+		attempts++
+		mbps := 1.0
+		if cfg.URL == "https://reserve.example.test/100mb.bin" {
+			mbps = 25
+		}
+		return Result{StableID: proxy.StableID, URL: cfg.URL, DownloadedBytes: cfg.MaxBytes, Mbps: mbps, Source: source}
+	}
+
+	result := manager.testProxyWithFallback(proxy, TestConfig{
+		URL:        "https://primary.example.test/100mb.bin",
+		MaxBytes:   1024,
+		TimeoutSec: 30,
+	}, "schedule")
+	if attempts != 3 {
+		t.Fatalf("attempt count = %d, want primary, probe and full fallback", attempts)
+	}
+	if !result.FallbackUsed || result.URL != "https://reserve.example.test/100mb.bin" || result.Mbps != 25 {
+		t.Fatalf("fallback result = %+v", result)
+	}
+	if result.PrimaryURL != "https://primary.example.test/100mb.bin" || result.PrimaryError != "" {
+		t.Fatalf("primary diagnostics = %q / %q", result.PrimaryURL, result.PrimaryError)
+	}
+	if !result.TelegramAlertSuppressed {
+		t.Fatal("healthy fallback did not suppress the automated Telegram report")
+	}
+}
+
+func TestLowSpeedFallbackRemainsEligibleForConfirmation(t *testing.T) {
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "DE Node", Protocol: "vless"}
+	manager := newFallbackTestManager(proxy)
+	manager.SetLowSpeedThresholdMbps(10)
+	manager.fallbackCatalog = mustParseFallbackCatalog(t, `
+version: 1
+countries:
+  DE:
+    - id: reserve
+      url: https://reserve.example.test/100mb.bin
+      priority: 10
+`)
+	manager.SetCountryResolver(func(string) string { return "DE" })
+	manager.testAttempt = func(_ *models.ProxyConfig, cfg TestConfig, source string) Result {
+		mbps := 2.0
+		if cfg.URL == "https://reserve.example.test/100mb.bin" {
+			mbps = 3
+		}
+		return Result{StableID: proxy.StableID, URL: cfg.URL, DownloadedBytes: cfg.MaxBytes, Mbps: mbps, Source: source}
+	}
+
+	result := manager.testProxyWithFallback(proxy, TestConfig{
+		URL:        "https://primary.example.test/100mb.bin",
+		MaxBytes:   1024,
+		TimeoutSec: 30,
+	}, "schedule")
+	if !result.FallbackUsed || result.Mbps != 3 {
+		t.Fatalf("fallback result = %+v", result)
+	}
+	if result.TelegramAlertSuppressed {
+		t.Fatal("low-speed fallback was suppressed from delayed confirmation")
+	}
+}
+
+func TestFailedFallbackKeepsPrimaryLowSpeedForConfirmation(t *testing.T) {
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "DE Node", Protocol: "vless"}
+	manager := newFallbackTestManager(proxy)
+	manager.SetLowSpeedThresholdMbps(10)
+	manager.fallbackCatalog = mustParseFallbackCatalog(t, `
+version: 1
+countries:
+  DE:
+    - id: reserve
+      url: https://reserve.example.test/100mb.bin
+      priority: 10
+`)
+	manager.SetCountryResolver(func(string) string { return "DE" })
+	manager.testAttempt = func(_ *models.ProxyConfig, cfg TestConfig, source string) Result {
+		result := Result{StableID: proxy.StableID, URL: cfg.URL, Source: source}
+		if cfg.URL == "https://reserve.example.test/100mb.bin" {
+			result.Error = "connection refused"
+			return result
+		}
+		result.DownloadedBytes = cfg.MaxBytes
+		result.Mbps = 2
+		return result
+	}
+
+	result := manager.testProxyWithFallback(proxy, TestConfig{
+		URL:        "https://primary.example.test/100mb.bin",
+		MaxBytes:   1024,
+		TimeoutSec: 30,
+	}, "schedule")
+	if result.FallbackUsed || result.Error != "" || result.Mbps != 2 {
+		t.Fatalf("result = %+v, want original low-speed result", result)
+	}
+}
+
+func TestDisabledLowSpeedThresholdDoesNotSwitchToFallback(t *testing.T) {
 	proxy := &models.ProxyConfig{StableID: "node-1", Name: "DE Node", Protocol: "vless"}
 	manager := newFallbackTestManager(proxy)
 	manager.fallbackCatalog = mustParseFallbackCatalog(t, `
@@ -137,11 +247,8 @@ countries:
 		MaxBytes:   1024,
 		TimeoutSec: 30,
 	}, "schedule")
-	if attempts != 1 {
-		t.Fatalf("attempt count = %d, want primary only", attempts)
-	}
-	if result.FallbackUsed {
-		t.Fatal("low speed switched to fallback")
+	if attempts != 1 || result.FallbackUsed {
+		t.Fatalf("attempts = %d, result = %+v", attempts, result)
 	}
 }
 

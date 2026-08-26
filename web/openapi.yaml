@@ -1176,7 +1176,7 @@ components:
           description: ISO 3166-1 alpha-2 code inferred from the node declaration, never GeoIP.
         telegramAlertSuppressed:
           type: boolean
-          description: Successful fallback result is omitted from automated Telegram reports and alerts.
+          description: Fallback result at or above the configured low-speed threshold is omitted from automated Telegram reports and alerts.
         statusCode:
           type: integer
         downloadedBytes:

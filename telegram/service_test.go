@@ -679,7 +679,7 @@ func TestSuccessfulFallbackSuppressesAutomatedTelegramReport(t *testing.T) {
 		Results: []speedtest.Result{{
 			StableID:                "node-1",
 			Name:                    "Node 1",
-			Mbps:                    2,
+			Mbps:                    20,
 			FallbackUsed:            true,
 			TelegramAlertSuppressed: true,
 		}},
@@ -693,6 +693,47 @@ func TestSuccessfulFallbackSuppressesAutomatedTelegramReport(t *testing.T) {
 	service.speedRetryMu.Unlock()
 	if pending {
 		t.Fatal("successful fallback scheduled a low-speed confirmation alert")
+	}
+}
+
+func TestLowSpeedFallbackSchedulesConfirmation(t *testing.T) {
+	service := NewService("", nil, nil, 10000)
+	defer service.Stop()
+	service.speedRetryDelay = time.Hour
+	service.setConfig(Config{
+		Enabled:               true,
+		ChatID:                "alerts-chat",
+		SpeedReportsEnabled:   true,
+		SpeedReportMode:       "issues",
+		LowSpeedThresholdMbps: 10,
+		TimeoutSec:            1,
+	})
+
+	var sent []formattedMessage
+	service.speedReportSendFunc = func(_ string, _ int, content formattedMessage) {
+		sent = append(sent, content)
+	}
+	service.NotifySpeedTest(speedtest.RunReport{
+		Source:     "schedule",
+		FinishedAt: time.Now(),
+		Selected:   1,
+		Config:     speedtest.TestConfig{URL: "https://primary.example.test/file.bin"},
+		Results: []speedtest.Result{{
+			StableID:     "node-1",
+			Name:         "Node 1",
+			Mbps:         2,
+			FallbackUsed: true,
+		}},
+	})
+
+	if len(sent) != 0 {
+		t.Fatalf("initial low-speed fallback sent %d reports, want none", len(sent))
+	}
+	service.speedRetryMu.Lock()
+	pending := service.speedRetryPending[speedRetryKey{Kind: speedRetryKindLowSpeed, StableID: "node-1"}]
+	service.speedRetryMu.Unlock()
+	if !pending {
+		t.Fatal("low-speed fallback did not schedule a confirmation test")
 	}
 }
 

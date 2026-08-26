@@ -271,7 +271,8 @@ func (m *Manager) persistFallbackHealth() error {
 
 func (m *Manager) testProxyWithFallback(proxy *models.ProxyConfig, cfg TestConfig, source string) Result {
 	primary := m.executeTestAttempt(proxy, cfg, source)
-	if primary.Error == "" || primary.Offline {
+	threshold := m.fallbackLowSpeedThreshold()
+	if primary.Offline || (primary.Error == "" && (threshold <= 0 || primary.Mbps >= threshold)) {
 		return primary
 	}
 
@@ -311,10 +312,27 @@ func (m *Manager) testProxyWithFallback(proxy *models.ProxyConfig, cfg TestConfi
 		result.FallbackCountryCode = countryCode
 		result.PrimaryURL = primary.URL
 		result.PrimaryError = primary.Error
-		result.TelegramAlertSuppressed = true
+		result.TelegramAlertSuppressed = threshold <= 0 || result.Mbps >= threshold
 		return result
 	}
 	return primary
+}
+
+// SetLowSpeedThresholdMbps keeps country fallback selection aligned with the
+// threshold used by Telegram reports and their delayed confirmation workflow.
+func (m *Manager) SetLowSpeedThresholdMbps(threshold float64) {
+	if threshold < 0 {
+		threshold = 0
+	}
+	m.fallbackMu.Lock()
+	m.lowSpeedThresholdMbps = threshold
+	m.fallbackMu.Unlock()
+}
+
+func (m *Manager) fallbackLowSpeedThreshold() float64 {
+	m.fallbackMu.Lock()
+	defer m.fallbackMu.Unlock()
+	return m.lowSpeedThresholdMbps
 }
 
 func successfulSpeedResult(result Result) bool {
