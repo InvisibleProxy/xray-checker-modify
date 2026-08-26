@@ -13,7 +13,7 @@
     "proxies · Config URLs return 200/503 for monitoring": "прокси · Config URL возвращают 200/503 для мониторинга",
     "Check:": "Проверка:", "Interval:": "Интервал:", "Timeout:": "Таймаут:",
     "Powered by": "Работает на базе", "Made with ❤️ by": "Сделано с ❤️ —",
-    "Telegram Chat": "Telegram-чат", "Auto": "Авто", "Copied!": "Скопировано!", "Logo": "Логотип",
+    "Telegram Chat": "Telegram-чат", "Auto": "Авто", "Copied!": "Скопировано!", "IP / server copied!": "IP / сервер скопирован!", "Logo": "Логотип",
 
     "Xray Checker Admin": "Админка Xray Checker",
     "Availability, speed tests and operational controls": "Availability, speedtest и оперативное управление",
@@ -52,7 +52,7 @@
     "No result": "Нет результата", "No speed test": "Нет speedtest", "No active downtime": "Нет активного downtime",
     "No current failure": "Нет текущего сбоя", "Diagnostics unavailable": "Диагностика недоступна",
     "Refresh Overview": "Обновить обзор", "Refresh Geo": "Обновить Geo",
-    "Name, server, country, subscription": "Имя, сервер, страна, подписка", "IP / Server": "IP / Сервер",
+    "Name, server, country, subscription": "Имя, сервер, страна, подписка", "IP / Server": "IP / Сервер", "Copy IP / server": "Копировать IP / сервер", "Open IP details": "Открыть сведения об IP",
     "Geo match": "Совпадение Geo", "Last seen": "Последняя активность", "Action": "Действие",
     "Active": "Активна", "Retired": "Выведена", "Delete": "Удалить", "Merge": "Merge",
     "Active nodes are managed by subscription": "Active-ноды управляются подпиской",

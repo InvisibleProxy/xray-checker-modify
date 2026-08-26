@@ -378,6 +378,35 @@
         min-width: 155px;
         white-space: nowrap;
       }
+      .copy-ip {
+        appearance: none;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+        font: inherit;
+        padding: 0;
+        text-decoration: underline;
+        text-decoration-style: dotted;
+        text-underline-offset: 2px;
+      }
+      .copy-ip:hover,
+      .copy-ip:focus-visible {
+        color: var(--accent);
+        text-decoration-style: solid;
+      }
+      .copy-toast {
+        position: fixed;
+        right: 24px;
+        bottom: 24px;
+        z-index: 50;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--panel);
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+        color: var(--text);
+        padding: 10px 14px;
+      }
       .reason-cell {
         min-width: 190px;
         overflow-wrap: anywhere;
@@ -2164,6 +2193,7 @@
       </div>
     </dialog>
     <div id="node-speed-tooltip" class="speed-chart-tooltip" role="status" aria-live="polite"></div>
+    <div id="copy-toast" class="copy-toast" role="status" aria-live="polite" hidden></div>
 
     <script>
       const tr = (value) => window.XrayI18n ? window.XrayI18n.translate(value) : value;
@@ -2183,6 +2213,7 @@
         nodesOverviewSort: "avgMbps",
         nodesOverviewSortDir: "desc",
         speedPollRunning: false,
+        loadRunning: false,
         availabilityCheckRunning: false,
         availabilityCheckIDs: new Set(),
         nodeURLDraftID: "",
@@ -2214,6 +2245,39 @@
           .replaceAll(">", "&gt;")
           .replaceAll('"', "&quot;")
           .replaceAll("'", "&#039;");
+      }
+
+      function copyIPButton(value, marker = "") {
+        const address = String(value || "");
+        if (!address) return "n/a";
+        const markerAttribute = marker ? ` ${marker}` : "";
+        return `<button class="copy-ip mono" type="button" data-copy-ip="${escapeHtml(address)}"${markerAttribute} title="Copy IP / server" aria-label="Copy IP / server">${escapeHtml(address)}</button>`;
+      }
+
+      async function copyToClipboard(value) {
+        try {
+          await navigator.clipboard.writeText(value);
+        } catch {
+          const textarea = Object.assign(document.createElement("textarea"), {
+            value,
+            style: "position:fixed;opacity:0",
+          });
+          document.body.appendChild(textarea);
+          textarea.select();
+          document.execCommand("copy");
+          textarea.remove();
+        }
+      }
+
+      let copyToastTimer = 0;
+      function showCopyToast() {
+        const toast = $("copy-toast");
+        toast.textContent = tr("IP / server copied!");
+        toast.hidden = false;
+        window.clearTimeout(copyToastTimer);
+        copyToastTimer = window.setTimeout(() => {
+          toast.hidden = true;
+        }, 1800);
       }
 
       async function request(path, options = {}) {
@@ -2367,7 +2431,7 @@
             <tr data-remnawave-node data-stable-id="${escapeHtml(proxy.stableId)}">
               <td class="remnawave-node-meta">
                 <strong>${escapeHtml(proxy.name || "Unnamed")}</strong>
-                <span>${escapeHtml(proxy.subName || "No subscription")} · ${escapeHtml(proxy.server || "n/a")}:${escapeHtml(proxy.port || "n/a")}</span>
+                <span>${escapeHtml(proxy.subName || "No subscription")} · ${copyIPButton(proxy.server)}:${escapeHtml(proxy.port || "n/a")}</span>
                 <span class="mono">${escapeHtml(proxy.stableId)}</span>
               </td>
               <td><select data-remnawave-host aria-label="Remnawave Host for ${escapeHtml(proxy.name || proxy.stableId)}">${hostOptions}</select></td>
@@ -3481,9 +3545,10 @@
         const retired = (state.nodesOverview || []).length - active;
         $("nodes-overview-summary").textContent = `${rows.length} shown · ${active} active · ${retired} retired`;
         $("nodes-overview").innerHTML = rows.map((node) => {
-          const ipLink = node.ipInfoUrl
-            ? `<a href="${escapeHtml(node.ipInfoUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(node.server || "n/a")}</a>`
-            : escapeHtml(node.server || "n/a");
+          const ipLink = copyIPButton(node.server);
+          const ipDetailsLink = node.ipInfoUrl
+            ? ` <a href="${escapeHtml(node.ipInfoUrl)}" target="_blank" rel="noopener noreferrer" title="Open IP details" aria-label="Open IP details">↗</a>`
+            : "";
           const speedClass = node.successfulResults > 0 ? "ok" : node.failedResults > 0 ? "error" : "neutral";
           const statusChip = node.active
             ? `<span class="chip ok">Active</span>`
@@ -3509,7 +3574,7 @@
                 ${mergedFrom}
               </td>
               <td>${statusChip}</td>
-              <td class="mono">${ipLink}${node.port ? `:${escapeHtml(node.port)}` : ""}</td>
+              <td class="mono">${ipLink}${node.port ? `:${escapeHtml(node.port)}` : ""}${ipDetailsLink}</td>
               <td>${escapeHtml(countryText(node))}</td>
               <td>${geoCell(node)}</td>
               <td class="${speedClass}">${node.successfulResults ? formatMbps(node.avgMbps) : "n/a"}</td>
@@ -3632,7 +3697,7 @@
         const checked = result ? formatTime(result.checkedAt) : "n/a";
         return `<div class="node-card-detail">
           <div class="node-detail-grid">
-            <div class="node-detail-stat"><span>Server</span><strong class="mono" data-node-detail-server>${escapeHtml(proxy.server)}:${escapeHtml(proxy.port)}</strong></div>
+            <div class="node-detail-stat"><span>Server</span><strong class="mono">${copyIPButton(proxy.server, "data-node-detail-ip")}:<span data-node-detail-port>${escapeHtml(proxy.port)}</span></strong></div>
             <div class="node-detail-stat"><span>Availability</span><strong class="${proxy.online ? "ok" : "error"}" data-node-detail-availability>${escapeHtml(nodeAvailabilityDetails(proxy))}</strong></div>
             <div class="node-detail-stat"><span>Down since</span><strong data-node-detail-down>${escapeHtml(down)}</strong></div>
             <div class="node-detail-stat"><span>Failure</span><strong data-node-detail-failure title="${escapeHtml(proxy.failureDetail || "")}">${escapeHtml(failure)}</strong></div>
@@ -3796,6 +3861,12 @@
         };
       }
 
+      function nodeSublineHTML(proxy) {
+        const prefix = [proxy.subName, proxy.protocol].filter(Boolean).map(escapeHtml).join(" · ");
+        const address = copyIPButton(proxy.server);
+        return prefix ? `${prefix} · ${address}` : address;
+      }
+
       function nodeCardHTML(proxy, index, animateCards) {
         const view = nodeCardPresentation(proxy);
         const open = state.openNodeStableIds.has(proxy.stableId);
@@ -3809,7 +3880,7 @@
               </label>
               <div class="node-identity">
                 <div class="node-title"><span data-node-country>${nodeCountryMarker(proxy.stableId)}</span><span class="dot ${proxy.online ? "online" : "offline"}" data-node-dot></span><span class="node-title-text" data-node-name>${escapeHtml(proxy.name || "Unnamed")}</span></div>
-                <div class="node-subline" data-node-subline>${escapeHtml([proxy.subName, proxy.protocol, proxy.server].filter(Boolean).join(" · "))}</div>
+                <div class="node-subline" data-node-subline>${nodeSublineHTML(proxy)}</div>
               </div>
               <div class="node-current">
                 <strong class="${view.availabilityClass}" data-node-availability>${escapeHtml(view.availabilityText)}</strong>
@@ -3832,12 +3903,14 @@
       }
 
       function updateNodeDetailSummary(card, proxy) {
-        const server = card.querySelector("[data-node-detail-server]");
+        const server = card.querySelector("[data-node-detail-ip]");
         if (!server) return;
         const availability = card.querySelector("[data-node-detail-availability]");
         const down = card.querySelector("[data-node-detail-down]");
         const failure = card.querySelector("[data-node-detail-failure]");
-        server.textContent = `${proxy.server}:${proxy.port}`;
+        server.dataset.copyIp = proxy.server;
+        server.textContent = proxy.server;
+        card.querySelector("[data-node-detail-port]").textContent = proxy.port;
         availability.textContent = nodeAvailabilityDetails(proxy);
         availability.className = proxy.online ? "ok" : "error";
         down.textContent = proxy.downSince
@@ -3863,7 +3936,7 @@
         dot.classList.toggle("online", proxy.online);
         dot.classList.toggle("offline", !proxy.online);
         card.querySelector("[data-node-name]").textContent = proxy.name || "Unnamed";
-        card.querySelector("[data-node-subline]").textContent = [proxy.subName, proxy.protocol, proxy.server].filter(Boolean).join(" · ");
+        card.querySelector("[data-node-subline]").innerHTML = nodeSublineHTML(proxy);
         const availability = card.querySelector("[data-node-availability]");
         availability.className = view.availabilityClass;
         availability.textContent = view.availabilityText;
@@ -4316,9 +4389,9 @@
       }
 
       function nodeMergeCardHTML(node) {
-        const endpoint = `${node.server || "n/a"}${node.port ? `:${node.port}` : ""}`;
+        const endpoint = `${copyIPButton(node.server)}${node.port ? `:${escapeHtml(node.port)}` : ""}`;
         return `<strong>${escapeHtml(node.name || "Unnamed")}</strong>
-          <span>${escapeHtml(node.subName || "No subscription")} · ${escapeHtml(String(node.protocol || "n/a").toUpperCase())} · ${escapeHtml(endpoint)}</span>
+          <span>${escapeHtml(node.subName || "No subscription")} · ${escapeHtml(String(node.protocol || "n/a").toUpperCase())} · ${endpoint}</span>
           <span class="mono">${escapeHtml(node.stableId || "")}</span>`;
       }
 
@@ -4619,37 +4692,43 @@
       }
 
       async function load(initial = false, refreshFilters = false) {
-        const [proxies, snapshot, telegram, nodesOverview] = await Promise.all([
-          request("/proxies"),
-          request("/speed-tests"),
-          request("/telegram"),
-          request("/nodes-overview"),
-        ]);
-        state.proxies = proxies;
-        state.snapshot = snapshot;
-        state.telegram = telegram;
-        state.nodesOverview = nodesOverview;
-        state.lastUpdatedAt = new Date();
-        if (initial) {
-          renderFilters();
-          applyDefaults();
-          applyTelegram();
-        } else if (refreshFilters) {
-          renderFilters();
+        if (state.loadRunning) return;
+        state.loadRunning = true;
+        try {
+          const [proxies, snapshot, telegram, nodesOverview] = await Promise.all([
+            request("/proxies"),
+            request("/speed-tests"),
+            request("/telegram"),
+            request("/nodes-overview"),
+          ]);
+          state.proxies = proxies;
+          state.snapshot = snapshot;
+          state.telegram = telegram;
+          state.nodesOverview = nodesOverview;
+          state.lastUpdatedAt = new Date();
+          if (initial) {
+            renderFilters();
+            applyDefaults();
+            applyTelegram();
+          } else if (refreshFilters) {
+            renderFilters();
+          }
+          pruneSelection();
+          renderAll();
+          if (state.activeTab === "history") {
+            await loadHistory();
+          }
+          if (state.activeTab === "incidents") {
+            await loadIncidents();
+          }
+          await Promise.all([...state.openNodeStableIds].map((stableId) => loadDashboardHistory(stableId)));
+        } finally {
+          state.loadRunning = false;
         }
-        pruneSelection();
-        renderAll();
-        if (state.activeTab === "history") {
-          await loadHistory();
-        }
-        if (state.activeTab === "incidents") {
-          await loadIncidents();
-        }
-        await Promise.all([...state.openNodeStableIds].map((stableId) => loadDashboardHistory(stableId)));
       }
 
       async function pollSpeedSnapshot() {
-        if (state.speedPollRunning || document.hidden || !state.snapshot) return;
+        if (state.speedPollRunning || state.loadRunning || document.hidden || !state.snapshot) return;
         state.speedPollRunning = true;
         const previousRun = state.snapshot.lastRun || {};
         const wasRunning = !!previousRun.running;
@@ -5149,6 +5228,15 @@
         window.cancelAnimationFrame(nodePanelResizeFrame);
         nodePanelResizeFrame = window.requestAnimationFrame(syncOpenNodePanels);
       });
+      document.addEventListener("click", (event) => {
+        const copyButton = event.target.closest?.("[data-copy-ip]");
+        if (!copyButton) return;
+        event.preventDefault();
+        event.stopPropagation();
+        copyToClipboard(copyButton.dataset.copyIp).then(showCopyToast).catch((err) => {
+          $("message").textContent = err.message;
+        });
+      }, true);
 
       switchSettingsPane(state.settingsPane);
       load(true).catch((err) => {
@@ -5158,10 +5246,17 @@
         pollSpeedSnapshot().catch(() => {});
       }, 5000);
       setInterval(() => {
-        if (state.snapshot) {
-          renderOverview();
-        }
+        if (document.hidden || !state.snapshot) return;
+        load().catch((err) => {
+          $("message").textContent = `Automatic refresh failed: ${err.message}`;
+        });
       }, 30000);
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden || !state.snapshot) return;
+        load().catch((err) => {
+          $("message").textContent = `Automatic refresh failed: ${err.message}`;
+        });
+      });
     </script>
   </body>
 </html>

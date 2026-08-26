@@ -108,6 +108,54 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 	}
 }
 
+func TestWebTemplatesCopyNodeAddressesAndRefreshLiveData(t *testing.T) {
+	var dashboard bytes.Buffer
+	if err := RenderIndex(&dashboard, PageData{
+		CheckInterval:     30,
+		ShowServerDetails: true,
+		Endpoints: []EndpointInfo{{
+			Name:       "Test node",
+			StableID:   "node-1",
+			ServerInfo: "203.0.113.7:443",
+			Server:     "203.0.113.7",
+			ServerPort: 443,
+		}},
+	}); err != nil {
+		t.Fatalf("RenderIndex() error = %v", err)
+	}
+	for _, marker := range []string{
+		`@click.stop="copyIP(proxy.server)"`,
+		`203.0.113.7`,
+		`serverPort:`,
+		`autoRefresh: localStorage.getItem('autoRefresh') !== 'false'`,
+		`refreshInFlight: false`,
+		`const proxy = this.proxies.find(p => p.stableId === updated.stableId)`,
+		`clearInterval(this.countdownInterval)`,
+	} {
+		if !strings.Contains(dashboard.String(), marker) {
+			t.Fatalf("dashboard template does not contain %q", marker)
+		}
+	}
+
+	var admin bytes.Buffer
+	if err := RenderAdmin(&admin); err != nil {
+		t.Fatalf("RenderAdmin() error = %v", err)
+	}
+	for _, marker := range []string{
+		`data-copy-ip="${escapeHtml(address)}"`,
+		`function copyIPButton(value, marker = "")`,
+		`function copyToClipboard(value)`,
+		`if (state.loadRunning) return`,
+		`if (state.speedPollRunning || state.loadRunning`,
+		`document.addEventListener("visibilitychange"`,
+		`Automatic refresh failed: ${err.message}`,
+	} {
+		if !strings.Contains(admin.String(), marker) {
+			t.Fatalf("admin template does not contain %q", marker)
+		}
+	}
+}
+
 func TestWebTemplatesExposeSharedEnglishRussianLocalization(t *testing.T) {
 	var admin bytes.Buffer
 	if err := RenderAdmin(&admin); err != nil {
@@ -146,6 +194,7 @@ func TestWebTemplatesExposeSharedEnglishRussianLocalization(t *testing.T) {
 		`"Nodes Overview": "Обзор нод"`,
 		`"StableID to Host mapping": "Маппинг StableID → Host"`,
 		`"Loading speed-test history…": "Загрузка speedtest history…"`,
+		`"IP / server copied!": "IP / сервер скопирован!"`,
 	} {
 		if !strings.Contains(localization, marker) {
 			t.Fatalf("localization asset does not contain %q", marker)

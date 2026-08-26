@@ -388,6 +388,23 @@
         font-variant-numeric: tabular-nums;
         flex-shrink: 0;
       }
+      .copy-ip {
+        appearance: none;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+        font: inherit;
+        padding: 0;
+        text-decoration: underline;
+        text-decoration-style: dotted;
+        text-underline-offset: 2px;
+      }
+      .copy-ip:hover,
+      .copy-ip:focus-visible {
+        color: var(--text-primary);
+        text-decoration-style: solid;
+      }
 
       /* Badge styles */
       .badge-style-flat {
@@ -907,7 +924,14 @@
               ></a>
               {{ end }} {{ if .ShowServerDetails }}
               <span class="text-xs text-muted truncate block"
-                ><span x-text="proxy.serverInfo"></span> · :<span
+                ><button
+                  type="button"
+                  class="copy-ip"
+                  title="Copy IP / server"
+                  aria-label="Copy IP / server"
+                  @click.stop="copyIP(proxy.server)"
+                  x-text="proxy.server"
+                ></button>:<span x-text="proxy.serverPort"></span> · :<span
                   x-text="proxy.proxyPort"
                 ></span
               ></span>
@@ -1040,9 +1064,10 @@
       function dashboard() {
         return {
           darkMode: localStorage.getItem('darkMode') !== 'false',
-          autoRefresh: localStorage.getItem('autoRefresh') === 'true',
+          autoRefresh: localStorage.getItem('autoRefresh') !== 'false',
           countdown: {{ .CheckInterval }},
           countdownInterval: null,
+          refreshInFlight: false,
           search: '',
           searchOpen: false,
           filter: localStorage.getItem('filter') || 'all',
@@ -1089,7 +1114,7 @@
 
           proxies: [
             {{ range $.Endpoints }}
-            { name: "{{.Name}}", stableId: "{{.StableID}}", {{ if $.ShowServerDetails }}serverInfo: "{{.ServerInfo}}", proxyPort: {{.ProxyPort}}, {{ end }}{{ if not $.IsPublic }}url: "{{.URL}}", {{ end }}index: {{.Index}}, status: {{.Status}}, latency: "{{ formatLatency .Latency }}", latencyMs: {{ .Latency.Milliseconds }} },
+            { name: "{{.Name}}", stableId: "{{.StableID}}", {{ if $.ShowServerDetails }}serverInfo: "{{.ServerInfo}}", server: "{{.Server}}", serverPort: {{.ServerPort}}, proxyPort: {{.ProxyPort}}, {{ end }}{{ if not $.IsPublic }}url: "{{.URL}}", {{ end }}index: {{.Index}}, status: {{.Status}}, latency: "{{ formatLatency .Latency }}", latencyMs: {{ .Latency.Milliseconds }} },
             {{ end }}
           ],
 
@@ -1236,6 +1261,7 @@
           },
 
           startCountdown() {
+            clearInterval(this.countdownInterval);
             this.countdown = {{ .CheckInterval }};
             this.countdownInterval = setInterval(() => {
               if (--this.countdown <= 0) this.refreshData();
@@ -1249,12 +1275,15 @@
           },
 
           async refreshData() {
+            if (this.refreshInFlight) return;
+            this.refreshInFlight = true;
             try {
               const res = await fetch('./api/v1/public/proxies');
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
               const json = await res.json();
               if (json.success && json.data) {
                 json.data.forEach(updated => {
-                  const proxy = this.proxies.find(p => p.name === updated.name);
+                  const proxy = this.proxies.find(p => p.stableId === updated.stableId);
                   if (proxy) {
                     proxy.status = updated.online;
                     proxy.latencyMs = updated.latencyMs;
@@ -1270,17 +1299,36 @@
                     this.badgeProxy.latency = updated.latencyMs > 0 ? updated.latencyMs + 'ms' : 'n/a';
                   }
                 }
-              }
+              } else throw new Error(json.error || 'Invalid response');
             } catch (e) {
               console.error('Failed to refresh:', e);
+            } finally {
+              this.refreshInFlight = false;
+              this.countdown = {{ .CheckInterval }};
             }
-            this.countdown = {{ .CheckInterval }};
+          },
+
+          async copyText(value) {
+            try {
+              await navigator.clipboard.writeText(value);
+            } catch {
+              const t = Object.assign(document.createElement('textarea'), {value, style: 'position:fixed;opacity:0'});
+              document.body.appendChild(t);
+              t.select();
+              document.execCommand('copy');
+              t.remove();
+            }
+          },
+
+          async copyIP(value) {
+            if (!value) return;
+            await this.copyText(value);
+            this.showToast('IP / server copied!');
           },
 
           async copyUrl(proxy) {
             const url = new URL(proxy.url, location.href).toString();
-            try { await navigator.clipboard.writeText(url); }
-            catch { const t = Object.assign(document.createElement('textarea'), {value: url, style: 'position:fixed;opacity:0'}); document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); }
+            await this.copyText(url);
             this.showToast('Copied!');
           },
 
