@@ -79,7 +79,7 @@ func validateDataFile(name string, data []byte) error {
 			return fmt.Errorf("backup file %s has an unsupported schema", name)
 		}
 		for _, retry := range state.SpeedRetries {
-			if (retry.Kind != "" && retry.Kind != "low-speed" && retry.Kind != "deadline") || len(retry.StableIDs) == 0 || retry.DueAt.IsZero() {
+			if (retry.Kind != "" && retry.Kind != "speed-confirmation" && retry.Kind != "low-speed" && retry.Kind != "deadline") || len(retry.StableIDs) == 0 || retry.DueAt.IsZero() {
 				return fmt.Errorf("backup file %s has an invalid pending speed retry", name)
 			}
 		}

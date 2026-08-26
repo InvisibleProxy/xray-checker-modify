@@ -655,34 +655,10 @@ func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source stri
 	if runGate != nil {
 		defer runGate.Unlock()
 	}
-	var wg sync.WaitGroup
 	sem := make(chan struct{}, cfg.Concurrency)
-	results := make(chan Result, len(proxies))
 	runResults := make([]Result, 0, len(proxies))
 
-	for _, proxy := range proxies {
-		wg.Add(1)
-		go func(p *models.ProxyConfig) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			proxyCfg := m.configForProxy(cfg, p)
-			if skipOffline {
-				if result, offline := m.offlineResult(p, proxyCfg, source); offline {
-					results <- result
-					return
-				}
-			}
-			results <- m.testProxyWithFallback(p, proxyCfg, source)
-		}(proxy)
-	}
-
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	for result := range results {
+	recordResult := func(result Result) {
 		runResults = append(runResults, result)
 
 		m.mu.Lock()
@@ -694,6 +670,38 @@ func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source stri
 		)
 		m.lastRun.Completed++
 		m.mu.Unlock()
+	}
+
+	if source == "manual" {
+		m.runManualTestPhases(proxies, cfg, source, skipOffline, sem, recordResult)
+	} else {
+		var wg sync.WaitGroup
+		results := make(chan Result, len(proxies))
+		for _, proxy := range proxies {
+			wg.Add(1)
+			go func(p *models.ProxyConfig) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				proxyCfg := m.configForProxy(cfg, p)
+				if skipOffline {
+					if result, offline := m.offlineResult(p, proxyCfg, source); offline {
+						results <- result
+						return
+					}
+				}
+				results <- m.testProxyWithFallback(p, proxyCfg, source)
+			}(proxy)
+		}
+
+		go func() {
+			wg.Wait()
+			close(results)
+		}()
+
+		for result := range results {
+			recordResult(result)
+		}
 	}
 
 	finishedAt := time.Now()
@@ -723,6 +731,79 @@ func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source stri
 
 	if reporter != nil {
 		go reporter.NotifySpeedTest(report)
+	}
+}
+
+type manualPrimaryResult struct {
+	proxy  *models.ProxyConfig
+	config TestConfig
+	result Result
+}
+
+func (m *Manager) runManualTestPhases(
+	proxies []*models.ProxyConfig,
+	cfg TestConfig,
+	source string,
+	skipOffline bool,
+	sem chan struct{},
+	recordResult func(Result),
+) {
+	threshold := m.fallbackLowSpeedThreshold()
+	primaryResults := make(chan manualPrimaryResult, len(proxies))
+	var primaryWG sync.WaitGroup
+	for _, proxy := range proxies {
+		primaryWG.Add(1)
+		go func(p *models.ProxyConfig) {
+			defer primaryWG.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			proxyCfg := m.configForProxy(cfg, p)
+			if skipOffline {
+				if result, offline := m.offlineResult(p, proxyCfg, source); offline {
+					primaryResults <- manualPrimaryResult{proxy: p, config: proxyCfg, result: result}
+					return
+				}
+			}
+			primaryResults <- manualPrimaryResult{
+				proxy:  p,
+				config: proxyCfg,
+				result: m.executeTestAttempt(p, proxyCfg, source),
+			}
+		}(proxy)
+	}
+	go func() {
+		primaryWG.Wait()
+		close(primaryResults)
+	}()
+
+	fallbackQueue := make([]manualPrimaryResult, 0)
+	for primary := range primaryResults {
+		if shouldAttemptFallback(primary.result, threshold) {
+			fallbackQueue = append(fallbackQueue, primary)
+			continue
+		}
+		recordResult(primary.result)
+	}
+
+	fallbackResults := make(chan Result, len(fallbackQueue))
+	var fallbackWG sync.WaitGroup
+	for _, queued := range fallbackQueue {
+		fallbackWG.Add(1)
+		go func(task manualPrimaryResult) {
+			defer fallbackWG.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			fallbackResults <- m.testFallbackForPrimary(task.proxy, task.config, source, task.result, threshold)
+		}(queued)
+	}
+	go func() {
+		fallbackWG.Wait()
+		close(fallbackResults)
+	}()
+
+	for result := range fallbackResults {
+		recordResult(result)
 	}
 }
 

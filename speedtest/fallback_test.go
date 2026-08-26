@@ -3,6 +3,7 @@ package speedtest
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -249,6 +250,137 @@ countries:
 	}, "schedule")
 	if attempts != 1 || result.FallbackUsed {
 		t.Fatalf("attempts = %d, result = %+v", attempts, result)
+	}
+}
+
+func TestManualFallbackWaitsForAllPrimaryTests(t *testing.T) {
+	tests := []struct {
+		name          string
+		primaryResult Result
+	}{
+		{
+			name:          "low speed",
+			primaryResult: Result{DownloadedBytes: 1024, Mbps: 2},
+		},
+		{
+			name:          "context deadline exceeded",
+			primaryResult: Result{Error: "context deadline exceeded"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proxies := []*models.ProxyConfig{
+				{StableID: "needs-fallback", Name: "Needs fallback", Protocol: "vless"},
+				{StableID: "slow-primary", Name: "Slow primary", Protocol: "vless"},
+			}
+			proxyChecker := checker.NewProxyChecker(proxies, 10000, "", 1, "", "", 1, 0, "status")
+			manager := NewManager(proxyChecker, 10000, "", TestConfig{})
+			manager.SetLowSpeedThresholdMbps(10)
+			manager.fallbackCatalog = mustParseFallbackCatalog(t, `
+version: 1
+countries:
+  DE:
+    - id: reserve
+      url: https://reserve.example.test/100mb.bin
+      priority: 10
+`)
+			manager.SetCountryResolver(func(string) string { return "DE" })
+
+			primaryFallbackDone := make(chan struct{})
+			primarySlowStarted := make(chan struct{})
+			releaseSlowPrimary := make(chan struct{})
+			fallbackStarted := make(chan struct{}, 1)
+			var closeFallbackPrimary sync.Once
+			var closeSlowPrimary sync.Once
+			manager.testAttempt = func(proxy *models.ProxyConfig, cfg TestConfig, source string) Result {
+				result := Result{
+					StableID:  proxy.StableID,
+					Name:      proxy.Name,
+					URL:       cfg.URL,
+					Source:    source,
+					CheckedAt: time.Now(),
+				}
+				if cfg.URL == "https://reserve.example.test/100mb.bin" {
+					select {
+					case fallbackStarted <- struct{}{}:
+					default:
+					}
+					result.DownloadedBytes = cfg.MaxBytes
+					result.Mbps = 25
+					return result
+				}
+				if proxy.StableID == "needs-fallback" {
+					result.DownloadedBytes = tt.primaryResult.DownloadedBytes
+					result.Mbps = tt.primaryResult.Mbps
+					result.Error = tt.primaryResult.Error
+					closeFallbackPrimary.Do(func() { close(primaryFallbackDone) })
+					return result
+				}
+
+				closeSlowPrimary.Do(func() { close(primarySlowStarted) })
+				<-releaseSlowPrimary
+				result.DownloadedBytes = cfg.MaxBytes
+				result.Mbps = 25
+				return result
+			}
+
+			reports := make(reportRecorder, 1)
+			manager.SetReporter(reports)
+			if err := manager.Run(RunRequest{
+				Config: TestConfig{
+					URL:         "https://primary.example.test/100mb.bin",
+					MaxBytes:    1024,
+					TimeoutSec:  30,
+					Concurrency: 2,
+				},
+			}, "manual"); err != nil {
+				t.Fatal(err)
+			}
+
+			select {
+			case <-primaryFallbackDone:
+			case <-time.After(time.Second):
+				t.Fatal("fallback-eligible primary test did not finish")
+			}
+			select {
+			case <-primarySlowStarted:
+			case <-time.After(time.Second):
+				t.Fatal("second primary test did not start")
+			}
+			select {
+			case <-fallbackStarted:
+				t.Fatal("fallback started before all primary tests finished")
+			case <-time.After(50 * time.Millisecond):
+			}
+
+			close(releaseSlowPrimary)
+			select {
+			case <-fallbackStarted:
+			case <-time.After(time.Second):
+				t.Fatal("queued fallback did not start after the primary phase")
+			}
+
+			var report RunReport
+			select {
+			case report = <-reports:
+			case <-time.After(time.Second):
+				t.Fatal("manual speed-test report was not delivered")
+			}
+			if len(report.Results) != 2 {
+				t.Fatalf("report results = %+v, want one final result per node", report.Results)
+			}
+			for _, result := range report.Results {
+				if result.StableID == "needs-fallback" && (!result.FallbackUsed || result.URL != "https://reserve.example.test/100mb.bin") {
+					t.Fatalf("fallback result = %+v", result)
+				}
+			}
+			for _, proxy := range proxies {
+				if history := manager.ResultHistory(proxy.StableID); len(history) != 1 {
+					t.Fatalf("history for %s = %+v, want one final result", proxy.StableID, history)
+				}
+			}
+		})
 	}
 }
 

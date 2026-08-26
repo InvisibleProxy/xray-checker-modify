@@ -36,13 +36,13 @@ const (
 	menuSpeedButtonLimit               = 8
 	maxDiagnosticsRefreshConcurrency   = 4
 	maxRichMessageRunes                = 32768
-	lowSpeedRetryDelay                 = 30 * time.Minute
-	deadlineRetryDelay                 = 5 * time.Minute
-	lowSpeedRetryBusyDelay             = time.Minute
-	lowSpeedRetrySource                = "speed-retry"
-	deadlineRetrySource                = "deadline-retry"
-	speedRetryKindLowSpeed             = "low-speed"
-	speedRetryKindDeadline             = "deadline"
+	speedConfirmationRetryDelay        = 30 * time.Minute
+	speedConfirmationRetryBusyDelay    = time.Minute
+	speedConfirmationRetrySource       = "speed-retry"
+	speedRetryKindConfirmation         = "speed-confirmation"
+	legacySpeedRetryKindLowSpeed       = "low-speed"
+	legacySpeedRetryKindDeadline       = "deadline"
+	legacyDeadlineRetryDelay           = 5 * time.Minute
 )
 
 var defaultAlertReminderScheduleMinutes = parseMinuteSchedule(defaultAlertReminderScheduleString)
@@ -195,7 +195,6 @@ type Service struct {
 	speedRetryEntries   map[uint64]pendingSpeedRetry
 	speedRetrySeq       uint64
 	speedRetryDelay     time.Duration
-	deadlineRetryDelay  time.Duration
 	speedRetryBusy      time.Duration
 	speedRunFunc        func(speedtest.RunRequest, string) error
 	speedReportSendFunc func(string, int, formattedMessage)
@@ -383,21 +382,20 @@ func NewService(statePath string, proxyChecker *checker.ProxyChecker, speedManag
 	}
 
 	return &Service{
-		proxyChecker:       proxyChecker,
-		speedManager:       speedManager,
-		startPort:          startPort,
-		statePath:          statePath,
-		alertStatePath:     alertStatePath,
-		config:             DefaultConfig(),
-		alerts:             make(map[string]nodeAlertState),
-		menuMessages:       make(map[string]int),
-		stopCh:             make(chan struct{}),
-		speedRetryPending:  make(map[speedRetryKey]bool),
-		speedRetryTimers:   make(map[uint64]*time.Timer),
-		speedRetryEntries:  make(map[uint64]pendingSpeedRetry),
-		speedRetryDelay:    lowSpeedRetryDelay,
-		deadlineRetryDelay: deadlineRetryDelay,
-		speedRetryBusy:     lowSpeedRetryBusyDelay,
+		proxyChecker:      proxyChecker,
+		speedManager:      speedManager,
+		startPort:         startPort,
+		statePath:         statePath,
+		alertStatePath:    alertStatePath,
+		config:            DefaultConfig(),
+		alerts:            make(map[string]nodeAlertState),
+		menuMessages:      make(map[string]int),
+		stopCh:            make(chan struct{}),
+		speedRetryPending: make(map[speedRetryKey]bool),
+		speedRetryTimers:  make(map[uint64]*time.Timer),
+		speedRetryEntries: make(map[uint64]pendingSpeedRetry),
+		speedRetryDelay:   speedConfirmationRetryDelay,
+		speedRetryBusy:    speedConfirmationRetryBusyDelay,
 	}
 }
 
@@ -545,8 +543,7 @@ func (s *Service) PruneInactiveMutedNodes() error {
 	}
 	s.speedRetryMu.Unlock()
 	if len(inactiveRetries) > 0 {
-		s.clearSpeedRetry(speedRetryKindLowSpeed, inactiveRetries)
-		s.clearSpeedRetry(speedRetryKindDeadline, inactiveRetries)
+		s.clearSpeedRetry(speedRetryKindConfirmation, inactiveRetries)
 		if err := s.saveAlertState(); err != nil {
 			return err
 		}
@@ -610,6 +607,12 @@ func (s *Service) SendTestMessage() error {
 
 func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 	cfg := s.Config()
+	if report.Source == "manual" {
+		ids := successfulSpeedResultIDs(report.Results, cfg.LowSpeedThresholdMbps)
+		if s.clearSpeedRetry(speedRetryKindConfirmation, ids) {
+			s.persistRetryStateWithWarn()
+		}
+	}
 	if isRequestedTelegramSpeedReport(report) {
 		if !cfg.Enabled || len(report.Results) == 0 {
 			return
@@ -625,29 +628,19 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 	}
 
 	report = filterMutedRunReport(report, cfg)
-	if automaticSpeedReportsEnabled(cfg) && report.Source != deadlineRetrySource {
-		// A deadline retry is independent from the 30-minute low-speed
-		// confirmation. Scheduling it must not delay or filter the current alert.
-		s.scheduleDeadlineRetry(report)
+	if automaticSpeedReportsEnabled(cfg) && report.Source != speedConfirmationRetrySource {
+		ids := speedConfirmationRetryIDs(report.Results, cfg.LowSpeedThresholdMbps)
+		if s.scheduleSpeedRetry(report, speedRetryKindConfirmation, ids, s.configuredSpeedRetryDelay()) {
+			report = excludeSpeedResults(report, ids)
+		}
 	}
-	report = filterTelegramAlertSuppressedRunReport(report, cfg.LowSpeedThresholdMbps)
+	report = filterTelegramAlertSuppressedRunReport(report)
 	failed, slow, issuesOnly, shouldSend := speedReportDecision(report, cfg)
 	if !shouldSend {
 		return
 	}
 
-	if report.Source == lowSpeedRetrySource {
-		if failed == 0 && slow == 0 {
-			return
-		}
-		issuesOnly = true
-	} else if report.Source != deadlineRetrySource && slow > 0 && s.scheduleLowSpeedRetry(report) {
-		// Ordinary low throughput is intentionally absent from the first alert.
-		// Explicit transport failures and deadline-affected low-speed results stay
-		// visible immediately and are not hidden behind the confirmation window.
-		report.Results = speedFailureResults(report.Results, cfg.LowSpeedThresholdMbps)
-		report.Selected = len(report.Results)
-		failed, slow = countSpeedIssues(report.Results, cfg.LowSpeedThresholdMbps)
+	if report.Source == speedConfirmationRetrySource {
 		if failed == 0 && slow == 0 {
 			return
 		}
@@ -679,26 +672,18 @@ func automaticSpeedReportsEnabled(cfg Config) bool {
 	return cfg.Enabled && cfg.ChatID != "" && cfg.SpeedReportsEnabled && cfg.SpeedReportMode != "disabled"
 }
 
-func speedFailureResults(results []speedtest.Result, threshold float64) []speedtest.Result {
-	filtered := make([]speedtest.Result, 0, len(results))
-	for _, result := range results {
-		deadlineLowSpeed := resultHasContextDeadlineExceeded(result) && threshold > 0 && result.Mbps < threshold
-		if result.Offline || result.Error != "" || deadlineLowSpeed {
-			filtered = append(filtered, result)
-		}
-	}
-	return filtered
-}
-
-func lowSpeedRetryIDs(results []speedtest.Result, threshold float64) []string {
-	if threshold <= 0 {
-		return nil
-	}
+// speedConfirmationRetryIDs selects results that need delayed confirmation.
+// It groups their scheduling only: Error and PrimaryError remain unchanged, and
+// a deadline is still a technical failure rather than a low-speed result.
+func speedConfirmationRetryIDs(results []speedtest.Result, threshold float64) []string {
 	seen := make(map[string]bool)
 	var ids []string
 	for _, result := range results {
 		stableID := strings.TrimSpace(result.StableID)
-		if stableID == "" || result.Offline || result.Error != "" || resultHasContextDeadlineExceeded(result) || result.Mbps >= threshold || seen[stableID] {
+		lowSpeed := threshold > 0 && !result.Offline && result.Error == "" && result.Mbps < threshold
+		unresolvedDeadline := resultHasContextDeadlineExceeded(result) &&
+			(result.Offline || result.Error != "" || (threshold > 0 && result.Mbps < threshold))
+		if stableID == "" || (!lowSpeed && !unresolvedDeadline) || seen[stableID] {
 			continue
 		}
 		seen[stableID] = true
@@ -708,12 +693,28 @@ func lowSpeedRetryIDs(results []speedtest.Result, threshold float64) []string {
 	return ids
 }
 
-func deadlineRetryIDs(results []speedtest.Result) []string {
+func excludeSpeedResults(report speedtest.RunReport, excludedIDs []string) speedtest.RunReport {
+	excluded := make(map[string]bool, len(excludedIDs))
+	for _, stableID := range excludedIDs {
+		excluded[stableID] = true
+	}
+	filtered := make([]speedtest.Result, 0, len(report.Results))
+	for _, result := range report.Results {
+		if !excluded[result.StableID] {
+			filtered = append(filtered, result)
+		}
+	}
+	report.Results = filtered
+	report.Selected = len(filtered)
+	return report
+}
+
+func successfulSpeedResultIDs(results []speedtest.Result, threshold float64) []string {
 	seen := make(map[string]bool)
 	var ids []string
 	for _, result := range results {
 		stableID := strings.TrimSpace(result.StableID)
-		if stableID == "" || !resultHasContextDeadlineExceeded(result) || seen[stableID] {
+		if stableID == "" || result.Offline || result.Error != "" || (threshold > 0 && result.Mbps < threshold) || seen[stableID] {
 			continue
 		}
 		seen[stableID] = true
@@ -731,15 +732,10 @@ func containsContextDeadlineExceeded(value string) bool {
 	return strings.Contains(strings.ToLower(value), "context deadline exceeded")
 }
 
-func (s *Service) scheduleLowSpeedRetry(report speedtest.RunReport) bool {
+func (s *Service) scheduleSpeedConfirmationRetry(report speedtest.RunReport) bool {
 	cfg := s.Config()
-	ids := lowSpeedRetryIDs(report.Results, cfg.LowSpeedThresholdMbps)
-	return s.scheduleSpeedRetry(report, speedRetryKindLowSpeed, ids, s.configuredSpeedRetryDelay())
-}
-
-func (s *Service) scheduleDeadlineRetry(report speedtest.RunReport) bool {
-	ids := deadlineRetryIDs(report.Results)
-	return s.scheduleSpeedRetry(report, speedRetryKindDeadline, ids, s.configuredDeadlineRetryDelay())
+	ids := speedConfirmationRetryIDs(report.Results, cfg.LowSpeedThresholdMbps)
+	return s.scheduleSpeedRetry(report, speedRetryKindConfirmation, ids, s.configuredSpeedRetryDelay())
 }
 
 func (s *Service) scheduleSpeedRetry(report speedtest.RunReport, kind string, ids []string, delay time.Duration) bool {
@@ -792,28 +788,14 @@ func (s *Service) configuredSpeedRetryDelay() time.Duration {
 	if s.speedRetryDelay > 0 {
 		return s.speedRetryDelay
 	}
-	return lowSpeedRetryDelay
-}
-
-func (s *Service) configuredDeadlineRetryDelay() time.Duration {
-	if s.deadlineRetryDelay > 0 {
-		return s.deadlineRetryDelay
-	}
-	return deadlineRetryDelay
-}
-
-func (s *Service) configuredRetryDelay(kind string) time.Duration {
-	if normalizedSpeedRetryKind(kind) == speedRetryKindDeadline {
-		return s.configuredDeadlineRetryDelay()
-	}
-	return s.configuredSpeedRetryDelay()
+	return speedConfirmationRetryDelay
 }
 
 func (s *Service) configuredSpeedRetryBusyDelay() time.Duration {
 	if s.speedRetryBusy > 0 {
 		return s.speedRetryBusy
 	}
-	return lowSpeedRetryBusyDelay
+	return speedConfirmationRetryBusyDelay
 }
 
 func (s *Service) scheduleSpeedRetryLocked(kind string, req speedtest.RunRequest, ids []string, delay time.Duration) {
@@ -847,10 +829,6 @@ func (s *Service) armSpeedRetryLocked(timerID uint64, delay time.Duration) {
 }
 
 func (s *Service) runSpeedRetry(timerID uint64, kind string, req speedtest.RunRequest, ids []string) {
-	s.speedRetryMu.Lock()
-	delete(s.speedRetryTimers, timerID)
-	s.speedRetryMu.Unlock()
-
 	select {
 	case <-s.stopCh:
 		return
@@ -864,12 +842,28 @@ func (s *Service) runSpeedRetry(timerID uint64, kind string, req speedtest.RunRe
 		logger.Warn("Discarded speed-test retry with unknown kind %q", kind)
 		return
 	}
+
+	s.speedRetryMu.Lock()
+	delete(s.speedRetryTimers, timerID)
+	pendingIDs := make([]string, 0, len(ids))
+	for _, stableID := range ids {
+		if s.speedRetryPending[speedRetryKey{Kind: kind, StableID: stableID}] {
+			pendingIDs = append(pendingIDs, stableID)
+		}
+	}
+	if len(pendingIDs) == 0 {
+		delete(s.speedRetryEntries, timerID)
+		s.speedRetryMu.Unlock()
+		s.persistRetryStateWithWarn()
+		return
+	}
+	req.ProxyIDs = append([]string(nil), pendingIDs...)
 	err := s.runSpeedTest(req, source)
 	if err == nil {
+		s.speedRetryMu.Unlock()
 		return
 	}
 	if strings.Contains(strings.ToLower(err.Error()), "already running") {
-		s.speedRetryMu.Lock()
 		select {
 		case <-s.stopCh:
 			s.speedRetryMu.Unlock()
@@ -877,14 +871,15 @@ func (s *Service) runSpeedRetry(timerID uint64, kind string, req speedtest.RunRe
 		default:
 		}
 		delete(s.speedRetryEntries, timerID)
-		s.scheduleSpeedRetryLocked(kind, req, ids, s.configuredSpeedRetryBusyDelay())
+		s.scheduleSpeedRetryLocked(kind, req, pendingIDs, s.configuredSpeedRetryBusyDelay())
 		s.speedRetryMu.Unlock()
 		s.persistRetryStateWithWarn()
 		logger.Warn("%s speed-test retry postponed because another speed-test is running", speedRetryKindLabel(kind))
 		return
 	}
+	s.speedRetryMu.Unlock()
 
-	s.clearSpeedRetry(kind, ids)
+	s.clearSpeedRetry(kind, pendingIDs)
 	s.persistRetryStateWithWarn()
 	logger.Warn("Failed to start %s speed-test retry: %v", speedRetryKindLabel(kind), err)
 }
@@ -900,25 +895,35 @@ func (s *Service) completeSpeedRetry(kind string, results []speedtest.Result) {
 	s.persistRetryStateWithWarn()
 }
 
-func (s *Service) clearSpeedRetry(kind string, ids []string) {
+func (s *Service) clearSpeedRetry(kind string, ids []string) bool {
 	s.speedRetryMu.Lock()
 	defer s.speedRetryMu.Unlock()
+	changed := false
 	cleared := make(map[string]bool, len(ids))
 	for _, stableID := range ids {
 		stableID = strings.TrimSpace(stableID)
-		delete(s.speedRetryPending, speedRetryKey{Kind: kind, StableID: stableID})
+		key := speedRetryKey{Kind: kind, StableID: stableID}
+		if s.speedRetryPending[key] {
+			delete(s.speedRetryPending, key)
+			changed = true
+		}
 		cleared[stableID] = true
 	}
 	for timerID, entry := range s.speedRetryEntries {
 		if normalizedSpeedRetryKind(entry.Kind) != kind {
 			continue
 		}
+		originalCount := len(entry.StableIDs)
 		remaining := entry.StableIDs[:0]
 		for _, stableID := range entry.StableIDs {
 			if !cleared[stableID] {
 				remaining = append(remaining, stableID)
 			}
 		}
+		if len(remaining) == originalCount {
+			continue
+		}
+		changed = true
 		if len(remaining) == 0 {
 			delete(s.speedRetryEntries, timerID)
 			if timer := s.speedRetryTimers[timerID]; timer != nil && timer.Stop() {
@@ -931,6 +936,7 @@ func (s *Service) clearSpeedRetry(kind string, ids []string) {
 		entry.Request.ProxyIDs = append([]string(nil), remaining...)
 		s.speedRetryEntries[timerID] = entry
 	}
+	return changed
 }
 
 func (s *Service) startRestoredSpeedRetries() {
@@ -956,39 +962,30 @@ func (s *Service) persistRetryStateWithWarn() {
 }
 
 func normalizedSpeedRetryKind(kind string) string {
-	if kind == "" {
-		return speedRetryKindLowSpeed
+	if kind == "" || kind == legacySpeedRetryKindLowSpeed || kind == legacySpeedRetryKindDeadline {
+		return speedRetryKindConfirmation
 	}
 	return kind
 }
 
 func speedRetryKindForSource(source string) (string, bool) {
-	switch source {
-	case lowSpeedRetrySource:
-		return speedRetryKindLowSpeed, true
-	case deadlineRetrySource:
-		return speedRetryKindDeadline, true
-	default:
-		return "", false
+	if source == speedConfirmationRetrySource {
+		return speedRetryKindConfirmation, true
 	}
+	return "", false
 }
 
 func speedRetrySourceForKind(kind string) (string, bool) {
 	switch normalizedSpeedRetryKind(kind) {
-	case speedRetryKindLowSpeed:
-		return lowSpeedRetrySource, true
-	case speedRetryKindDeadline:
-		return deadlineRetrySource, true
+	case speedRetryKindConfirmation:
+		return speedConfirmationRetrySource, true
 	default:
 		return "", false
 	}
 }
 
 func speedRetryKindLabel(kind string) string {
-	if normalizedSpeedRetryKind(kind) == speedRetryKindDeadline {
-		return "deadline"
-	}
-	return "low-speed"
+	return "confirmation"
 }
 
 func (s *Service) runSpeedTest(req speedtest.RunRequest, source string) error {
@@ -3147,17 +3144,52 @@ func (s *Service) loadAlertState() error {
 		s.mu.Unlock()
 	}
 
-	restoredRetries := 0
-	s.speedRetryMu.Lock()
+	type restoredSpeedRetry struct {
+		stableIDs []string
+		config    speedtest.TestConfig
+		dueAt     time.Time
+	}
+	loadNow := time.Now()
+	retryStateMigrated := false
+	normalizedRetries := make([]restoredSpeedRetry, 0, len(stateFile.SpeedRetries))
 	for _, persisted := range stateFile.SpeedRetries {
-		kind := normalizedSpeedRetryKind(persisted.Kind)
-		if _, ok := speedRetrySourceForKind(kind); !ok {
+		rawKind := strings.TrimSpace(persisted.Kind)
+		if rawKind != "" && rawKind != speedRetryKindConfirmation && rawKind != legacySpeedRetryKindLowSpeed && rawKind != legacySpeedRetryKindDeadline {
 			continue
 		}
+		dueAt := persisted.DueAt
+		if dueAt.IsZero() {
+			dueAt = loadNow.Add(s.configuredSpeedRetryDelay())
+		}
+		if rawKind == legacySpeedRetryKindDeadline {
+			// Old deadline retries were due five minutes after the failed run.
+			// Extending their stored due time keeps the new confirmation at thirty
+			// minutes from the original run and the immediate rewrite makes the
+			// migration idempotent across restarts.
+			if !persisted.DueAt.IsZero() {
+				dueAt = dueAt.Add(speedConfirmationRetryDelay - legacyDeadlineRetryDelay)
+			}
+		}
+		if rawKind != speedRetryKindConfirmation {
+			retryStateMigrated = true
+		}
+		normalizedRetries = append(normalizedRetries, restoredSpeedRetry{
+			stableIDs: persisted.StableIDs,
+			config:    persisted.Config,
+			dueAt:     dueAt,
+		})
+	}
+	sort.SliceStable(normalizedRetries, func(i, j int) bool {
+		return normalizedRetries[i].dueAt.Before(normalizedRetries[j].dueAt)
+	})
+
+	restoredRetries := 0
+	s.speedRetryMu.Lock()
+	for _, persisted := range normalizedRetries {
 		var ids []string
-		for _, rawStableID := range persisted.StableIDs {
+		for _, rawStableID := range persisted.stableIDs {
 			stableID := strings.TrimSpace(rawStableID)
-			key := speedRetryKey{Kind: kind, StableID: stableID}
+			key := speedRetryKey{Kind: speedRetryKindConfirmation, StableID: stableID}
 			if stableID == "" || !active[stableID] || s.speedRetryPending[key] {
 				continue
 			}
@@ -3168,23 +3200,24 @@ func (s *Service) loadAlertState() error {
 			continue
 		}
 		sort.Strings(ids)
-		dueAt := persisted.DueAt
-		if dueAt.IsZero() {
-			dueAt = time.Now().Add(s.configuredRetryDelay(kind))
-		}
 		s.speedRetrySeq++
 		s.speedRetryEntries[s.speedRetrySeq] = pendingSpeedRetry{
-			Kind: kind,
+			Kind: speedRetryKindConfirmation,
 			Request: speedtest.RunRequest{
 				ProxyIDs: append([]string(nil), ids...),
-				Config:   persisted.Config,
+				Config:   persisted.config,
 			},
 			StableIDs: append([]string(nil), ids...),
-			DueAt:     dueAt,
+			DueAt:     persisted.dueAt,
 		}
 		restoredRetries += len(ids)
 	}
 	s.speedRetryMu.Unlock()
+	if retryStateMigrated {
+		if err := s.saveAlertState(); err != nil {
+			return fmt.Errorf("persist migrated speed-test retry state: %w", err)
+		}
+	}
 
 	restored := 0
 	for stableID, state := range loaded {
@@ -3663,11 +3696,10 @@ func filterMutedRunReport(report speedtest.RunReport, cfg Config) speedtest.RunR
 	return report
 }
 
-func filterTelegramAlertSuppressedRunReport(report speedtest.RunReport, threshold float64) speedtest.RunReport {
+func filterTelegramAlertSuppressedRunReport(report speedtest.RunReport) speedtest.RunReport {
 	filtered := make([]speedtest.Result, 0, len(report.Results))
 	for _, result := range report.Results {
-		deadlineLowSpeed := resultHasContextDeadlineExceeded(result) && !result.Offline && result.Error == "" && threshold > 0 && result.Mbps < threshold
-		if result.TelegramAlertSuppressed && !deadlineLowSpeed {
+		if result.TelegramAlertSuppressed {
 			continue
 		}
 		filtered = append(filtered, result)
@@ -4024,10 +4056,8 @@ func reportSourceLabel(source string) string {
 		return "Telegram"
 	case "schedule":
 		return "расписание"
-	case lowSpeedRetrySource:
+	case speedConfirmationRetrySource:
 		return "повтор через 30 минут"
-	case deadlineRetrySource:
-		return "повтор после timeout через 5 минут"
 	default:
 		if source == "" {
 			return "неизвестно"
@@ -4037,7 +4067,7 @@ func reportSourceLabel(source string) string {
 }
 
 func speedReportTitle(source string, issuesOnly bool) string {
-	if source == lowSpeedRetrySource {
+	if source == speedConfirmationRetrySource {
 		return "Speed-test: проблема подтверждена"
 	}
 	if issuesOnly {

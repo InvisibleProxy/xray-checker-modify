@@ -272,7 +272,11 @@ func (m *Manager) persistFallbackHealth() error {
 func (m *Manager) testProxyWithFallback(proxy *models.ProxyConfig, cfg TestConfig, source string) Result {
 	primary := m.executeTestAttempt(proxy, cfg, source)
 	threshold := m.fallbackLowSpeedThreshold()
-	if primary.Offline || (primary.Error == "" && (threshold <= 0 || primary.Mbps >= threshold)) {
+	return m.testFallbackForPrimary(proxy, cfg, source, primary, threshold)
+}
+
+func (m *Manager) testFallbackForPrimary(proxy *models.ProxyConfig, cfg TestConfig, source string, primary Result, threshold float64) Result {
+	if !shouldAttemptFallback(primary, threshold) {
 		return primary
 	}
 
@@ -316,6 +320,10 @@ func (m *Manager) testProxyWithFallback(proxy *models.ProxyConfig, cfg TestConfi
 		return result
 	}
 	return primary
+}
+
+func shouldAttemptFallback(primary Result, threshold float64) bool {
+	return !primary.Offline && (primary.Error != "" || (threshold > 0 && primary.Mbps < threshold))
 }
 
 // SetLowSpeedThresholdMbps keeps country fallback selection aligned with the

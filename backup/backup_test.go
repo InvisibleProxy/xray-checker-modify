@@ -228,8 +228,9 @@ func TestPrepareDataFileRejectsMalformedPersistedSchemas(t *testing.T) {
 	}
 }
 
-func TestPrepareDataFileAcceptsLegacyAndTypedSpeedRetries(t *testing.T) {
+func TestPrepareDataFileAcceptsCurrentAndLegacySpeedRetries(t *testing.T) {
 	for _, data := range []string{
+		`{"version":1,"nodes":{},"speedRetries":[{"kind":"speed-confirmation","stableIds":["node-1"],"config":{},"dueAt":"2026-08-22T12:00:00Z"}]}`,
 		`{"version":1,"nodes":{},"speedRetries":[{"stableIds":["node-1"],"config":{},"dueAt":"2026-08-22T12:00:00Z"}]}`,
 		`{"version":1,"nodes":{},"speedRetries":[{"kind":"low-speed","stableIds":["node-1"],"config":{},"dueAt":"2026-08-22T12:00:00Z"},{"kind":"deadline","stableIds":["node-1"],"config":{},"dueAt":"2026-08-22T12:05:00Z"}]}`,
 	} {
