@@ -5,6 +5,7 @@
 В этой версии дополнительно доступны:
 
 - приватная веб-админка;
+- переключаемая EN/RU-локализация dashboard и админки с сохранением выбора в браузере;
 - ручное и плановое обновление подписок с защитой от массового удаления нод и rollback Xray;
 - ручной и плановый speedtest с отдельным Test URL для каждой ноды;
 - Nodes Overview с downtime, историей speedtest, GeoIP-сверкой и безопасным merge retired-ноды после смены ключа;
@@ -44,6 +45,8 @@ docker run --rm `
 - metrics: `http://127.0.0.1:2112/metrics`;
 - OpenAPI UI: `http://127.0.0.1:2112/api/v1/docs`;
 - healthcheck: `http://127.0.0.1:2112/health`.
+
+Язык dashboard и админки переключается кнопками `EN`/`RU` в верхней панели. Выбор хранится в `localStorage` браузера и применяется к обоим экранам; технические названия (`StableID`, `Test URL`, `Remnawave Host`, `Internal Squad`, `External Squad`, `announce`, `reconcile` и подобные) остаются без смыслового перевода.
 
 ### Docker Compose и публичная status page
 

@@ -108,6 +108,67 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 	}
 }
 
+func TestWebTemplatesExposeSharedEnglishRussianLocalization(t *testing.T) {
+	var admin bytes.Buffer
+	if err := RenderAdmin(&admin); err != nil {
+		t.Fatalf("RenderAdmin() error = %v", err)
+	}
+	var dashboard bytes.Buffer
+	if err := RenderIndex(&dashboard, PageData{}); err != nil {
+		t.Fatalf("RenderIndex() error = %v", err)
+	}
+
+	for name, rendered := range map[string]string{
+		"admin":     admin.String(),
+		"dashboard": dashboard.String(),
+	} {
+		for _, marker := range []string{
+			`localization.js`,
+			`data-language="en"`,
+			`data-language="ru"`,
+			`aria-label="Switch language"`,
+		} {
+			if !strings.Contains(rendered, marker) {
+				t.Fatalf("%s template does not contain %q", name, marker)
+			}
+		}
+	}
+
+	asset, err := staticFiles.ReadFile("static/localization.js")
+	if err != nil {
+		t.Fatalf("read localization asset: %v", err)
+	}
+	localization := string(asset)
+	for _, marker := range []string{
+		`xray-checker-language`,
+		`new MutationObserver`,
+		`document.documentElement.lang = language`,
+		`"Nodes Overview": "Обзор нод"`,
+		`"StableID to Host mapping": "Сопоставление StableID с Host"`,
+	} {
+		if !strings.Contains(localization, marker) {
+			t.Fatalf("localization asset does not contain %q", marker)
+		}
+	}
+}
+
+func TestLocalizationAssetUsesRevalidatingCachePolicy(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/static/localization.js?v=1", nil)
+	recorder := httptest.NewRecorder()
+
+	StaticHandler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if got := recorder.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("Cache-Control = %q, want no-cache", got)
+	}
+	if !strings.Contains(recorder.Body.String(), "xray-checker-language") {
+		t.Fatal("localization asset body is missing language storage key")
+	}
+}
+
 func TestAdminTemplateExposesRemnawaveMessageConstructor(t *testing.T) {
 	var rendered bytes.Buffer
 	if err := RenderAdmin(&rendered); err != nil {

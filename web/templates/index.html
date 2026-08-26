@@ -26,6 +26,7 @@
     />
     <meta name="apple-mobile-web-app-title" content="Xray Checker" />
     <link rel="manifest" href="./static/site.webmanifest" />
+    <script src="./static/localization.js?v=1"></script>
     <script defer src="./static/alpine.min.js"></script>
     <script type="module">
       import { polyfillCountryFlagEmojis } from "./static/country-flag-emoji-polyfill.js";
@@ -225,6 +226,13 @@
         background: var(--btn-active-bg);
         border-color: var(--btn-active-border);
         color: var(--color-green);
+      }
+      .language-button {
+        color: var(--text-muted);
+      }
+      .language-button.active {
+        background: var(--hover-bg);
+        color: var(--text-primary);
       }
       .link-hover:hover {
         color: var(--color-green);
@@ -544,6 +552,10 @@
         </div>
 
         <div class="flex items-center gap-2">
+          <div class="flex gap-1 p-1 rounded-lg card-flat" role="group" aria-label="Switch language">
+            <button type="button" data-language="en" class="language-button px-2 py-1 rounded text-xs font-medium" aria-pressed="false">EN</button>
+            <button type="button" data-language="ru" class="language-button px-2 py-1 rounded text-xs font-medium" aria-pressed="false">RU</button>
+          </div>
           {{ if not .IsPublic }}
           <span
             class="h-9 px-3 text-xs rounded-lg card-flat text-muted flex items-center"

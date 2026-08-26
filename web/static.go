@@ -72,7 +72,11 @@ func StaticHandler() http.HandlerFunc {
 
 		contentType := GetContentType(filePath)
 		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Cache-Control", "public, max-age=31536000")
+		if filePath == "localization.js" {
+			w.Header().Set("Cache-Control", "no-cache")
+		} else {
+			w.Header().Set("Cache-Control", "public, max-age=31536000")
+		}
 		w.Write(data)
 	}
 }

@@ -6,6 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="robots" content="noindex, nofollow" />
     <title>Xray Checker Admin</title>
+    <script src="/static/localization.js?v=1"></script>
     <style>
       :root {
         color-scheme: dark;
@@ -181,6 +182,26 @@
         background: var(--blue-soft);
         color: var(--text);
       }
+      .language-switch {
+        display: inline-flex;
+        gap: 3px;
+        padding: 3px;
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        background: var(--panel-3);
+      }
+      .language-switch button {
+        min-width: 34px;
+        padding: 5px 7px;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--muted);
+      }
+      .language-switch button.active {
+        background: var(--blue-soft);
+        color: var(--text);
+      }
       label {
         display: grid;
         gap: 6px;
@@ -223,6 +244,40 @@
       }
       button.secondary {
         background: transparent;
+      }
+      .file-picker-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+      }
+      .file-picker {
+        display: inline-flex;
+        width: auto;
+        padding: 9px 10px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: transparent;
+        color: var(--text);
+        cursor: pointer;
+        font-weight: 600;
+      }
+      .file-picker-name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .visually-hidden {
+        position: absolute !important;
+        width: 1px !important;
+        height: 1px !important;
+        padding: 0 !important;
+        margin: -1px !important;
+        overflow: hidden !important;
+        clip: rect(0, 0, 0, 0) !important;
+        white-space: nowrap !important;
+        border: 0 !important;
       }
       button.danger {
         border-color: rgba(255, 93, 93, 0.45);
@@ -1188,6 +1243,10 @@
         </div>
       </div>
       <div class="topbar-status">
+        <div class="language-switch" role="group" aria-label="Switch language">
+          <button type="button" data-language="en" aria-pressed="false">EN</button>
+          <button type="button" data-language="ru" aria-pressed="false">RU</button>
+        </div>
         <span id="overall-status" class="chip neutral">Waiting for data</span>
         <span id="last-updated" class="muted">Last updated: n/a</span>
         <span id="run-state" class="pill state-chip idle">Idle</span>
@@ -1487,7 +1546,11 @@
               Upload an Xray Checker backup. It will be verified and applied on the next application restart.
               Files missing from the archive will be removed during restoration.
             </div>
-            <input id="restore-backup-file" type="file" accept=".zip,application/zip" />
+            <div class="file-picker-row">
+              <label class="file-picker" for="restore-backup-file">Choose Backup ZIP</label>
+              <span id="restore-backup-filename" class="file-picker-name muted" data-i18n-skip></span>
+            </div>
+            <input id="restore-backup-file" class="visually-hidden" type="file" accept=".zip,application/zip" />
             <button id="restore-backup" class="secondary" type="button" disabled>Restore on Restart</button>
           </div>
         </section>
@@ -2103,6 +2166,7 @@
     <div id="node-speed-tooltip" class="speed-chart-tooltip" role="status" aria-live="polite"></div>
 
     <script>
+      const tr = (value) => window.XrayI18n ? window.XrayI18n.translate(value) : value;
       const state = {
         proxies: [],
         snapshot: null,
@@ -4453,7 +4517,7 @@
         }
 
         const label = nodeOverviewLabel(node) || stableId;
-        const confirmed = window.confirm(`Delete archived node "${label}"?\n\nThis removes the node registry entry and saved speed-test history.`);
+        const confirmed = window.confirm(tr(`Delete archived node "${label}"?\n\nThis removes the node registry entry and saved speed-test history.`));
         if (!confirmed) return;
 
         $("nodes-overview-summary").textContent = "Deleting node";
@@ -4623,7 +4687,7 @@
           if (result.requiresConfirmation) {
             const removed = Array.isArray(result.removedNames) ? result.removedNames.slice(0, 10) : [];
             const detail = removed.length > 0 ? `\n\nRemoved nodes:\n- ${removed.join("\n- ")}` : "";
-            const confirmed = window.confirm(`${result.message}${detail}\n\nApply this update anyway?`);
+            const confirmed = window.confirm(`${result.message}${detail}\n\n${tr("Apply this update anyway?")}`);
             if (!confirmed) {
               $("subscription-state").textContent = "Update blocked";
               $("message").textContent = result.message;
@@ -4786,14 +4850,16 @@
       }
 
       function updateRestoreBackupButton() {
-        $("restore-backup").disabled = $("restore-backup-file").files.length === 0;
+        const input = $("restore-backup-file");
+        $("restore-backup").disabled = input.files.length === 0;
+        $("restore-backup-filename").textContent = input.files[0]?.name || "";
       }
 
       async function restoreBackup() {
         const input = $("restore-backup-file");
         const file = input.files[0];
         if (!file) return;
-        if (!window.confirm("Restore this backup on the next application restart?\n\nCurrent persisted data will be replaced.")) {
+        if (!window.confirm(tr("Restore this backup on the next application restart?\n\nCurrent persisted data will be replaced."))) {
           return;
         }
 
