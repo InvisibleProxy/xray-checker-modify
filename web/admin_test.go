@@ -203,6 +203,7 @@ func TestWebTemplatesExposeSharedEnglishRussianLocalization(t *testing.T) {
 		`new MutationObserver`,
 		`document.documentElement.lang = language`,
 		`"Nodes Overview": "Обзор нод"`,
+		`"Check": "Check", "Run": "Run"`,
 		`"StableID to Host mapping": "Маппинг StableID → Host"`,
 		`"Loading speed-test history…": "Загрузка speedtest history…"`,
 		`"IP / server copied!": "IP / сервер скопирован!"`,

@@ -40,7 +40,7 @@
     "Upload an Xray Checker backup. It will be verified and applied on the next application restart. Files missing from the archive will be removed during restoration.": "Загрузить бэкап Xray Checker. Он пройдёт валидацию и будет применён при следующем restart приложения. Файлы, которых нет в архиве, будут удалены во время restore.",
     "Overview": "Обзор", "Servers online": "Серверов онлайн", "Avg speed": "Средняя скорость",
     "Failures": "Сбои", "Nodes": "Ноды", "Select all visible nodes": "Выбрать все видимые ноды",
-    "Check": "Проверить", "Run": "Запустить", "Resume": "Возобновить", "Saving…": "Сохранение…", "Mute Selected": "Mute выбранных",
+    "Check": "Check", "Run": "Run", "Resume": "Возобновить", "Saving…": "Сохранение…", "Mute Selected": "Mute выбранных",
     "Unmute Selected": "Снять mute с выбранных", "Only issues": "Только проблемы", "Sort": "Сортировка",
     "Search": "Поиск", "No nodes match filters": "Нет нод, соответствующих фильтрам",
     "Protocol": "Протокол", "Country": "Страна", "Availability": "Доступность",
