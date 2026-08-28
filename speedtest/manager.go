@@ -69,6 +69,14 @@ type ScheduleConfig struct {
 	HistoryRetentionDays int               `json:"historyRetentionDays,omitempty"`
 }
 
+// scheduleStateFile keeps runtime scheduling metadata out of the admin API
+// while retaining the existing flat JSON shape for backward compatibility.
+// Legacy files decode with NextRunAt == nil.
+type scheduleStateFile struct {
+	ScheduleConfig
+	NextRunAt *time.Time `json:"nextRunAt,omitempty"`
+}
+
 type Result struct {
 	StableID                string                    `json:"stableId"`
 	Name                    string                    `json:"name"`
@@ -83,6 +91,7 @@ type Result struct {
 	FallbackCity            string                    `json:"fallbackCity,omitempty"`
 	FallbackCountryCode     string                    `json:"fallbackCountryCode,omitempty"`
 	TelegramAlertSuppressed bool                      `json:"telegramAlertSuppressed,omitempty"`
+	MaintenanceProbe        bool                      `json:"maintenanceProbe,omitempty"`
 	StatusCode              int                       `json:"statusCode"`
 	DownloadedBytes         int64                     `json:"downloadedBytes"`
 	DurationMs              int64                     `json:"durationMs"`
@@ -145,15 +154,16 @@ type Manager struct {
 	resultPath   string
 	defaults     TestConfig
 
-	mu       sync.RWMutex
-	running  bool
-	lastRun  RunInfo
-	results  map[string]Result
-	history  map[string][]Result
-	schedule ScheduleConfig
-	nextRun  time.Time
-	reporter Reporter
-	runGate  sync.Locker
+	mu           sync.RWMutex
+	running      bool
+	lastRun      RunInfo
+	results      map[string]Result
+	probeResults map[string]Result
+	history      map[string][]Result
+	schedule     ScheduleConfig
+	nextRun      time.Time
+	reporter     Reporter
+	runGate      sync.Locker
 
 	resultPersistMu        sync.Mutex
 	schedulePersistMu      sync.Mutex
@@ -181,6 +191,7 @@ func NewManager(proxyChecker *checker.ProxyChecker, startPort int, statePath str
 		resultPath:   resultStatePath(statePath),
 		defaults:     defaults,
 		results:      make(map[string]Result),
+		probeResults: make(map[string]Result),
 		history:      make(map[string][]Result),
 		stopCh:       make(chan struct{}),
 		scheduleCh:   make(chan struct{}, 1),
@@ -215,19 +226,25 @@ func (m *Manager) Load() error {
 		return err
 	}
 
-	var schedule ScheduleConfig
-	if err := json.Unmarshal(data, &schedule); err != nil {
+	var state scheduleStateFile
+	if err := json.Unmarshal(data, &state); err != nil {
 		return err
 	}
+	schedule := state.ScheduleConfig
 	schedule.Config = m.normalizeConfig(schedule.Config)
 	schedule.NodeTestURLs = normalizeNodeTestURLs(schedule.NodeTestURLs, m.activeProxiesByID())
 	schedule.HistoryRetentionDays = normalizeHistoryRetentionDays(schedule.HistoryRetentionDays)
 	if schedule.IntervalSec < 60 {
 		schedule.IntervalSec = 3600
 	}
+	nextRun := time.Time{}
+	if schedule.Enabled && state.NextRunAt != nil {
+		nextRun = *state.NextRunAt
+	}
 
 	m.mu.Lock()
 	m.schedule = schedule
+	m.nextRun = nextRun
 	m.mu.Unlock()
 	return m.loadResults()
 }
@@ -314,8 +331,18 @@ func (m *Manager) Snapshot() Snapshot {
 	schedule.NodeTestURLs = copyStringMap(m.schedule.NodeTestURLs)
 	schedule.HistoryRetentionDays = normalizeHistoryRetentionDays(schedule.HistoryRetentionDays)
 
-	results := make([]Result, 0, len(m.results))
-	for _, result := range m.results {
+	latest := make(map[string]Result, len(m.results)+len(m.probeResults))
+	for stableID, result := range m.results {
+		latest[stableID] = result
+	}
+	for stableID, result := range m.probeResults {
+		if m.proxyChecker.MonitoringEnabled(stableID) {
+			continue
+		}
+		latest[stableID] = result
+	}
+	results := make([]Result, 0, len(latest))
+	for _, result := range latest {
 		results = append(results, result)
 	}
 	sort.Slice(results, func(i, j int) bool {
@@ -336,6 +363,19 @@ func (m *Manager) Snapshot() Snapshot {
 		LastRun:            m.lastRun,
 		Results:            results,
 	}
+}
+
+// ClearMaintenanceProbe drops the ephemeral admin-only result when maintenance
+// is toggled. Without this, a probe hidden by Resume could reappear during a
+// later maintenance window even though it belongs to the previous one.
+func (m *Manager) ClearMaintenanceProbe(stableID string) {
+	stableID = strings.TrimSpace(stableID)
+	if stableID == "" {
+		return
+	}
+	m.mu.Lock()
+	delete(m.probeResults, stableID)
+	m.mu.Unlock()
 }
 
 func (m *Manager) ResultHistory(stableID string) []Result {
@@ -429,7 +469,9 @@ func (m *Manager) UpdateSchedule(schedule ScheduleConfig) error {
 	defer m.schedulePersistMu.Unlock()
 
 	m.mu.RLock()
+	existingSchedule := m.schedule
 	existingNodeTestURLs := copyStringMap(m.schedule.NodeTestURLs)
+	existingNextRun := m.nextRun
 	m.mu.RUnlock()
 
 	schedule.Config = m.normalizeConfig(schedule.Config)
@@ -444,14 +486,16 @@ func (m *Manager) UpdateSchedule(schedule ScheduleConfig) error {
 	if !schedule.Enabled && schedule.IntervalSec == 0 {
 		schedule.IntervalSec = 3600
 	}
+	nextRun := nextScheduledRunAfterUpdate(existingSchedule, schedule, existingNextRun, time.Now())
 
-	if err := m.saveSchedule(schedule); err != nil {
+	if err := m.saveSchedule(schedule, nextRun); err != nil {
 		return err
 	}
 
 	saveResults := false
 	m.mu.Lock()
 	m.schedule = schedule
+	m.nextRun = nextRun
 	if m.pruneHistoryLocked(schedule.HistoryRetentionDays, time.Now()) {
 		saveResults = true
 	}
@@ -489,6 +533,7 @@ func (m *Manager) UpdateNodeTestURL(stableID string, testURL string) error {
 	m.mu.RLock()
 	schedule := m.schedule
 	schedule.NodeTestURLs = copyStringMap(m.schedule.NodeTestURLs)
+	nextRun := m.nextRun
 	m.mu.RUnlock()
 
 	schedule.Config = m.normalizeConfig(schedule.Config)
@@ -507,7 +552,7 @@ func (m *Manager) UpdateNodeTestURL(stableID string, testURL string) error {
 	}
 	schedule.NodeTestURLs = normalizeNodeTestURLs(schedule.NodeTestURLs, active)
 
-	if err := m.saveSchedule(schedule); err != nil {
+	if err := m.saveSchedule(schedule, nextRun); err != nil {
 		return err
 	}
 
@@ -529,6 +574,7 @@ func (m *Manager) updateScheduleTestURL(testURL string) error {
 	m.mu.RLock()
 	schedule := m.schedule
 	schedule.NodeTestURLs = copyStringMap(m.schedule.NodeTestURLs)
+	nextRun := m.nextRun
 	m.mu.RUnlock()
 
 	schedule.Config = m.normalizeConfig(schedule.Config)
@@ -541,7 +587,7 @@ func (m *Manager) updateScheduleTestURL(testURL string) error {
 		schedule.IntervalSec = 3600
 	}
 
-	if err := m.saveSchedule(schedule); err != nil {
+	if err := m.saveSchedule(schedule, nextRun); err != nil {
 		return err
 	}
 
@@ -574,8 +620,18 @@ func (m *Manager) Run(req RunRequest, source string) error {
 		}
 	}()
 
-	proxies := m.selectProxies(req)
+	proxies := m.selectProxies(req, source == "manual")
 	if len(proxies) == 0 {
+		var paused []string
+		for _, stableID := range req.ProxyIDs {
+			stableID = strings.TrimSpace(stableID)
+			if stableID != "" && !m.proxyChecker.MonitoringEnabled(stableID) {
+				paused = append(paused, stableID)
+			}
+		}
+		if len(paused) > 0 {
+			return fmt.Errorf("%w: %s", checker.ErrMaintenanceMode, strings.Join(paused, ", "))
+		}
 		return fmt.Errorf("no proxies selected")
 	}
 
@@ -602,9 +658,8 @@ func (m *Manager) Run(req RunRequest, source string) error {
 
 func (m *Manager) schedulerLoop() {
 	for {
-		schedule := m.Schedule()
+		schedule, nextRun := m.ensureSchedulerDeadline(time.Now())
 		if !schedule.Enabled {
-			m.setNextScheduledRunAt(time.Time{})
 			select {
 			case <-m.scheduleCh:
 				continue
@@ -613,15 +668,16 @@ func (m *Manager) schedulerLoop() {
 			}
 		}
 
-		interval := time.Duration(schedule.IntervalSec) * time.Second
-		m.setNextScheduledRunAt(time.Now().Add(interval))
-		timer := time.NewTimer(interval)
+		delay := time.Until(nextRun)
+		if delay < 0 {
+			delay = 0
+		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-timer.C:
-			// Configuration may have changed without resetting the interval,
-			// for example when a manual run saves a new shared Test URL.
-			schedule = m.Schedule()
-			if !schedule.Enabled {
+			var due bool
+			schedule, due = m.advanceSchedulerDeadline(nextRun, time.Now())
+			if !due {
 				continue
 			}
 			req := RunRequest{
@@ -639,16 +695,83 @@ func (m *Manager) schedulerLoop() {
 			timer.Stop()
 		case <-m.stopCh:
 			timer.Stop()
-			m.setNextScheduledRunAt(time.Time{})
 			return
 		}
 	}
 }
 
-func (m *Manager) setNextScheduledRunAt(nextRun time.Time) {
+func nextScheduledRunAfterUpdate(existing, updated ScheduleConfig, current time.Time, now time.Time) time.Time {
+	if !updated.Enabled {
+		return time.Time{}
+	}
+	updatedInterval := time.Duration(updated.IntervalSec) * time.Second
+	if !existing.Enabled || current.IsZero() {
+		return now.Add(updatedInterval)
+	}
+	if existing.IntervalSec == updated.IntervalSec {
+		return current
+	}
+	if existing.IntervalSec < 1 {
+		return now.Add(updatedInterval)
+	}
+	anchor := current.Add(-time.Duration(existing.IntervalSec) * time.Second)
+	adjusted := anchor.Add(updatedInterval)
+	if adjusted.Before(now) {
+		return now
+	}
+	return adjusted
+}
+
+func nextScheduledRunAfterTick(due time.Time, interval time.Duration, now time.Time) time.Time {
+	next := due.Add(interval)
+	if !next.After(now) {
+		return now.Add(interval)
+	}
+	return next
+}
+
+func (m *Manager) ensureSchedulerDeadline(now time.Time) (ScheduleConfig, time.Time) {
+	m.schedulePersistMu.Lock()
+	defer m.schedulePersistMu.Unlock()
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	schedule := m.schedule
+	schedule.NodeTestURLs = copyStringMap(m.schedule.NodeTestURLs)
+	nextRun := m.nextRun
+	changed := schedule.Enabled && nextRun.IsZero()
+	if changed {
+		nextRun = now.Add(time.Duration(schedule.IntervalSec) * time.Second)
+		m.nextRun = nextRun
+	}
+	m.mu.Unlock()
+
+	if changed {
+		if err := m.saveSchedule(schedule, nextRun); err != nil {
+			logger.Warn("Failed to save next scheduled speed-test time: %v", err)
+		}
+	}
+	return schedule, nextRun
+}
+
+func (m *Manager) advanceSchedulerDeadline(expected, now time.Time) (ScheduleConfig, bool) {
+	m.schedulePersistMu.Lock()
+	defer m.schedulePersistMu.Unlock()
+
+	m.mu.Lock()
+	if !m.schedule.Enabled || !m.nextRun.Equal(expected) {
+		m.mu.Unlock()
+		return ScheduleConfig{}, false
+	}
+	schedule := m.schedule
+	schedule.NodeTestURLs = copyStringMap(m.schedule.NodeTestURLs)
+	nextRun := nextScheduledRunAfterTick(expected, time.Duration(schedule.IntervalSec)*time.Second, now)
 	m.nextRun = nextRun
+	m.mu.Unlock()
+
+	if err := m.saveSchedule(schedule, nextRun); err != nil {
+		logger.Warn("Failed to advance next scheduled speed-test time: %v", err)
+	}
+	return schedule, true
 }
 
 func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source string, startedAt time.Time, skipOffline bool, reportTarget ReportTarget, runGate sync.Locker) {
@@ -657,17 +780,27 @@ func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source stri
 	}
 	sem := make(chan struct{}, cfg.Concurrency)
 	runResults := make([]Result, 0, len(proxies))
+	maintenanceProbes := make(map[string]bool, len(proxies))
+	for _, proxy := range proxies {
+		maintenanceProbes[proxy.StableID] = !m.proxyChecker.MonitoringEnabled(proxy.StableID)
+	}
 
 	recordResult := func(result Result) {
+		result.MaintenanceProbe = maintenanceProbes[result.StableID]
 		runResults = append(runResults, result)
 
 		m.mu.Lock()
-		m.results[result.StableID] = result
-		m.history[result.StableID] = append([]Result{result}, m.history[result.StableID]...)
-		m.history[result.StableID] = retainResultHistory(
-			m.history[result.StableID],
-			historyCutoff(m.historyRetentionDaysLocked(), time.Now()),
-		)
+		if result.MaintenanceProbe {
+			m.probeResults[result.StableID] = result
+		} else {
+			delete(m.probeResults, result.StableID)
+			m.results[result.StableID] = result
+			m.history[result.StableID] = append([]Result{result}, m.history[result.StableID]...)
+			m.history[result.StableID] = retainResultHistory(
+				m.history[result.StableID],
+				historyCutoff(m.historyRetentionDaysLocked(), time.Now()),
+			)
+		}
 		m.lastRun.Completed++
 		m.mu.Unlock()
 	}
@@ -948,7 +1081,7 @@ func (m *Manager) configForProxy(cfg TestConfig, proxy *models.ProxyConfig) Test
 	return cfg
 }
 
-func (m *Manager) selectProxies(req RunRequest) []*models.ProxyConfig {
+func (m *Manager) selectProxies(req RunRequest, allowMaintenance bool) []*models.ProxyConfig {
 	proxies := m.proxyChecker.GetProxies()
 	selectedIDs := make(map[string]bool)
 	for _, id := range req.ProxyIDs {
@@ -962,6 +1095,9 @@ func (m *Manager) selectProxies(req RunRequest) []*models.ProxyConfig {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
+		if !allowMaintenance && !m.proxyChecker.MonitoringEnabled(proxy.StableID) {
+			continue
+		}
 		if len(selectedIDs) > 0 && !selectedIDs[proxy.StableID] {
 			continue
 		}
@@ -971,7 +1107,7 @@ func (m *Manager) selectProxies(req RunRequest) []*models.ProxyConfig {
 		if req.Protocol != "" && proxy.Protocol != req.Protocol {
 			continue
 		}
-		if req.OnlyOnline {
+		if req.OnlyOnline && (!allowMaintenance || m.proxyChecker.MonitoringEnabled(proxy.StableID)) {
 			online, _, err := m.proxyChecker.GetProxyStatusByStableID(proxy.StableID)
 			if err != nil || !online {
 				continue
@@ -1071,14 +1207,19 @@ func normalizeResult(stableID string, proxy *models.ProxyConfig, result Result) 
 	return result
 }
 
-func (m *Manager) saveSchedule(schedule ScheduleConfig) error {
+func (m *Manager) saveSchedule(schedule ScheduleConfig, nextRun time.Time) error {
 	if m.statePath == "" {
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(m.statePath), 0755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(schedule, "", "  ")
+	state := scheduleStateFile{ScheduleConfig: schedule}
+	if !nextRun.IsZero() {
+		nextRun = nextRun.UTC()
+		state.NextRunAt = &nextRun
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}

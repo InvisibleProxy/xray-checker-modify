@@ -55,6 +55,12 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`filteredProxies().forEach((proxy) => {`,
 		`data-check-id="${escapeHtml(proxy.stableId)}"`,
 		`data-run-id="${escapeHtml(proxy.stableId)}"`,
+		`data-maintenance-id="${escapeHtml(proxy.stableId)}"`,
+		`checkDisabled: state.availabilityCheckRunning || maintenanceUpdating`,
+		`runDisabled: Boolean(run && run.running) || maintenanceUpdating`,
+		`const ids = [...new Set(stableIds.filter(Boolean))]`,
+		`request("/nodes-overview/maintenance"`,
+		`proxy.maintenance`,
 		`data-node-toggle="${escapeHtml(proxy.stableId)}"`,
 		`data-node-toggle-area="${escapeHtml(proxy.stableId)}"`,
 		`class="node-card-panel"`,
@@ -232,9 +238,13 @@ func TestAdminTemplateExposesRemnawaveMessageConstructor(t *testing.T) {
 		`id="remnawave-message-all-template"`,
 		`id="remnawave-message-partial-single-template"`,
 		`id="remnawave-message-partial-multiple-template"`,
+		`id="remnawave-message-maintenance-single-template"`,
+		`id="remnawave-message-maintenance-multiple-template"`,
 		`id="remnawave-message-healthy-template"`,
 		`id="remnawave-message-fallback-template"`,
 		`id="remnawave-message-partial-fallback-template"`,
+		`id="remnawave-message-maintenance-fallback-template"`,
+		`id="remnawave-message-maintenance-mixed-fallback-template"`,
 		`data-remnawave-token="{location}"`,
 		`data-remnawave-token="{locations}"`,
 		`data-remnawave-token="{affected}"`,
@@ -243,8 +253,14 @@ func TestAdminTemplateExposesRemnawaveMessageConstructor(t *testing.T) {
 		`singleLocation: remnawaveScenarioFromForm("single")`,
 		`partialSingleLocation: remnawaveScenarioFromForm("partial-single")`,
 		`partialMultipleLocations: remnawaveScenarioFromForm("partial-multiple")`,
+		`maintenanceSingleLocation: remnawaveScenarioFromForm("maintenance-single")`,
+		`maintenanceMultipleLocations: remnawaveScenarioFromForm("maintenance-multiple")`,
 		`partialFallback: $("remnawave-message-fallback-template").value.trim()`,
 		`partialAvailabilityFallback: $("remnawave-message-partial-fallback-template").value.trim()`,
+		`maintenanceFallback: $("remnawave-message-maintenance-fallback-template").value.trim()`,
+		`maintenanceMixedFallback: $("remnawave-message-maintenance-mixed-fallback-template").value.trim()`,
+		`function monitoringSpeedResults()`,
+		`!result.maintenanceProbe && !maintenanceIDs.has(result.stableId)`,
 	} {
 		if !strings.Contains(html, marker) {
 			t.Fatalf("admin template does not contain %q", marker)
@@ -659,6 +675,46 @@ func TestAdminProxyCheckHandlerRequiresSelection(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
+	}
+}
+
+func TestAdminNodeMaintenanceHandlerUpdatesSelectedStableID(t *testing.T) {
+	var gotStableID string
+	var gotEnabled bool
+	handler := AdminNodeMaintenanceHandler(func(stableID string, enabled bool) (nodearchive.NodeRecord, error) {
+		gotStableID = stableID
+		gotEnabled = enabled
+		return nodearchive.NodeRecord{StableID: stableID, Active: true, Maintenance: enabled}, nil
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/nodes-overview/maintenance", strings.NewReader(`{"stableId":"node-1","enabled":true}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if gotStableID != "node-1" || !gotEnabled {
+		t.Fatalf("maintenance update = %q/%v", gotStableID, gotEnabled)
+	}
+	if !strings.Contains(rec.Body.String(), `"maintenance":true`) {
+		t.Fatalf("response does not include maintenance state: %s", rec.Body.String())
+	}
+}
+
+func TestConfigStatusHandlerReturnsOKDuringMaintenance(t *testing.T) {
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "Node one"}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "", "", 1, 0, "status")
+	if err := proxyChecker.SetMaintenanceMode(proxy.StableID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/config/node-1", nil)
+	ConfigStatusHandler(proxyChecker).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "Maintenance" {
+		t.Fatalf("maintenance config status = %d %q", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("X-Xray-Checker-Status") != "maintenance" {
+		t.Fatalf("maintenance response header = %q", rec.Header().Get("X-Xray-Checker-Status"))
 	}
 }
 

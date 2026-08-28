@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	ConfigVersion  = 3
-	RuntimeVersion = 3
+	ConfigVersion  = 4
+	RuntimeVersion = 4
 
 	announceHeader       = "announce"
 	announceValuePrefix  = "rwEncodeBase64:"
@@ -41,14 +41,18 @@ type MessageScenario struct {
 }
 
 type MessageScenarios struct {
-	SingleLocation              MessageScenario `json:"singleLocation"`
-	MultipleLocations           MessageScenario `json:"multipleLocations"`
-	AllLocations                MessageScenario `json:"allLocations"`
-	PartialSingleLocation       MessageScenario `json:"partialSingleLocation"`
-	PartialMultipleLocations    MessageScenario `json:"partialMultipleLocations"`
-	Healthy                     MessageScenario `json:"healthy"`
-	PartialFallback             string          `json:"partialFallback"`
-	PartialAvailabilityFallback string          `json:"partialAvailabilityFallback"`
+	SingleLocation               MessageScenario `json:"singleLocation"`
+	MultipleLocations            MessageScenario `json:"multipleLocations"`
+	AllLocations                 MessageScenario `json:"allLocations"`
+	PartialSingleLocation        MessageScenario `json:"partialSingleLocation"`
+	PartialMultipleLocations     MessageScenario `json:"partialMultipleLocations"`
+	MaintenanceSingleLocation    MessageScenario `json:"maintenanceSingleLocation"`
+	MaintenanceMultipleLocations MessageScenario `json:"maintenanceMultipleLocations"`
+	Healthy                      MessageScenario `json:"healthy"`
+	PartialFallback              string          `json:"partialFallback"`
+	PartialAvailabilityFallback  string          `json:"partialAvailabilityFallback"`
+	MaintenanceFallback          string          `json:"maintenanceFallback"`
+	MaintenanceMixedFallback     string          `json:"maintenanceMixedFallback"`
 }
 
 type SquadPair struct {
@@ -82,13 +86,14 @@ type Settings struct {
 }
 
 type ManagedAnnouncement struct {
-	Value         string            `json:"value"`
-	Message       string            `json:"message"`
-	BasePresent   bool              `json:"basePresent,omitempty"`
-	BaseValue     string            `json:"baseValue,omitempty"`
-	Groups        map[string]string `json:"groups,omitempty"`
-	PartialGroups map[string]string `json:"partialGroups,omitempty"`
-	UpdatedAt     time.Time         `json:"updatedAt"`
+	Value             string            `json:"value"`
+	Message           string            `json:"message"`
+	BasePresent       bool              `json:"basePresent,omitempty"`
+	BaseValue         string            `json:"baseValue,omitempty"`
+	Groups            map[string]string `json:"groups,omitempty"`
+	PartialGroups     map[string]string `json:"partialGroups,omitempty"`
+	MaintenanceGroups map[string]string `json:"maintenanceGroups,omitempty"`
+	UpdatedAt         time.Time         `json:"updatedAt"`
 }
 
 type RuntimeFile struct {
@@ -210,7 +215,7 @@ func normalizeConfig(config *ConfigFile) {
 	if config.Version >= 0 && config.Version < ConfigVersion {
 		// v0 was the unversioned development format. v1 had hardcoded outage
 		// messages and one optional normalMessage. v2 added configurable outage
-		// scenarios. Older versions migrate to the current scenario model.
+		// scenarios, v3 partial availability, and v4 maintenance scenarios.
 		config.Version = ConfigVersion
 	}
 	if config.Policy.OutageMinutes == 0 {
@@ -225,7 +230,7 @@ func normalizeConfig(config *ConfigFile) {
 	legacyNormalMessage := strings.TrimSpace(config.Policy.NormalMessage)
 	messagesWereMissing := messageScenariosMissing(config.Policy.Messages)
 	normalizeMessageScenarios(&config.Policy.Messages)
-	if legacyNormalMessage != "" && (sourceVersion < ConfigVersion || messagesWereMissing) {
+	if legacyNormalMessage != "" && (sourceVersion < 2 || messagesWereMissing) {
 		config.Policy.Messages.Healthy = MessageScenario{Enabled: true, Template: legacyNormalMessage}
 	}
 	config.Policy.NormalMessage = ""
@@ -251,7 +256,7 @@ func normalizeRuntime(runtime *RuntimeFile) {
 	if runtime.Version >= 0 && runtime.Version < RuntimeVersion {
 		// v1 owned the whole announce value. Migrating it with no base keeps
 		// the old exact-delete behavior while new writes can preserve a base.
-		// v2 had no separate partial-redundancy ownership map.
+		// v2 had no partial-redundancy ownership map; v3 had no maintenance map.
 		runtime.Version = RuntimeVersion
 	}
 	if runtime.Managed == nil {
@@ -263,6 +268,9 @@ func normalizeRuntime(runtime *RuntimeFile) {
 		}
 		if managed.PartialGroups == nil {
 			managed.PartialGroups = map[string]string{}
+		}
+		if managed.MaintenanceGroups == nil {
+			managed.MaintenanceGroups = map[string]string{}
 		}
 		runtime.Managed[externalUUID] = managed
 	}
@@ -458,6 +466,7 @@ func cloneManaged(input map[string]ManagedAnnouncement) map[string]ManagedAnnoun
 	for externalUUID, managed := range input {
 		managed.Groups = cloneStringMap(managed.Groups)
 		managed.PartialGroups = cloneStringMap(managed.PartialGroups)
+		managed.MaintenanceGroups = cloneStringMap(managed.MaintenanceGroups)
 		result[externalUUID] = managed
 	}
 	return result

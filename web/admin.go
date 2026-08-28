@@ -32,6 +32,7 @@ type AdminProxyInfo struct {
 	Protocol           string `json:"protocol"`
 	ProxyPort          int    `json:"proxyPort"`
 	Online             bool   `json:"online"`
+	Maintenance        bool   `json:"maintenance"`
 	LatencyMs          int64  `json:"latencyMs"`
 	DownSince          string `json:"downSince,omitempty"`
 	DowntimeSec        int64  `json:"downtimeSec"`
@@ -87,6 +88,13 @@ type AdminNodesOverviewGeoRequest struct {
 type AdminNodesOverviewDeleteRequest struct {
 	StableID string `json:"stableId"`
 }
+
+type AdminNodeMaintenanceRequest struct {
+	StableID string `json:"stableId"`
+	Enabled  bool   `json:"enabled"`
+}
+
+type AdminNodeMaintenanceFunc func(string, bool) (nodearchive.NodeRecord, error)
 
 type AdminNodesOverviewMergeRequest struct {
 	SourceStableID    string `json:"sourceStableId"`
@@ -315,13 +323,13 @@ func AdminProxiesHandler(proxyChecker *checker.ProxyChecker, startPort int) http
 			if proxy.StableID == "" {
 				proxy.StableID = proxy.GenerateStableID()
 			}
-			details, err := proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+			details, err := proxyChecker.GetProxyStatusDetailsIncludingMaintenance(proxy.StableID)
 			if err != nil {
 				online, latency, _ := proxyChecker.GetProxyStatusByStableID(proxy.StableID)
 				details.Online = online
 				details.Latency = latency
 			}
-			result = append(result, adminProxyInfo(proxy, details, startPort))
+			result = append(result, adminProxyInfo(proxy, details, startPort, !proxyChecker.MonitoringEnabled(proxy.StableID)))
 		}
 		writeJSON(w, result)
 	}
@@ -364,10 +372,10 @@ func AdminProxyCheckHandler(check AdminProxyCheckFunc, proxyChecker *checker.Pro
 			if !selected[stableID] {
 				continue
 			}
-			details, _ := proxyChecker.GetProxyStatusDetailsByStableID(stableID)
+			details, _ := proxyChecker.GetProxyStatusDetailsIncludingMaintenance(stableID)
 			proxyCopy := *proxy
 			proxyCopy.StableID = stableID
-			result = append(result, adminProxyInfo(&proxyCopy, details, startPort))
+			result = append(result, adminProxyInfo(&proxyCopy, details, startPort, !proxyChecker.MonitoringEnabled(stableID)))
 		}
 		writeJSON(w, result)
 	}
@@ -497,6 +505,31 @@ func AdminNodesOverviewHandler(store *nodearchive.Store, manager *speedtest.Mana
 			return
 		}
 		writeJSON(w, store.Summaries(manager.AllResultHistory()))
+	}
+}
+
+func AdminNodeMaintenanceHandler(update AdminNodeMaintenanceFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req AdminNodeMaintenanceRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, "Invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		req.StableID = strings.TrimSpace(req.StableID)
+		if req.StableID == "" {
+			writeError(w, "stableId is required", http.StatusBadRequest)
+			return
+		}
+		record, err := update(req.StableID, req.Enabled)
+		if err != nil {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, record)
 	}
 }
 
@@ -691,7 +724,7 @@ func AdminTelegramTestHandler(service *telegram.Service) http.HandlerFunc {
 	}
 }
 
-func adminProxyInfo(proxy *models.ProxyConfig, details checker.ProxyStatusDetails, startPort int) AdminProxyInfo {
+func adminProxyInfo(proxy *models.ProxyConfig, details checker.ProxyStatusDetails, startPort int, maintenance bool) AdminProxyInfo {
 	downSince := ""
 	downtimeSec := int64(0)
 	if !details.DownSince.IsZero() {
@@ -708,6 +741,7 @@ func adminProxyInfo(proxy *models.ProxyConfig, details checker.ProxyStatusDetail
 		Protocol:           proxy.Protocol,
 		ProxyPort:          startPort + proxy.Index,
 		Online:             details.Online,
+		Maintenance:        maintenance,
 		LatencyMs:          details.Latency.Milliseconds(),
 		DownSince:          downSince,
 		DowntimeSec:        downtimeSec,

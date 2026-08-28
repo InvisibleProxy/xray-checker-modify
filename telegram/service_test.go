@@ -1722,6 +1722,47 @@ func TestTelegramInteractiveSpeedViewsExcludeInactiveResults(t *testing.T) {
 	}
 }
 
+func TestTelegramInteractiveViewsAndTransportExcludeMaintenanceNodes(t *testing.T) {
+	active := &models.ProxyConfig{StableID: "active", Name: "Active"}
+	paused := &models.ProxyConfig{StableID: "paused", Name: "Paused"}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{active, paused}, 10000, "", 1, "", "", 1, 0, "status")
+	if err := proxyChecker.SetMaintenanceMode(paused.StableID, true); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService("", proxyChecker, nil, 10000)
+
+	if proxies := service.sortedProxies(); len(proxies) != 1 || proxies[0].StableID != active.StableID {
+		t.Fatalf("Telegram proxies = %+v, want only active", proxies)
+	}
+	if total, _, _ := service.nodeCounts(); total != 1 {
+		t.Fatalf("Telegram node total = %d, want 1", total)
+	}
+	if proxy, matches := service.findProxy(paused.StableID); proxy != nil || len(matches) != 0 {
+		t.Fatalf("maintenance node is reachable from Telegram: proxy=%+v matches=%+v", proxy, matches)
+	}
+	if candidates := service.proxyCandidates(); len(candidates) != 1 || candidates[0].Proxy.StableID != active.StableID {
+		t.Fatalf("Telegram transport candidates = %+v, want only active", candidates)
+	}
+	results := service.activeSpeedResults([]speedtest.Result{
+		{StableID: active.StableID, Name: active.Name, Mbps: 50},
+		{StableID: paused.StableID, Name: paused.Name, Mbps: 50, MaintenanceProbe: true},
+	})
+	if len(results) != 1 || results[0].StableID != active.StableID {
+		t.Fatalf("Telegram speed results = %+v, want only active", results)
+	}
+	report := service.excludeMaintenanceSpeedResults(speedtest.RunReport{
+		Selected: 3,
+		Results: []speedtest.Result{
+			{StableID: active.StableID, Name: active.Name, Mbps: 50},
+			{StableID: active.StableID, Name: active.Name, Mbps: 50, MaintenanceProbe: true},
+			{StableID: paused.StableID, Name: paused.Name, Mbps: 50},
+		},
+	})
+	if report.Selected != 1 || len(report.Results) != 1 || report.Results[0].StableID != active.StableID || report.Results[0].MaintenanceProbe {
+		t.Fatalf("Telegram filtered report = %+v, want only the regular active result", report)
+	}
+}
+
 func withReportMode(cfg Config, mode string) Config {
 	cfg.SpeedReportMode = mode
 	return cfg

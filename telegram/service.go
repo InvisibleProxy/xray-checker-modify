@@ -531,7 +531,9 @@ func (s *Service) PruneInactiveMutedNodes() error {
 			if proxy.StableID == "" {
 				proxy.StableID = proxy.GenerateStableID()
 			}
-			active[proxy.StableID] = true
+			if s.proxyChecker.MonitoringEnabled(proxy.StableID) {
+				active[proxy.StableID] = true
+			}
 		}
 	}
 	var inactiveRetries []string
@@ -549,6 +551,25 @@ func (s *Service) PruneInactiveMutedNodes() error {
 		}
 	}
 	return nil
+}
+
+// ClearMonitoringState removes alert/recovery counters and pending speed-test
+// confirmations when an operator places a node into maintenance. Telegram mute
+// preferences are intentionally preserved for when monitoring resumes.
+func (s *Service) ClearMonitoringState(stableID string) error {
+	stableID = strings.TrimSpace(stableID)
+	if stableID == "" {
+		return fmt.Errorf("stableId is required")
+	}
+	s.mu.Lock()
+	_, hadAlert := s.alerts[stableID]
+	delete(s.alerts, stableID)
+	s.mu.Unlock()
+	retryChanged := s.clearSpeedRetry(speedRetryKindConfirmation, []string{stableID})
+	if !hadAlert && !retryChanged {
+		return nil
+	}
+	return s.saveAlertState()
 }
 
 func (s *Service) UpdateConfig(cfg Config) error {
@@ -608,6 +629,9 @@ func (s *Service) SendTestMessage() error {
 func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 	cfg := s.Config()
 	if report.Source == "manual" {
+		report = s.excludeMaintenanceSpeedResults(report)
+	}
+	if report.Source == "manual" {
 		ids := successfulSpeedResultIDs(report.Results, cfg.LowSpeedThresholdMbps)
 		if s.clearSpeedRetry(speedRetryKindConfirmation, ids) {
 			s.persistRetryStateWithWarn()
@@ -649,6 +673,21 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 
 	content := s.formatSpeedReportMessage(report, cfg, failed, slow, issuesOnly)
 	s.sendSpeedTestReport(cfg, cfg.ChatID, cfg.MessageThreadID, content)
+}
+
+func (s *Service) excludeMaintenanceSpeedResults(report speedtest.RunReport) speedtest.RunReport {
+	if s.proxyChecker == nil || len(report.Results) == 0 {
+		return report
+	}
+	filtered := make([]speedtest.Result, 0, len(report.Results))
+	for _, result := range report.Results {
+		if !result.MaintenanceProbe && s.proxyChecker.MonitoringEnabled(result.StableID) {
+			filtered = append(filtered, result)
+		}
+	}
+	report.Results = filtered
+	report.Selected = len(filtered)
+	return report
 }
 
 func (s *Service) sendSpeedTestReport(cfg Config, chatID string, threadID int, content formattedMessage) {
@@ -1036,7 +1075,9 @@ func (s *Service) NotifyNodeStatuses() bool {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
-		active[proxy.StableID] = true
+		if s.proxyChecker.MonitoringEnabled(proxy.StableID) {
+			active[proxy.StableID] = true
+		}
 	}
 	muted := mutedAlertNodeSet(cfg)
 
@@ -1057,10 +1098,16 @@ func (s *Service) NotifyNodeStatuses() bool {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
+		if !s.proxyChecker.MonitoringEnabled(proxy.StableID) {
+			continue
+		}
 		isMuted := muted[proxy.StableID]
 
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
-		isDown := err != nil || !details.Online
+		if err != nil {
+			continue
+		}
+		isDown := !details.Online
 
 		var shouldSendDownAlert bool
 		var shouldRefreshDiagnostics bool
@@ -2203,11 +2250,16 @@ func (s *Service) latestSpeedResult(stableID string) *speedtest.Result {
 }
 
 func (s *Service) sortedProxies() []*models.ProxyConfig {
-	proxies := s.proxyChecker.GetProxies()
-	for _, proxy := range proxies {
+	all := s.proxyChecker.GetProxies()
+	proxies := make([]*models.ProxyConfig, 0, len(all))
+	for _, proxy := range all {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
+		if !s.proxyChecker.MonitoringEnabled(proxy.StableID) {
+			continue
+		}
+		proxies = append(proxies, proxy)
 	}
 	sort.Slice(proxies, func(i, j int) bool {
 		return strings.ToLower(proxies[i].Name) < strings.ToLower(proxies[j].Name)
@@ -2265,7 +2317,7 @@ func replyThreadID(msg *message, cfg Config) int {
 }
 
 func (s *Service) nodeCounts() (total int, online int, offline int) {
-	proxies := s.proxyChecker.GetProxies()
+	proxies := s.sortedProxies()
 	total = len(proxies)
 	for _, proxy := range proxies {
 		if proxy.StableID == "" {
@@ -2372,7 +2424,7 @@ func (s *Service) formatIssuesSummary() string {
 	cfg := s.Config()
 	muted := mutedAlertNodeSet(cfg)
 	var offlineLines []string
-	for _, proxy := range s.proxyChecker.GetProxies() {
+	for _, proxy := range s.sortedProxies() {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
@@ -2963,6 +3015,9 @@ func (s *Service) proxyCandidates() []proxyCandidate {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
+		if !s.proxyChecker.MonitoringEnabled(proxy.StableID) {
+			continue
+		}
 
 		online, latency, err := s.proxyChecker.GetProxyStatusByStableID(proxy.StableID)
 		if err != nil {
@@ -2976,6 +3031,12 @@ func (s *Service) proxyCandidates() []proxyCandidate {
 
 	if len(candidates) == 0 && knownStatuses == 0 {
 		for _, proxy := range proxies {
+			if proxy.StableID == "" {
+				proxy.StableID = proxy.GenerateStableID()
+			}
+			if !s.proxyChecker.MonitoringEnabled(proxy.StableID) {
+				continue
+			}
 			candidates = append(candidates, proxyCandidate{Proxy: proxy})
 		}
 	}
@@ -3016,6 +3077,9 @@ func (s *Service) findProxy(query string) (*models.ProxyConfig, []*models.ProxyC
 	for _, proxy := range s.proxyChecker.GetProxies() {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
+		}
+		if !s.proxyChecker.MonitoringEnabled(proxy.StableID) {
+			continue
 		}
 		stableID := strings.ToLower(proxy.StableID)
 		name := strings.ToLower(proxy.Name)
@@ -3120,7 +3184,9 @@ func (s *Service) loadAlertState() error {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
-		active[proxy.StableID] = true
+		if s.proxyChecker.MonitoringEnabled(proxy.StableID) {
+			active[proxy.StableID] = true
+		}
 	}
 
 	loaded := make(map[string]nodeAlertState)
@@ -3244,7 +3310,9 @@ func (s *Service) saveAlertState() error {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
-		active[proxy.StableID] = true
+		if s.proxyChecker.MonitoringEnabled(proxy.StableID) {
+			active[proxy.StableID] = true
+		}
 	}
 
 	nodes := make(map[string]persistedNodeAlertState)
@@ -3602,6 +3670,16 @@ func (s *Service) activeNodeIDs() map[string]bool {
 	return active
 }
 
+func (s *Service) monitoredNodeIDs() map[string]bool {
+	active := s.activeNodeIDs()
+	for stableID := range active {
+		if !s.proxyChecker.MonitoringEnabled(stableID) {
+			delete(active, stableID)
+		}
+	}
+	return active
+}
+
 func filterActiveNodeIDs(values []string, active map[string]bool) []string {
 	values = normalizeNodeIDs(values)
 	if len(active) == 0 {
@@ -3725,14 +3803,14 @@ func filterMutedSpeedResults(results []speedtest.Result, cfg Config) []speedtest
 }
 
 func (s *Service) activeSpeedResults(results []speedtest.Result) []speedtest.Result {
-	active := s.activeNodeIDs()
+	active := s.monitoredNodeIDs()
 	if len(results) == 0 || len(active) == 0 {
 		return nil
 	}
 
 	filtered := make([]speedtest.Result, 0, len(results))
 	for _, result := range results {
-		if result.StableID != "" && active[result.StableID] {
+		if !result.MaintenanceProbe && result.StableID != "" && active[result.StableID] {
 			filtered = append(filtered, result)
 		}
 	}

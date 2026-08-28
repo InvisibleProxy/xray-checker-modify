@@ -16,29 +16,32 @@ import (
 var openAPISpec []byte
 
 type ProxyInfo struct {
-	Index     int    `json:"index"`
-	StableID  string `json:"stableId"`
-	Name      string `json:"name"`
-	SubName   string `json:"subName"`
-	Server    string `json:"server"`
-	Port      int    `json:"port"`
-	Protocol  string `json:"protocol"`
-	ProxyPort int    `json:"proxyPort"`
-	Online    bool   `json:"online"`
-	LatencyMs int64  `json:"latencyMs"`
+	Index       int    `json:"index"`
+	StableID    string `json:"stableId"`
+	Name        string `json:"name"`
+	SubName     string `json:"subName"`
+	Server      string `json:"server"`
+	Port        int    `json:"port"`
+	Protocol    string `json:"protocol"`
+	ProxyPort   int    `json:"proxyPort"`
+	Online      bool   `json:"online"`
+	Maintenance bool   `json:"maintenance"`
+	LatencyMs   int64  `json:"latencyMs"`
 }
 
 type PublicProxyInfo struct {
-	StableID  string `json:"stableId"`
-	Name      string `json:"name"`
-	Online    bool   `json:"online"`
-	LatencyMs int64  `json:"latencyMs"`
+	StableID    string `json:"stableId"`
+	Name        string `json:"name"`
+	Online      bool   `json:"online"`
+	Maintenance bool   `json:"maintenance"`
+	LatencyMs   int64  `json:"latencyMs"`
 }
 
 type StatusResponse struct {
 	Total        int   `json:"total"`
 	Online       int   `json:"online"`
 	Offline      int   `json:"offline"`
+	Maintenance  int   `json:"maintenance"`
 	AvgLatencyMs int64 `json:"avgLatencyMs"`
 }
 
@@ -88,18 +91,19 @@ func writeError(w http.ResponseWriter, message string, code int) {
 	})
 }
 
-func toProxyInfo(proxy *models.ProxyConfig, online bool, latency time.Duration, startPort int) ProxyInfo {
+func toProxyInfo(proxy *models.ProxyConfig, online bool, maintenance bool, latency time.Duration, startPort int) ProxyInfo {
 	return ProxyInfo{
-		Index:     proxy.Index,
-		StableID:  proxy.StableID,
-		Name:      proxy.Name,
-		SubName:   proxy.SubName,
-		Server:    proxy.Server,
-		Port:      proxy.Port,
-		Protocol:  proxy.Protocol,
-		ProxyPort: startPort + proxy.Index,
-		Online:    online,
-		LatencyMs: latency.Milliseconds(),
+		Index:       proxy.Index,
+		StableID:    proxy.StableID,
+		Name:        proxy.Name,
+		SubName:     proxy.SubName,
+		Server:      proxy.Server,
+		Port:        proxy.Port,
+		Protocol:    proxy.Protocol,
+		ProxyPort:   startPort + proxy.Index,
+		Online:      online,
+		Maintenance: maintenance,
+		LatencyMs:   latency.Milliseconds(),
 	}
 }
 
@@ -120,11 +124,13 @@ func APIPublicProxiesHandler(proxyChecker *checker.ProxyChecker) http.HandlerFun
 				proxy.StableID = proxy.GenerateStableID()
 			}
 			status, latency, _ := proxyChecker.GetProxyStatusByStableID(proxy.StableID)
+			maintenance := !proxyChecker.MonitoringEnabled(proxy.StableID)
 			result = append(result, PublicProxyInfo{
-				StableID:  proxy.StableID,
-				Name:      proxy.Name,
-				Online:    status,
-				LatencyMs: latency.Milliseconds(),
+				StableID:    proxy.StableID,
+				Name:        proxy.Name,
+				Online:      status,
+				Maintenance: maintenance,
+				LatencyMs:   latency.Milliseconds(),
 			})
 		}
 
@@ -149,7 +155,7 @@ func APIProxiesHandler(proxyChecker *checker.ProxyChecker, startPort int) http.H
 				proxy.StableID = proxy.GenerateStableID()
 			}
 			status, latency, _ := proxyChecker.GetProxyStatusByStableID(proxy.StableID)
-			result = append(result, toProxyInfo(proxy, status, latency, startPort))
+			result = append(result, toProxyInfo(proxy, status, !proxyChecker.MonitoringEnabled(proxy.StableID), latency, startPort))
 		}
 
 		writeJSON(w, result)
@@ -187,7 +193,7 @@ func APIProxyHandler(proxyChecker *checker.ProxyChecker, startPort int) http.Han
 		}
 
 		status, latency, _ := proxyChecker.GetProxyStatusByStableID(proxy.StableID)
-		writeJSON(w, toProxyInfo(proxy, status, latency, startPort))
+		writeJSON(w, toProxyInfo(proxy, status, !proxyChecker.MonitoringEnabled(proxy.StableID), latency, startPort))
 	}
 }
 
@@ -202,13 +208,17 @@ func APIStatusHandler(proxyChecker *checker.ProxyChecker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		proxies := proxyChecker.GetProxies()
 
-		var online, offline int
+		var online, offline, maintenance int
 		var totalLatency int64
 		var latencyCount int
 
 		for _, proxy := range proxies {
 			if proxy.StableID == "" {
 				proxy.StableID = proxy.GenerateStableID()
+			}
+			if !proxyChecker.MonitoringEnabled(proxy.StableID) {
+				maintenance++
+				continue
 			}
 			status, latency, _ := proxyChecker.GetProxyStatusByStableID(proxy.StableID)
 			if status {
@@ -231,6 +241,7 @@ func APIStatusHandler(proxyChecker *checker.ProxyChecker) http.HandlerFunc {
 			Total:        len(proxies),
 			Online:       online,
 			Offline:      offline,
+			Maintenance:  maintenance,
 			AvgLatencyMs: avgLatency,
 		})
 	}

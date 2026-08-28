@@ -22,6 +22,7 @@ func TestDecodeConfigMigratesUnversionedSparseState(t *testing.T) {
 	}
 	if !config.Policy.Messages.SingleLocation.Enabled || config.Policy.Messages.SingleLocation.Template != defaultSingleLocationTemplate ||
 		!config.Policy.Messages.PartialSingleLocation.Enabled || config.Policy.Messages.PartialSingleLocation.Template != defaultPartialSingleLocationTemplate ||
+		!config.Policy.Messages.MaintenanceSingleLocation.Enabled || config.Policy.Messages.MaintenanceSingleLocation.Template != defaultMaintenanceSingleLocationTemplate ||
 		config.Policy.Messages.Healthy.Enabled {
 		t.Fatalf("message scenarios were not normalized: %+v", config.Policy.Messages)
 	}
@@ -121,6 +122,44 @@ func TestDecodeConfigMigratesV2PartialAvailabilityScenarios(t *testing.T) {
 	if config.Policy.Messages.SingleLocation.Template != "Недоступна: {location}" {
 		t.Fatalf("v2 existing scenario was not preserved: %+v", config.Policy.Messages)
 	}
+	if config.Policy.Messages.MaintenanceSingleLocation.Template != defaultMaintenanceSingleLocationTemplate {
+		t.Fatalf("v2 maintenance scenario was not added: %+v", config.Policy.Messages)
+	}
+}
+
+func TestDecodeConfigMigratesV3MaintenanceScenarios(t *testing.T) {
+	config, err := DecodeConfig([]byte(`{
+  "version": 3,
+  "policy": {
+    "outageMinutes": 15,
+    "minimumFailures": 3,
+    "recoveryMinutes": 5,
+	"normalMessage": "Устаревшее значение",
+    "messages": {
+      "singleLocation": {"enabled": true, "template": "Недоступна: {location}"},
+      "multipleLocations": {"enabled": true, "template": "Недоступны: {locations}"},
+      "allLocations": {"enabled": true, "template": "Недоступны все"},
+      "partialSingleLocation": {"enabled": true, "template": "Частично: {location}"},
+      "partialMultipleLocations": {"enabled": true, "template": "Частично: {locations}"},
+	  "healthy": {"enabled": false, "template": "Настроенный healthy"},
+      "partialFallback": "Недоступно: {unavailable}/{total}",
+      "partialAvailabilityFallback": "Частично: {affected}/{total}"
+    }
+  },
+  "squadPairs": [],
+  "nodeMappings": {}
+}`))
+	if err != nil {
+		t.Fatalf("DecodeConfig: %v", err)
+	}
+	if config.Version != ConfigVersion ||
+		config.Policy.Messages.MaintenanceSingleLocation.Template != defaultMaintenanceSingleLocationTemplate ||
+		config.Policy.Messages.MaintenanceMixedFallback != defaultMaintenanceMixedFallbackTemplate {
+		t.Fatalf("v3 maintenance migration = %+v", config.Policy.Messages)
+	}
+	if config.Policy.Messages.Healthy.Enabled || config.Policy.Messages.Healthy.Template != "Настроенный healthy" {
+		t.Fatalf("v3 migration overwrote healthy scenario from stale normalMessage: %+v", config.Policy.Messages.Healthy)
+	}
 }
 
 func TestConfigRejectsRemnawaveTemplateInjection(t *testing.T) {
@@ -172,8 +211,8 @@ func TestDecodeRuntimeMigratesV1WholeValueOwnership(t *testing.T) {
 	if managed.Value != composeManagedAnnounce(false, "", managed.Message) {
 		t.Fatalf("v1 whole-value ownership changed during migration: %+v", managed)
 	}
-	if managed.Groups == nil {
-		t.Fatal("v1 nil groups were not normalized")
+	if managed.Groups == nil || managed.MaintenanceGroups == nil {
+		t.Fatal("v1 nil ownership groups were not normalized")
 	}
 }
 
@@ -200,7 +239,7 @@ func TestDecodeRuntimeMigratesV2BaseAndManagedSuffix(t *testing.T) {
 	if !managed.BasePresent || managed.BaseValue != base || managed.Value != base+"\n"+message {
 		t.Fatalf("v2 base ownership = %+v", managed)
 	}
-	if managed.PartialGroups == nil || runtime.Version != RuntimeVersion {
+	if managed.PartialGroups == nil || managed.MaintenanceGroups == nil || runtime.Version != RuntimeVersion {
 		t.Fatalf("v2 partial groups were not normalized: %+v", runtime)
 	}
 }

@@ -186,6 +186,10 @@
       .status-offline {
         background: var(--color-red);
       }
+      .status-maintenance {
+        background-color: #f59e0b;
+        box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.16);
+      }
       .latency-good {
         color: var(--color-green);
       }
@@ -489,7 +493,7 @@
         <div class="badge-card" :class="badgeClasses" :style="badgeStyle">
           <div
             class="badge-status"
-            :class="badgeProxy.status ? 'status-online pulse' : 'status-offline'"
+            :class="badgeProxy.maintenance ? 'status-maintenance' : (badgeProxy.status ? 'status-online pulse' : 'status-offline')"
           ></div>
           <span
             x-show="badgeShowName"
@@ -500,7 +504,7 @@
             x-show="badgeShowLatency"
             class="badge-latency"
             :class="badgeProxy.latencyMs === 0 ? 'text-muted' : badgeProxy.latencyMs < 500 ? 'latency-good' : badgeProxy.latencyMs < 1000 ? 'latency-medium' : 'latency-bad'"
-            x-text="badgeProxy.latency"
+            x-text="badgeProxy.maintenance ? 'Maintenance' : badgeProxy.latency"
           ></span>
         </div>
       </div>
@@ -650,7 +654,7 @@
           >
             0
           </div>
-          <div class="text-xs text-muted mt-0.5">Total</div>
+          <div class="text-xs text-muted mt-0.5"><span>Total</span><span x-show="stats.maintenance > 0" x-text="' · ' + stats.maintenance + ' maintenance'"></span></div>
         </div>
         <div class="card rounded-lg p-2 sm:p-4 text-center">
           <div
@@ -873,6 +877,13 @@
               >
                 Offline
               </button>
+              <button
+                @click="setFilter('maintenance')"
+                :class="filter === 'maintenance' ? 'filter-all' : 'text-muted hover:text-secondary'"
+                class="px-3 py-1 rounded text-xs font-medium"
+              >
+                Maintenance
+              </button>
             </div>
 
             <select
@@ -904,7 +915,7 @@
             <div class="relative flex-shrink-0">
               <div
                 class="w-2 h-2 rounded-full"
-                :class="proxy.status ? 'status-online pulse' : 'status-offline'"
+                :class="proxy.maintenance ? 'status-maintenance' : (proxy.status ? 'status-online pulse' : 'status-offline')"
               ></div>
             </div>
 
@@ -943,7 +954,7 @@
               <span
                 class="text-xs tabular-nums"
                 :class="proxy.latencyMs === 0 ? 'text-muted' : proxy.latencyMs < 500 ? 'latency-good' : proxy.latencyMs < 1000 ? 'latency-medium' : 'latency-bad'"
-                x-text="proxy.latency"
+                x-text="proxy.maintenance ? 'Maintenance' : proxy.latency"
               ></span>
               <div class="flex items-center gap-0.5">
                 <template x-for="i in 5" :key="i">
@@ -1114,17 +1125,20 @@
 
           proxies: [
             {{ range $.Endpoints }}
-            { name: "{{.Name}}", stableId: "{{.StableID}}", {{ if $.ShowServerDetails }}serverInfo: "{{.ServerInfo}}", server: "{{.Server}}", serverPort: {{.ServerPort}}, proxyPort: {{.ProxyPort}}, {{ end }}{{ if not $.IsPublic }}url: "{{.URL}}", {{ end }}index: {{.Index}}, status: {{.Status}}, latency: "{{ formatLatency .Latency }}", latencyMs: {{ .Latency.Milliseconds }} },
+            { name: "{{.Name}}", stableId: "{{.StableID}}", {{ if $.ShowServerDetails }}serverInfo: "{{.ServerInfo}}", server: "{{.Server}}", serverPort: {{.ServerPort}}, proxyPort: {{.ProxyPort}}, {{ end }}{{ if not $.IsPublic }}url: "{{.URL}}", {{ end }}index: {{.Index}}, status: {{.Status}}, maintenance: {{.Maintenance}}, latency: "{{ formatLatency .Latency }}", latencyMs: {{ .Latency.Milliseconds }} },
             {{ end }}
           ],
 
           get stats() {
-            const online = this.proxies.filter(p => p.status).length;
-            const withLatency = this.proxies.filter(p => p.status && p.latencyMs > 0);
+            const maintenance = this.proxies.filter(p => p.maintenance).length;
+            const monitored = this.proxies.length - maintenance;
+            const online = this.proxies.filter(p => !p.maintenance && p.status).length;
+            const withLatency = this.proxies.filter(p => !p.maintenance && p.status && p.latencyMs > 0);
             return {
               total: this.proxies.length,
               online,
-              offline: this.proxies.length - online,
+              offline: monitored - online,
+              maintenance,
               avgLatency: withLatency.length ? Math.round(withLatency.reduce((s, p) => s + p.latencyMs, 0) / withLatency.length) : 0
             };
           },
@@ -1135,8 +1149,9 @@
               const q = this.search.toLowerCase();
               r = r.filter(p => p.name.toLowerCase().includes(q) || (p.serverInfo && p.serverInfo.toLowerCase().includes(q)));
             }
-            if (this.filter === 'online') r = r.filter(p => p.status);
-            else if (this.filter === 'offline') r = r.filter(p => !p.status);
+            if (this.filter === 'online') r = r.filter(p => !p.maintenance && p.status);
+            else if (this.filter === 'offline') r = r.filter(p => !p.maintenance && !p.status);
+            else if (this.filter === 'maintenance') r = r.filter(p => p.maintenance);
 
             return [...r].sort((a, b) => {
               if (this.sort === 'latency-asc') {
@@ -1286,6 +1301,7 @@
                   const proxy = this.proxies.find(p => p.stableId === updated.stableId);
                   if (proxy) {
                     proxy.status = updated.online;
+                    proxy.maintenance = updated.maintenance;
                     proxy.latencyMs = updated.latencyMs;
                     proxy.latency = updated.latencyMs > 0 ? updated.latencyMs + 'ms' : 'n/a';
                   }
@@ -1295,6 +1311,7 @@
                   const updated = json.data.find(p => p.stableId === this.badgeProxy.stableId);
                   if (updated) {
                     this.badgeProxy.status = updated.online;
+                    this.badgeProxy.maintenance = updated.maintenance;
                     this.badgeProxy.latencyMs = updated.latencyMs;
                     this.badgeProxy.latency = updated.latencyMs > 0 ? updated.latencyMs + 'ms' : 'n/a';
                   }

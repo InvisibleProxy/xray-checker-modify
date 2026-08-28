@@ -119,6 +119,15 @@ func validateDataFile(name string, data []byte) error {
 		if err := json.Unmarshal(data, &schedule); err != nil {
 			return fmt.Errorf("backup file %s has invalid schedule: %w", name, err)
 		}
+		if rawNextRun, ok := object["nextRunAt"]; ok {
+			var nextRun time.Time
+			if err := json.Unmarshal(rawNextRun, &nextRun); err != nil || nextRun.IsZero() {
+				if err == nil {
+					err = fmt.Errorf("nextRunAt must be a non-zero RFC3339 timestamp")
+				}
+				return fmt.Errorf("backup file %s has invalid next scheduled run: %w", name, err)
+			}
+		}
 	case "telegram_config.json":
 		var enabled bool
 		if err := decodeRequiredField(object, "enabled", &enabled); err != nil {

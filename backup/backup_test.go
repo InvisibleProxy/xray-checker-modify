@@ -212,6 +212,7 @@ func TestPrepareDataFileRejectsMalformedPersistedSchemas(t *testing.T) {
 		{name: "wrong nodes type", file: "node_registry.json", data: `{"version":1,"nodes":"bad"}`},
 		{name: "wrong schedule config type", file: "speedtest_schedule.json", data: `{"enabled":true,"intervalSec":60,"config":"bad"}`},
 		{name: "null schedule config", file: "speedtest_schedule.json", data: `{"enabled":true,"intervalSec":60,"config":null}`},
+		{name: "invalid next schedule deadline", file: "speedtest_schedule.json", data: `{"enabled":true,"intervalSec":60,"config":{},"nextRunAt":"not-a-time"}`},
 		{name: "wrong Telegram enabled type", file: "telegram_config.json", data: `{"enabled":"yes"}`},
 		{name: "null Telegram enabled", file: "telegram_config.json", data: `{"enabled":null}`},
 		{name: "trailing garbage", file: "node_registry.json", data: `{"version":1,"nodes":{}} garbage`},

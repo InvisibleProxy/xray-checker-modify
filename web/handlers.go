@@ -19,16 +19,17 @@ var (
 )
 
 type EndpointInfo struct {
-	Name       string
-	ServerInfo string
-	Server     string
-	ServerPort int
-	URL        string
-	ProxyPort  int
-	Index      int
-	Status     bool
-	Latency    time.Duration
-	StableID   string
+	Name        string
+	ServerInfo  string
+	Server      string
+	ServerPort  int
+	URL         string
+	ProxyPort   int
+	Index       int
+	Status      bool
+	Maintenance bool
+	Latency     time.Duration
+	StableID    string
 }
 
 func IndexHandler(version string, proxyChecker *checker.ProxyChecker) http.HandlerFunc {
@@ -56,11 +57,12 @@ func IndexHandler(version string, proxyChecker *checker.ProxyChecker) http.Handl
 			endpoints = make([]EndpointInfo, len(allEndpoints))
 			for i, ep := range allEndpoints {
 				endpoints[i] = EndpointInfo{
-					Name:     ep.Name,
-					Index:    ep.Index,
-					Status:   ep.Status,
-					Latency:  ep.Latency,
-					StableID: ep.StableID,
+					Name:        ep.Name,
+					Index:       ep.Index,
+					Status:      ep.Status,
+					Maintenance: ep.Maintenance,
+					Latency:     ep.Latency,
+					StableID:    ep.StableID,
 				}
 			}
 		}
@@ -131,6 +133,13 @@ func ConfigStatusHandler(proxyChecker *checker.ProxyChecker) http.HandlerFunc {
 			return
 		}
 
+		if !proxyChecker.MonitoringEnabled(found.StableID) {
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("X-Xray-Checker-Status", "maintenance")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("Maintenance"))
+			return
+		}
 		status, latency, err := proxyChecker.GetProxyStatusByStableID(found.StableID)
 		if err != nil {
 			http.Error(w, "Status not available", http.StatusNotFound)
@@ -164,16 +173,17 @@ func RegisterConfigEndpoints(proxies []*models.ProxyConfig, proxyChecker *checke
 		status, latency, _ := proxyChecker.GetProxyStatusByStableID(proxy.StableID)
 
 		endpoints = append(endpoints, EndpointInfo{
-			Name:       proxy.Name,
-			ServerInfo: fmt.Sprintf("%s:%d", proxy.Server, proxy.Port),
-			Server:     proxy.Server,
-			ServerPort: proxy.Port,
-			URL:        endpoint,
-			ProxyPort:  startPort + proxy.Index,
-			Index:      proxy.Index,
-			Status:     status,
-			Latency:    latency,
-			StableID:   proxy.StableID,
+			Name:        proxy.Name,
+			ServerInfo:  fmt.Sprintf("%s:%d", proxy.Server, proxy.Port),
+			Server:      proxy.Server,
+			ServerPort:  proxy.Port,
+			URL:         endpoint,
+			ProxyPort:   startPort + proxy.Index,
+			Index:       proxy.Index,
+			Status:      status,
+			Maintenance: !proxyChecker.MonitoringEnabled(proxy.StableID),
+			Latency:     latency,
+			StableID:    proxy.StableID,
 		})
 	}
 

@@ -14,14 +14,18 @@ const (
 	messageTokenAffected    = "{affected}"
 	messageTokenTotal       = "{total}"
 
-	defaultSingleLocationTemplate              = "⚠️ Временно недоступна локация «{location}». Остальные доступные вам локации работают."
-	defaultMultipleLocationsTemplate           = "⚠️ Временно недоступны локации: {locations}. Остальные доступные вам локации работают."
-	defaultAllLocationsTemplate                = "⚠️ Все доступные вам локации временно недоступны. Идёт восстановление работы."
-	defaultPartialSingleLocationTemplate       = "⚠️ Часть серверов локации «{location}» временно недоступна. Если подключение не работает, выберите другой сервер этой локации."
-	defaultPartialMultipleLocationsTemplate    = "⚠️ Часть серверов временно недоступна в локациях: {locations}. Если подключение не работает, выберите другой сервер."
-	defaultHealthyTemplate                     = "Всё стабильно"
-	defaultPartialFallbackTemplate             = "⚠️ Временно недоступны несколько локаций. Остальные доступные вам локации работают."
-	defaultPartialAvailabilityFallbackTemplate = "⚠️ Часть серверов в нескольких локациях временно недоступна. Если подключение не работает, выберите другой сервер."
+	defaultSingleLocationTemplate               = "⚠️ Временно недоступна локация «{location}». Остальные доступные вам локации работают."
+	defaultMultipleLocationsTemplate            = "⚠️ Временно недоступны локации: {locations}. Остальные доступные вам локации работают."
+	defaultAllLocationsTemplate                 = "⚠️ Все доступные вам локации временно недоступны. Идёт восстановление работы."
+	defaultPartialSingleLocationTemplate        = "⚠️ Часть серверов локации «{location}» временно недоступна. Если подключение не работает, выберите другой сервер этой локации."
+	defaultPartialMultipleLocationsTemplate     = "⚠️ Часть серверов временно недоступна в локациях: {locations}. Если подключение не работает, выберите другой сервер."
+	defaultMaintenanceSingleLocationTemplate    = "🔧 Серверы локации «{location}» находятся на обслуживании. Могут наблюдаться проблемы в работе."
+	defaultMaintenanceMultipleLocationsTemplate = "🔧 Серверы локаций {locations} находятся на обслуживании. Могут наблюдаться проблемы в работе."
+	defaultHealthyTemplate                      = "Всё стабильно"
+	defaultPartialFallbackTemplate              = "⚠️ Временно недоступны несколько локаций. Остальные доступные вам локации работают."
+	defaultPartialAvailabilityFallbackTemplate  = "⚠️ Часть серверов в нескольких локациях временно недоступна. Если подключение не работает, выберите другой сервер."
+	defaultMaintenanceFallbackTemplate          = "🔧 Серверы в {affected} локациях находятся на обслуживании. Могут наблюдаться проблемы в работе."
+	defaultMaintenanceMixedFallbackTemplate     = "⚠️ Недоступны {unavailable} локаций; ещё {affected} локаций находятся на обслуживании. Могут наблюдаться проблемы в работе."
 )
 
 type messageTemplateData struct {
@@ -53,12 +57,22 @@ func defaultMessageScenarios() MessageScenarios {
 			Enabled:  true,
 			Template: defaultPartialMultipleLocationsTemplate,
 		},
+		MaintenanceSingleLocation: MessageScenario{
+			Enabled:  true,
+			Template: defaultMaintenanceSingleLocationTemplate,
+		},
+		MaintenanceMultipleLocations: MessageScenario{
+			Enabled:  true,
+			Template: defaultMaintenanceMultipleLocationsTemplate,
+		},
 		Healthy: MessageScenario{
 			Enabled:  false,
 			Template: defaultHealthyTemplate,
 		},
 		PartialFallback:             defaultPartialFallbackTemplate,
 		PartialAvailabilityFallback: defaultPartialAvailabilityFallbackTemplate,
+		MaintenanceFallback:         defaultMaintenanceFallbackTemplate,
+		MaintenanceMixedFallback:    defaultMaintenanceMixedFallbackTemplate,
 	}
 }
 
@@ -68,15 +82,26 @@ func messageScenariosMissing(messages MessageScenarios) bool {
 		strings.TrimSpace(messages.AllLocations.Template) == "" &&
 		strings.TrimSpace(messages.PartialSingleLocation.Template) == "" &&
 		strings.TrimSpace(messages.PartialMultipleLocations.Template) == "" &&
+		strings.TrimSpace(messages.MaintenanceSingleLocation.Template) == "" &&
+		strings.TrimSpace(messages.MaintenanceMultipleLocations.Template) == "" &&
 		strings.TrimSpace(messages.Healthy.Template) == "" &&
 		strings.TrimSpace(messages.PartialFallback) == "" &&
-		strings.TrimSpace(messages.PartialAvailabilityFallback) == ""
+		strings.TrimSpace(messages.PartialAvailabilityFallback) == "" &&
+		strings.TrimSpace(messages.MaintenanceFallback) == "" &&
+		strings.TrimSpace(messages.MaintenanceMixedFallback) == ""
 }
 
 func partialAvailabilityScenariosMissing(messages MessageScenarios) bool {
 	return strings.TrimSpace(messages.PartialSingleLocation.Template) == "" &&
 		strings.TrimSpace(messages.PartialMultipleLocations.Template) == "" &&
 		strings.TrimSpace(messages.PartialAvailabilityFallback) == ""
+}
+
+func maintenanceScenariosMissing(messages MessageScenarios) bool {
+	return strings.TrimSpace(messages.MaintenanceSingleLocation.Template) == "" &&
+		strings.TrimSpace(messages.MaintenanceMultipleLocations.Template) == "" &&
+		strings.TrimSpace(messages.MaintenanceFallback) == "" &&
+		strings.TrimSpace(messages.MaintenanceMixedFallback) == ""
 }
 
 func normalizeMessageScenarios(messages *MessageScenarios) {
@@ -92,6 +117,8 @@ func normalizeMessageScenarios(messages *MessageScenarios) {
 	normalizeScenario(&messages.AllLocations, defaults.AllLocations)
 	normalizeScenario(&messages.PartialSingleLocation, defaults.PartialSingleLocation)
 	normalizeScenario(&messages.PartialMultipleLocations, defaults.PartialMultipleLocations)
+	normalizeScenario(&messages.MaintenanceSingleLocation, defaults.MaintenanceSingleLocation)
+	normalizeScenario(&messages.MaintenanceMultipleLocations, defaults.MaintenanceMultipleLocations)
 	normalizeScenario(&messages.Healthy, defaults.Healthy)
 	messages.PartialFallback = strings.TrimSpace(messages.PartialFallback)
 	if messages.PartialFallback == "" {
@@ -100,6 +127,14 @@ func normalizeMessageScenarios(messages *MessageScenarios) {
 	messages.PartialAvailabilityFallback = strings.TrimSpace(messages.PartialAvailabilityFallback)
 	if messages.PartialAvailabilityFallback == "" {
 		messages.PartialAvailabilityFallback = defaults.PartialAvailabilityFallback
+	}
+	messages.MaintenanceFallback = strings.TrimSpace(messages.MaintenanceFallback)
+	if messages.MaintenanceFallback == "" {
+		messages.MaintenanceFallback = defaults.MaintenanceFallback
+	}
+	messages.MaintenanceMixedFallback = strings.TrimSpace(messages.MaintenanceMixedFallback)
+	if messages.MaintenanceMixedFallback == "" {
+		messages.MaintenanceMixedFallback = defaults.MaintenanceMixedFallback
 	}
 }
 
@@ -114,9 +149,13 @@ func validateMessageScenarios(messages MessageScenarios) error {
 		{"messages.allLocations.template", messages.AllLocations.Template, []string{messageTokenUnavailable, messageTokenTotal}},
 		{"messages.partialSingleLocation.template", messages.PartialSingleLocation.Template, []string{messageTokenLocation, messageTokenAffected, messageTokenTotal}},
 		{"messages.partialMultipleLocations.template", messages.PartialMultipleLocations.Template, []string{messageTokenLocations, messageTokenAffected, messageTokenTotal}},
+		{"messages.maintenanceSingleLocation.template", messages.MaintenanceSingleLocation.Template, []string{messageTokenLocation, messageTokenAffected, messageTokenTotal}},
+		{"messages.maintenanceMultipleLocations.template", messages.MaintenanceMultipleLocations.Template, []string{messageTokenLocations, messageTokenAffected, messageTokenTotal}},
 		{"messages.healthy.template", messages.Healthy.Template, []string{messageTokenUnavailable, messageTokenTotal}},
 		{"messages.partialFallback", messages.PartialFallback, []string{messageTokenUnavailable, messageTokenTotal}},
 		{"messages.partialAvailabilityFallback", messages.PartialAvailabilityFallback, []string{messageTokenAffected, messageTokenTotal}},
+		{"messages.maintenanceFallback", messages.MaintenanceFallback, []string{messageTokenAffected, messageTokenTotal}},
+		{"messages.maintenanceMixedFallback", messages.MaintenanceMixedFallback, []string{messageTokenUnavailable, messageTokenAffected, messageTokenTotal}},
 	}
 	for _, check := range checks {
 		if err := validateMessageTemplate(check.name, check.value, check.allowed); err != nil {
@@ -204,6 +243,49 @@ func partialAvailabilityMessage(messages MessageScenarios, groups map[string]str
 		}
 	}
 	return renderMessageTemplate("partial-availability fallback announce", messages.PartialAvailabilityFallback, data)
+}
+
+func maintenanceMessage(messages MessageScenarios, groups map[string]string, totalGroups int) (string, error) {
+	labels := make([]string, 0, len(groups))
+	for _, label := range groups {
+		labels = append(labels, label)
+	}
+	sort.Strings(labels)
+	data := messageTemplateData{labels: labels, affected: len(labels), total: totalGroups}
+
+	if len(labels) == 1 {
+		if !messages.MaintenanceSingleLocation.Enabled {
+			return "", nil
+		}
+		return renderMessageTemplate("maintenance single-location announce", messages.MaintenanceSingleLocation.Template, data)
+	}
+	if !messages.MaintenanceMultipleLocations.Enabled {
+		return "", nil
+	}
+	if len(labels) <= 3 {
+		if message, err := renderMessageTemplate("maintenance multiple-locations announce", messages.MaintenanceMultipleLocations.Template, data); err == nil {
+			return message, nil
+		}
+	}
+	return renderMessageTemplate("maintenance fallback announce", messages.MaintenanceFallback, data)
+}
+
+func combineOutageAndMaintenanceMessages(messages MessageScenarios, outage, maintenance string, unavailable, affected, total int) (string, error) {
+	if outage == "" {
+		return maintenance, nil
+	}
+	if maintenance == "" {
+		return outage, nil
+	}
+	combined := outage + " " + maintenance
+	if validateDisplayText("combined outage and maintenance announce", combined, maxMessageRunes) == nil {
+		return combined, nil
+	}
+	return renderMessageTemplate("mixed outage and maintenance fallback announce", messages.MaintenanceMixedFallback, messageTemplateData{
+		unavailable: unavailable,
+		affected:    affected,
+		total:       total,
+	})
 }
 
 func renderMessageTemplate(name, template string, data messageTemplateData) (string, error) {

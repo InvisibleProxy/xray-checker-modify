@@ -2,6 +2,7 @@ package speedtest
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -18,6 +19,69 @@ type reportRecorder chan RunReport
 
 func (r reportRecorder) NotifySpeedTest(report RunReport) {
 	r <- report
+}
+
+func TestMaintenanceNodesAreExcludedFromSpeedTestSelection(t *testing.T) {
+	paused := &models.ProxyConfig{StableID: "paused", Name: "Paused"}
+	active := &models.ProxyConfig{StableID: "active", Name: "Active"}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{paused, active}, 10000, "", 1, "", "", 1, 0, "status")
+	if err := proxyChecker.SetMaintenanceMode(paused.StableID, true); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(proxyChecker, 10000, "", TestConfig{})
+	selected := manager.selectProxies(RunRequest{}, false)
+	if len(selected) != 1 || selected[0].StableID != active.StableID {
+		t.Fatalf("selected proxies = %+v, want only active", selected)
+	}
+	manualSelected := manager.selectProxies(RunRequest{ProxyIDs: []string{paused.StableID}}, true)
+	if len(manualSelected) != 1 || manualSelected[0].StableID != paused.StableID {
+		t.Fatalf("manual selection = %+v, want maintenance node", manualSelected)
+	}
+	if err := manager.Run(RunRequest{ProxyIDs: []string{paused.StableID}}, "telegram"); !errors.Is(err, checker.ErrMaintenanceMode) {
+		t.Fatalf("paused-only run error = %v, want ErrMaintenanceMode", err)
+	}
+}
+
+func TestManualMaintenanceProbeIsVisibleButNotAddedToHistory(t *testing.T) {
+	paused := &models.ProxyConfig{StableID: "paused", Name: "Paused"}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{paused}, 10000, "", 1, "", "", 1, 0, "status")
+	if err := proxyChecker.SetMaintenanceMode(paused.StableID, true); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	manager := NewManager(proxyChecker, 10000, filepath.Join(dir, "speedtest_schedule.json"), TestConfig{})
+	manager.testAttempt = func(proxy *models.ProxyConfig, cfg TestConfig, source string) Result {
+		return Result{StableID: proxy.StableID, Name: proxy.Name, URL: cfg.URL, Mbps: 42, CheckedAt: time.Now(), Source: source}
+	}
+	reports := make(reportRecorder, 1)
+	manager.SetReporter(reports)
+
+	if err := manager.Run(RunRequest{ProxyIDs: []string{paused.StableID}}, "manual"); err != nil {
+		t.Fatalf("manual maintenance run: %v", err)
+	}
+	var report RunReport
+	select {
+	case report = <-reports:
+	case <-time.After(2 * time.Second):
+		t.Fatal("manual maintenance run did not finish")
+	}
+	if len(report.Results) != 1 || !report.Results[0].MaintenanceProbe {
+		t.Fatalf("maintenance run report = %+v", report.Results)
+	}
+	if history := manager.ResultHistory(paused.StableID); len(history) != 0 {
+		t.Fatalf("maintenance probe polluted history: %+v", history)
+	}
+	snapshot := manager.Snapshot()
+	if len(snapshot.Results) != 1 || !snapshot.Results[0].MaintenanceProbe {
+		t.Fatalf("maintenance probe is not visible in admin snapshot: %+v", snapshot.Results)
+	}
+	if _, err := os.Stat(manager.resultPath); !os.IsNotExist(err) {
+		t.Fatalf("maintenance probe was persisted: %v", err)
+	}
+	manager.ClearMaintenanceProbe(paused.StableID)
+	if results := manager.Snapshot().Results; len(results) != 0 {
+		t.Fatalf("cleared maintenance probe is still visible: %+v", results)
+	}
 }
 
 func TestLoadResultsKeepsInactiveHistory(t *testing.T) {
@@ -268,6 +332,66 @@ func TestUpdatedTestURLIsUsedByScheduledConfig(t *testing.T) {
 	}
 	if reloaded.Schedule().Config.URL != "https://new.example.com/test.bin" {
 		t.Fatalf("reloaded scheduled URL = %q, want updated URL", reloaded.Schedule().Config.URL)
+	}
+}
+
+func TestScheduleDeadlineSurvivesReloadAndNonTimingUpdate(t *testing.T) {
+	dir := t.TempDir()
+	schedulePath := filepath.Join(dir, "speedtest_schedule.json")
+	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
+	manager := NewManager(proxyChecker, 10000, schedulePath, TestConfig{})
+	initial := ScheduleConfig{
+		Enabled:              true,
+		IntervalSec:          3600,
+		HistoryRetentionDays: 60,
+		Config:               TestConfig{URL: "https://example.com/initial.bin"},
+	}
+	if err := manager.UpdateSchedule(initial); err != nil {
+		t.Fatal(err)
+	}
+	first := manager.Snapshot().NextScheduledRunAt
+	if first == nil {
+		t.Fatal("enabled schedule has no persisted deadline")
+	}
+
+	initial.HistoryRetentionDays = 30
+	initial.Config.URL = "https://example.com/updated.bin"
+	if err := manager.UpdateSchedule(initial); err != nil {
+		t.Fatal(err)
+	}
+	updated := manager.Snapshot().NextScheduledRunAt
+	if updated == nil || !updated.Equal(*first) {
+		t.Fatalf("non-timing update moved deadline from %v to %v", first, updated)
+	}
+
+	reloaded := NewManager(proxyChecker, 10000, schedulePath, TestConfig{})
+	if err := reloaded.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if schedule, _ := reloaded.ensureSchedulerDeadline(time.Now()); !schedule.Enabled {
+		t.Fatal("reloaded schedule is disabled")
+	}
+	afterRestart := reloaded.Snapshot().NextScheduledRunAt
+	if afterRestart == nil || !afterRestart.Equal(*first) {
+		t.Fatalf("restart moved deadline from %v to %v", first, afterRestart)
+	}
+}
+
+func TestScheduleIntervalUpdateKeepsOriginalAnchor(t *testing.T) {
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	current := now.Add(40 * time.Minute)
+	existing := ScheduleConfig{Enabled: true, IntervalSec: 3600}
+	updated := ScheduleConfig{Enabled: true, IntervalSec: 7200}
+
+	got := nextScheduledRunAfterUpdate(existing, updated, current, now)
+	want := current.Add(time.Hour)
+	if !got.Equal(want) {
+		t.Fatalf("interval update deadline = %s, want anchored %s", got, want)
+	}
+
+	overdue := nextScheduledRunAfterTick(now.Add(-3*time.Hour), time.Hour, now)
+	if want := now.Add(time.Hour); !overdue.Equal(want) {
+		t.Fatalf("overdue tick advanced to %s, want one future interval %s", overdue, want)
 	}
 }
 

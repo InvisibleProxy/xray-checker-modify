@@ -33,6 +33,7 @@
 - Ручной speedtest из admin UI выполняет две фазы: сначала завершаются все основные замеры выбранных нод, и только затем для low-speed или technical-error результатов запускается очередь country fallback. В history/report сохраняется один финальный результат на `StableID`.
 - Country fallback выбирается только по `ClaimedCountryCode` из node archive; GeoIP не участвует. Техническая ошибка либо скорость основного URL ниже текущего Telegram low-speed threshold переключает замер на fallback; нулевой threshold отключает переключение по скорости. Fallback не ниже threshold не создаёт автоматический Telegram report/alert. Медленный fallback и неразрешённый `context deadline exceeded` входят в общий 30-минутный confirmation retry, но причина результата не нормализуется: deadline сохраняется в `Error`/`PrimaryError` как технический timeout загрузки и не считается low-speed.
 - Telegram-запуск speedtest использует сохранённый `ScheduleConfig`, а не нулевой `TestConfig`.
+- Плановый speedtest сохраняет абсолютный `nextRunAt` в `speedtest_schedule.json`: restart и изменение фильтров/TestConfig/retention не должны начинать интервал заново. При изменении `IntervalSec` новый deadline считается от прежнего временного якоря; просроченный после downtime запуск выполняется один раз сразу, без серии catch-up запусков.
 - Прямой результат Telegram-speedtest должен возвращаться в исходные chat ID и topic ID независимо от настроек фоновых speed-report; report target не персистится и не попадает в admin API.
 - Первый фоновый low-speed результат (schedule/admin) сначала проверяется через country fallback и не уведомляет. Только если fallback тоже медленный либо доступные fallback URL завершаются ошибкой, просевшие `StableID` повторяются через 30 минут, а алерт отправляется лишь при повторной проблеме. Неразрешённый `context deadline exceeded` в `Error` или `PrimaryError` использует ту же очередь и те же правила подтверждения; fallback не ниже threshold закрывает событие без retry. Успешный ручной финальный результат до due time отменяет общий pending retry этой ноды; scheduled result чужой pending retry не отменяет.
 - Pending speed-test retry персистится с нейтральным типом `speed-confirmation`, due time, исходным TestConfig и `StableID`, восстанавливается после restart и очищается для исчезнувших нод. Legacy-записи без типа и с типом `low-speed` мигрируют без изменения due time; legacy `deadline` мигрирует в общую очередь, а её прежний 5-минутный due time сдвигается до 30 минут от исходного события. Все причины дедуплицируются по общему ключу `StableID`.
@@ -40,6 +41,7 @@
 - Переход в offline и `DownSince` сохраняются до дополнительной TCP/ping-диагностики. Для непривилегированного ICMP `udp4`/`udp6` не сопоставляйте reply по Echo ID: Linux может переписать его; используйте тип ответа, sequence и уникальный payload.
 - Быстрые recovery-checks не увеличивают Telegram `FailCount` и не сдвигают reminder schedule. Подтверждённый online передаётся immediate-recovery пути без ожидания `AlertCheckMinutes`.
 - Ручная availability-проверка из admin UI/API и карточки ноды Telegram использует общий workflow; для online/unknown выполняется полный proxy-check, для offline — каскадная проверка.
+- Maintenance mode хранится по `StableID` в node archive и исключает ноду из monitoring metrics/status, downtime/incidents, быстрого recovery-loop, планового speedtest и Telegram alert/retry. Медленный полный availability-loop продолжает probe-only proxy-check для Remnawave и не пишет его результат в monitoring statistics. Явный admin `Check`/`Run` остаётся разрешённым и не снимает maintenance; Telegram/manual non-admin paths paused-ноду пропускают. Ручной maintenance speed-result может быть виден в текущем admin snapshot, но не должен попадать в persisted latest/history, KPI, graph или Telegram. Включение режима закрывает текущий downtime и node incident, сохраняя cumulative downtime, incident journal, прежнюю speedtest history, mute и per-node Test URL; `/config/<StableID>` отвечает `200 Maintenance`, после `Resume` не выставляйте online без реального check. В Remnawave maintenance-нода остаётся member своей group: online probe ничего не меняет, подтверждённый offline обрабатывается обычно, а отдельный maintenance scenario разрешён только когда все members group одновременно offline и все находятся в maintenance. Неизвестный remote announce не трогайте.
 - В admin UI действия `Check` и `Run` должны оставаться доступны одновременно в строке каждой ноды и в групповой панели выбранных нод. Клик по этим кнопкам или checkbox не должен срабатывать как раскрытие строки; раскрывается только неинтерактивная область шапки либо отдельная стрелка. Master-checkbox в заголовке `Nodes` выбирает только текущие видимые `StableID` и обязан корректно отражать checked/indeterminate/disabled после фильтрации и изменения выбора.
 - Повторный render admin dashboard при неизменном порядке видимых `StableID` должен обновлять карточки на месте, не заменяя весь список через `innerHTML`. Несколько карточек могут быть раскрыты одновременно; их history/range/request-state независимы, а polling и выбор строк не должны сбрасывать раскрытие или перезапускать графики.
 - Показанный IP/Server checker-ноды на dashboard и во всех admin views копируется кликом без порта; это интерактивное действие не должно раскрывать карточку или подменять отдельную ссылку IP details. Автообновление обязано запрашивать свежие данные и сопоставлять ноды по `StableID`, а не повторно рендерить старый snapshot или искать по имени.
@@ -52,9 +54,9 @@
 - Incident journal хранит node и mass records; массовая корреляция требует одинакового failure code, минимум 3 и минимум 50% active scope. `check_endpoint` всегда маркируется как вероятностный вывод.
 - Remnawave announce mapping всегда строится по `StableID → Host UUID`; имя checker-ноды и Host remark остаются только display-полями. Несколько StableID могут ссылаться на один Host, а redundancy нескольких Hosts задаётся явным `GroupKey`. GroupKey агрегируется только внутри уже отфильтрованной audience: одинаковый ключ разных тарифов не делает их Hosts резервами друг друга.
 - Host не принадлежит External Squad напрямую. Audience определяется через Host inbound, membership inbound во внутреннем скваде, `excludedInternalSquads` и явную persisted пару Internal → External. Disabled/hidden Hosts исключаются; сервисная пара checker обязана быть `MonitoringOnly` и не может стать target.
-- Новый Remnawave announce требует и минимального downtime, и нескольких полных availability-итераций. Manual check и быстрый recovery-loop не увеличивают confirmation counter; active массовый `check_endpoint` не создаёт новый пользовательский announce. Redundancy group с healthy и подтверждённо offline members имеет отдельное partial-состояние; full outage имеет приоритет. Улучшения `down → partial` и `partial/down → healthy` требуют отдельного стабильного окна и не публикуют специального recovery-сообщения.
+- Новый Remnawave announce требует и минимального downtime, и нескольких полных availability-итераций. Manual check и быстрый recovery-loop не увеличивают confirmation counter; probe-only full check maintenance-ноды увеличивает его. Active массовый `check_endpoint` не создаёт новый пользовательский announce. Redundancy group с healthy и подтверждённо offline members имеет partial-состояние; all-offline/all-maintenance group имеет maintenance-состояние; смесь maintenance и обычных offline members остаётся `down`. Full outage/maintenance имеют приоритет над partial. Улучшения `down/maintenance → partial/healthy` требуют отдельного стабильного окна и не публикуют специального recovery-сообщения.
 - Remnawave write сначала перечитывает External Squads и case-insensitively merge-ит только `announce` в полной карте `responseHeadersAdd`. Существующий однострочный `rwEncodeBase64:` можно принять как opaque base: status добавляется через `\n`, а после очистки base восстанавливается байт-в-байт. Многострочное значение разрешено принять только при точном совпадении его suffix с rendered target/healthy message; preceding base сохраняется точно. Не принимайте под управление plain/многострочное неизвестное значение и не меняйте remote value, не совпадающее с persisted ownership state. Runtime v1/v2 мигрирует без получения новых прав на неизвестный remote header.
-- Remnawave user messages строятся только из versioned scenario templates, а не строковых литералов в reconcile workflow. Разрешайте лишь контекстные `{location}`, `{locations}`, `{unavailable}`, `{affected}`, `{total}`; unknown braces, URL, `{{...}}`, line breaks и output длиннее 240 runes отклоняются. Disabled scenario очищает только exact-owned suffix. Config v0-v2 получает default rules, legacy `NormalMessage` мигрирует в healthy scenario; v1 API save без `messages` и v2 save без partial rules не должны сбрасывать сохранённые templates.
+- Remnawave user messages строятся только из versioned scenario templates, а не строковых литералов в reconcile workflow. Разрешайте лишь контекстные `{location}`, `{locations}`, `{unavailable}`, `{affected}`, `{total}`; unknown braces, URL, `{{...}}`, line breaks и output длиннее 240 runes отклоняются. Disabled scenario очищает только exact-owned suffix. Config v0-v3 получает default rules, legacy `NormalMessage` мигрирует в healthy scenario; v1 API save без `messages`, v2 save без partial rules и v3 save без maintenance rules не должны сбрасывать сохранённые templates.
 - Remnawave API token читается только из env и не попадает в persisted config, admin API, логи или backup. Минимальные scopes: `hosts:list`, `internal-squads:list`, `external-squads:list`, `external-squads:update`; последний scope всё равно даёт endpoint-wide write access.
 - Failure code строится из proxy-check и прямых TCP/ping diagnostics; отсутствие ICMP reply не является самостоятельным доказательством offline.
 - Активные ноды управляются подпиской; удалять вручную можно только retired-записи.
@@ -87,39 +89,21 @@
 - После заметной UI-правки требуется desktop browser check, а не только парсинг шаблона. Mobile viewport и отдельная mobile browser QA для админки не требуются и не выполняются.
 - GitHub Actions и Dependabot в этом форке отключены. Не добавляйте `.github/workflows/` и `.github/dependabot.yml`; обязательные проверки выполняются локально перед push.
 
-## Обязательные проверки
+## Проверки
 
-Минимум для Go-изменений:
+- Выполняйте только минимально необходимые проверки, достаточные для изменённого поведения и его ближайших зависимостей. Не запускайте полный набор тестов, `vet`, race-проверки или production build «на всякий случай».
+- Форматируйте только изменённые Go-файлы. Для локального изменения начинайте с конкретных тестов через `go test ./package -run 'TestName1|TestName2' -count=1`; расширяйте запуск до всего затронутого package только когда точечных тестов недостаточно.
+- Несколько package проверяйте только при сквозном изменении их контракта. `go test ./...`, полный `go vet ./...`, широкие `go test -race` и финальный Docker image нужны перед релизом/push либо когда масштаб или риск изменения действительно не покрываются узкими проверками.
+- Если host Go отсутствует, используйте существующий Docker builder с тем же минимальным набором package/test names. Не пересобирайте production image, если изменение не затрагивает Dockerfile, Compose, сборку или релизный сценарий.
+- В итоговом отчёте перечисляйте фактически выполненные проверки и отдельно отмечайте важные проверки, которые не запускались.
 
-```powershell
-$goFiles = Get-ChildItem -Recurse -Filter *.go | Select-Object -ExpandProperty FullName
-gofmt -w $goFiles
-go test ./...
-go vet ./...
-```
-
-Для конкурентного кода в `checker`, `speedtest`, `telegram`, `backup` или `web` дополнительно:
-
-```powershell
-go test -race ./backup ./checker ./nodemerge ./speedtest ./telegram ./web
-```
-
-Если host Go отсутствует, используйте Docker:
-
-```powershell
-docker build --target builder --build-arg ENABLE_UPX=false -t xray-checker-builder .
-docker run --rm xray-checker-builder go test ./...
-docker run --rm xray-checker-builder go vet ./...
-docker build --build-arg ENABLE_UPX=false -t xray-checker:check .
-```
-
-Дополнительные проверки по области:
+Дополнительные проверки по области: выбирайте из списка только сценарии, непосредственно затронутые текущим diff; это не обязательный запуск всего списка.
 
 - subscription/identity: тесты `xray` и `nodemerge`, сценарии неоднозначных имён, stale confirmation, suspicious diff, interrupted apply/commit и rollback rejected candidate;
-- speedtest: manual и scheduled paths, per-node URL, retention и persistence;
+- speedtest: manual и scheduled paths, maintenance exclusion, per-node URL, retention и persistence;
 - backup/restore: manifest, hash, дубликаты JSON-ключей, typed schema, interrupted apply/commit, path traversal, missing files, rollback, secrets и rotation;
-- Telegram: HTML/Rich HTML escaping, структура summary/details, fallback policy, сохранённый TestConfig, persisted 30-минутные confirmation retries и миграция legacy deadline retry, mass incident grouping, mute scopes, alert lifecycle и отсутствие токенов в выводе;
-- Remnawave: API paths/scopes, bearer secrecy, topology exclusions, Internal → External audience pairs, StableID mapping, redundancy groups, full-check confirmation, `check_endpoint` suppression, recovery hysteresis, scenario enable/disable, placeholder validation/rendering/fallback, config migration, header merge/ownership conflicts и отсутствие token/raw inbound в admin snapshot;
+- Telegram: HTML/Rich HTML escaping, структура summary/details, fallback policy, сохранённый TestConfig, maintenance cleanup/exclusion, persisted 30-минутные confirmation retries и миграция legacy deadline retry, mass incident grouping, mute scopes, alert lifecycle и отсутствие токенов в выводе;
+- Remnawave: для maintenance минимально проверяйте отсутствие write при успешном probe, отдельный текст только для all-offline/all-maintenance group, обычный outage для смешанной offline group, full-check confirmation, recovery hysteresis и migration v3→v4; остальные сценарии выбирайте по затронутому diff из ownership/base preservation, conflicts, API paths/scopes, bearer secrecy, topology/audience pairs, StableID mapping, scenario validation/rendering/fallback и отсутствия token/raw inbound в admin snapshot;
 - API: обновить `web/openapi.yaml`, проверить все локальные `$ref` и handler tests;
 - UI: только desktop viewport, filters, selection, admin auth и отсутствие ошибок в console; mobile browser check не запускать;
 - Dockerfile/Compose: builder build и финальный production image.

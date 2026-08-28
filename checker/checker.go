@@ -34,6 +34,7 @@ type ProxyChecker struct {
 	currentMetrics  sync.Map
 	latencyMetrics  sync.Map
 	statusDetails   sync.Map
+	maintenance     sync.Map
 	statusMu        sync.Mutex
 	ipInitialized   bool
 	ipCheckTimeout  int
@@ -53,6 +54,8 @@ type ProxyChecker struct {
 }
 
 const maxAvailabilityCheckConcurrency = 4
+
+var ErrMaintenanceMode = errors.New("node is in maintenance mode")
 
 var pingProbeCounter uint64
 
@@ -110,6 +113,7 @@ func (r AvailabilityCheckReport) RecoveredStableIDs() []string {
 type availabilityCheckCandidate struct {
 	Proxy      *models.ProxyConfig
 	WasOffline bool
+	ProbeOnly  bool
 }
 
 func NewProxyChecker(proxies []*models.ProxyConfig, startPort int, ipCheckURL string, ipCheckTimeout int, genMethodURL string, downloadURL string, downloadTimeout int, downloadMinSize int64, checkMethod string) *ProxyChecker {
@@ -131,6 +135,103 @@ func NewProxyChecker(proxies []*models.ProxyConfig, startPort int, ipCheckURL st
 
 func (pc *ProxyChecker) SetRunGate(gate sync.Locker) {
 	pc.runGate = gate
+}
+
+// MonitoringEnabled reports whether a StableID participates in regular
+// monitoring workflows. Explicit admin probes may opt into a maintenance node;
+// the state remains separate from the subscription-owned proxy list so pausing
+// a node never retires or renames it.
+func (pc *ProxyChecker) MonitoringEnabled(stableID string) bool {
+	stableID = strings.TrimSpace(stableID)
+	if stableID == "" {
+		return false
+	}
+	_, paused := pc.maintenance.Load(stableID)
+	return !paused
+}
+
+func (pc *ProxyChecker) SetMaintenanceMode(stableID string, enabled bool) error {
+	stableID = strings.TrimSpace(stableID)
+	if stableID == "" {
+		return fmt.Errorf("stableId is required")
+	}
+
+	pc.checkMu.Lock()
+	defer pc.checkMu.Unlock()
+	if _, ok := pc.GetProxyByStableID(stableID); !ok {
+		return fmt.Errorf("proxy not found")
+	}
+	pc.setMaintenanceModeLocked(stableID, enabled)
+	return nil
+}
+
+// ReplaceMaintenanceModes restores the complete active maintenance set after
+// startup or a subscription refresh. Callers coordinate this with the Xray
+// lifecycle write lock so no speed test can retain an obsolete selection.
+func (pc *ProxyChecker) ReplaceMaintenanceModes(stableIDs []string) {
+	pc.checkMu.Lock()
+	defer pc.checkMu.Unlock()
+
+	wanted := make(map[string]bool, len(stableIDs))
+	for _, stableID := range stableIDs {
+		stableID = strings.TrimSpace(stableID)
+		if stableID != "" {
+			wanted[stableID] = true
+		}
+	}
+	pc.maintenance.Range(func(key, _ any) bool {
+		stableID, ok := key.(string)
+		if ok && !wanted[stableID] {
+			pc.setMaintenanceModeLocked(stableID, false)
+		}
+		return true
+	})
+	for stableID := range wanted {
+		pc.setMaintenanceModeLocked(stableID, true)
+	}
+}
+
+func (pc *ProxyChecker) setMaintenanceModeLocked(stableID string, enabled bool) {
+	_, paused := pc.maintenance.Load(stableID)
+	if paused == enabled {
+		return
+	}
+	if enabled {
+		pc.maintenance.Store(stableID, true)
+	} else {
+		pc.maintenance.Delete(stableID)
+	}
+	pc.clearProxyMonitoringState(stableID)
+}
+
+func (pc *ProxyChecker) clearProxyMonitoringState(stableID string) {
+	pc.statusMu.Lock()
+	pc.statusDetails.Delete(stableID)
+	pc.statusMu.Unlock()
+
+	removeMetric := func(key any) bool {
+		metricKey, ok := key.(string)
+		return ok && strings.HasSuffix(metricKey, "|"+stableID)
+	}
+	pc.currentMetrics.Range(func(key, _ any) bool {
+		if !removeMetric(key) {
+			return true
+		}
+		metricKey := key.(string)
+		parts := strings.Split(metricKey, "|")
+		if len(parts) >= 4 {
+			metrics.DeleteProxyStatus(parts[0], parts[1], parts[2], parts[3])
+			metrics.DeleteProxyLatency(parts[0], parts[1], parts[2], parts[3])
+		}
+		pc.currentMetrics.Delete(key)
+		return true
+	})
+	pc.latencyMetrics.Range(func(key, _ any) bool {
+		if removeMetric(key) {
+			pc.latencyMetrics.Delete(key)
+		}
+		return true
+	})
 }
 
 func (pc *ProxyChecker) GetCurrentIP() (string, error) {
@@ -159,37 +260,49 @@ func (pc *ProxyChecker) GetCurrentIP() (string, error) {
 
 func (pc *ProxyChecker) CheckProxy(proxy *models.ProxyConfig) {
 	pc.withCheckRun(func() {
+		if proxy == nil {
+			return
+		}
+		if proxy.StableID == "" {
+			proxy.StableID = proxy.GenerateStableID()
+		}
+		if !pc.MonitoringEnabled(proxy.StableID) {
+			return
+		}
 		if pc.checkMethod == "ip" {
 			if _, err := pc.GetCurrentIP(); err != nil {
 				logger.Warn("Error getting current IP: %v", err)
 				return
 			}
 		}
-		pc.runProxyCheck(proxy, 0, false, false)
+		pc.runProxyCheck(proxy, 0, false, false, false)
 	})
 }
 
 func (pc *ProxyChecker) withCheckRun(run func()) {
-	pc.checkMu.Lock()
-	defer pc.checkMu.Unlock()
 	if pc.runGate != nil {
 		pc.runGate.Lock()
 		defer pc.runGate.Unlock()
 	}
+	pc.checkMu.Lock()
+	defer pc.checkMu.Unlock()
 	run()
 }
 
-func (pc *ProxyChecker) runProxyCheck(proxy *models.ProxyConfig, expectedGeneration uint64, checkGeneration bool, quiet bool) {
+func (pc *ProxyChecker) runProxyCheck(proxy *models.ProxyConfig, expectedGeneration uint64, checkGeneration bool, quiet bool, allowMaintenance bool) {
 	if pc.checkProxyFunc != nil {
 		pc.checkProxyFunc(proxy, expectedGeneration, checkGeneration, quiet)
 		return
 	}
-	pc.checkProxyInternal(proxy, expectedGeneration, checkGeneration, quiet)
+	pc.checkProxyInternal(proxy, expectedGeneration, checkGeneration, quiet, allowMaintenance)
 }
 
-func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGeneration uint64, checkGeneration bool, quiet bool) {
+func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGeneration uint64, checkGeneration bool, quiet bool, allowMaintenance bool) {
 	if proxy.StableID == "" {
 		proxy.StableID = proxy.GenerateStableID()
+	}
+	if !allowMaintenance && !pc.MonitoringEnabled(proxy.StableID) {
+		return
 	}
 
 	metricKey := fmt.Sprintf("%s|%s:%d|%s|%s|%s",
@@ -213,15 +326,17 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 			logger.Debug("%s | Skipping metric update: generation changed", proxy.Name)
 			return
 		}
-		metrics.RecordProxyStatus(
-			proxy.Protocol,
-			fmt.Sprintf("%s:%d", proxy.Server, proxy.Port),
-			proxy.Name,
-			proxy.SubName,
-			0,
-		)
-		pc.currentMetrics.Store(metricKey, false)
-		hostCheck, pingCheck := pc.markUnavailableAndCollectDiagnostics(proxy, failure)
+		if !allowMaintenance {
+			metrics.RecordProxyStatus(
+				proxy.Protocol,
+				fmt.Sprintf("%s:%d", proxy.Server, proxy.Port),
+				proxy.Name,
+				proxy.SubName,
+				0,
+			)
+			pc.currentMetrics.Store(metricKey, false)
+		}
+		hostCheck, pingCheck := pc.markUnavailableAndCollectDiagnosticsMode(proxy, allowMaintenance, failure)
 		logHostDiagnostics(proxy.Name, hostCheck, pingCheck)
 	}
 
@@ -229,14 +344,16 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 		if !isGenerationValid() {
 			return
 		}
-		metrics.RecordProxyLatency(
-			proxy.Protocol,
-			fmt.Sprintf("%s:%d", proxy.Server, proxy.Port),
-			proxy.Name,
-			proxy.SubName,
-			time.Duration(0),
-		)
-		pc.latencyMetrics.Store(metricKey, time.Duration(0))
+		if !allowMaintenance {
+			metrics.RecordProxyLatency(
+				proxy.Protocol,
+				fmt.Sprintf("%s:%d", proxy.Server, proxy.Port),
+				proxy.Name,
+				proxy.SubName,
+				time.Duration(0),
+			)
+			pc.latencyMetrics.Store(metricKey, time.Duration(0))
+		}
 	}
 
 	proxyURL := fmt.Sprintf("socks5://127.0.0.1:%d", pc.startPort+proxy.Index)
@@ -301,24 +418,25 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 			logger.Debug("%s | Skipping metric update: generation changed", proxy.Name)
 			return
 		}
-		metrics.RecordProxyStatus(
-			proxy.Protocol,
-			fmt.Sprintf("%s:%d", proxy.Server, proxy.Port),
-			proxy.Name,
-			proxy.SubName,
-			1,
-		)
-		metrics.RecordProxyLatency(
-			proxy.Protocol,
-			fmt.Sprintf("%s:%d", proxy.Server, proxy.Port),
-			proxy.Name,
-			proxy.SubName,
-			latency,
-		)
-
-		pc.latencyMetrics.Store(metricKey, latency)
-		pc.currentMetrics.Store(metricKey, true)
-		pc.storeStatusDetails(proxy.StableID, true, latency, nil, nil)
+		if !allowMaintenance {
+			metrics.RecordProxyStatus(
+				proxy.Protocol,
+				fmt.Sprintf("%s:%d", proxy.Server, proxy.Port),
+				proxy.Name,
+				proxy.SubName,
+				1,
+			)
+			metrics.RecordProxyLatency(
+				proxy.Protocol,
+				fmt.Sprintf("%s:%d", proxy.Server, proxy.Port),
+				proxy.Name,
+				proxy.SubName,
+				latency,
+			)
+			pc.latencyMetrics.Store(metricKey, latency)
+			pc.currentMetrics.Store(metricKey, true)
+		}
+		pc.storeStatusDetailsMode(proxy.StableID, true, latency, nil, nil, nil, allowMaintenance)
 	}
 }
 
@@ -462,13 +580,21 @@ func (pc *ProxyChecker) storeStatusDetails(stableID string, online bool, latency
 }
 
 func (pc *ProxyChecker) storeStatusDetailsWithFailure(stableID string, online bool, latency time.Duration, hostCheck *HostCheckDetails, pingCheck *PingCheckDetails, failure *FailureDetails) bool {
+	return pc.storeStatusDetailsMode(stableID, online, latency, hostCheck, pingCheck, failure, false)
+}
+
+func (pc *ProxyChecker) storeStatusDetailsMode(stableID string, online bool, latency time.Duration, hostCheck *HostCheckDetails, pingCheck *PingCheckDetails, failure *FailureDetails, allowMaintenance bool) bool {
 	pc.statusMu.Lock()
 	defer pc.statusMu.Unlock()
-	return pc.storeStatusDetailsLocked(stableID, online, latency, hostCheck, pingCheck, failure)
+	return pc.storeStatusDetailsLockedMode(stableID, online, latency, hostCheck, pingCheck, failure, allowMaintenance)
 }
 
 func (pc *ProxyChecker) storeStatusDetailsLocked(stableID string, online bool, latency time.Duration, hostCheck *HostCheckDetails, pingCheck *PingCheckDetails, failure *FailureDetails) bool {
-	if stableID == "" {
+	return pc.storeStatusDetailsLockedMode(stableID, online, latency, hostCheck, pingCheck, failure, false)
+}
+
+func (pc *ProxyChecker) storeStatusDetailsLockedMode(stableID string, online bool, latency time.Duration, hostCheck *HostCheckDetails, pingCheck *PingCheckDetails, failure *FailureDetails, allowMaintenance bool) bool {
+	if stableID == "" || (!allowMaintenance && !pc.MonitoringEnabled(stableID)) {
 		return false
 	}
 
@@ -517,6 +643,10 @@ func (pc *ProxyChecker) storeStatusDetailsLocked(stableID string, online bool, l
 }
 
 func (pc *ProxyChecker) markUnavailableAndCollectDiagnostics(proxy *models.ProxyConfig, failures ...FailureDetails) (*HostCheckDetails, *PingCheckDetails) {
+	return pc.markUnavailableAndCollectDiagnosticsMode(proxy, false, failures...)
+}
+
+func (pc *ProxyChecker) markUnavailableAndCollectDiagnosticsMode(proxy *models.ProxyConfig, allowMaintenance bool, failures ...FailureDetails) (*HostCheckDetails, *PingCheckDetails) {
 	if proxy == nil || proxy.StableID == "" {
 		return nil, nil
 	}
@@ -525,7 +655,7 @@ func (pc *ProxyChecker) markUnavailableAndCollectDiagnostics(proxy *models.Proxy
 		failure = failures[0]
 	}
 
-	if !pc.storeStatusDetailsWithFailure(proxy.StableID, false, 0, nil, nil, &failure) {
+	if !pc.storeStatusDetailsMode(proxy.StableID, false, 0, nil, nil, &failure, allowMaintenance) {
 		return nil, nil
 	}
 
@@ -574,6 +704,9 @@ func (pc *ProxyChecker) checkHostDiagnostics(proxy *models.ProxyConfig) (HostChe
 }
 
 func (pc *ProxyChecker) RefreshHostDiagnosticsByStableID(stableID string) (ProxyStatusDetails, error) {
+	if !pc.MonitoringEnabled(stableID) {
+		return ProxyStatusDetails{}, ErrMaintenanceMode
+	}
 	proxy, ok := pc.GetProxyByStableID(stableID)
 	if !ok {
 		return ProxyStatusDetails{}, fmt.Errorf("proxy not found")
@@ -825,7 +958,28 @@ func (pc *ProxyChecker) UpdateProxies(newProxies []*models.ProxyConfig) {
 	atomic.AddUint64(&pc.generation, 1)
 	pc.ClearMetrics()
 	pc.pruneStatusDetails(newProxies)
+	pc.pruneMaintenanceModes(newProxies)
 	pc.proxies = newProxies
+}
+
+func (pc *ProxyChecker) pruneMaintenanceModes(proxies []*models.ProxyConfig) {
+	active := make(map[string]bool, len(proxies))
+	for _, proxy := range proxies {
+		if proxy == nil {
+			continue
+		}
+		if proxy.StableID == "" {
+			proxy.StableID = proxy.GenerateStableID()
+		}
+		active[proxy.StableID] = true
+	}
+	pc.maintenance.Range(func(key, _ any) bool {
+		stableID, ok := key.(string)
+		if !ok || !active[stableID] {
+			pc.maintenance.Delete(key)
+		}
+		return true
+	})
 }
 
 func (pc *ProxyChecker) pruneStatusDetails(proxies []*models.ProxyConfig) {
@@ -849,7 +1003,7 @@ func (pc *ProxyChecker) pruneStatusDetails(proxies []*models.ProxyConfig) {
 }
 
 func (pc *ProxyChecker) RestoreOfflineStatus(stableID string, downSince time.Time, hostCheck HostCheckDetails, pingCheck PingCheckDetails, failures ...FailureDetails) bool {
-	if stableID == "" || downSince.IsZero() {
+	if stableID == "" || downSince.IsZero() || !pc.MonitoringEnabled(stableID) {
 		return false
 	}
 
@@ -924,11 +1078,18 @@ func (pc *ProxyChecker) checkAllProxies() {
 
 	var wg sync.WaitGroup
 	for _, proxy := range proxiesToCheck {
+		if proxy == nil {
+			continue
+		}
+		if proxy.StableID == "" {
+			proxy.StableID = proxy.GenerateStableID()
+		}
+		probeOnly := !pc.MonitoringEnabled(proxy.StableID)
 		wg.Add(1)
-		go func(p *models.ProxyConfig, gen uint64) {
+		go func(p *models.ProxyConfig, gen uint64, maintenanceProbe bool) {
 			defer wg.Done()
-			pc.runProxyCheck(p, gen, true, false)
-		}(proxy, currentGeneration)
+			pc.runProxyCheck(p, gen, true, false, maintenanceProbe)
+		}(proxy, currentGeneration, probeOnly)
 	}
 	wg.Wait()
 }
@@ -937,7 +1098,7 @@ func (pc *ProxyChecker) CheckUnavailableProxies() (AvailabilityCheckReport, erro
 	var report AvailabilityCheckReport
 	var checkErr error
 	pc.withCheckRun(func() {
-		candidates, generation, err := pc.availabilityCheckCandidates(nil, true)
+		candidates, generation, err := pc.availabilityCheckCandidates(nil, true, false)
 		if err != nil {
 			checkErr = err
 			return
@@ -948,10 +1109,20 @@ func (pc *ProxyChecker) CheckUnavailableProxies() (AvailabilityCheckReport, erro
 }
 
 func (pc *ProxyChecker) CheckProxiesByStableIDs(stableIDs []string) (AvailabilityCheckReport, error) {
+	return pc.checkProxiesByStableIDs(stableIDs, false)
+}
+
+// CheckProxiesByStableIDsIncludingMaintenance runs an explicit admin check
+// against paused nodes without re-enabling their monitoring workflows.
+func (pc *ProxyChecker) CheckProxiesByStableIDsIncludingMaintenance(stableIDs []string) (AvailabilityCheckReport, error) {
+	return pc.checkProxiesByStableIDs(stableIDs, true)
+}
+
+func (pc *ProxyChecker) checkProxiesByStableIDs(stableIDs []string, allowMaintenance bool) (AvailabilityCheckReport, error) {
 	var report AvailabilityCheckReport
 	var checkErr error
 	pc.withCheckRun(func() {
-		candidates, generation, err := pc.availabilityCheckCandidates(stableIDs, false)
+		candidates, generation, err := pc.availabilityCheckCandidates(stableIDs, false, allowMaintenance)
 		if err != nil {
 			checkErr = err
 			return
@@ -961,7 +1132,7 @@ func (pc *ProxyChecker) CheckProxiesByStableIDs(stableIDs []string) (Availabilit
 	return report, checkErr
 }
 
-func (pc *ProxyChecker) availabilityCheckCandidates(stableIDs []string, unavailableOnly bool) ([]availabilityCheckCandidate, uint64, error) {
+func (pc *ProxyChecker) availabilityCheckCandidates(stableIDs []string, unavailableOnly bool, allowMaintenance bool) ([]availabilityCheckCandidate, uint64, error) {
 	requested := make([]string, 0, len(stableIDs))
 	requestedSet := make(map[string]bool, len(stableIDs))
 	for _, rawStableID := range stableIDs {
@@ -991,6 +1162,10 @@ func (pc *ProxyChecker) availabilityCheckCandidates(stableIDs []string, unavaila
 		if len(requestedSet) > 0 && !requestedSet[stableID] {
 			continue
 		}
+		if !allowMaintenance && !pc.MonitoringEnabled(stableID) {
+			continue
+		}
+		probeOnly := !pc.MonitoringEnabled(stableID)
 		details, hasDetails := pc.statusDetailsByStableID(stableID)
 		wasOffline := hasDetails && !details.Online
 		if unavailableOnly && !wasOffline {
@@ -998,7 +1173,7 @@ func (pc *ProxyChecker) availabilityCheckCandidates(stableIDs []string, unavaila
 		}
 		proxyCopy := *proxy
 		proxyCopy.StableID = stableID
-		candidate := availabilityCheckCandidate{Proxy: &proxyCopy, WasOffline: wasOffline}
+		candidate := availabilityCheckCandidate{Proxy: &proxyCopy, WasOffline: wasOffline, ProbeOnly: probeOnly}
 		byStableID[stableID] = candidate
 		ordered = append(ordered, candidate)
 	}
@@ -1019,7 +1194,19 @@ func (pc *ProxyChecker) availabilityCheckCandidates(stableIDs []string, unavaila
 		selected = append(selected, candidate)
 	}
 	if len(missing) > 0 {
-		return nil, generation, fmt.Errorf("proxy not found: %s", strings.Join(missing, ", "))
+		paused := make([]string, 0, len(missing))
+		notFound := make([]string, 0, len(missing))
+		for _, stableID := range missing {
+			if _, ok := pc.GetProxyByStableID(stableID); !ok {
+				notFound = append(notFound, stableID)
+			} else if !allowMaintenance && !pc.MonitoringEnabled(stableID) {
+				paused = append(paused, stableID)
+			}
+		}
+		if len(paused) > 0 {
+			return nil, generation, fmt.Errorf("%w: %s", ErrMaintenanceMode, strings.Join(paused, ", "))
+		}
+		return nil, generation, fmt.Errorf("proxy not found: %s", strings.Join(notFound, ", "))
 	}
 	return selected, generation, nil
 }
@@ -1048,7 +1235,7 @@ func (pc *ProxyChecker) checkAvailabilityCandidates(candidates []availabilityChe
 			diagnosticErrorsMu.Unlock()
 			return
 		}
-		pc.storeStatusDetails(candidate.Proxy.StableID, false, 0, &hostCheck, &pingCheck)
+		pc.storeStatusDetailsMode(candidate.Proxy.StableID, false, 0, &hostCheck, &pingCheck, nil, candidate.ProbeOnly)
 		needsProxyCheck[index] = hostCheck.Online
 	})
 
@@ -1076,7 +1263,7 @@ func (pc *ProxyChecker) checkAvailabilityCandidates(candidates []availabilityChe
 			return
 		}
 		candidate := candidates[index]
-		pc.runProxyCheck(candidate.Proxy, generation, true, quiet)
+		pc.runProxyCheck(candidate.Proxy, generation, true, quiet, candidate.ProbeOnly)
 		report.Results[index].ProxyChecked = true
 	})
 	pc.populateAvailabilityResults(&report, candidates)
@@ -1092,7 +1279,7 @@ func (pc *ProxyChecker) populateAvailabilityResults(report *AvailabilityCheckRep
 			continue
 		}
 		result.Online = details.Online
-		result.Recovered = candidate.WasOffline && details.Online
+		result.Recovered = !candidate.ProbeOnly && candidate.WasOffline && details.Online
 	}
 }
 
@@ -1168,6 +1355,9 @@ func (pc *ProxyChecker) GetProxyStatus(name string) (bool, time.Duration, error)
 }
 
 func (pc *ProxyChecker) GetProxyStatusByStableID(stableID string) (bool, time.Duration, error) {
+	if !pc.MonitoringEnabled(stableID) {
+		return false, 0, ErrMaintenanceMode
+	}
 	pc.mu.RLock()
 	var metricKey string
 	for _, proxy := range pc.proxies {
@@ -1222,6 +1412,19 @@ func (pc *ProxyChecker) statusDetailsByStableID(stableID string) (ProxyStatusDet
 }
 
 func (pc *ProxyChecker) GetProxyStatusDetailsByStableID(stableID string) (ProxyStatusDetails, error) {
+	if !pc.MonitoringEnabled(stableID) {
+		return ProxyStatusDetails{}, ErrMaintenanceMode
+	}
+	return pc.getProxyStatusDetailsByStableID(stableID)
+}
+
+// GetProxyStatusDetailsIncludingMaintenance exposes the last explicit check
+// result to the admin UI while keeping normal monitoring consumers gated.
+func (pc *ProxyChecker) GetProxyStatusDetailsIncludingMaintenance(stableID string) (ProxyStatusDetails, error) {
+	return pc.getProxyStatusDetailsByStableID(stableID)
+}
+
+func (pc *ProxyChecker) getProxyStatusDetailsByStableID(stableID string) (ProxyStatusDetails, error) {
 	pc.mu.RLock()
 	found := false
 	for _, proxy := range pc.proxies {

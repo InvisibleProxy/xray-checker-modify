@@ -78,6 +78,8 @@ type NodeRecord struct {
 	Port                int       `json:"port"`
 	Protocol            string    `json:"protocol"`
 	Active              bool      `json:"active"`
+	Maintenance         bool      `json:"maintenance,omitempty"`
+	MaintenanceSince    time.Time `json:"maintenanceSince,omitempty"`
 	FirstSeenAt         time.Time `json:"firstSeenAt"`
 	LastSeenAt          time.Time `json:"lastSeenAt"`
 	RetiredAt           time.Time `json:"retiredAt,omitempty"`
@@ -284,6 +286,66 @@ func (s *Store) SyncProxies(proxies []*models.ProxyConfig) error {
 	return s.saveLocked()
 }
 
+// ActiveMaintenanceStableIDs returns subscription-active nodes whose
+// monitoring is intentionally paused. Retired records may retain the flag so
+// the same StableID remains paused if it later returns to the subscription.
+func (s *Store) ActiveMaintenanceStableIDs() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	stableIDs := make([]string, 0)
+	for stableID, record := range s.nodes {
+		if record.Active && record.Maintenance {
+			stableIDs = append(stableIDs, stableID)
+		}
+	}
+	sort.Strings(stableIDs)
+	return stableIDs
+}
+
+// SetMaintenance persists the operator-owned monitoring mode without changing
+// subscription ownership or deleting historical measurements. Entering the
+// mode closes any open downtime and active node incident at the pause time.
+func (s *Store) SetMaintenance(stableID string, enabled bool) (NodeRecord, error) {
+	stableID = strings.TrimSpace(stableID)
+	if stableID == "" {
+		return NodeRecord{}, fmt.Errorf("stableId is required")
+	}
+
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.nodes[stableID]
+	if !ok {
+		return NodeRecord{}, fmt.Errorf("node not found")
+	}
+	if !record.Active {
+		return NodeRecord{}, fmt.Errorf("maintenance mode is available only for active nodes")
+	}
+	if record.Maintenance == enabled {
+		return record, nil
+	}
+
+	previousRecord := record
+	previousIncidents := append([]IncidentRecord(nil), s.incidents...)
+	record.Maintenance = enabled
+	if enabled {
+		record.MaintenanceSince = now
+		record = closeDowntime(record, now)
+		if incidentIndex := s.findActiveIncidentLocked(incidentKindNode, "node:"+stableID); incidentIndex >= 0 {
+			s.resolveIncidentLocked(incidentIndex, now)
+		}
+	} else {
+		record.MaintenanceSince = time.Time{}
+	}
+	s.nodes[stableID] = record
+	if err := s.saveLocked(); err != nil {
+		s.nodes[stableID] = previousRecord
+		s.incidents = previousIncidents
+		return NodeRecord{}, err
+	}
+	return record, nil
+}
+
 func (s *Store) SyncSpeedHistory(history map[string][]speedtest.Result) error {
 	if len(history) == 0 {
 		return nil
@@ -352,6 +414,7 @@ func (s *Store) RecordAvailability() error {
 	changed := false
 	active := make(map[string]bool, len(proxies))
 	detailsByStableID := make(map[string]checker.ProxyStatusDetails, len(proxies))
+	monitoredProxies := make([]*models.ProxyConfig, 0, len(proxies))
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -369,6 +432,19 @@ func (s *Store) RecordAvailability() error {
 		active[proxy.StableID] = true
 		record := applyProxy(s.nodes[proxy.StableID], proxy, now)
 		previous := record
+		if record.Maintenance {
+			record = closeDowntime(record, now)
+			if incidentIndex := s.findActiveIncidentLocked(incidentKindNode, "node:"+proxy.StableID); incidentIndex >= 0 {
+				s.resolveIncidentLocked(incidentIndex, now)
+				changed = true
+			}
+			if previous != record || s.nodes[proxy.StableID] != record {
+				s.nodes[proxy.StableID] = record
+				changed = true
+			}
+			continue
+		}
+		monitoredProxies = append(monitoredProxies, proxy)
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
 		if err == nil {
 			detailsByStableID[proxy.StableID] = details
@@ -382,7 +458,7 @@ func (s *Store) RecordAvailability() error {
 			changed = true
 		}
 	}
-	if s.updateMassIncidentsLocked(proxies, detailsByStableID, now) {
+	if s.updateMassIncidentsLocked(monitoredProxies, detailsByStableID, now) {
 		changed = true
 	}
 	if s.pruneIncidentsLocked() {

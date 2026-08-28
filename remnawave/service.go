@@ -16,7 +16,8 @@ import (
 
 type ProxySource interface {
 	GetProxies() []*models.ProxyConfig
-	GetProxyStatusDetailsByStableID(string) (checker.ProxyStatusDetails, error)
+	GetProxyStatusDetailsIncludingMaintenance(string) (checker.ProxyStatusDetails, error)
+	MonitoringEnabled(string) bool
 }
 
 type IncidentSource interface {
@@ -74,6 +75,7 @@ type desiredAnnouncement struct {
 	KnownHealthyMessage string
 	Groups              map[string]string
 	PartialGroups       map[string]string
+	MaintenanceGroups   map[string]string
 }
 
 type groupEvaluation struct {
@@ -83,11 +85,12 @@ type groupEvaluation struct {
 }
 
 const (
-	groupHealthy   = "healthy"
-	groupDown      = "down"
-	groupPartial   = "partial"
-	groupPending   = "pending"
-	groupAmbiguous = "ambiguous"
+	groupHealthy     = "healthy"
+	groupDown        = "down"
+	groupPartial     = "partial"
+	groupPending     = "pending"
+	groupAmbiguous   = "ambiguous"
+	groupMaintenance = "maintenance"
 )
 
 func NewService(options Options) *Service {
@@ -233,7 +236,7 @@ func (s *Service) ObserveFullCheck() {
 			continue
 		}
 		active[proxy.StableID] = true
-		details, err := s.proxySource.GetProxyStatusDetailsByStableID(proxy.StableID)
+		details, err := s.proxySource.GetProxyStatusDetailsIncludingMaintenance(proxy.StableID)
 		if err != nil || details.Online {
 			delete(s.failureObservations, proxy.StableID)
 			continue
@@ -268,16 +271,29 @@ func (s *Service) UpdateSettings(settings Settings) (Snapshot, error) {
 		}
 		settings.Policy.Messages = messages
 		settings.Policy.NormalMessage = ""
-	} else if partialAvailabilityScenariosMissing(settings.Policy.Messages) {
-		// A v2 admin/API client knows the original outage scenarios but not the
-		// partial-redundancy fields. Preserve the current partial templates so
-		// saving unrelated settings cannot reset operator customizations.
-		s.mu.RLock()
-		current := s.config.Policy.Messages
-		s.mu.RUnlock()
-		settings.Policy.Messages.PartialSingleLocation = current.PartialSingleLocation
-		settings.Policy.Messages.PartialMultipleLocations = current.PartialMultipleLocations
-		settings.Policy.Messages.PartialAvailabilityFallback = current.PartialAvailabilityFallback
+	} else {
+		if partialAvailabilityScenariosMissing(settings.Policy.Messages) {
+			// A v2 admin/API client knows the original outage scenarios but not the
+			// partial-redundancy fields. Preserve the current partial templates so
+			// saving unrelated settings cannot reset operator customizations.
+			s.mu.RLock()
+			current := s.config.Policy.Messages
+			s.mu.RUnlock()
+			settings.Policy.Messages.PartialSingleLocation = current.PartialSingleLocation
+			settings.Policy.Messages.PartialMultipleLocations = current.PartialMultipleLocations
+			settings.Policy.Messages.PartialAvailabilityFallback = current.PartialAvailabilityFallback
+		}
+		if maintenanceScenariosMissing(settings.Policy.Messages) {
+			// A v3 client predates maintenance announcements. Preserve the
+			// operator's current maintenance templates on unrelated saves.
+			s.mu.RLock()
+			current := s.config.Policy.Messages
+			s.mu.RUnlock()
+			settings.Policy.Messages.MaintenanceSingleLocation = current.MaintenanceSingleLocation
+			settings.Policy.Messages.MaintenanceMultipleLocations = current.MaintenanceMultipleLocations
+			settings.Policy.Messages.MaintenanceFallback = current.MaintenanceFallback
+			settings.Policy.Messages.MaintenanceMixedFallback = current.MaintenanceMixedFallback
+		}
 	}
 	config := ConfigFile{
 		Version:      ConfigVersion,
@@ -423,7 +439,7 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 	}
 	s.mu.Unlock()
 
-	proxies, statuses := s.proxySnapshot()
+	proxies, statuses, maintenance := s.proxySnapshot()
 	checkEndpointIDs := s.activeCheckEndpointStableIDs()
 	now := s.now().UTC()
 	desired, nextRecovery, err := computeDesiredAnnouncements(
@@ -432,6 +448,7 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 		topology,
 		proxies,
 		statuses,
+		maintenance,
 		observations,
 		checkEndpointIDs,
 		recoverySince,
@@ -504,10 +521,12 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 		if owned && target.Message != "" && currentValue == targetValue {
 			if previous.Message != target.Message ||
 				!stringMapEqual(previous.Groups, target.Groups) ||
-				!stringMapEqual(previous.PartialGroups, target.PartialGroups) {
+				!stringMapEqual(previous.PartialGroups, target.PartialGroups) ||
+				!stringMapEqual(previous.MaintenanceGroups, target.MaintenanceGroups) {
 				previous.Message = target.Message
 				previous.Groups = cloneStringMap(target.Groups)
 				previous.PartialGroups = cloneStringMap(target.PartialGroups)
+				previous.MaintenanceGroups = cloneStringMap(target.MaintenanceGroups)
 				previous.UpdatedAt = now
 				runtime.Managed[externalUUID] = previous
 				runtimeChanged = true
@@ -534,13 +553,14 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 			delete(runtime.Managed, externalUUID)
 		} else {
 			runtime.Managed[externalUUID] = ManagedAnnouncement{
-				Value:         targetValue,
-				Message:       target.Message,
-				BasePresent:   basePresent,
-				BaseValue:     baseValue,
-				Groups:        cloneStringMap(target.Groups),
-				PartialGroups: cloneStringMap(target.PartialGroups),
-				UpdatedAt:     now,
+				Value:             targetValue,
+				Message:           target.Message,
+				BasePresent:       basePresent,
+				BaseValue:         baseValue,
+				Groups:            cloneStringMap(target.Groups),
+				PartialGroups:     cloneStringMap(target.PartialGroups),
+				MaintenanceGroups: cloneStringMap(target.MaintenanceGroups),
+				UpdatedAt:         now,
 			}
 		}
 		runtimeChanged = true
@@ -588,21 +608,25 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 	return nil
 }
 
-func (s *Service) proxySnapshot() ([]*models.ProxyConfig, map[string]checker.ProxyStatusDetails) {
+func (s *Service) proxySnapshot() ([]*models.ProxyConfig, map[string]checker.ProxyStatusDetails, map[string]bool) {
 	if s.proxySource == nil {
-		return nil, map[string]checker.ProxyStatusDetails{}
+		return nil, map[string]checker.ProxyStatusDetails{}, map[string]bool{}
 	}
 	proxies := s.proxySource.GetProxies()
+	active := make([]*models.ProxyConfig, 0, len(proxies))
 	statuses := make(map[string]checker.ProxyStatusDetails, len(proxies))
+	maintenance := make(map[string]bool, len(proxies))
 	for _, proxy := range proxies {
 		if proxy == nil || proxy.StableID == "" {
 			continue
 		}
-		if details, err := s.proxySource.GetProxyStatusDetailsByStableID(proxy.StableID); err == nil {
+		active = append(active, proxy)
+		maintenance[proxy.StableID] = !s.proxySource.MonitoringEnabled(proxy.StableID)
+		if details, err := s.proxySource.GetProxyStatusDetailsIncludingMaintenance(proxy.StableID); err == nil {
 			statuses[proxy.StableID] = details
 		}
 	}
-	return proxies, statuses
+	return active, statuses, maintenance
 }
 
 func (s *Service) activeCheckEndpointStableIDs() map[string]bool {
@@ -627,6 +651,7 @@ func computeDesiredAnnouncements(
 	topology Topology,
 	proxies []*models.ProxyConfig,
 	statuses map[string]checker.ProxyStatusDetails,
+	maintenance map[string]bool,
 	observations map[string]int,
 	checkEndpointIDs map[string]bool,
 	recoverySince map[string]time.Time,
@@ -681,6 +706,7 @@ func computeDesiredAnnouncements(
 			hostByUUID,
 			proxyByStableID,
 			statuses,
+			maintenance,
 			observations,
 			checkEndpointIDs,
 			now,
@@ -692,6 +718,7 @@ func computeDesiredAnnouncements(
 		}
 		announced := make(map[string]string)
 		partial := make(map[string]string)
+		maintenanceGroups := make(map[string]string)
 		allHealthy := true
 		for key, group := range groups {
 			if group.State != groupHealthy {
@@ -703,12 +730,18 @@ func computeDesiredAnnouncements(
 				previousState = groupDown
 			} else if _, wasPartial := previous.PartialGroups[key]; wasPartial {
 				previousState = groupPartial
+			} else if _, wasMaintenance := previous.MaintenanceGroups[key]; wasMaintenance {
+				previousState = groupMaintenance
 			}
 			if group.State == groupDown {
 				announced[key] = group.Label
 				continue
 			}
-			if group.State == groupPartial && previousState != groupDown {
+			if group.State == groupMaintenance {
+				maintenanceGroups[key] = group.Label
+				continue
+			}
+			if group.State == groupPartial && previousState != groupDown && previousState != groupMaintenance {
 				partial[key] = group.Label
 				continue
 			}
@@ -726,6 +759,8 @@ func computeDesiredAnnouncements(
 				if now.Sub(since) < time.Duration(config.Policy.RecoveryMinutes)*time.Minute {
 					if previousState == groupDown {
 						announced[key] = group.Label
+					} else if previousState == groupMaintenance {
+						maintenanceGroups[key] = group.Label
 					} else {
 						partial[key] = group.Label
 					}
@@ -736,6 +771,8 @@ func computeDesiredAnnouncements(
 			case groupPending, groupAmbiguous:
 				if previousState == groupDown {
 					announced[key] = group.Label
+				} else if previousState == groupMaintenance {
+					maintenanceGroups[key] = group.Label
 				} else {
 					partial[key] = group.Label
 				}
@@ -746,8 +783,24 @@ func computeDesiredAnnouncements(
 			return nil, recoverySince, err
 		}
 		message := ""
-		if len(announced) > 0 {
-			message, err = outageMessage(config.Policy.Messages, announced, len(groups))
+		if len(announced) > 0 || len(maintenanceGroups) > 0 {
+			outage := ""
+			var outageErr error
+			if len(announced) > 0 {
+				outage, outageErr = outageMessage(config.Policy.Messages, announced, len(groups))
+			}
+			if outageErr != nil {
+				return nil, recoverySince, outageErr
+			}
+			maintenanceText := ""
+			var maintenanceErr error
+			if len(maintenanceGroups) > 0 {
+				maintenanceText, maintenanceErr = maintenanceMessage(config.Policy.Messages, maintenanceGroups, len(groups))
+			}
+			if maintenanceErr != nil {
+				return nil, recoverySince, maintenanceErr
+			}
+			message, err = combineOutageAndMaintenanceMessages(config.Policy.Messages, outage, maintenanceText, len(announced), len(maintenanceGroups), len(groups))
 			if err != nil {
 				return nil, recoverySince, err
 			}
@@ -756,7 +809,7 @@ func computeDesiredAnnouncements(
 			if err != nil {
 				return nil, recoverySince, err
 			}
-		} else if allHealthy || (len(previous.Groups) == 0 && len(previous.PartialGroups) == 0 && previous.Message == healthy) {
+		} else if allHealthy || (len(previous.Groups) == 0 && len(previous.PartialGroups) == 0 && len(previous.MaintenanceGroups) == 0 && previous.Message == healthy) {
 			message = healthy
 		}
 		desired[pair.ExternalSquadUUID] = desiredAnnouncement{
@@ -764,6 +817,7 @@ func computeDesiredAnnouncements(
 			KnownHealthyMessage: healthy,
 			Groups:              announced,
 			PartialGroups:       partial,
+			MaintenanceGroups:   maintenanceGroups,
 		}
 	}
 	return desired, nextRecovery, nil
@@ -801,18 +855,20 @@ func evaluateGroups(
 	hostByUUID map[string]Host,
 	proxyByStableID map[string]*models.ProxyConfig,
 	statuses map[string]checker.ProxyStatusDetails,
+	maintenance map[string]bool,
 	observations map[string]int,
 	checkEndpointIDs map[string]bool,
 	now time.Time,
 ) map[string]groupEvaluation {
 	type aggregate struct {
-		label         string
-		labelExplicit bool
-		hasHealthy    bool
-		hasPending    bool
-		hasAmbiguous  bool
-		members       int
-		down          int
+		label           string
+		labelExplicit   bool
+		hasHealthy      bool
+		hasPending      bool
+		hasAmbiguous    bool
+		members         int
+		down            int
+		maintenanceDown int
 	}
 	aggregates := make(map[string]*aggregate)
 	for stableID, mapping := range config.NodeMappings {
@@ -855,6 +911,9 @@ func evaluateGroups(
 			continue
 		}
 		item.down++
+		if maintenance[stableID] {
+			item.maintenanceDown++
+		}
 	}
 
 	result := make(map[string]groupEvaluation, len(aggregates))
@@ -869,6 +928,8 @@ func evaluateGroups(
 			state = groupAmbiguous
 		case item.hasPending || item.down < item.members:
 			state = groupPending
+		case item.maintenanceDown == item.members:
+			state = groupMaintenance
 		}
 		result[key] = groupEvaluation{Key: key, Label: item.label, State: state}
 	}

@@ -175,8 +175,61 @@ func TestLoadOldNodeRegistryWithoutIncidentJournal(t *testing.T) {
 	if err := store.Load(); err != nil {
 		t.Fatal(err)
 	}
-	if len(store.Incidents(10)) != 0 || store.nodes["one"].Name != "One" {
+	if len(store.Incidents(10)) != 0 || store.nodes["one"].Name != "One" || store.nodes["one"].Maintenance {
 		t.Fatalf("old state was not normalized: nodes=%+v incidents=%+v", store.nodes, store.incidents)
+	}
+}
+
+func TestSetMaintenancePersistsAndClosesActiveDowntime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "node_registry.json")
+	store := NewStore(path, nil)
+	startedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	store.nodes["node-1"] = NodeRecord{
+		StableID:         "node-1",
+		Name:             "Node 1",
+		Active:           true,
+		CurrentDownSince: startedAt,
+		IncidentCount:    1,
+	}
+	store.incidents = []IncidentRecord{{
+		ID:        "incident-1",
+		Kind:      incidentKindNode,
+		Status:    incidentStatusActive,
+		Scope:     "node:node-1",
+		StableIDs: []string{"node-1"},
+		StartedAt: startedAt,
+	}}
+
+	record, err := store.SetMaintenance("node-1", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !record.Maintenance || record.MaintenanceSince.IsZero() || !record.CurrentDownSince.IsZero() {
+		t.Fatalf("maintenance record = %+v", record)
+	}
+	if record.TotalDowntimeSec <= 0 {
+		t.Fatalf("closed downtime = %d, want positive", record.TotalDowntimeSec)
+	}
+	if store.incidents[0].Status != incidentStatusResolved || store.incidents[0].ResolvedAt.IsZero() {
+		t.Fatalf("incident was not resolved: %+v", store.incidents[0])
+	}
+	if got := store.ActiveMaintenanceStableIDs(); len(got) != 1 || got[0] != "node-1" {
+		t.Fatalf("active maintenance IDs = %v", got)
+	}
+
+	reloaded := NewStore(path, nil)
+	if err := reloaded.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.nodes["node-1"]; !got.Maintenance || got.MaintenanceSince.IsZero() {
+		t.Fatalf("maintenance state was not persisted: %+v", got)
+	}
+	resumed, err := reloaded.SetMaintenance("node-1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Maintenance || !resumed.MaintenanceSince.IsZero() {
+		t.Fatalf("maintenance state was not cleared: %+v", resumed)
 	}
 }
 

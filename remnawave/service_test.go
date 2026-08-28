@@ -59,9 +59,16 @@ func (f *fakeAPI) UpdateExternalHeaders(_ context.Context, uuid string, headers 
 }
 
 type fakeProxySource struct {
-	mu       sync.RWMutex
-	proxies  []*models.ProxyConfig
-	statuses map[string]checker.ProxyStatusDetails
+	mu          sync.RWMutex
+	proxies     []*models.ProxyConfig
+	statuses    map[string]checker.ProxyStatusDetails
+	maintenance map[string]bool
+}
+
+func (f *fakeProxySource) MonitoringEnabled(stableID string) bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return !f.maintenance[stableID]
 }
 
 func (f *fakeProxySource) GetProxies() []*models.ProxyConfig {
@@ -70,7 +77,7 @@ func (f *fakeProxySource) GetProxies() []*models.ProxyConfig {
 	return append([]*models.ProxyConfig(nil), f.proxies...)
 }
 
-func (f *fakeProxySource) GetProxyStatusDetailsByStableID(stableID string) (checker.ProxyStatusDetails, error) {
+func (f *fakeProxySource) GetProxyStatusDetailsIncludingMaintenance(stableID string) (checker.ProxyStatusDetails, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	details, ok := f.statuses[stableID]
@@ -85,6 +92,95 @@ func (f *fakeProxySource) setOnline(stableIDs ...string) {
 	defer f.mu.Unlock()
 	for _, stableID := range stableIDs {
 		f.statuses[stableID] = checker.ProxyStatusDetails{Online: true}
+	}
+}
+
+func TestProxySnapshotIncludesMaintenanceProbeState(t *testing.T) {
+	source := &fakeProxySource{
+		proxies: []*models.ProxyConfig{
+			{StableID: "active", Name: "Active"},
+			{StableID: "paused", Name: "Paused"},
+		},
+		statuses: map[string]checker.ProxyStatusDetails{
+			"active": {Online: true},
+			"paused": {Online: false},
+		},
+		maintenance: map[string]bool{"paused": true},
+	}
+	service := &Service{proxySource: source}
+	proxies, statuses, maintenance := service.proxySnapshot()
+	if len(proxies) != 2 {
+		t.Fatalf("active proxies = %+v, want both subscription nodes", proxies)
+	}
+	if len(statuses) != 2 || !statuses["active"].Online || statuses["paused"].Online {
+		t.Fatalf("probe statuses = %+v", statuses)
+	}
+	if !maintenance["paused"] || maintenance["active"] {
+		t.Fatalf("maintenance flags = %+v", maintenance)
+	}
+}
+
+func TestServicePublishesMaintenanceOnlyForFullyOfflineMaintenanceLocation(t *testing.T) {
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	api, proxies := oneAudienceFixture(now, map[string]string{})
+	proxies.maintenance = map[string]bool{"stable-a": true}
+	proxies.setOnline("stable-a")
+	service := testService(t, api, proxies, &fakeIncidentSource{}, &now)
+	service.config = audienceConfig("")
+
+	for range 3 {
+		service.ObserveFullCheck()
+	}
+	if _, err := service.SyncNow(context.Background()); err != nil {
+		t.Fatalf("healthy maintenance SyncNow: %v", err)
+	}
+	if len(api.updates) != 0 {
+		t.Fatalf("healthy maintenance node changed announce: %+v", api.updates)
+	}
+
+	proxies.setOffline(now.Add(-20*time.Minute), "stable-a")
+	for range 3 {
+		service.ObserveFullCheck()
+	}
+	if _, err := service.ReconcileNow(context.Background()); err != nil {
+		t.Fatalf("offline maintenance ReconcileNow: %v", err)
+	}
+	if len(api.updates) != 1 {
+		t.Fatalf("maintenance updates = %+v", api.updates)
+	}
+	announce := api.updates[0].Headers[announceHeader]
+	if !strings.Contains(announce, "Серверы локации «Германия» находятся на обслуживании") {
+		t.Fatalf("maintenance announce = %q", announce)
+	}
+	managed := service.runtime.Managed["external-users"]
+	if managed.MaintenanceGroups["de"] != "Германия" || len(managed.Groups) != 0 {
+		t.Fatalf("maintenance ownership state = %+v", managed)
+	}
+}
+
+func TestServiceUsesRegularOutageWhenOfflineLocationIsNotEntirelyMaintenance(t *testing.T) {
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	api, proxies := oneAudienceFixture(now, map[string]string{})
+	api.hosts = append(api.hosts, Host{UUID: "host-b", Remark: "Германия B", Inbound: HostInbound{ConfigProfileInboundUUID: "inbound-users"}})
+	proxies.proxies = append(proxies.proxies, &models.ProxyConfig{StableID: "stable-b", Name: "DE B"})
+	proxies.setOffline(now.Add(-20*time.Minute), "stable-b")
+	proxies.maintenance = map[string]bool{"stable-a": true}
+	service := testService(t, api, proxies, &fakeIncidentSource{}, &now)
+	service.config = audienceConfig("")
+	service.config.NodeMappings["stable-b"] = NodeMapping{HostUUID: "host-b", GroupKey: "de", PublicLabel: "Германия"}
+
+	for range 3 {
+		service.ObserveFullCheck()
+	}
+	if _, err := service.SyncNow(context.Background()); err != nil {
+		t.Fatalf("SyncNow: %v", err)
+	}
+	if len(api.updates) != 1 || !strings.Contains(api.updates[0].Headers[announceHeader], "Все доступные вам локации временно недоступны") {
+		t.Fatalf("regular outage update = %+v", api.updates)
+	}
+	managed := service.runtime.Managed["external-users"]
+	if managed.Groups["de"] != "Германия" || len(managed.MaintenanceGroups) != 0 {
+		t.Fatalf("regular outage ownership state = %+v", managed)
 	}
 }
 

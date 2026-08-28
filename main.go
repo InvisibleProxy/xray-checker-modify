@@ -177,6 +177,7 @@ func main() {
 	if err := nodeArchive.SyncProxies(*proxyConfigs); err != nil {
 		logger.Warn("Failed to sync node registry: %v", err)
 	}
+	proxyChecker.ReplaceMaintenanceModes(nodeArchive.ActiveMaintenanceStableIDs())
 	if err := nodeArchive.SyncSpeedHistory(speedTestManager.AllResultHistory()); err != nil {
 		logger.Warn("Failed to sync speed history into node registry: %v", err)
 	}
@@ -252,7 +253,7 @@ func main() {
 		}
 		telegramService.NotifyNodeRecoveries(stableIDs)
 	}
-	runManualAvailabilityCheck := func(stableIDs []string) error {
+	runAvailabilityCheck := func(stableIDs []string, allowMaintenance bool) error {
 		var recovered []string
 		var checkErr error
 		if len(stableIDs) == 0 {
@@ -261,7 +262,11 @@ func main() {
 			recovered = recoveredStableIDs(proxyChecker, offlineBefore)
 		} else {
 			var report checker.AvailabilityCheckReport
-			report, checkErr = proxyChecker.CheckProxiesByStableIDs(stableIDs)
+			if allowMaintenance {
+				report, checkErr = proxyChecker.CheckProxiesByStableIDsIncludingMaintenance(stableIDs)
+			} else {
+				report, checkErr = proxyChecker.CheckProxiesByStableIDs(stableIDs)
+			}
 			recovered = report.RecoveredStableIDs()
 		}
 		if err := nodeArchive.RecordAvailability(); err != nil {
@@ -271,7 +276,38 @@ func main() {
 		notifyRecoveredNodes(recovered)
 		return checkErr
 	}
+	runManualAvailabilityCheck := func(stableIDs []string) error {
+		return runAvailabilityCheck(stableIDs, false)
+	}
+	runAdminAvailabilityCheck := func(stableIDs []string) error {
+		return runAvailabilityCheck(stableIDs, true)
+	}
 	telegramService.SetAvailabilityCheckFunc(runManualAvailabilityCheck)
+	setNodeMaintenance := func(stableID string, enabled bool) (nodearchive.NodeRecord, error) {
+		xrayLifecycle.Lock()
+		defer xrayLifecycle.Unlock()
+		if _, ok := proxyChecker.GetProxyByStableID(stableID); !ok {
+			return nodearchive.NodeRecord{}, fmt.Errorf("proxy not found")
+		}
+		record, err := nodeArchive.SetMaintenance(stableID, enabled)
+		if err != nil {
+			return nodearchive.NodeRecord{}, err
+		}
+		if err := proxyChecker.SetMaintenanceMode(stableID, enabled); err != nil {
+			return nodearchive.NodeRecord{}, err
+		}
+		speedTestManager.ClearMaintenanceProbe(stableID)
+		if enabled {
+			if err := telegramService.ClearMonitoringState(stableID); err != nil {
+				logger.Warn("Failed to clear Telegram monitoring state for %s: %v", stableID, err)
+			}
+		}
+		if err := nodeArchive.RecordAvailability(); err != nil {
+			logger.Warn("Failed to reconcile node registry after maintenance change: %v", err)
+		}
+		remnawaveService.Trigger()
+		return record, nil
+	}
 
 	speedTestManager.SetReporter(telegramService)
 	telegramService.Start()
@@ -416,13 +452,15 @@ func main() {
 
 		xrayLifecycle.Lock()
 		err = updateConfiguration(newConfigs, proxyConfigs, xrayRunner, proxyChecker)
-		xrayLifecycle.Unlock()
 		if err != nil {
+			xrayLifecycle.Unlock()
 			return web.AdminSubscriptionRefreshResult{}, err
 		}
 		if err := nodeArchive.SyncProxies(*proxyConfigs); err != nil {
 			logger.Warn("Failed to sync node registry after subscription update: %v", err)
 		}
+		proxyChecker.ReplaceMaintenanceModes(nodeArchive.ActiveMaintenanceStableIDs())
+		xrayLifecycle.Unlock()
 		if err := telegramService.PruneInactiveMutedNodes(); err != nil {
 			logger.Warn("Failed to prune inactive muted Telegram nodes: %v", err)
 		}
@@ -467,7 +505,7 @@ func main() {
 	protectedHandler.Handle("/admin", web.AdminHandler())
 	protectedHandler.Handle("/admin/", web.AdminHandler())
 	protectedHandler.Handle("/api/v1/admin/proxies", web.AdminProxiesHandler(proxyChecker, config.CLIConfig.Xray.StartPort))
-	protectedHandler.Handle("/api/v1/admin/proxies/check", web.AdminProxyCheckHandler(runManualAvailabilityCheck, proxyChecker, config.CLIConfig.Xray.StartPort))
+	protectedHandler.Handle("/api/v1/admin/proxies/check", web.AdminProxyCheckHandler(runAdminAvailabilityCheck, proxyChecker, config.CLIConfig.Xray.StartPort))
 	protectedHandler.Handle("/api/v1/admin/subscription/refresh", web.AdminSubscriptionRefreshHandler(func(request web.AdminSubscriptionRefreshRequest) (web.AdminSubscriptionRefreshResult, error) {
 		return refreshSubscription("manual", request.Force, request.ConfirmationToken)
 	}))
@@ -481,6 +519,7 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/nodes-overview/merge/preview", web.AdminNodesOverviewMergePreviewHandler(nodeMergeCoordinator))
 	protectedHandler.Handle("/api/v1/admin/nodes-overview/merge", web.AdminNodesOverviewMergeHandler(nodeMergeCoordinator))
 	protectedHandler.Handle("/api/v1/admin/nodes-overview/delete", web.AdminNodesOverviewDeleteHandler(nodeArchive, speedTestManager))
+	protectedHandler.Handle("/api/v1/admin/nodes-overview/maintenance", web.AdminNodeMaintenanceHandler(setNodeMaintenance))
 	protectedHandler.Handle("/api/v1/admin/nodes-overview", web.AdminNodesOverviewHandler(nodeArchive, speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/incidents", web.AdminIncidentsHandler(nodeArchive))
 	protectedHandler.Handle("/api/v1/admin/schedules", web.AdminScheduleHandler(speedTestManager))

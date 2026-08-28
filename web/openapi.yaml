@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Xray Checker API
   description: API for monitoring Xray proxies. Every `/api/v1/admin/*` operation requires explicitly configured HTTP Basic Auth credentials.
-  version: "1.1"
+  version: "1.3"
 servers:
   - url: /
 security:
@@ -465,6 +465,34 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /api/v1/admin/nodes-overview/maintenance:
+    put:
+      summary: Enable or disable maintenance mode for an active node
+      description: Excludes the node from availability/speed statistics, the fast recovery loop, scheduled speed tests and Telegram monitoring without deleting history. Slow full availability iterations continue as probe-only checks for Remnawave announce evaluation. Admin Check and Run remain available and do not resume monitoring. Entering maintenance closes the current downtime interval.
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeMaintenanceRequest'
+      responses:
+        '200':
+          description: Updated persisted node record
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/NodeSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /api/v1/admin/incidents:
     get:
       summary: Get persisted node and correlated mass incidents
@@ -833,6 +861,9 @@ components:
         online:
           type: boolean
           example: true
+        maintenance:
+          type: boolean
+          description: True when operator-paused monitoring excludes this node from availability and speed statistics.
         latencyMs:
           type: integer
           format: int64
@@ -870,6 +901,9 @@ components:
         online:
           type: boolean
           example: true
+        maintenance:
+          type: boolean
+          description: True when monitoring is paused for planned maintenance.
         latencyMs:
           type: integer
           format: int64
@@ -887,6 +921,10 @@ components:
         offline:
           type: integer
           example: 2
+        maintenance:
+          type: integer
+          description: Nodes excluded from online/offline totals by maintenance mode.
+          example: 1
         avgLatencyMs:
           type: integer
           format: int64
@@ -1177,6 +1215,9 @@ components:
         telegramAlertSuppressed:
           type: boolean
           description: Fallback result at or above the configured low-speed threshold is omitted from automated Telegram reports and alerts.
+        maintenanceProbe:
+          type: boolean
+          description: One-off admin speed probe for a maintenance node. It may be shown in the current admin snapshot but is not persisted in speed history or used by Telegram/statistics.
         statusCode:
           type: integer
         downloadedBytes:
@@ -1244,6 +1285,15 @@ components:
       properties:
         stableId:
           type: string
+
+    NodeMaintenanceRequest:
+      type: object
+      required: [stableId, enabled]
+      properties:
+        stableId:
+          type: string
+        enabled:
+          type: boolean
 
     NodeMergePreviewRequest:
       type: object
@@ -1392,6 +1442,12 @@ components:
           type: string
         active:
           type: boolean
+        maintenance:
+          type: boolean
+          description: Operator-owned pause flag; independent from subscription activity.
+        maintenanceSince:
+          type: string
+          format: date-time
         firstSeenAt:
           type: string
           format: date-time
@@ -1590,7 +1646,7 @@ components:
 
     RemnawaveMessageScenarios:
       type: object
-      required: [singleLocation, multipleLocations, allLocations, partialSingleLocation, partialMultipleLocations, healthy, partialFallback, partialAvailabilityFallback]
+      required: [singleLocation, multipleLocations, allLocations, partialSingleLocation, partialMultipleLocations, maintenanceSingleLocation, maintenanceMultipleLocations, healthy, partialFallback, partialAvailabilityFallback, maintenanceFallback, maintenanceMixedFallback]
       properties:
         singleLocation:
           allOf:
@@ -1612,6 +1668,14 @@ components:
           allOf:
             - $ref: '#/components/schemas/RemnawaveMessageScenario'
             - description: Used when at least one server remains healthy in several redundancy groups. Supports {locations}, {affected}, and {total}.
+        maintenanceSingleLocation:
+          allOf:
+            - $ref: '#/components/schemas/RemnawaveMessageScenario'
+            - description: Used when every member of one redundancy group is offline and in maintenance. Supports {location}, {affected}, and {total}.
+        maintenanceMultipleLocations:
+          allOf:
+            - $ref: '#/components/schemas/RemnawaveMessageScenario'
+            - description: Used when every member is offline and in maintenance in several redundancy groups. Supports {locations}, {affected}, and {total}.
         healthy:
           allOf:
             - $ref: '#/components/schemas/RemnawaveMessageScenario'
@@ -1626,6 +1690,16 @@ components:
           minLength: 1
           maxLength: 240
           description: Supports {affected} and {total}; used for more than three partially unavailable locations or an oversized rendered list.
+        maintenanceFallback:
+          type: string
+          minLength: 1
+          maxLength: 240
+          description: Supports {affected} and {total}; used for more than three maintenance locations or an oversized rendered list.
+        maintenanceMixedFallback:
+          type: string
+          minLength: 1
+          maxLength: 240
+          description: Supports {unavailable}, {affected}, and {total}; used when combined outage and maintenance messages exceed 240 characters.
 
     RemnawavePolicy:
       type: object

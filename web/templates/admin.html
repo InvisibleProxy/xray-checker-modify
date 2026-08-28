@@ -331,6 +331,9 @@
       .dot.offline {
         background: var(--red);
       }
+      .dot.maintenance {
+        background: var(--yellow);
+      }
       .table-wrap {
         overflow-x: auto;
       }
@@ -1376,6 +1379,7 @@
                   <option value="">All</option>
                   <option value="online">Online</option>
                   <option value="offline">Offline</option>
+                  <option value="maintenance">Maintenance</option>
                 </select>
               </label>
               <label>
@@ -1684,6 +1688,7 @@
               <select id="nodes-overview-status">
                 <option value="">All</option>
                 <option value="active">Active</option>
+                <option value="maintenance">Maintenance</option>
                 <option value="retired">Retired</option>
               </select>
             </label>
@@ -1831,6 +1836,7 @@
             confirmations by themselves. A confirmed failed member of an otherwise healthy redundancy group uses
             the partial-availability scenarios. Unknown state and probable <code>check_endpoint</code> incidents do
             not create a new message.
+            <br><span>A maintenance node is evaluated by its probe result. A separate maintenance scenario is used only when every member of the location is both offline and in maintenance.</span>
           </div>
           <div class="remnawave-template-grid">
             <article class="remnawave-template-card">
@@ -1933,6 +1939,40 @@
               <div class="remnawave-template-preview"><span>Preview</span><strong id="remnawave-message-healthy-preview"></strong></div>
             </article>
 
+            <article class="remnawave-template-card">
+              <label class="row">
+                <span>One location under maintenance</span>
+                <input id="remnawave-message-maintenance-single-enabled" type="checkbox" />
+              </label>
+              <label>
+                Template
+                <textarea id="remnawave-message-maintenance-single-template" maxlength="240" rows="3"></textarea>
+              </label>
+              <div class="remnawave-template-tokens" aria-label="Maintenance single-location placeholders">
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-maintenance-single-template" data-remnawave-token="{location}">{location}</button>
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-maintenance-single-template" data-remnawave-token="{affected}">{affected}</button>
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-maintenance-single-template" data-remnawave-token="{total}">{total}</button>
+              </div>
+              <div class="remnawave-template-preview"><span>Preview</span><strong id="remnawave-message-maintenance-single-preview"></strong></div>
+            </article>
+
+            <article class="remnawave-template-card">
+              <label class="row">
+                <span>Several locations under maintenance</span>
+                <input id="remnawave-message-maintenance-multiple-enabled" type="checkbox" />
+              </label>
+              <label>
+                Template
+                <textarea id="remnawave-message-maintenance-multiple-template" maxlength="240" rows="3"></textarea>
+              </label>
+              <div class="remnawave-template-tokens" aria-label="Maintenance multiple-location placeholders">
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-maintenance-multiple-template" data-remnawave-token="{locations}">{locations}</button>
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-maintenance-multiple-template" data-remnawave-token="{affected}">{affected}</button>
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-maintenance-multiple-template" data-remnawave-token="{total}">{total}</button>
+              </div>
+              <div class="remnawave-template-preview"><span>Preview</span><strong id="remnawave-message-maintenance-multiple-preview"></strong></div>
+            </article>
+
             <article class="remnawave-template-card wide">
               <strong>Long location-list fallback</strong>
               <div class="muted">Used when more than three whole locations are down or the rendered location list exceeds 240 characters.</div>
@@ -1959,6 +1999,35 @@
                 <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-partial-fallback-template" data-remnawave-token="{total}">{total}</button>
               </div>
               <div class="remnawave-template-preview"><span>Preview</span><strong id="remnawave-message-partial-fallback-preview"></strong></div>
+            </article>
+
+            <article class="remnawave-template-card wide">
+              <strong>Long maintenance-location-list fallback</strong>
+              <div class="muted">Used when more than three locations are fully offline under maintenance or the rendered list is too long.</div>
+              <label>
+                Template
+                <textarea id="remnawave-message-maintenance-fallback-template" maxlength="240" rows="2"></textarea>
+              </label>
+              <div class="remnawave-template-tokens" aria-label="Maintenance fallback placeholders">
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-maintenance-fallback-template" data-remnawave-token="{affected}">{affected}</button>
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-maintenance-fallback-template" data-remnawave-token="{total}">{total}</button>
+              </div>
+              <div class="remnawave-template-preview"><span>Preview</span><strong id="remnawave-message-maintenance-fallback-preview"></strong></div>
+            </article>
+
+            <article class="remnawave-template-card wide">
+              <strong>Mixed outage and maintenance fallback</strong>
+              <div class="muted">Used when the combined outage and maintenance messages would exceed 240 characters.</div>
+              <label>
+                Template
+                <textarea id="remnawave-message-maintenance-mixed-fallback-template" maxlength="240" rows="2"></textarea>
+              </label>
+              <div class="remnawave-template-tokens" aria-label="Mixed maintenance fallback placeholders">
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-maintenance-mixed-fallback-template" data-remnawave-token="{unavailable}">{unavailable}</button>
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-maintenance-mixed-fallback-template" data-remnawave-token="{affected}">{affected}</button>
+                <button class="secondary" type="button" data-remnawave-template-target="remnawave-message-maintenance-mixed-fallback-template" data-remnawave-token="{total}">{total}</button>
+              </div>
+              <div class="remnawave-template-preview"><span>Preview</span><strong id="remnawave-message-maintenance-mixed-fallback-preview"></strong></div>
             </article>
           </div>
           <div class="hint">
@@ -2216,6 +2285,7 @@
         loadRunning: false,
         availabilityCheckRunning: false,
         availabilityCheckIDs: new Set(),
+        maintenanceUpdatingIDs: new Set(),
         nodeURLDraftID: "",
         nodeURLDirty: false,
         openNodeStableIds: new Set(),
@@ -2344,6 +2414,14 @@
             replacements: { "{locations}": "«Германия», «Нидерланды»", "{affected}": "2", "{total}": "3" },
           },
           {
+            prefix: "maintenance-single",
+            replacements: { "{location}": "Германия", "{affected}": "1", "{total}": "3" },
+          },
+          {
+            prefix: "maintenance-multiple",
+            replacements: { "{locations}": "«Германия», «Нидерланды»", "{affected}": "2", "{total}": "3" },
+          },
+          {
             prefix: "healthy",
             replacements: { "{unavailable}": "0", "{total}": "3" },
           },
@@ -2363,6 +2441,14 @@
         $("remnawave-message-partial-fallback-preview").textContent = renderRemnawaveTemplateExample(
           $("remnawave-message-partial-fallback-template").value,
           { "{affected}": "4", "{total}": "5" },
+        );
+        $("remnawave-message-maintenance-fallback-preview").textContent = renderRemnawaveTemplateExample(
+          $("remnawave-message-maintenance-fallback-template").value,
+          { "{affected}": "4", "{total}": "5" },
+        );
+        $("remnawave-message-maintenance-mixed-fallback-preview").textContent = renderRemnawaveTemplateExample(
+          $("remnawave-message-maintenance-mixed-fallback-template").value,
+          { "{unavailable}": "2", "{affected}": "2", "{total}": "5" },
         );
       }
 
@@ -2470,6 +2556,8 @@
           ["all", messages.allLocations || {}, true],
           ["partial-single", messages.partialSingleLocation || {}, true],
           ["partial-multiple", messages.partialMultipleLocations || {}, true],
+          ["maintenance-single", messages.maintenanceSingleLocation || {}, true],
+          ["maintenance-multiple", messages.maintenanceMultipleLocations || {}, true],
           ["healthy", messages.healthy || {}, false],
         ];
         messageFields.forEach(([prefix, scenario, defaultEnabled]) => {
@@ -2478,6 +2566,8 @@
         });
         $("remnawave-message-fallback-template").value = messages.partialFallback || "";
         $("remnawave-message-partial-fallback-template").value = messages.partialAvailabilityFallback || "";
+        $("remnawave-message-maintenance-fallback-template").value = messages.maintenanceFallback || "";
+        $("remnawave-message-maintenance-mixed-fallback-template").value = messages.maintenanceMixedFallback || "";
         renderRemnawaveMessagePreviews();
         renderRemnawavePairs(settings.squadPairs || []);
         renderRemnawaveNodeMappings();
@@ -2531,9 +2621,13 @@
               allLocations: remnawaveScenarioFromForm("all"),
               partialSingleLocation: remnawaveScenarioFromForm("partial-single"),
               partialMultipleLocations: remnawaveScenarioFromForm("partial-multiple"),
+              maintenanceSingleLocation: remnawaveScenarioFromForm("maintenance-single"),
+              maintenanceMultipleLocations: remnawaveScenarioFromForm("maintenance-multiple"),
               healthy: remnawaveScenarioFromForm("healthy"),
               partialFallback: $("remnawave-message-fallback-template").value.trim(),
               partialAvailabilityFallback: $("remnawave-message-partial-fallback-template").value.trim(),
+              maintenanceFallback: $("remnawave-message-maintenance-fallback-template").value.trim(),
+              maintenanceMixedFallback: $("remnawave-message-maintenance-mixed-fallback-template").value.trim(),
             },
           },
           squadPairs: remnawavePairRowsFromForm(),
@@ -2673,8 +2767,9 @@
       function filteredProxies() {
         const filters = currentFilters();
         return state.proxies.filter((proxy) => {
-          if (filters.status === "online" && !proxy.online) return false;
-          if (filters.status === "offline" && proxy.online) return false;
+          if (filters.status === "online" && (proxy.maintenance || !proxy.online)) return false;
+          if (filters.status === "offline" && (proxy.maintenance || proxy.online)) return false;
+          if (filters.status === "maintenance" && !proxy.maintenance) return false;
           if (filters.protocol && proxy.protocol !== filters.protocol) return false;
           if (filters.subName && proxy.subName !== filters.subName) return false;
           if (filters.search) {
@@ -2809,7 +2904,7 @@
       }
 
       function latestResult() {
-        const results = state.snapshot ? state.snapshot.results || [] : [];
+        const results = monitoringSpeedResults();
         return [...results]
           .filter((result) => result.checkedAt && !result.checkedAt.startsWith("0001-"))
           .sort((a, b) => new Date(b.checkedAt) - new Date(a.checkedAt))[0] || null;
@@ -3488,6 +3583,7 @@
         const filters = nodesOverviewFilters();
         const rows = (state.nodesOverview || []).filter((node) => {
           if (filters.status === "active" && !node.active) return false;
+          if (filters.status === "maintenance" && (!node.active || !node.maintenance)) return false;
           if (filters.status === "retired" && node.active) return false;
           if (filters.country && filters.country !== (node.claimedCountryCode || node.claimedCountry || "")) return false;
           if (filters.subName && filters.subName !== (node.subName || "")) return false;
@@ -3542,8 +3638,9 @@
         renderNodesOverviewFilters();
         const rows = filteredNodesOverview();
         const active = (state.nodesOverview || []).filter((node) => node.active).length;
+        const maintenance = (state.nodesOverview || []).filter((node) => node.active && node.maintenance).length;
         const retired = (state.nodesOverview || []).length - active;
-        $("nodes-overview-summary").textContent = `${rows.length} shown · ${active} active · ${retired} retired`;
+        $("nodes-overview-summary").textContent = `${rows.length} shown · ${active - maintenance} monitored · ${maintenance} maintenance · ${retired} retired`;
         $("nodes-overview").innerHTML = rows.map((node) => {
           const ipLink = copyIPButton(node.server);
           const ipDetailsLink = node.ipInfoUrl
@@ -3551,10 +3648,15 @@
             : "";
           const speedClass = node.successfulResults > 0 ? "ok" : node.failedResults > 0 ? "error" : "neutral";
           const statusChip = node.active
-            ? `<span class="chip ok">Active</span>`
+            ? (node.maintenance
+              ? `<span class="chip warn" title="Paused since ${escapeHtml(formatTime(node.maintenanceSince) || "n/a")}">Maintenance</span>`
+              : `<span class="chip ok">Active</span>`)
             : `<span class="chip neutral">Retired</span>`;
           const nodeActions = node.active
-            ? `<button class="secondary small" type="button" disabled title="Active nodes are managed by subscription">Delete</button>`
+            ? `<div class="node-actions">
+                <button class="secondary small" type="button" data-maintenance-node="${escapeHtml(node.stableId || "")}" data-maintenance-enabled="${node.maintenance ? "false" : "true"}">${node.maintenance ? "Resume" : "Maintenance"}</button>
+                <button class="secondary small" type="button" disabled title="Active nodes are managed by subscription">Delete</button>
+              </div>`
             : `<div class="node-actions">
                 <button class="secondary small" type="button" data-merge-node="${escapeHtml(node.stableId || "")}">Merge</button>
                 <button class="secondary danger small" type="button" data-delete-node="${escapeHtml(node.stableId || "")}">Delete</button>
@@ -3597,10 +3699,12 @@
         const chipClass = severity === "error" ? "error" : severity === "warn" ? "warn" : severity === "ok" ? "ok" : "neutral";
         const fallbackTitle = fallbackResultTitle(result);
         const title = fallbackTitle ? ` title="${escapeHtml(fallbackTitle)}" aria-label="${escapeHtml(`${formatSpeedStatus(result)}; ${fallbackTitle}`)}"` : "";
-        return `<span class="chip ${chipClass}"${title}>${escapeHtml(formatSpeedStatus(result))}</span>`;
+        const label = result.maintenanceProbe ? `Probe · ${formatSpeedStatus(result)}` : formatSpeedStatus(result);
+        return `<span class="chip ${chipClass}"${title}>${escapeHtml(label)}</span>`;
       }
 
       function nodeRowClass(proxy, result, muted) {
+        if (proxy.maintenance) return "row-warn";
         if (!proxy.online || (result && (result.offline || result.error))) return "row-error";
         if (muted || isLowSpeed(result)) return "row-warn";
         return "";
@@ -3609,7 +3713,9 @@
       function formatStatusChips(proxy) {
         const muted = telegramMuteStatus(proxy.stableId);
         const chips = [
-          `<span class="chip ${proxy.online ? "ok" : "error"}">${proxy.online ? "Online" : "Offline"}</span>`,
+          proxy.maintenance
+            ? `<span class="chip warn">Maintenance</span>`
+            : `<span class="chip ${proxy.online ? "ok" : "error"}">${proxy.online ? "Online" : "Offline"}</span>`,
         ];
         if (muted.all) {
           chips.push(`<span class="chip warn">Muted all</span>`);
@@ -3675,6 +3781,7 @@
       }
 
       function nodeAvailabilityDetails(proxy) {
+        if (proxy.maintenance) return "Monitoring paused";
         if (proxy.online) {
           return `${proxy.latencyMs > 0 ? `${proxy.latencyMs} ms` : "Online"}`;
         }
@@ -3689,7 +3796,10 @@
       }
 
       function nodeDetailHTML(proxy, result, history) {
-        const down = proxy.downSince ? `${formatTime(proxy.downSince)} · ${formatDurationSec(proxy.downtimeSec)}` : "No active downtime";
+        const overview = overviewNodeFor(proxy.stableId);
+        const down = proxy.maintenance
+          ? `Paused ${formatTime(overview && overview.maintenanceSince) || "now"}`
+          : (proxy.downSince ? `${formatTime(proxy.downSince)} · ${formatDurationSec(proxy.downtimeSec)}` : "No active downtime");
         const failure = proxy.failureSummary
           ? `${proxy.failureSummary}${proxy.failureCode ? ` · ${proxy.failureCode}` : ""}`
           : "No current failure";
@@ -3698,7 +3808,7 @@
         return `<div class="node-card-detail">
           <div class="node-detail-grid">
             <div class="node-detail-stat"><span>Server</span><strong class="mono">${copyIPButton(proxy.server, "data-node-detail-ip")}:<span data-node-detail-port>${escapeHtml(proxy.port)}</span></strong></div>
-            <div class="node-detail-stat"><span>Availability</span><strong class="${proxy.online ? "ok" : "error"}" data-node-detail-availability>${escapeHtml(nodeAvailabilityDetails(proxy))}</strong></div>
+            <div class="node-detail-stat"><span>Availability</span><strong class="${proxy.maintenance ? "warn" : (proxy.online ? "ok" : "error")}" data-node-detail-availability>${escapeHtml(nodeAvailabilityDetails(proxy))}</strong></div>
             <div class="node-detail-stat"><span>Down since</span><strong data-node-detail-down>${escapeHtml(down)}</strong></div>
             <div class="node-detail-stat"><span>Failure</span><strong data-node-detail-failure title="${escapeHtml(proxy.failureDetail || "")}">${escapeHtml(failure)}</strong></div>
           </div>
@@ -3719,10 +3829,12 @@
 
       function renderOverview() {
         const total = state.proxies.length;
-        const online = state.proxies.filter((proxy) => proxy.online).length;
-        const offline = total - online;
+        const maintenance = state.proxies.filter((proxy) => proxy.maintenance).length;
+        const monitored = total - maintenance;
+        const online = state.proxies.filter((proxy) => !proxy.maintenance && proxy.online).length;
+        const offline = monitored - online;
         const muted = telegramAnyMutedNodeSet().size;
-        const results = state.snapshot ? state.snapshot.results || [] : [];
+        const results = monitoringSpeedResults();
         const successful = results.filter(isSuccessfulResult);
         const avgMbps = successful.length
           ? successful.reduce((sum, result) => sum + Number(result.mbps || 0), 0) / successful.length
@@ -3730,13 +3842,13 @@
         const latest = latestResult();
         const nextRun = nextScheduledRunAt();
 
-        $("kpi-online").textContent = `${online} / ${total}`;
-        $("kpi-online-detail").textContent = `${percent(online, total)} available · ${offline} offline · ${muted} muted`;
+        $("kpi-online").textContent = `${online} / ${monitored}`;
+        $("kpi-online-detail").textContent = `${percent(online, monitored)} available · ${offline} offline · ${maintenance} maintenance · ${muted} muted`;
         $("kpi-avg-speed").textContent = successful.length ? formatMbps(avgMbps) : "n/a";
         $("kpi-last-check").textContent = latest ? formatShortTime(latest.checkedAt) : "n/a";
         $("kpi-last-source").textContent = latest ? (latest.source || "speed-test") : "no results";
-        $("overall-status").textContent = total > 0 && offline === 0 ? "All systems operational" : `${offline} server(s) unavailable`;
-        $("overall-status").className = `chip ${total > 0 && offline === 0 ? "ok" : offline > 0 ? "error" : "neutral"}`;
+        $("overall-status").textContent = monitored > 0 && offline === 0 ? "All monitored systems operational" : `${offline} server(s) unavailable`;
+        $("overall-status").className = `chip ${monitored > 0 && offline === 0 ? "ok" : offline > 0 ? "error" : "neutral"}`;
         $("overview-state").textContent = nextRun
           ? `${results.length} latest results · next test ${formatTimeUntil(nextRun)}`
           : `${results.length} latest results`;
@@ -3845,20 +3957,30 @@
         const muted = telegramAnyMutedNodeSet().has(proxy.stableId);
         const run = state.snapshot && state.snapshot.lastRun;
         const checking = state.availabilityCheckRunning && state.availabilityCheckIDs.has(proxy.stableId);
+        const maintenanceUpdating = state.maintenanceUpdatingIDs.has(proxy.stableId);
         return {
           result,
           rowClass: nodeRowClass(proxy, result, muted),
           checking,
-          checkDisabled: state.availabilityCheckRunning,
-          runDisabled: Boolean(run && run.running),
-          availabilityClass: proxy.online ? "ok" : "error",
-          availabilityText: proxy.online
+          maintenanceUpdating,
+          checkDisabled: state.availabilityCheckRunning || maintenanceUpdating,
+          runDisabled: Boolean(run && run.running) || maintenanceUpdating,
+          availabilityClass: proxy.maintenance ? "warn" : (proxy.online ? "ok" : "error"),
+          availabilityText: proxy.maintenance
+            ? "Maintenance"
+            : (proxy.online
             ? (proxy.latencyMs > 0 ? `${proxy.latencyMs} ms` : "Online")
-            : (proxy.downSince ? `Offline · ${formatDurationSec(proxy.downtimeSec)}` : "Offline"),
+            : (proxy.downSince ? `Offline · ${formatDurationSec(proxy.downtimeSec)}` : "Offline")),
           speedClass: result ? speedStatusClass(result) : "",
           speedText: result ? formatSpeedStatus(result) : "No result",
           speedChecked: result ? formatShortTime(result.checkedAt) : "Last speed test",
         };
+      }
+
+      function monitoringSpeedResults() {
+        const results = state.snapshot ? state.snapshot.results || [] : [];
+        const maintenanceIDs = new Set(state.proxies.filter((proxy) => proxy.maintenance).map((proxy) => proxy.stableId));
+        return results.filter((result) => !result.maintenanceProbe && !maintenanceIDs.has(result.stableId));
       }
 
       function nodeSublineHTML(proxy) {
@@ -3879,7 +4001,7 @@
                 <input type="checkbox" data-id="${escapeHtml(proxy.stableId)}" ${state.selected.has(proxy.stableId) ? "checked" : ""}>
               </label>
               <div class="node-identity">
-                <div class="node-title"><span data-node-country>${nodeCountryMarker(proxy.stableId)}</span><span class="dot ${proxy.online ? "online" : "offline"}" data-node-dot></span><span class="node-title-text" data-node-name>${escapeHtml(proxy.name || "Unnamed")}</span></div>
+                <div class="node-title"><span data-node-country>${nodeCountryMarker(proxy.stableId)}</span><span class="dot ${proxy.maintenance ? "maintenance" : (proxy.online ? "online" : "offline")}" data-node-dot></span><span class="node-title-text" data-node-name>${escapeHtml(proxy.name || "Unnamed")}</span></div>
                 <div class="node-subline" data-node-subline>${nodeSublineHTML(proxy)}</div>
               </div>
               <div class="node-current">
@@ -3893,6 +4015,7 @@
               <div class="node-card-actions">
                 <button class="secondary small" type="button" data-check-id="${escapeHtml(proxy.stableId)}" ${view.checkDisabled ? "disabled" : ""}>${view.checking ? "Checking…" : "Check"}</button>
                 <button class="primary small" type="button" data-run-id="${escapeHtml(proxy.stableId)}" ${view.runDisabled ? "disabled" : ""}>Run</button>
+                <button class="secondary small" type="button" data-maintenance-id="${escapeHtml(proxy.stableId)}" data-maintenance-enabled="${proxy.maintenance ? "false" : "true"}" ${view.maintenanceUpdating ? "disabled" : ""}>${view.maintenanceUpdating ? "Saving…" : (proxy.maintenance ? "Resume" : "Maintenance")}</button>
               </div>
               <button class="node-toggle" type="button" data-node-toggle="${escapeHtml(proxy.stableId)}" aria-expanded="${open}" aria-label="${open ? "Close" : "Open"} details">
                 <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
@@ -3912,10 +4035,11 @@
         server.textContent = proxy.server;
         card.querySelector("[data-node-detail-port]").textContent = proxy.port;
         availability.textContent = nodeAvailabilityDetails(proxy);
-        availability.className = proxy.online ? "ok" : "error";
-        down.textContent = proxy.downSince
-          ? `${formatTime(proxy.downSince)} · ${formatDurationSec(proxy.downtimeSec)}`
-          : "No active downtime";
+        availability.className = proxy.maintenance ? "warn" : (proxy.online ? "ok" : "error");
+        const overview = overviewNodeFor(proxy.stableId);
+        down.textContent = proxy.maintenance
+          ? `Paused ${formatTime(overview && overview.maintenanceSince) || "now"}`
+          : (proxy.downSince ? `${formatTime(proxy.downSince)} · ${formatDurationSec(proxy.downtimeSec)}` : "No active downtime");
         failure.textContent = proxy.failureSummary
           ? `${proxy.failureSummary}${proxy.failureCode ? ` · ${proxy.failureCode}` : ""}`
           : "No current failure";
@@ -3933,8 +4057,9 @@
         const countryHTML = nodeCountryMarker(proxy.stableId);
         if (country.innerHTML !== countryHTML) country.innerHTML = countryHTML;
         const dot = card.querySelector("[data-node-dot]");
-        dot.classList.toggle("online", proxy.online);
-        dot.classList.toggle("offline", !proxy.online);
+        dot.classList.toggle("online", !proxy.maintenance && proxy.online);
+        dot.classList.toggle("offline", !proxy.maintenance && !proxy.online);
+        dot.classList.toggle("maintenance", proxy.maintenance);
         card.querySelector("[data-node-name]").textContent = proxy.name || "Unnamed";
         card.querySelector("[data-node-subline]").innerHTML = nodeSublineHTML(proxy);
         const availability = card.querySelector("[data-node-availability]");
@@ -3948,6 +4073,10 @@
         check.disabled = view.checkDisabled;
         check.textContent = view.checking ? "Checking…" : "Check";
         card.querySelector("[data-run-id]").disabled = view.runDisabled;
+        const maintenance = card.querySelector("[data-maintenance-id]");
+        maintenance.disabled = view.maintenanceUpdating;
+        maintenance.dataset.maintenanceEnabled = proxy.maintenance ? "false" : "true";
+        maintenance.textContent = view.maintenanceUpdating ? "Saving…" : (proxy.maintenance ? "Resume" : "Maintenance");
         const open = state.openNodeStableIds.has(proxy.stableId);
         setNodeCardExpanded(card, open);
         if (open && !card.querySelector(".node-card-detail")) {
@@ -4934,6 +5063,28 @@
         $("restore-backup-filename").textContent = input.files[0]?.name || "";
       }
 
+      async function updateMaintenance(stableId, enabled) {
+        stableId = String(stableId || "").trim();
+        if (!stableId || state.maintenanceUpdatingIDs.has(stableId)) return;
+        state.maintenanceUpdatingIDs.add(stableId);
+        renderNodes();
+        $("message").textContent = enabled ? "Enabling maintenance" : "Resuming monitoring";
+        try {
+          await request("/nodes-overview/maintenance", {
+            method: "PUT",
+            body: JSON.stringify({ stableId, enabled }),
+          });
+          await load(false, true);
+          $("message").textContent = enabled ? "Maintenance enabled" : "Monitoring resumed";
+        } catch (err) {
+          $("message").textContent = err.message;
+        } finally {
+          state.maintenanceUpdatingIDs.delete(stableId);
+          renderNodes();
+          renderNodesOverview();
+        }
+      }
+
       async function restoreBackup() {
         const input = $("restore-backup-file");
         const file = input.files[0];
@@ -5041,6 +5192,11 @@
           runNodes([run.dataset.runId]);
           return;
         }
+        const maintenance = target.closest("[data-maintenance-id]");
+        if (maintenance) {
+          updateMaintenance(maintenance.dataset.maintenanceId, maintenance.dataset.maintenanceEnabled === "true");
+          return;
+        }
         const range = target.closest("[data-chart-range]");
         if (range) {
           setDashboardRange(range.dataset.chartNode, range.dataset.chartRange);
@@ -5119,6 +5275,11 @@
       });
       $("refresh-node-geo").addEventListener("click", refreshNodeGeo);
       $("nodes-overview").addEventListener("click", (event) => {
+        const maintenanceButton = event.target.closest("[data-maintenance-node]");
+        if (maintenanceButton) {
+          updateMaintenance(maintenanceButton.dataset.maintenanceNode, maintenanceButton.dataset.maintenanceEnabled === "true");
+          return;
+        }
         const mergeButton = event.target.closest("[data-merge-node]");
         if (mergeButton) {
           openNodeMergeDialog(mergeButton.dataset.mergeNode);

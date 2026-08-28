@@ -1,6 +1,7 @@
 package checker
 
 import (
+	"errors"
 	"net"
 	"runtime"
 	"testing"
@@ -317,6 +318,72 @@ func TestFullCheckNeverUsesTCPAsAGate(t *testing.T) {
 	details, err := proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
 	if err != nil || !details.Online {
 		t.Fatalf("full check did not update the node online: details=%+v err=%v", details, err)
+	}
+}
+
+func TestMaintenanceModeKeepsProbeChecksAndClearsMonitoringStatus(t *testing.T) {
+	proxy := testProxy("node-1", "Node one")
+	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{proxy})
+	proxyChecker.storeStatusDetails(proxy.StableID, false, 0, nil, nil)
+	checks := 0
+	proxyChecker.checkProxyFunc = func(*models.ProxyConfig, uint64, bool, bool) {
+		checks++
+	}
+
+	if err := proxyChecker.SetMaintenanceMode(proxy.StableID, true); err != nil {
+		t.Fatal(err)
+	}
+	if proxyChecker.MonitoringEnabled(proxy.StableID) {
+		t.Fatal("monitoring remains enabled in maintenance mode")
+	}
+	proxyChecker.CheckAllProxies()
+	if checks != 1 {
+		t.Fatalf("maintenance full probes = %d, want 1", checks)
+	}
+	if _, err := proxyChecker.CheckProxiesByStableIDs([]string{proxy.StableID}); !errors.Is(err, ErrMaintenanceMode) {
+		t.Fatalf("non-admin maintenance check error = %v, want ErrMaintenanceMode", err)
+	}
+	if _, err := proxyChecker.CheckProxiesByStableIDsIncludingMaintenance([]string{proxy.StableID}); err != nil {
+		t.Fatalf("admin maintenance check error = %v", err)
+	}
+	if checks != 2 {
+		t.Fatalf("checks after admin maintenance probe = %d, want 2", checks)
+	}
+	if _, _, err := proxyChecker.GetProxyStatusByStableID(proxy.StableID); !errors.Is(err, ErrMaintenanceMode) {
+		t.Fatalf("maintenance status error = %v, want ErrMaintenanceMode", err)
+	}
+
+	if err := proxyChecker.SetMaintenanceMode(proxy.StableID, false); err != nil {
+		t.Fatal(err)
+	}
+	proxyChecker.CheckAllProxies()
+	if checks != 3 {
+		t.Fatalf("checks after resume = %d, want 3 including maintenance probes", checks)
+	}
+}
+
+func TestAdminMixedMaintenanceBatchPreservesPerNodeRecoverySemantics(t *testing.T) {
+	active := testProxy("active", "Active")
+	paused := testProxy("paused", "Paused")
+	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{active, paused})
+	proxyChecker.storeStatusDetails(active.StableID, false, 0, nil, nil)
+	if err := proxyChecker.SetMaintenanceMode(paused.StableID, true); err != nil {
+		t.Fatal(err)
+	}
+	proxyChecker.storeStatusDetailsMode(paused.StableID, false, 0, nil, nil, nil, true)
+	proxyChecker.hostDiagnosticsFunc = func(*models.ProxyConfig) (HostCheckDetails, PingCheckDetails) {
+		return HostCheckDetails{Online: true}, PingCheckDetails{Online: true}
+	}
+	proxyChecker.checkProxyFunc = func(candidate *models.ProxyConfig, _ uint64, _ bool, _ bool) {
+		proxyChecker.storeStatusDetailsMode(candidate.StableID, true, 10*time.Millisecond, nil, nil, nil, candidate.StableID == paused.StableID)
+	}
+
+	report, err := proxyChecker.CheckProxiesByStableIDsIncludingMaintenance([]string{active.StableID, paused.StableID})
+	if err != nil {
+		t.Fatalf("admin mixed check: %v", err)
+	}
+	if len(report.Results) != 2 || !report.Results[0].Recovered || report.Results[1].Recovered {
+		t.Fatalf("mixed recovery report = %+v", report.Results)
 	}
 }
 
