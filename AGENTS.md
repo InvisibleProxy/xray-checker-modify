@@ -72,7 +72,7 @@
 - `/admin` и `/api/v1/admin/*` не должны становиться публичными.
 - Server-mode не запускается с пустыми Basic Auth credentials; встроенные публичные credentials запрещены.
 - Основной Telegram output использует Rich Messages и компактный HTML fallback. На неопределённой сетевой ошибке нельзя отправлять fallback повторно из-за риска дубля.
-- Интерактивные Telegram-экраны «Проблемы» и «Замеры» и кнопки speedtest history показывают только результаты active `StableID`; retired history остаётся в persisted state и админке.
+- Интерактивные Telegram-экраны «Проблемы» и «Замеры», кнопки speedtest history, текущая admin-таблица `Results` и dashboard KPI показывают только результаты active `StableID`; retired history остаётся в persisted state и доступна через архивные admin views.
 - Recovery alert удаляется из persisted state только после успешной отправки соответствующего уведомления.
 - `xray_config.json` — генерируемый runtime-файл, не источник истины и не часть backup.
 

@@ -3985,8 +3985,14 @@
         };
       }
 
-      function monitoringSpeedResults() {
+      function activeSpeedResults() {
         const results = state.snapshot ? state.snapshot.results || [] : [];
+        const activeIDs = new Set(state.proxies.map((proxy) => proxy.stableId));
+        return results.filter((result) => activeIDs.has(result.stableId));
+      }
+
+      function monitoringSpeedResults() {
+        const results = activeSpeedResults();
         const maintenanceIDs = new Set(state.proxies.filter((proxy) => proxy.maintenance).map((proxy) => proxy.stableId));
         return results.filter((result) => !result.maintenanceProbe && !maintenanceIDs.has(result.stableId));
       }
@@ -4114,7 +4120,7 @@
       }
 
       function renderResults() {
-        const results = state.snapshot ? state.snapshot.results : [];
+        const results = activeSpeedResults();
         $("results").innerHTML = results.map((result) => {
           const severity = resultSeverity(result);
           const reason = resultReason(result);

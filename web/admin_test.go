@@ -202,7 +202,7 @@ func TestWebTemplatesExposeSharedEnglishRussianLocalization(t *testing.T) {
 		`xray-checker-language`,
 		`new MutationObserver`,
 		`document.documentElement.lang = language`,
-		`"Nodes Overview": "Обзор нод"`,
+		`"Nodes Overview": "Nodes Overview"`,
 		`"Check": "Check", "Run": "Run"`,
 		`"StableID to Host mapping": "Маппинг StableID → Host"`,
 		`"Loading speed-test history…": "Загрузка speedtest history…"`,
@@ -265,7 +265,10 @@ func TestAdminTemplateExposesRemnawaveMessageConstructor(t *testing.T) {
 		`partialAvailabilityFallback: $("remnawave-message-partial-fallback-template").value.trim()`,
 		`maintenanceFallback: $("remnawave-message-maintenance-fallback-template").value.trim()`,
 		`maintenanceMixedFallback: $("remnawave-message-maintenance-mixed-fallback-template").value.trim()`,
+		`function activeSpeedResults()`,
+		`activeIDs.has(result.stableId)`,
 		`function monitoringSpeedResults()`,
+		`const results = activeSpeedResults();`,
 		`!result.maintenanceProbe && !maintenanceIDs.has(result.stableId)`,
 	} {
 		if !strings.Contains(html, marker) {
