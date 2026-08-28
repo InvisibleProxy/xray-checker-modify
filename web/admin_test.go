@@ -55,7 +55,9 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`filteredProxies().forEach((proxy) => {`,
 		`data-check-id="${escapeHtml(proxy.stableId)}"`,
 		`data-run-id="${escapeHtml(proxy.stableId)}"`,
-		`data-maintenance-id="${escapeHtml(proxy.stableId)}"`,
+		`id="toggle-maintenance"`,
+		`function renderMaintenanceControl()`,
+		`button.dataset.maintenanceId = proxy.stableId`,
 		`checkDisabled: state.availabilityCheckRunning || maintenanceUpdating`,
 		`runDisabled: Boolean(run && run.running) || maintenanceUpdating`,
 		`const ids = [...new Set(stableIds.filter(Boolean))]`,
@@ -111,6 +113,9 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 	}
 	if strings.Contains(html, `targets.length !== 1`) {
 		t.Fatal("admin template still blocks multiple compatible merge targets")
+	}
+	if strings.Contains(html, `data-maintenance-id=`) {
+		t.Fatal("admin template still exposes maintenance in node card actions")
 	}
 }
 

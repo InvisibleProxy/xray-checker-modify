@@ -1360,6 +1360,14 @@
             </div>
           </div>
 
+          <div class="control-group">
+            <div class="group-title">
+              <h3>Maintenance</h3>
+              <span id="maintenance-node-state" class="muted">Select one node</span>
+            </div>
+            <button id="toggle-maintenance" class="secondary" type="button" disabled>Maintenance</button>
+          </div>
+
           <button id="run" class="primary" type="button">Run Check</button>
         </section>
 
@@ -4015,7 +4023,6 @@
               <div class="node-card-actions">
                 <button class="secondary small" type="button" data-check-id="${escapeHtml(proxy.stableId)}" ${view.checkDisabled ? "disabled" : ""}>${view.checking ? "Checking…" : "Check"}</button>
                 <button class="primary small" type="button" data-run-id="${escapeHtml(proxy.stableId)}" ${view.runDisabled ? "disabled" : ""}>Run</button>
-                <button class="secondary small" type="button" data-maintenance-id="${escapeHtml(proxy.stableId)}" data-maintenance-enabled="${proxy.maintenance ? "false" : "true"}" ${view.maintenanceUpdating ? "disabled" : ""}>${view.maintenanceUpdating ? "Saving…" : (proxy.maintenance ? "Resume" : "Maintenance")}</button>
               </div>
               <button class="node-toggle" type="button" data-node-toggle="${escapeHtml(proxy.stableId)}" aria-expanded="${open}" aria-label="${open ? "Close" : "Open"} details">
                 <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
@@ -4073,10 +4080,6 @@
         check.disabled = view.checkDisabled;
         check.textContent = view.checking ? "Checking…" : "Check";
         card.querySelector("[data-run-id]").disabled = view.runDisabled;
-        const maintenance = card.querySelector("[data-maintenance-id]");
-        maintenance.disabled = view.maintenanceUpdating;
-        maintenance.dataset.maintenanceEnabled = proxy.maintenance ? "false" : "true";
-        maintenance.textContent = view.maintenanceUpdating ? "Saving…" : (proxy.maintenance ? "Resume" : "Maintenance");
         const open = state.openNodeStableIds.has(proxy.stableId);
         setNodeCardExpanded(card, open);
         if (open && !card.querySelector(".node-card-detail")) {
@@ -4230,7 +4233,30 @@
         $("selection-unmute").disabled = count === 0 || !ids.some((id) => anyMuted.has(id));
         $("selection-history").disabled = count !== 1;
         renderNodeURLForm();
+        renderMaintenanceControl();
         renderTelegramMuteControls();
+      }
+
+      function renderMaintenanceControl() {
+        const ids = selectedIDs();
+        const button = $("toggle-maintenance");
+        const stateLabel = $("maintenance-node-state");
+        const proxy = ids.length === 1
+          ? state.proxies.find((item) => item.stableId === ids[0])
+          : null;
+        if (!proxy) {
+          button.disabled = true;
+          button.dataset.maintenanceEnabled = "true";
+          button.textContent = "Maintenance";
+          stateLabel.textContent = "Select one node";
+          return;
+        }
+        const updating = state.maintenanceUpdatingIDs.has(proxy.stableId);
+        button.disabled = updating;
+        button.dataset.maintenanceId = proxy.stableId;
+        button.dataset.maintenanceEnabled = proxy.maintenance ? "false" : "true";
+        button.textContent = updating ? "Saving…" : (proxy.maintenance ? "Resume" : "Maintenance");
+        stateLabel.textContent = proxyLabel(proxy);
       }
 
       function renderNodeURLForm() {
@@ -5192,11 +5218,6 @@
           runNodes([run.dataset.runId]);
           return;
         }
-        const maintenance = target.closest("[data-maintenance-id]");
-        if (maintenance) {
-          updateMaintenance(maintenance.dataset.maintenanceId, maintenance.dataset.maintenanceEnabled === "true");
-          return;
-        }
         const range = target.closest("[data-chart-range]");
         if (range) {
           setDashboardRange(range.dataset.chartNode, range.dataset.chartRange);
@@ -5318,6 +5339,10 @@
         loadHistory();
       });
       $("run").addEventListener("click", runSelected);
+      $("toggle-maintenance").addEventListener("click", (event) => {
+        const button = event.currentTarget;
+        updateMaintenance(button.dataset.maintenanceId, button.dataset.maintenanceEnabled === "true");
+      });
       $("selection-check").addEventListener("click", checkSelectedAvailability);
       $("selection-run").addEventListener("click", runSelected);
       $("selection-mute").addEventListener("click", () => updateTelegramMute("all", true));
