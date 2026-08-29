@@ -10,7 +10,7 @@
 - ручной и плановый speedtest с отдельным Test URL для каждой ноды;
 - Nodes Overview с downtime, историей speedtest, GeoIP-сверкой и безопасным merge retired-ноды после смены ключа;
 - persisted-журнал одиночных и массовых инцидентов с диагностическими кодами причин;
-- настраиваемое хранение истории speedtest, по умолчанию 60 дней;
+- общий настраиваемый срок хранения историй speedtest и Availability, по умолчанию 60 дней;
 - структурированные Telegram-команды, отчёты и уведомления о недоступности;
 - ручные и автоматические резервные копии;
 - проверяемое восстановление из архива после перезапуска.
@@ -128,6 +128,8 @@ go run . --help
 
 Dashboard админки использует компактные раскрываемые строки нод. Карточка плавно раскрывается по клику в любом неинтерактивном месте шапки или по стрелке; чекбокс, IP/Server и отдельные действия `Check`/`Run` при этом не переключают карточку. Клик по показанному IP/Server копирует только адрес без порта; это же поведение действует на основном dashboard, в Nodes Overview, карточках Remnawave locations и merge-диалоге. Master-checkbox рядом с заголовком `Nodes` выбирает или снимает выбор со всех видимых после фильтрации нод и показывает промежуточное состояние, если выбрана только часть списка. Несколько карточек можно держать открытыми одновременно: период, загрузка истории и состояние каждой панели независимы. Основной dashboard автоматически обновляет статусы и latency с периодом availability-check; автообновление включено по умолчанию и может быть отключено кнопкой `Auto`. Админка каждые 30 секунд заново запрашивает proxies, speedtest snapshot, Telegram config и Nodes Overview, а после возврата на скрытую вкладку обновляется сразу. Фоновое обновление сохраняет существующие DOM-элементы, раскрытие и позицию горизонтальной прокрутки графика, пока набор и порядок видимых `StableID` не изменились. Внутри показываются сетевая диагностика и area-график фактически измеренной скорости с отметкой последнего замера; в offline-карточке успешные `TCP OK` и `Ping OK` выделяются зелёным независимо от красного proxy-статуса, а неуспешная диагностика остаётся красной. Сводка выбранного периода показывает процент успешных измерений: успешным считается завершённый замер со скоростью не ниже настроенного low-speed threshold; low-speed, offline и error входят в знаменатель как неуспешные. При движении курсора график выбирает ближайший реальный замер, показывает вертикальный crosshair и tooltip со статусом, Mbps, TTFB и скачанным объёмом. Для графика доступны периоды 24 часа, 3, 7, 14 и 30 дней, а также произвольные даты. Пропуски не интерполируются: фактическая линия прерывается, её участки мягко затухают без вертикальной границы заливки, а тонкий пунктир и полупрозрачная error-зона показывают отсутствие замера без ложного падения скорости до нуля. При системной настройке reduced motion декоративные анимации отключаются.
 
+В правом нижнем углу раскрытой карточки переключатель `Speedtest`/`Availability` меняет dataset этого же графика. Availability-режим показывает latency реальных proxy-checks в ms, online/offline статистику, crosshair и tooltip на тех же периодах; история хранится по `StableID` за тот же срок, что и speedtest. Maintenance и probe-only проверки в неё не записываются, а при node merge retained history переносится в active target.
+
 Текущая таблица `Results` и dashboard KPI используют только active `StableID`. Результаты retired-нод не удаляются: их сохранённая история остаётся доступна через `Speed History` и `Nodes Overview`.
 
 Для плановых работ выберите active-ноду и используйте контекстную кнопку `Maintenance`/`Resume` в `Controls → Actions`; тот же переключатель доступен в `Nodes Overview`. Режим сохраняется по `StableID` в `data/node_registry.json` и переживает restart. Maintenance-нода исключается из availability/downtime-статистики, быстрого recovery-loop, планового speedtest и Telegram alerts/retries, но медленный полный availability-обход продолжает выполнять через неё технический proxy-probe для Remnawave announce. Результат такого probe не попадает в Prometheus, node incidents, downtime и Telegram. Кнопки `Check` и `Run` в админке остаются доступны и не снимают maintenance; результат ручного speed-probe виден в текущем admin snapshot, но не записывается в speedtest history и не участвует в агрегатах. Telegram-команды paused-ноду пропускают. При включении закрываются текущий downtime и активный node incident; cumulative downtime, incident journal, прежняя speedtest history, mute и персональный Test URL сохраняются. `/config/<StableID>` во время обслуживания отвечает `200 Maintenance` с `X-Xray-Checker-Status: maintenance`, чтобы внешний uptime-check не записывал плановую остановку как outage. После `Resume` нода снова участвует в мониторинге, но не считается online до следующей настоящей проверки.
@@ -161,6 +163,8 @@ docker compose restart xray-checker
 ```
 
 На startup в active StableID переносятся сохранённая speedtest history/latest result, накопленный downtime, incident count и ссылки incident journal, наиболее ранний `FirstSeenAt`, максимальный downtime, актуальнейшие GeoIP-данные и lineage прежних StableID. Текущая active-конфигурация и её live-состояние остаются целевыми. Retired-запись удаляется лишь после того, как speedtest, node archive и Telegram успешно загрузили новое состояние. До этого исходные `node_registry.json` и `speedtest_results.json` лежат в rollback-копии; ошибка загрузки возвращает их и останавливает startup с требованием повторного запуска. После подтверждённого startup `Nodes Overview` сверяет исчезновение source с `MergedFromStableIDs` target и показывает `Node merge completed successfully`; у target также остаётся постоянный `Merge applied` marker. Backup restore и node merge нельзя ставить в staging одновременно.
+
+Availability history хранится внутри `node_registry.json`, поэтому та же merge-транзакция переносит её вместе с downtime и incident state без третьего runtime-файла.
 
 Remnawave location membership в node merge намеренно не переносится: транзакция merge по-прежнему меняет только node archive и speedtest history. Если source StableID был member location во вкладке `Remnawave`, после успешного merge вручную замените его на новый active StableID в той же location и сохраните настройки.
 
@@ -258,7 +262,7 @@ Copy-Item country-test-urls.example.yaml data/country-test-urls.yaml
 
 Speedtest удерживает Xray lifecycle-lock от выбора нод до завершения всех замеров. Refresh подписки дождётся активного теста, а новый тест во время restart начнётся только после запуска обновлённой конфигурации. Это исключает обращение к уже остановленным SOCKS-портам.
 
-История хранится по времени. Значение по умолчанию — 60 дней, диапазон настройки — 1–3650 дней. При уменьшении срока устаревшие результаты удаляются.
+Истории speedtest и Availability хранятся по времени с общим сроком из `History retention days`. Значение по умолчанию — 60 дней, диапазон настройки — 1–3650 дней. При уменьшении срока устаревшие записи сразу удаляются из обеих историй.
 
 ### Telegram
 
@@ -286,7 +290,7 @@ Recovery-уведомление хранится как pending до подтв�
 
 | Путь | Содержимое |
 | --- | --- |
-| `data/node_registry.json` | архив нод, режим обслуживания, downtime, incident journal, GeoIP-состояние и lineage объединённых StableID |
+| `data/node_registry.json` | архив нод, availability history с общим для speedtest сроком хранения, режим обслуживания, downtime, incident journal, GeoIP-состояние и lineage объединённых StableID |
 | `data/speedtest_results.json` | результаты и история speedtest |
 | `data/speedtest_schedule.json` | расписание, deadline следующего запуска, срок хранения и Test URL нод |
 | `data/country-test-urls.yaml` | редактируемый каталог резервных Test URL по ISO-кодам стран |

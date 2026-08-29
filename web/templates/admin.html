@@ -1071,6 +1071,34 @@
         align-items: center;
         gap: 6px;
       }
+      .chart-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .chart-mode-switch {
+        display: inline-flex;
+        gap: 4px;
+        margin-left: auto;
+        padding: 3px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--panel-2);
+      }
+      button.chart-mode {
+        padding: 6px 10px;
+        border-color: transparent;
+        background: transparent;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      button.chart-mode.active {
+        border-color: rgba(110, 168, 254, 0.65);
+        background: var(--blue-soft);
+        color: var(--text);
+      }
       @media (prefers-reduced-motion: reduce) {
         .node-card,
         .node-card.entering,
@@ -3080,18 +3108,32 @@
         let history = state.dashboardCardHistory.get(stableId);
         if (!history) {
           history = {
-            results: [],
-            loading: false,
-            error: "",
-            request: 0,
-            loaded: false,
+            view: "speedtest",
             range: "7d",
             from: "",
             to: "",
+            datasets: {
+              speedtest: { results: [], loading: false, error: "", request: 0, loaded: false },
+              availability: { results: [], loading: false, error: "", request: 0, loaded: false },
+            },
           };
           state.dashboardCardHistory.set(stableId, history);
         }
         return history;
+      }
+
+      function dashboardDataset(history, view = history.view) {
+        return history.datasets[view === "availability" ? "availability" : "speedtest"];
+      }
+
+      function resetDashboardDatasets(history) {
+        Object.values(history.datasets).forEach((dataset) => {
+          dataset.request += 1;
+          dataset.results = [];
+          dataset.loading = false;
+          dataset.error = "";
+          dataset.loaded = false;
+        });
       }
 
       function dashboardRangeBounds(history) {
@@ -3139,12 +3181,25 @@
         return step * exponent;
       }
 
-      function renderNodeSpeedChart(results, stableId, history) {
-        if (history.loading && results.length === 0) {
-          return `<div class="chart-empty">Loading speed-test history…</div>`;
+      function chartResultSuccessful(result, view) {
+        return view === "availability" ? result && result.online === true : isSuccessfulResult(result);
+      }
+
+      function chartResultValue(result, view) {
+        return Number(view === "availability" ? result.latencyMs : result.mbps) || 0;
+      }
+
+      function formatLatencyMs(value) {
+        return `${Math.max(0, Math.round(Number(value) || 0))} ms`;
+      }
+
+      function renderNodeMetricChart(results, stableId, history, view) {
+        const dataset = dashboardDataset(history, view);
+        if (dataset.loading && results.length === 0) {
+          return `<div class="chart-empty">${view === "availability" ? "Loading availability history…" : "Loading speed-test history…"}</div>`;
         }
-        if (history.error) {
-          return `<div class="chart-empty error">${escapeHtml(history.error)}</div>`;
+        if (dataset.error) {
+          return `<div class="chart-empty error">${escapeHtml(dataset.error)}</div>`;
         }
         const bounds = dashboardRangeBounds(history);
         if (bounds.error) {
@@ -3154,12 +3209,12 @@
           .filter((result) => result.checkedAt && !result.checkedAt.startsWith("0001-"))
           .sort((a, b) => new Date(a.checkedAt) - new Date(b.checkedAt));
         if (ordered.length === 0) {
-          return `<div class="chart-empty">No speed tests in this period</div>`;
+          return `<div class="chart-empty">${view === "availability" ? "No availability checks in this period" : "No speed tests in this period"}</div>`;
         }
 
-        const successful = ordered.filter(isSuccessfulResult);
-        const threshold = lowSpeedThreshold();
-        const observedMax = successful.reduce((max, result) => Math.max(max, Number(result.mbps || 0)), 0);
+        const successful = ordered.filter((result) => chartResultSuccessful(result, view));
+        const threshold = view === "speedtest" ? lowSpeedThreshold() : 0;
+        const observedMax = successful.reduce((max, result) => Math.max(max, chartResultValue(result, view)), 0);
         const yMax = niceSpeedMax(Math.max(observedMax, threshold));
         const width = 960;
         const height = 250;
@@ -3173,7 +3228,7 @@
         const toMs = bounds.to.getTime();
         const spanMs = Math.max(1, toMs - fromMs);
         const xOf = (iso) => left + Math.max(0, Math.min(1, (new Date(iso).getTime() - fromMs) / spanMs)) * plotWidth;
-        const yOf = (mbps) => top + plotHeight - Math.max(0, Math.min(1, Number(mbps || 0) / yMax)) * plotHeight;
+        const yOf = (value) => top + plotHeight - Math.max(0, Math.min(1, Number(value || 0) / yMax)) * plotHeight;
 
         const grid = [];
         [0, 0.5, 1].forEach((ratio) => {
@@ -3200,7 +3255,7 @@
         let run = [];
         let previous = null;
         ordered.forEach((result) => {
-          if (!isSuccessfulResult(result)) {
+          if (!chartResultSuccessful(result, view)) {
             if (run.length) runs.push(run);
             run = [];
             previous = null;
@@ -3217,7 +3272,7 @@
 
         const successfulRuns = runs.filter((items) => items.length > 1);
         const areaMasks = [];
-        const chartPrefix = `node-speed-${chartDOMToken(stableId)}`;
+        const chartPrefix = `node-${view}-${chartDOMToken(stableId)}`;
         const areaGradientID = `${chartPrefix}-area-gradient`;
         const clipID = `${chartPrefix}-plot`;
         const areas = successfulRuns.map((items, index) => {
@@ -3238,13 +3293,13 @@
             <mask id="${maskID}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="${firstX}" y="${top}" width="${runWidth.toFixed(1)}" height="${plotHeight}" style="mask-type: alpha">
               <rect x="${firstX}" y="${top}" width="${runWidth.toFixed(1)}" height="${plotHeight}" fill="url(#${gradientID})" />
             </mask>`);
-          const path = items.map((result) => `L ${xOf(result.checkedAt).toFixed(1)} ${yOf(result.mbps).toFixed(1)}`).join(" ");
+          const path = items.map((result) => `L ${xOf(result.checkedAt).toFixed(1)} ${yOf(chartResultValue(result, view)).toFixed(1)}`).join(" ");
           return `<path class="chart-area" style="fill:url(#${areaGradientID})" mask="url(#${maskID})" d="M ${firstX} ${baselineY} ${path} L ${lastX} ${baselineY} Z" />`;
         }).join("");
         const lines = successfulRuns.map((items) => {
           const path = items.map((result, index) => {
             const command = index === 0 ? "M" : "L";
-            return `${command} ${xOf(result.checkedAt).toFixed(1)} ${yOf(result.mbps).toFixed(1)}`;
+            return `${command} ${xOf(result.checkedAt).toFixed(1)} ${yOf(chartResultValue(result, view)).toFixed(1)}`;
           }).join(" ");
           return `<path class="chart-line" pathLength="1" d="${path}" />`;
         }).join("");
@@ -3253,30 +3308,36 @@
           if (!previousRun.length || !items.length) return "";
           const previous = previousRun[previousRun.length - 1];
           const next = items[0];
-          return `<path class="chart-gap-bridge" d="M ${xOf(previous.checkedAt).toFixed(1)} ${yOf(previous.mbps).toFixed(1)} L ${xOf(next.checkedAt).toFixed(1)} ${yOf(next.mbps).toFixed(1)}" aria-hidden="true" />`;
+          return `<path class="chart-gap-bridge" d="M ${xOf(previous.checkedAt).toFixed(1)} ${yOf(chartResultValue(previous, view)).toFixed(1)} L ${xOf(next.checkedAt).toFixed(1)} ${yOf(chartResultValue(next, view)).toFixed(1)}" aria-hidden="true" />`;
         }).join("");
         const singlePointTimes = new Set(runs.filter((items) => items.length === 1).map((items) => items[0].checkedAt));
         const points = successful.map((result) => {
-          const low = isLowSpeed(result);
+          const low = view === "speedtest" && isLowSpeed(result);
           const color = low ? "var(--yellow)" : "var(--blue)";
-          const detail = `${formatTime(result.checkedAt)} · ${formatMbps(result.mbps)} · TTFB ${Number(result.ttfbMs || 0)} ms · ${formatBytes(result.downloadedBytes)}`;
+          const detail = view === "availability"
+            ? `${formatTime(result.checkedAt)} · ${formatLatencyMs(result.latencyMs)} · Online`
+            : `${formatTime(result.checkedAt)} · ${formatMbps(result.mbps)} · TTFB ${Number(result.ttfbMs || 0)} ms · ${formatBytes(result.downloadedBytes)}`;
           const singleClass = singlePointTimes.has(result.checkedAt) ? " single" : "";
-          return `<circle class="chart-point${singleClass}" cx="${xOf(result.checkedAt).toFixed(1)}" cy="${yOf(result.mbps).toFixed(1)}" r="5" fill="${color}" tabindex="0"><title>${escapeHtml(detail)}</title></circle>`;
+          return `<circle class="chart-point${singleClass}" cx="${xOf(result.checkedAt).toFixed(1)}" cy="${yOf(chartResultValue(result, view)).toFixed(1)}" r="5" fill="${color}" tabindex="0"><title>${escapeHtml(detail)}</title></circle>`;
         }).join("");
         const errorBandWidth = Math.max(3, Math.min(34, medianInterval > 0 ? (medianInterval / spanMs) * plotWidth : 8));
-        const errors = ordered.filter((result) => !isSuccessfulResult(result)).map((result) => {
+        const errors = ordered.filter((result) => !chartResultSuccessful(result, view)).map((result) => {
           const x = xOf(result.checkedAt);
-          const detail = `${formatTime(result.checkedAt)} · ${result.offline ? "Offline" : compactReason(result.error) || "Failed"}`;
+          const detail = view === "availability"
+            ? `${formatTime(result.checkedAt)} · ${result.failureSummary || "Offline"}`
+            : `${formatTime(result.checkedAt)} · ${result.offline ? "Offline" : compactReason(result.error) || "Failed"}`;
           return `<rect class="chart-error-band" x="${(x - errorBandWidth / 2).toFixed(1)}" y="${top}" width="${errorBandWidth.toFixed(1)}" height="${plotHeight}" rx="2"><title>${escapeHtml(detail)}</title></rect>`;
         }).join("");
-        const thresholdLine = threshold > 0 && threshold < yMax
+        const thresholdLine = view === "speedtest" && threshold > 0 && threshold < yMax
           ? `<line class="chart-threshold" x1="${left}" y1="${yOf(threshold)}" x2="${width - right}" y2="${yOf(threshold)}"><title>Low-speed threshold: ${escapeHtml(formatMbps(threshold))}</title></line>`
           : "";
         const latest = ordered[ordered.length - 1];
         const latestX = xOf(latest.checkedAt).toFixed(1);
-        const latestMarker = `<line class="chart-last-marker" x1="${latestX}" y1="${top}" x2="${latestX}" y2="${top + plotHeight}"><title>Latest measurement: ${escapeHtml(formatTime(latest.checkedAt))}</title></line>`;
+        const latestMarker = `<line class="chart-last-marker" x1="${latestX}" y1="${top}" x2="${latestX}" y2="${top + plotHeight}"><title>${view === "availability" ? "Latest availability check" : "Latest measurement"}: ${escapeHtml(formatTime(latest.checkedAt))}</title></line>`;
         const cursor = `<line class="chart-cursor" x1="${left}" y1="${top}" x2="${left}" y2="${top + plotHeight}" opacity="0" aria-hidden="true" />`;
-        return `<svg class="speed-chart" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="Speed-test history in Mbps">
+        const unit = view === "availability" ? "ms" : "Mbps";
+        const ariaLabel = view === "availability" ? "Availability history in milliseconds" : "Speed-test history in Mbps";
+        return `<svg class="speed-chart" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${ariaLabel}">
           <defs>
             <linearGradient id="${areaGradientID}" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stop-color="var(--blue)" stop-opacity="0.28" />
@@ -3289,7 +3350,7 @@
           </defs>
           ${grid.join("")}
           <g clip-path="url(#${clipID})">${areas}${errors}${thresholdLine}${gapBridges}${lines}${latestMarker}${cursor}${points}</g>
-          <text class="chart-axis-label" x="${left}" y="13">Mbps</text>
+          <text class="chart-axis-label" x="${left}" y="13">${unit}</text>
         </svg>`;
       }
 
@@ -3312,34 +3373,40 @@
         tooltip.style.top = `${Math.max(8, y)}px`;
       }
 
-      function speedChartTooltipHTML(result) {
-        const successful = isSuccessfulResult(result);
-        const low = successful && isLowSpeed(result);
+      function metricChartTooltipHTML(result, view) {
+        const successful = chartResultSuccessful(result, view);
+        const low = view === "speedtest" && successful && isLowSpeed(result);
         const statusClass = successful ? (low ? "warn" : "ok") : "error";
-        const status = successful ? (low ? "Below threshold" : "Successful") : (result.offline ? "Offline" : compactReason(result.error) || "Failed");
+        const status = view === "availability"
+          ? (successful ? "Online" : result.failureSummary || "Offline")
+          : (successful ? (low ? "Below threshold" : "Successful") : (result.offline ? "Offline" : compactReason(result.error) || "Failed"));
         const measurement = successful
-          ? `<div class="speed-chart-tooltip-row">Speed: <strong>${escapeHtml(formatMbps(result.mbps))}</strong></div>
-             <div class="speed-chart-tooltip-row">TTFB: <strong>${Number(result.ttfbMs || 0)} ms</strong></div>
-             <div class="speed-chart-tooltip-row">Downloaded: <strong>${escapeHtml(formatBytes(result.downloadedBytes))}</strong></div>`
+          ? (view === "availability"
+            ? `<div class="speed-chart-tooltip-row">Latency: <strong>${escapeHtml(formatLatencyMs(result.latencyMs))}</strong></div>`
+            : `<div class="speed-chart-tooltip-row">Speed: <strong>${escapeHtml(formatMbps(result.mbps))}</strong></div>
+               <div class="speed-chart-tooltip-row">TTFB: <strong>${Number(result.ttfbMs || 0)} ms</strong></div>
+               <div class="speed-chart-tooltip-row">Downloaded: <strong>${escapeHtml(formatBytes(result.downloadedBytes))}</strong></div>`)
           : "";
         return `<div class="speed-chart-tooltip-time">${escapeHtml(formatTime(result.checkedAt))}</div>
           <div class="speed-chart-tooltip-row">Result: <strong class="${statusClass}">${escapeHtml(status)}</strong></div>
           ${measurement}`;
       }
 
-      function bindSpeedChartInteractions(root = $("nodes")) {
+      function bindMetricChartInteractions(root = $("nodes")) {
         const tooltip = $("node-speed-tooltip");
         if (!root || !tooltip) return;
-        root.querySelectorAll("[data-node-speed-chart] svg.speed-chart").forEach((svg) => {
+        root.querySelectorAll("[data-node-metric-chart] svg.speed-chart").forEach((svg) => {
           if (svg.dataset.interactionsBound === "true") return;
-          const wrap = svg.closest("[data-node-speed-chart]");
-          const stableId = wrap?.dataset.nodeSpeedChart || "";
+          const wrap = svg.closest("[data-node-metric-chart]");
+          const stableId = wrap?.dataset.nodeMetricChart || "";
+          const view = wrap?.dataset.chartView === "availability" ? "availability" : "speedtest";
           const history = state.dashboardCardHistory.get(stableId);
           const cursor = svg.querySelector(".chart-cursor");
           if (!history || !cursor) return;
+          const dataset = dashboardDataset(history, view);
           const bounds = dashboardRangeBounds(history);
           if (bounds.error) return;
-          const ordered = [...(history.results || [])]
+          const ordered = [...(dataset.results || [])]
             .filter((result) => result.checkedAt && !result.checkedAt.startsWith("0001-"))
             .sort((a, b) => new Date(a.checkedAt) - new Date(b.checkedAt));
           if (ordered.length === 0) return;
@@ -3371,7 +3438,7 @@
             cursor.setAttribute("x1", x);
             cursor.setAttribute("x2", x);
             cursor.setAttribute("opacity", "1");
-            tooltip.innerHTML = speedChartTooltipHTML(nearest);
+            tooltip.innerHTML = metricChartTooltipHTML(nearest, view);
             tooltip.classList.add("visible");
             moveSpeedChartTooltip(event);
           });
@@ -3864,12 +3931,18 @@
 
       function dashboardRangeControls(stableId, history) {
         const active = (value) => history.range === value ? "active" : "";
+        const availability = history.view === "availability";
+        const dataset = dashboardDataset(history);
+        const title = availability ? "Availability latency" : "Measured speed";
+        const description = availability
+          ? `Only real availability checks are plotted; gaps mean no check.${dataset.loading && dataset.results.length > 0 ? " Refreshing…" : ""}`
+          : `Only real speed tests are plotted; gaps mean no measurement.${dataset.loading && dataset.results.length > 0 ? " Refreshing…" : ""}`;
         return `<div class="chart-toolbar">
           <div>
-            <h3>Measured speed</h3>
-            <div class="muted">Only real speed tests are plotted; gaps mean no measurement.${history.loading && history.results.length > 0 ? " Refreshing…" : ""}</div>
+            <h3>${title}</h3>
+            <div class="muted">${description}</div>
           </div>
-          <div class="chart-ranges" aria-label="Speed chart period">
+          <div class="chart-ranges" aria-label="${availability ? "Availability chart period" : "Speed chart period"}">
             <button class="chart-range ${active("1d")}" type="button" data-chart-range="1d" data-chart-node="${escapeHtml(stableId)}">24 h</button>
             <button class="chart-range ${active("3d")}" type="button" data-chart-range="3d" data-chart-node="${escapeHtml(stableId)}">3 d</button>
             <button class="chart-range ${active("7d")}" type="button" data-chart-range="7d" data-chart-node="${escapeHtml(stableId)}">7 d</button>
@@ -3893,6 +3966,30 @@
           <div class="node-detail-stat"><span>Maximum</span><strong>${stats ? escapeHtml(formatMbps(stats.max)) : "n/a"}</strong></div>
           <div class="node-detail-stat"><span>Measurements</span><strong title="${measurements.successful} of ${(results || []).length} measurements met the configured speed threshold">${measurements.completed} ok · ${measurements.failed} failed · ${measurements.successPercent}</strong></div>
         </div>`;
+      }
+
+      function nodeAvailabilityStatsHTML(results) {
+        const checks = results || [];
+        const online = checks.filter((result) => result.online === true);
+        const latencies = online.map((result) => Number(result.latencyMs || 0));
+        const stats = latencies.length > 0 ? {
+          avg: latencies.reduce((sum, value) => sum + value, 0) / latencies.length,
+          min: Math.min(...latencies),
+          max: Math.max(...latencies),
+        } : null;
+        const failed = checks.length - online.length;
+        return `<div class="node-detail-grid">
+          <div class="node-detail-stat"><span>Average</span><strong>${stats ? escapeHtml(formatLatencyMs(stats.avg)) : "n/a"}</strong></div>
+          <div class="node-detail-stat"><span>Minimum</span><strong>${stats ? escapeHtml(formatLatencyMs(stats.min)) : "n/a"}</strong></div>
+          <div class="node-detail-stat"><span>Maximum</span><strong>${stats ? escapeHtml(formatLatencyMs(stats.max)) : "n/a"}</strong></div>
+          <div class="node-detail-stat"><span>Checks</span><strong title="${online.length} of ${checks.length} availability checks succeeded">${online.length} online · ${failed} offline · ${percent(online.length, checks.length)}</strong></div>
+        </div>`;
+      }
+
+      function latestAvailabilitySample(results) {
+        return [...(results || [])]
+          .filter((result) => result.checkedAt && !result.checkedAt.startsWith("0001-"))
+          .sort((a, b) => new Date(b.checkedAt) - new Date(a.checkedAt))[0] || null;
       }
 
       function nodeAvailabilityDetails(proxy) {
@@ -3936,6 +4033,20 @@
           : "No current failure";
         const speed = result ? formatSpeedStatus(result) : "No speed test";
         const checked = result ? formatTime(result.checkedAt) : "n/a";
+        const view = history.view === "availability" ? "availability" : "speedtest";
+        const dataset = dashboardDataset(history, view);
+        const latestAvailability = latestAvailabilitySample(dataset.results);
+        const latestAvailabilityStatus = latestAvailability
+          ? (latestAvailability.online ? formatLatencyMs(latestAvailability.latencyMs) : latestAvailability.failureSummary || "Offline")
+          : "No availability checks";
+        const legend = view === "availability"
+          ? `<span><i class="legend-dot"></i>Available</span>
+             <span><i class="legend-dot error"></i>Offline</span>
+             <span>Latest: ${escapeHtml(latestAvailabilityStatus)} · ${escapeHtml(latestAvailability ? formatTime(latestAvailability.checkedAt) : "n/a")}</span>`
+          : `<span><i class="legend-dot"></i>Normal speed</span>
+             <span><i class="legend-dot warn"></i>Below configured threshold</span>
+             <span><i class="legend-dot error"></i>Error or offline</span>
+             <span>Latest: ${escapeHtml(speed)} · ${escapeHtml(checked)}</span>`;
         return `<div class="node-card-detail">
           <div class="node-detail-grid">
             <div class="node-detail-stat"><span>Server</span><strong class="mono">${copyIPButton(proxy.server, "data-node-detail-ip")}:<span data-node-detail-port>${escapeHtml(proxy.port)}</span></strong></div>
@@ -3944,16 +4055,17 @@
             <div class="node-detail-stat"><span>Failure</span><strong data-node-detail-failure title="${escapeHtml(proxy.failureDetail || "")}">${escapeHtml(failure)}</strong></div>
           </div>
           ${dashboardRangeControls(proxy.stableId, history)}
-          ${nodeSpeedStatsHTML(history.results)}
-          <div class="speed-chart-wrap" data-node-speed-chart="${escapeHtml(proxy.stableId)}">${renderNodeSpeedChart(history.results, proxy.stableId, history)}</div>
+          ${view === "availability" ? nodeAvailabilityStatsHTML(dataset.results) : nodeSpeedStatsHTML(dataset.results)}
+          <div class="speed-chart-wrap" data-node-metric-chart="${escapeHtml(proxy.stableId)}" data-chart-view="${view}">${renderNodeMetricChart(dataset.results, proxy.stableId, history, view)}</div>
           <div class="chart-legend">
-            <span><i class="legend-dot"></i>Normal speed</span>
-            <span><i class="legend-dot warn"></i>Below configured threshold</span>
-            <span><i class="legend-dot error"></i>Error or offline</span>
-            <span>Latest: ${escapeHtml(speed)} · ${escapeHtml(checked)}</span>
+            ${legend}
           </div>
-          <div class="row">
-            <button class="secondary small" type="button" data-open-history="${escapeHtml(proxy.stableId)}">Open full history</button>
+          <div class="chart-footer">
+            <div>${view === "speedtest" ? `<button class="secondary small" type="button" data-open-history="${escapeHtml(proxy.stableId)}">Open full history</button>` : ""}</div>
+            <div class="chart-mode-switch" role="group" aria-label="Chart metric">
+              <button class="chart-mode ${view === "speedtest" ? "active" : ""}" type="button" aria-pressed="${view === "speedtest"}" data-chart-view-select="speedtest" data-chart-node="${escapeHtml(proxy.stableId)}">Speedtest</button>
+              <button class="chart-mode ${view === "availability" ? "active" : ""}" type="button" aria-pressed="${view === "availability"}" data-chart-view-select="availability" data-chart-node="${escapeHtml(proxy.stableId)}">Availability</button>
+            </div>
           </div>
         </div>`;
       }
@@ -4073,11 +4185,11 @@
         const result = resultFor(stableId);
         const history = dashboardHistoryFor(stableId);
         const previousHeight = panel.getBoundingClientRect().height;
-        const previousScrollLeft = panel.querySelector("[data-node-speed-chart]")?.scrollLeft || 0;
+        const previousScrollLeft = panel.querySelector("[data-node-metric-chart]")?.scrollLeft || 0;
         panel.innerHTML = nodeDetailHTML(proxy, result, history);
-        const chart = panel.querySelector("[data-node-speed-chart]");
+        const chart = panel.querySelector("[data-node-metric-chart]");
         if (chart) chart.scrollLeft = previousScrollLeft;
-        bindSpeedChartInteractions(panel);
+        bindMetricChartInteractions(panel);
         if (options.sync !== false && state.openNodeStableIds.has(stableId)) {
           syncNodePanel(stableId, options.immediate ? { immediate: true } : { fromHeight: previousHeight });
         }
@@ -4234,7 +4346,7 @@
           container.innerHTML = proxies.map((proxy, index) => nodeCardHTML(proxy, index, animateCards)).join("")
             || `<div class="panel muted">No nodes match filters</div>`;
           if (animateCards) state.dashboardCardsAnimated = true;
-          bindSpeedChartInteractions(container);
+          bindMetricChartInteractions(container);
           state.openNodeStableIds.forEach((stableId) => {
             if (nodeCardElement(stableId)) syncNodePanel(stableId, { immediate: true });
           });
@@ -4515,7 +4627,7 @@
         state.openNodeStableIds = new Set([...state.openNodeStableIds].filter((id) => knownIds.has(id)));
         [...state.dashboardCardHistory.entries()].forEach(([stableId, history]) => {
           if (knownIds.has(stableId)) return;
-          history.request += 1;
+          Object.values(history.datasets).forEach((dataset) => { dataset.request += 1; });
           state.dashboardCardHistory.delete(stableId);
         });
         if (state.historyStableId && !knownHistoryIds.has(state.historyStableId)) {
@@ -4529,8 +4641,10 @@
         const history = dashboardHistoryFor(stableId);
         if (state.openNodeStableIds.has(stableId)) {
           state.openNodeStableIds.delete(stableId);
-          history.request += 1;
-          history.loading = false;
+          Object.values(history.datasets).forEach((dataset) => {
+            dataset.request += 1;
+            dataset.loading = false;
+          });
           animateNodePanelClose(stableId);
           return;
         }
@@ -4551,9 +4665,7 @@
           history.from = dateInputValue(from);
           history.to = dateInputValue(today);
         }
-        history.results = [];
-        history.error = "";
-        history.loaded = false;
+        resetDashboardDatasets(history);
         renderNodePanel(stableId);
         await loadDashboardHistory(stableId);
       }
@@ -4561,46 +4673,58 @@
       async function setDashboardCustomDate(stableId, field, value) {
         const history = dashboardHistoryFor(stableId);
         history[field] = value;
-        history.results = [];
-        history.error = "";
-        history.loaded = false;
+        resetDashboardDatasets(history);
         renderNodePanel(stableId);
         await loadDashboardHistory(stableId);
+      }
+
+      async function setDashboardView(stableId, view) {
+        const history = dashboardHistoryFor(stableId);
+        history.view = view === "availability" ? "availability" : "speedtest";
+        hideSpeedChartTooltip();
+        renderNodePanel(stableId);
+        const dataset = dashboardDataset(history);
+        if (!dataset.loading) {
+          await loadDashboardHistory(stableId);
+        }
       }
 
       async function loadDashboardHistory(stableId) {
         if (!stableId || !state.openNodeStableIds.has(stableId)) return;
         const history = dashboardHistoryFor(stableId);
+        const view = history.view === "availability" ? "availability" : "speedtest";
+        const dataset = dashboardDataset(history, view);
         const bounds = dashboardRangeBounds(history);
         if (bounds.error) {
-          history.results = [];
-          history.error = bounds.error;
-          history.loading = false;
+          dataset.results = [];
+          dataset.error = bounds.error;
+          dataset.loading = false;
           renderNodePanel(stableId);
           return;
         }
 
-        const requestID = history.request + 1;
-        history.request = requestID;
-        history.loading = true;
-        history.error = "";
-        if (history.results.length === 0) renderNodePanel(stableId);
+        const requestID = dataset.request + 1;
+        dataset.request = requestID;
+        dataset.loading = true;
+        dataset.error = "";
+        if (dataset.results.length === 0) renderNodePanel(stableId);
         const query = new URLSearchParams({
           stableId,
           from: bounds.from.toISOString(),
           to: bounds.to.toISOString(),
         });
         try {
-          const results = await request(`/speed-tests/history?${query.toString()}`);
-          if (requestID !== history.request || !state.openNodeStableIds.has(stableId)) return;
-          history.results = results;
-          history.loaded = true;
+          const endpoint = view === "availability" ? "/availability/history" : "/speed-tests/history";
+          const results = await request(`${endpoint}?${query.toString()}`);
+          if (requestID !== dataset.request || !state.openNodeStableIds.has(stableId)) return;
+          dataset.results = results;
+          dataset.loaded = true;
         } catch (err) {
-          if (requestID !== history.request || !state.openNodeStableIds.has(stableId)) return;
-          history.error = err.message;
+          if (requestID !== dataset.request || !state.openNodeStableIds.has(stableId)) return;
+          dataset.error = err.message;
         } finally {
-          if (requestID === history.request && state.openNodeStableIds.has(stableId)) {
-            history.loading = false;
+          if (requestID === dataset.request && state.openNodeStableIds.has(stableId)) {
+            dataset.loading = false;
             renderNodePanel(stableId);
           }
         }
@@ -4874,7 +4998,7 @@
         }
 
         const label = nodeOverviewLabel(node) || stableId;
-        const confirmed = window.confirm(tr(`Delete archived node "${label}"?\n\nThis removes the node registry entry and saved speed-test history.`));
+        const confirmed = window.confirm(tr(`Delete archived node "${label}"?\n\nThis removes the node registry entry and saved speed-test and availability histories.`));
         if (!confirmed) return;
 
         $("nodes-overview-summary").textContent = "Deleting node";
@@ -5345,6 +5469,11 @@
         const run = target.closest("[data-run-id]");
         if (run) {
           runNodes([run.dataset.runId]);
+          return;
+        }
+        const chartView = target.closest("[data-chart-view-select]");
+        if (chartView) {
+          setDashboardView(chartView.dataset.chartNode, chartView.dataset.chartViewSelect);
           return;
         }
         const range = target.closest("[data-chart-range]");

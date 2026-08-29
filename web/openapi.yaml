@@ -444,6 +444,49 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /api/v1/admin/availability/history:
+    get:
+      summary: Get retained availability latency history for one node
+      tags: [Admin]
+      parameters:
+        - name: stableId
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: from
+          in: query
+          required: false
+          description: Inclusive lower bound for checkedAt in RFC3339 format.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          description: Exclusive upper bound for checkedAt in RFC3339 format.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Real availability checks ordered from newest to oldest
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AvailabilitySample'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /api/v1/admin/nodes-overview:
     get:
       summary: Get active and retired node summaries
@@ -869,6 +912,25 @@ components:
           format: int64
           example: 150
 
+    AvailabilitySample:
+      type: object
+      required: [checkedAt, online, latencyMs]
+      properties:
+        checkedAt:
+          type: string
+          format: date-time
+        online:
+          type: boolean
+        latencyMs:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Proxy check latency in milliseconds; zero for offline checks.
+        failureCode:
+          type: string
+        failureSummary:
+          type: string
+
     ProxyInfo:
       type: object
       properties:
@@ -1129,6 +1191,8 @@ components:
         historyRetentionDays:
           type: integer
           minimum: 1
+          maximum: 3650
+          description: Shared age-based retention period for speed-test and availability histories.
 
     SpeedTestRunRequest:
       type: object

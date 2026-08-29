@@ -342,8 +342,44 @@ func mergeNodeState(state *nodearchive.StateFile, sourceID, targetID string, now
 	for index := range state.Incidents {
 		rewriteIncident(&state.Incidents[index], sourceID, targetID, target.Name)
 	}
+	if state.AvailabilityHistory == nil {
+		state.AvailabilityHistory = make(map[string][]nodearchive.AvailabilitySample)
+	}
+	mergedAvailability := mergeAvailabilityHistory(
+		state.AvailabilityHistory[targetID],
+		state.AvailabilityHistory[sourceID],
+	)
+	delete(state.AvailabilityHistory, sourceID)
+	if len(mergedAvailability) == 0 {
+		delete(state.AvailabilityHistory, targetID)
+	} else {
+		state.AvailabilityHistory[targetID] = mergedAvailability
+	}
 	state.UpdatedAt = now
 	return nil
+}
+
+func mergeAvailabilityHistory(first, second []nodearchive.AvailabilitySample) []nodearchive.AvailabilitySample {
+	entries := make([]nodearchive.AvailabilitySample, 0, len(first)+len(second))
+	entries = append(entries, first...)
+	entries = append(entries, second...)
+	seen := make(map[int64]bool, len(entries))
+	merged := make([]nodearchive.AvailabilitySample, 0, len(entries))
+	for _, sample := range entries {
+		if sample.CheckedAt.IsZero() {
+			continue
+		}
+		key := sample.CheckedAt.UnixNano()
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		merged = append(merged, sample)
+	}
+	sort.SliceStable(merged, func(i, j int) bool {
+		return merged[i].CheckedAt.After(merged[j].CheckedAt)
+	})
+	return merged
 }
 
 func mergeSpeedState(state *speedResultState, sourceID, targetID string, target nodearchive.NodeRecord, now time.Time) {

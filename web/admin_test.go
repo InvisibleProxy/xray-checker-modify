@@ -67,7 +67,9 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`data-node-toggle-area="${escapeHtml(proxy.stableId)}"`,
 		`class="node-card-panel"`,
 		`data-chart-range="7d"`,
-		`data-node-speed-chart="${escapeHtml(proxy.stableId)}"`,
+		`data-node-metric-chart="${escapeHtml(proxy.stableId)}"`,
+		`data-chart-view-select="availability"`,
+		"request(`${endpoint}?${query.toString()}`)",
 		`preserveAspectRatio="none"`,
 		`style="mask-type: alpha"`,
 		`class="chart-area"`,
@@ -76,7 +78,7 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`class="chart-last-marker"`,
 		`class="chart-cursor"`,
 		`id="node-speed-tooltip"`,
-		`function bindSpeedChartInteractions(root = $("nodes"))`,
+		`function bindMetricChartInteractions(root = $("nodes"))`,
 		`function animateNodePanelClose(stableId)`,
 		`openNodeStableIds: new Set()`,
 		`dashboardCardHistory: new Map()`,
@@ -228,6 +230,7 @@ func TestWebTemplatesExposeSharedEnglishRussianLocalization(t *testing.T) {
 		`"Check": "Check", "Run": "Run"`,
 		`"Announce locations": "Локации Announce"`,
 		`"Loading speed-test history…": "Загрузка speedtest history…"`,
+		`"Loading availability history…": "Загрузка availability history…"`,
 		`"IP / server copied!": "IP / сервер скопирован!"`,
 	} {
 		if !strings.Contains(localization, marker) {
@@ -423,6 +426,102 @@ func TestAdminSpeedTestHistoryHandlerRejectsInvalidRange(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("%s: expected status %d, got %d: %s", path, http.StatusBadRequest, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestAdminAvailabilityHistoryHandlerFiltersByTimeRange(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	path := filepath.Join(t.TempDir(), "node_registry.json")
+	state := nodearchive.StateFile{
+		Version: 1,
+		Nodes:   map[string]nodearchive.NodeRecord{"node-1": {StableID: "node-1", Active: true}},
+		AvailabilityHistory: map[string][]nodearchive.AvailabilitySample{
+			"node-1": {
+				{CheckedAt: now.Add(-time.Hour), Online: true, LatencyMs: 25},
+				{CheckedAt: now.Add(-48 * time.Hour), Online: false, FailureCode: checker.FailureCodeProxyTimeout},
+				{CheckedAt: now.Add(-10 * 24 * time.Hour), Online: true, LatencyMs: 40},
+			},
+		},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := nodearchive.NewStore(path, nil)
+	if err := store.Load(); err != nil {
+		t.Fatalf("load availability history: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	requestPath := fmt.Sprintf(
+		"/api/v1/admin/availability/history?stableId=node-1&from=%s&to=%s",
+		now.Add(-3*24*time.Hour).Format(time.RFC3339),
+		now.Format(time.RFC3339),
+	)
+	AdminAvailabilityHistoryHandler(store).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, requestPath, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Success bool                             `json:"success"`
+		Data    []nodearchive.AvailabilitySample `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !body.Success || len(body.Data) != 2 || body.Data[0].LatencyMs != 25 || body.Data[1].Online {
+		t.Fatalf("unexpected filtered history: %+v", body)
+	}
+}
+
+func TestAdminScheduleHandlerAppliesRetentionToAvailabilityHistory(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	path := filepath.Join(t.TempDir(), "node_registry.json")
+	state := nodearchive.StateFile{
+		Version: 1,
+		Nodes:   map[string]nodearchive.NodeRecord{"node-1": {StableID: "node-1", Active: true}},
+		AvailabilityHistory: map[string][]nodearchive.AvailabilitySample{
+			"node-1": {
+				{CheckedAt: now.Add(-20 * 24 * time.Hour), Online: true, LatencyMs: 20},
+				{CheckedAt: now.Add(-40 * 24 * time.Hour), Online: true, LatencyMs: 40},
+			},
+		},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := nodearchive.NewStore(path, nil)
+	if err := store.SetAvailabilityHistoryRetentionDays(90); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
+	manager := speedtest.NewManager(proxyChecker, 10000, "", speedtest.TestConfig{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPut,
+		"/api/v1/admin/schedules",
+		strings.NewReader(`{"enabled":false,"intervalSec":7200,"historyRetentionDays":30,"config":{}}`),
+	)
+	AdminScheduleHandler(manager, store).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if got := manager.Schedule().HistoryRetentionDays; got != 30 {
+		t.Fatalf("speed-test retention = %d days, want 30", got)
+	}
+	if got := store.AvailabilityHistory("node-1", time.Time{}, time.Time{}); len(got) != 1 || got[0].LatencyMs != 20 {
+		t.Fatalf("availability history after schedule update = %+v, want one retained sample", got)
 	}
 }
 

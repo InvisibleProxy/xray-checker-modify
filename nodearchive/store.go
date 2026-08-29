@@ -22,6 +22,11 @@ import (
 const stateVersion = 1
 
 const (
+	defaultAvailabilityHistoryRetentionDays = 60
+	maxAvailabilityHistoryRetentionDays     = 3650
+)
+
+const (
 	incidentKindNode       = "node"
 	incidentKindMass       = "mass"
 	incidentStatusActive   = "active"
@@ -34,18 +39,31 @@ type Store struct {
 	proxyChecker *checker.ProxyChecker
 	httpClient   *http.Client
 
-	mu          sync.RWMutex
-	nodes       map[string]NodeRecord
-	mergedNodes map[string][]string
-	incidents   []IncidentRecord
+	mu                               sync.RWMutex
+	nodes                            map[string]NodeRecord
+	mergedNodes                      map[string][]string
+	incidents                        []IncidentRecord
+	availabilityHistory              map[string][]AvailabilitySample
+	availabilityHistoryRetentionDays int
 }
 
 type StateFile struct {
-	Version     int                   `json:"version"`
-	UpdatedAt   time.Time             `json:"updatedAt"`
-	Nodes       map[string]NodeRecord `json:"nodes"`
-	MergedNodes map[string][]string   `json:"mergedNodes,omitempty"`
-	Incidents   []IncidentRecord      `json:"incidents,omitempty"`
+	Version             int                             `json:"version"`
+	UpdatedAt           time.Time                       `json:"updatedAt"`
+	Nodes               map[string]NodeRecord           `json:"nodes"`
+	MergedNodes         map[string][]string             `json:"mergedNodes,omitempty"`
+	Incidents           []IncidentRecord                `json:"incidents,omitempty"`
+	AvailabilityHistory map[string][]AvailabilitySample `json:"availabilityHistory,omitempty"`
+}
+
+// AvailabilitySample is one real proxy availability check retained for the
+// admin card latency graph. Offline checks deliberately carry no latency.
+type AvailabilitySample struct {
+	CheckedAt      time.Time `json:"checkedAt"`
+	Online         bool      `json:"online"`
+	LatencyMs      int64     `json:"latencyMs"`
+	FailureCode    string    `json:"failureCode,omitempty"`
+	FailureSummary string    `json:"failureSummary,omitempty"`
 }
 
 // IncidentRecord is an append-oriented operational journal entry. Node
@@ -172,10 +190,34 @@ func NewStore(path string, proxyChecker *checker.ProxyChecker) *Store {
 		httpClient: &http.Client{
 			Timeout: 8 * time.Second,
 		},
-		nodes:       make(map[string]NodeRecord),
-		mergedNodes: make(map[string][]string),
-		incidents:   make([]IncidentRecord, 0),
+		nodes:                            make(map[string]NodeRecord),
+		mergedNodes:                      make(map[string][]string),
+		incidents:                        make([]IncidentRecord, 0),
+		availabilityHistory:              make(map[string][]AvailabilitySample),
+		availabilityHistoryRetentionDays: defaultAvailabilityHistoryRetentionDays,
 	}
+}
+
+// SetAvailabilityHistoryRetentionDays applies the same age-based retention
+// configured for speed-test history and immediately persists any pruning.
+func (s *Store) SetAvailabilityHistoryRetentionDays(days int) error {
+	days = normalizeAvailabilityHistoryRetentionDays(days)
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previousDays := s.availabilityHistoryRetentionDays
+	previousHistory := cloneAvailabilityHistory(s.availabilityHistory)
+	s.availabilityHistoryRetentionDays = days
+	if !s.pruneAvailabilityHistoryLocked(now) {
+		return nil
+	}
+	if err := s.saveLocked(); err != nil {
+		s.availabilityHistoryRetentionDays = previousDays
+		s.availabilityHistory = previousHistory
+		return err
+	}
+	return nil
 }
 
 // ClaimedCountryCode returns the user-declared country inferred from the node
@@ -222,11 +264,17 @@ func (s *Store) Load() error {
 	}
 	mergedNodes := normalizeMergedNodes(state.MergedNodes, nodes)
 	incidents := normalizeIncidents(state.Incidents)
+	availabilityHistory := normalizeAvailabilityHistory(
+		state.AvailabilityHistory,
+		time.Now(),
+		s.availabilityHistoryRetentionDays,
+	)
 
 	s.mu.Lock()
 	s.nodes = nodes
 	s.mergedNodes = mergedNodes
 	s.incidents = incidents
+	s.availabilityHistory = availabilityHistory
 	s.mu.Unlock()
 	return nil
 }
@@ -449,6 +497,9 @@ func (s *Store) RecordAvailability() error {
 		if err == nil {
 			detailsByStableID[proxy.StableID] = details
 			record = applyAvailability(record, details, now)
+			if s.recordAvailabilitySampleLocked(proxy.StableID, details, now) {
+				changed = true
+			}
 			if s.updateNodeIncidentLocked(proxy, details, now) {
 				changed = true
 			}
@@ -462,6 +513,9 @@ func (s *Store) RecordAvailability() error {
 		changed = true
 	}
 	if s.pruneIncidentsLocked() {
+		changed = true
+	}
+	if s.pruneAvailabilityHistoryLocked(now) {
 		changed = true
 	}
 
@@ -484,6 +538,142 @@ func (s *Store) RecordAvailability() error {
 		return nil
 	}
 	return s.saveLocked()
+}
+
+// AvailabilityHistory returns retained samples newest-first. From is
+// inclusive and to is exclusive, matching the speed-test history contract.
+func (s *Store) AvailabilityHistory(stableID string, from, to time.Time) []AvailabilitySample {
+	stableID = strings.TrimSpace(stableID)
+	if stableID == "" {
+		return []AvailabilitySample{}
+	}
+	s.mu.RLock()
+	cutoff := availabilityHistoryCutoff(s.availabilityHistoryRetentionDays, time.Now())
+	entries := s.availabilityHistory[stableID]
+	result := make([]AvailabilitySample, 0, len(entries))
+	for _, sample := range entries {
+		if sample.CheckedAt.IsZero() || sample.CheckedAt.Before(cutoff) {
+			continue
+		}
+		if !from.IsZero() && sample.CheckedAt.Before(from) {
+			continue
+		}
+		if !to.IsZero() && !sample.CheckedAt.Before(to) {
+			continue
+		}
+		result = append(result, sample)
+	}
+	s.mu.RUnlock()
+	return result
+}
+
+func (s *Store) recordAvailabilitySampleLocked(stableID string, details checker.ProxyStatusDetails, now time.Time) bool {
+	if details.CheckedAt.IsZero() {
+		return false
+	}
+	for _, sample := range s.availabilityHistory[stableID] {
+		if sample.CheckedAt.Equal(details.CheckedAt) {
+			return false
+		}
+	}
+	sample := AvailabilitySample{
+		CheckedAt:      details.CheckedAt,
+		Online:         details.Online,
+		FailureCode:    strings.TrimSpace(details.Failure.Code),
+		FailureSummary: strings.TrimSpace(details.Failure.Summary),
+	}
+	if sample.Online && details.Latency > 0 {
+		sample.LatencyMs = details.Latency.Milliseconds()
+	}
+	s.availabilityHistory[stableID] = append([]AvailabilitySample{sample}, s.availabilityHistory[stableID]...)
+	s.availabilityHistory[stableID] = normalizeAvailabilitySamples(
+		s.availabilityHistory[stableID],
+		now,
+		s.availabilityHistoryRetentionDays,
+	)
+	return true
+}
+
+func (s *Store) pruneAvailabilityHistoryLocked(now time.Time) bool {
+	changed := false
+	for stableID, entries := range s.availabilityHistory {
+		normalized := normalizeAvailabilitySamples(entries, now, s.availabilityHistoryRetentionDays)
+		if len(normalized) == 0 {
+			if len(entries) > 0 {
+				delete(s.availabilityHistory, stableID)
+				changed = true
+			}
+			continue
+		}
+		if len(normalized) != len(entries) {
+			changed = true
+		}
+		s.availabilityHistory[stableID] = normalized
+	}
+	return changed
+}
+
+func normalizeAvailabilityHistory(input map[string][]AvailabilitySample, now time.Time, retentionDays int) map[string][]AvailabilitySample {
+	result := make(map[string][]AvailabilitySample)
+	for rawStableID, entries := range input {
+		stableID := strings.TrimSpace(rawStableID)
+		if stableID == "" {
+			continue
+		}
+		if normalized := normalizeAvailabilitySamples(entries, now, retentionDays); len(normalized) > 0 {
+			result[stableID] = normalized
+		}
+	}
+	return result
+}
+
+func normalizeAvailabilitySamples(entries []AvailabilitySample, now time.Time, retentionDays int) []AvailabilitySample {
+	cutoff := availabilityHistoryCutoff(retentionDays, now)
+	seen := make(map[int64]bool, len(entries))
+	result := make([]AvailabilitySample, 0, len(entries))
+	for _, sample := range entries {
+		if sample.CheckedAt.IsZero() || sample.CheckedAt.Before(cutoff) {
+			continue
+		}
+		key := sample.CheckedAt.UnixNano()
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if !sample.Online || sample.LatencyMs < 0 {
+			sample.LatencyMs = 0
+		}
+		sample.FailureCode = strings.TrimSpace(sample.FailureCode)
+		sample.FailureSummary = strings.TrimSpace(sample.FailureSummary)
+		result = append(result, sample)
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		return result[i].CheckedAt.After(result[j].CheckedAt)
+	})
+	return result
+}
+
+func normalizeAvailabilityHistoryRetentionDays(days int) int {
+	if days <= 0 {
+		return defaultAvailabilityHistoryRetentionDays
+	}
+	if days > maxAvailabilityHistoryRetentionDays {
+		return maxAvailabilityHistoryRetentionDays
+	}
+	return days
+}
+
+func availabilityHistoryCutoff(retentionDays int, now time.Time) time.Time {
+	days := normalizeAvailabilityHistoryRetentionDays(retentionDays)
+	return now.Add(-time.Duration(days) * 24 * time.Hour)
+}
+
+func cloneAvailabilityHistory(input map[string][]AvailabilitySample) map[string][]AvailabilitySample {
+	result := make(map[string][]AvailabilitySample, len(input))
+	for stableID, entries := range input {
+		result[stableID] = append([]AvailabilitySample(nil), entries...)
+	}
+	return result
 }
 
 func (s *Store) Summaries(history map[string][]speedtest.Result) []Summary {
@@ -662,12 +852,17 @@ func (s *Store) DeleteArchived(stableID string) error {
 		return fmt.Errorf("active nodes are managed by subscription and cannot be deleted")
 	}
 	mergedFrom := append([]string(nil), s.mergedNodes[stableID]...)
+	availabilityHistory := append([]AvailabilitySample(nil), s.availabilityHistory[stableID]...)
 	delete(s.nodes, stableID)
 	delete(s.mergedNodes, stableID)
+	delete(s.availabilityHistory, stableID)
 	if err := s.saveLocked(); err != nil {
 		s.nodes[stableID] = record
 		if len(mergedFrom) > 0 {
 			s.mergedNodes[stableID] = mergedFrom
+		}
+		if len(availabilityHistory) > 0 {
+			s.availabilityHistory[stableID] = availabilityHistory
 		}
 		return err
 	}
@@ -691,7 +886,18 @@ func (s *Store) ArchivedRecord(stableID string) (NodeRecord, error) {
 	return record, nil
 }
 
+func (s *Store) ArchivedAvailabilityHistory(stableID string) []AvailabilitySample {
+	stableID = strings.TrimSpace(stableID)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]AvailabilitySample(nil), s.availabilityHistory[stableID]...)
+}
+
 func (s *Store) RestoreArchived(record NodeRecord, mergedFrom ...string) error {
+	return s.RestoreArchivedState(record, nil, mergedFrom...)
+}
+
+func (s *Store) RestoreArchivedState(record NodeRecord, availabilityHistory []AvailabilitySample, mergedFrom ...string) error {
 	stableID := strings.TrimSpace(record.StableID)
 	if stableID == "" {
 		return fmt.Errorf("stableId is required")
@@ -704,12 +910,22 @@ func (s *Store) RestoreArchived(record NodeRecord, mergedFrom ...string) error {
 	defer s.mu.Unlock()
 	previous, existed := s.nodes[stableID]
 	previousMerged, hadMerged := s.mergedNodes[stableID]
+	previousAvailability, hadAvailability := s.availabilityHistory[stableID]
 	s.nodes[stableID] = record
 	restoredMerged := uniqueSortedStrings(mergedFrom)
 	if len(restoredMerged) > 0 {
 		s.mergedNodes[stableID] = restoredMerged
 	} else {
 		delete(s.mergedNodes, stableID)
+	}
+	if len(availabilityHistory) > 0 {
+		s.availabilityHistory[stableID] = normalizeAvailabilitySamples(
+			availabilityHistory,
+			time.Now(),
+			s.availabilityHistoryRetentionDays,
+		)
+	} else {
+		delete(s.availabilityHistory, stableID)
 	}
 	if err := s.saveLocked(); err != nil {
 		if existed {
@@ -721,6 +937,11 @@ func (s *Store) RestoreArchived(record NodeRecord, mergedFrom ...string) error {
 			s.mergedNodes[stableID] = previousMerged
 		} else {
 			delete(s.mergedNodes, stableID)
+		}
+		if hadAvailability {
+			s.availabilityHistory[stableID] = previousAvailability
+		} else {
+			delete(s.availabilityHistory, stableID)
 		}
 		return err
 	}
@@ -1532,11 +1753,12 @@ func (s *Store) saveLocked() error {
 		return err
 	}
 	state := StateFile{
-		Version:     stateVersion,
-		UpdatedAt:   time.Now(),
-		Nodes:       s.nodes,
-		MergedNodes: s.mergedNodes,
-		Incidents:   s.incidents,
+		Version:             stateVersion,
+		UpdatedAt:           time.Now(),
+		Nodes:               s.nodes,
+		MergedNodes:         s.mergedNodes,
+		Incidents:           s.incidents,
+		AvailabilityHistory: s.availabilityHistory,
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {

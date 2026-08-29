@@ -72,6 +72,13 @@ func TestApplyPendingMergesPersistedStateAndConfirms(t *testing.T) {
 	if incident := mergedRegistry.Incidents[1]; incident.ID != "mass-incident" || !reflect.DeepEqual(incident.StableIDs, []string{testTargetID, "another-node"}) || incident.AffectedCount != 2 {
 		t.Fatalf("mass incident was not de-duplicated: %#v", incident)
 	}
+	if _, ok := mergedRegistry.AvailabilityHistory[testSourceID]; ok {
+		t.Fatal("retired source availability history still exists")
+	}
+	availability := mergedRegistry.AvailabilityHistory[testTargetID]
+	if len(availability) != 3 || !availability[0].CheckedAt.After(availability[1].CheckedAt) || !availability[1].CheckedAt.After(availability[2].CheckedAt) {
+		t.Fatalf("availability history was not merged newest-first: %#v", availability)
+	}
 
 	var mergedSpeed speedResultState
 	readJSONFile(t, filepath.Join(dataDir, speedResultsName), &mergedSpeed)
@@ -383,6 +390,15 @@ func testStateFixture() (nodearchive.StateFile, speedResultState) {
 				ID: "mass-incident", Kind: "mass", Status: "resolved", Scope: "subscription:InvisibleProxy", Subscription: "InvisibleProxy",
 				StableIDs: []string{testSourceID, testTargetID, "another-node"}, NodeNames: []string{"Estonia", "Estonia", "Other"}, AffectedCount: 3, TotalCount: 3,
 				CauseCode: "timeout", CauseSummary: "Timeout", StartedAt: now.Add(-12 * time.Hour), UpdatedAt: now.Add(-11 * time.Hour),
+			},
+		},
+		AvailabilityHistory: map[string][]nodearchive.AvailabilitySample{
+			testSourceID: {
+				{CheckedAt: now.Add(-3 * time.Hour), Online: true, LatencyMs: 48},
+				{CheckedAt: now.Add(-4 * time.Hour), Online: false, FailureCode: checker.FailureCodeTCPRefused},
+			},
+			testTargetID: {
+				{CheckedAt: now.Add(-time.Hour), Online: true, LatencyMs: 31},
 			},
 		},
 	}

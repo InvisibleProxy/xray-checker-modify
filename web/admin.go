@@ -438,6 +438,35 @@ func AdminSpeedTestHistoryHandler(manager *speedtest.Manager) http.HandlerFunc {
 	}
 }
 
+func AdminAvailabilityHistoryHandler(store *nodearchive.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		stableID := strings.TrimSpace(r.URL.Query().Get("stableId"))
+		if stableID == "" {
+			writeError(w, "stableId is required", http.StatusBadRequest)
+			return
+		}
+		from, err := parseHistoryTime(r.URL.Query().Get("from"), "from")
+		if err != nil {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		to, err := parseHistoryTime(r.URL.Query().Get("to"), "to")
+		if err != nil {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !from.IsZero() && !to.IsZero() && !from.Before(to) {
+			writeError(w, "from must be before to", http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, store.AvailabilityHistory(stableID, from, to))
+	}
+}
+
 func parseHistoryTime(raw, name string) (time.Time, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -651,12 +680,13 @@ func AdminNodesOverviewDeleteHandler(store *nodearchive.Store, manager *speedtes
 			return
 		}
 		mergedFrom := store.MergedFromStableIDs(stableID)
+		availabilityHistory := store.ArchivedAvailabilityHistory(stableID)
 		if err := store.DeleteArchived(stableID); err != nil {
 			writeError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		if err := manager.DeleteHistory(stableID); err != nil {
-			if rollbackErr := store.RestoreArchived(record, mergedFrom...); rollbackErr != nil {
+			if rollbackErr := store.RestoreArchivedState(record, availabilityHistory, mergedFrom...); rollbackErr != nil {
 				err = errors.Join(err, errors.New("restore archived node: "+rollbackErr.Error()))
 			}
 			writeError(w, err.Error(), http.StatusInternalServerError)
@@ -666,7 +696,11 @@ func AdminNodesOverviewDeleteHandler(store *nodearchive.Store, manager *speedtes
 	}
 }
 
-func AdminScheduleHandler(manager *speedtest.Manager) http.HandlerFunc {
+func AdminScheduleHandler(manager *speedtest.Manager, archives ...*nodearchive.Store) http.HandlerFunc {
+	var archive *nodearchive.Store
+	if len(archives) > 0 {
+		archive = archives[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -680,6 +714,13 @@ func AdminScheduleHandler(manager *speedtest.Manager) http.HandlerFunc {
 			if err := manager.UpdateSchedule(schedule); err != nil {
 				writeError(w, err.Error(), http.StatusBadRequest)
 				return
+			}
+			if archive != nil {
+				retentionDays := manager.Schedule().HistoryRetentionDays
+				if err := archive.SetAvailabilityHistoryRetentionDays(retentionDays); err != nil {
+					writeError(w, "schedule was saved but availability history pruning failed: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
 			}
 			writeJSON(w, manager.Schedule())
 		default:

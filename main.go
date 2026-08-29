@@ -173,6 +173,9 @@ func main() {
 	handleStateLoadError("speed-test", speedTestManager.Load())
 
 	nodeArchive := nodearchive.NewStore("data/node_registry.json", proxyChecker)
+	if err := nodeArchive.SetAvailabilityHistoryRetentionDays(speedTestManager.Schedule().HistoryRetentionDays); err != nil {
+		logger.Fatal("Failed to configure availability history retention: %v", err)
+	}
 	handleStateLoadError("node registry", nodeArchive.Load())
 	if err := nodeArchive.SyncProxies(*proxyConfigs); err != nil {
 		logger.Warn("Failed to sync node registry: %v", err)
@@ -515,6 +518,7 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/speed-tests/node-url", web.AdminSpeedTestNodeURLHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/speed-tests/history", web.AdminSpeedTestHistoryHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/speed-tests", web.AdminSpeedTestSnapshotHandler(speedTestManager))
+	protectedHandler.Handle("/api/v1/admin/availability/history", web.AdminAvailabilityHistoryHandler(nodeArchive))
 	protectedHandler.Handle("/api/v1/admin/nodes-overview/geo", web.AdminNodesOverviewGeoHandler(nodeArchive))
 	protectedHandler.Handle("/api/v1/admin/nodes-overview/merge/preview", web.AdminNodesOverviewMergePreviewHandler(nodeMergeCoordinator))
 	protectedHandler.Handle("/api/v1/admin/nodes-overview/merge", web.AdminNodesOverviewMergeHandler(nodeMergeCoordinator))
@@ -522,7 +526,7 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/nodes-overview/maintenance", web.AdminNodeMaintenanceHandler(setNodeMaintenance))
 	protectedHandler.Handle("/api/v1/admin/nodes-overview", web.AdminNodesOverviewHandler(nodeArchive, speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/incidents", web.AdminIncidentsHandler(nodeArchive))
-	protectedHandler.Handle("/api/v1/admin/schedules", web.AdminScheduleHandler(speedTestManager))
+	protectedHandler.Handle("/api/v1/admin/schedules", web.AdminScheduleHandler(speedTestManager, nodeArchive))
 	protectedHandler.Handle("/api/v1/admin/telegram/test", web.AdminTelegramTestHandler(telegramService))
 	protectedHandler.Handle("/api/v1/admin/telegram", web.AdminTelegramHandler(telegramService))
 	protectedHandler.Handle("/api/v1/admin/remnawave/sync", web.AdminRemnawaveSyncHandler(remnawaveService))

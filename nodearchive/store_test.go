@@ -175,8 +175,75 @@ func TestLoadOldNodeRegistryWithoutIncidentJournal(t *testing.T) {
 	if err := store.Load(); err != nil {
 		t.Fatal(err)
 	}
-	if len(store.Incidents(10)) != 0 || store.nodes["one"].Name != "One" || store.nodes["one"].Maintenance {
-		t.Fatalf("old state was not normalized: nodes=%+v incidents=%+v", store.nodes, store.incidents)
+	if len(store.Incidents(10)) != 0 || store.nodes["one"].Name != "One" || store.nodes["one"].Maintenance || store.availabilityHistory == nil {
+		t.Fatalf("old state was not normalized: nodes=%+v incidents=%+v availability=%+v", store.nodes, store.incidents, store.availabilityHistory)
+	}
+}
+
+func TestAvailabilityHistoryNormalizesDeduplicatesAndFiltersRange(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	store := NewStore("", nil)
+	store.availabilityHistory = normalizeAvailabilityHistory(map[string][]AvailabilitySample{
+		" node-1 ": {
+			{CheckedAt: now.Add(-time.Hour), Online: true, LatencyMs: 42},
+			{CheckedAt: now.Add(-2 * time.Hour), Online: false, LatencyMs: 999, FailureCode: " tcp_timeout ", FailureSummary: " Timeout "},
+			{CheckedAt: now.Add(-2 * time.Hour), Online: true, LatencyMs: 1},
+			{CheckedAt: now.Add(-61 * 24 * time.Hour), Online: true, LatencyMs: 10},
+		},
+	}, now, defaultAvailabilityHistoryRetentionDays)
+
+	got := store.AvailabilityHistory("node-1", now.Add(-3*time.Hour), now)
+	if len(got) != 2 {
+		t.Fatalf("history length = %d, want 2: %+v", len(got), got)
+	}
+	if !got[0].Online || got[0].LatencyMs != 42 || got[1].Online || got[1].LatencyMs != 0 {
+		t.Fatalf("normalized history = %+v", got)
+	}
+	if got[1].FailureCode != checker.FailureCodeTCPTimeout || got[1].FailureSummary != "Timeout" {
+		t.Fatalf("failure fields were not normalized: %+v", got[1])
+	}
+
+	details := checker.ProxyStatusDetails{Online: true, Latency: 15 * time.Millisecond, CheckedAt: now}
+	if !store.recordAvailabilitySampleLocked("node-1", details, now) {
+		t.Fatal("new availability sample was not recorded")
+	}
+	if store.recordAvailabilitySampleLocked("node-1", details, now) {
+		t.Fatal("duplicate availability sample was recorded")
+	}
+}
+
+func TestAvailabilityHistoryUsesConfiguredSpeedTestRetention(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	path := filepath.Join(t.TempDir(), "node_registry.json")
+	store := NewStore(path, nil)
+	if err := store.SetAvailabilityHistoryRetentionDays(90); err != nil {
+		t.Fatal(err)
+	}
+	store.availabilityHistory["node-1"] = []AvailabilitySample{
+		{CheckedAt: now.Add(-20 * 24 * time.Hour), Online: true, LatencyMs: 20},
+		{CheckedAt: now.Add(-40 * 24 * time.Hour), Online: true, LatencyMs: 40},
+		{CheckedAt: now.Add(-80 * 24 * time.Hour), Online: true, LatencyMs: 80},
+	}
+
+	if got := store.AvailabilityHistory("node-1", time.Time{}, time.Time{}); len(got) != 3 {
+		t.Fatalf("history length with 90-day retention = %d, want 3", len(got))
+	}
+	if err := store.SetAvailabilityHistoryRetentionDays(30); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.AvailabilityHistory("node-1", time.Time{}, time.Time{}); len(got) != 1 {
+		t.Fatalf("history length after 30-day pruning = %d, want 1", len(got))
+	}
+
+	reloaded := NewStore(path, nil)
+	if err := reloaded.SetAvailabilityHistoryRetentionDays(30); err != nil {
+		t.Fatal(err)
+	}
+	if err := reloaded.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.AvailabilityHistory("node-1", time.Time{}, time.Time{}); len(got) != 1 {
+		t.Fatalf("persisted history length = %d, want 1", len(got))
 	}
 }
 
@@ -295,6 +362,7 @@ func TestDeleteArchivedRejectsActiveAndDeletesRetired(t *testing.T) {
 	store := NewStore("", nil)
 	store.nodes["active"] = NodeRecord{StableID: "active", Active: true}
 	store.nodes["retired"] = NodeRecord{StableID: "retired", Active: false}
+	store.availabilityHistory["retired"] = []AvailabilitySample{{CheckedAt: time.Now(), Online: true, LatencyMs: 10}}
 
 	if err := store.DeleteArchived("active"); err == nil {
 		t.Fatal("expected active node delete to fail")
@@ -309,6 +377,9 @@ func TestDeleteArchivedRejectsActiveAndDeletesRetired(t *testing.T) {
 	if _, ok := store.nodes["retired"]; ok {
 		t.Fatal("retired node was not deleted")
 	}
+	if _, ok := store.availabilityHistory["retired"]; ok {
+		t.Fatal("retired availability history was not deleted")
+	}
 }
 
 func TestDeleteArchivedRollsBackMemoryWhenPersistenceFails(t *testing.T) {
@@ -320,6 +391,8 @@ func TestDeleteArchivedRollsBackMemoryWhenPersistenceFails(t *testing.T) {
 	store := NewStore(filepath.Join(blocker, "node_registry.json"), nil)
 	want := NodeRecord{StableID: "retired", Name: "Retired", Active: false}
 	store.nodes[want.StableID] = want
+	wantAvailability := []AvailabilitySample{{CheckedAt: time.Now(), Online: true, LatencyMs: 12}}
+	store.availabilityHistory[want.StableID] = wantAvailability
 
 	if err := store.DeleteArchived(want.StableID); err == nil {
 		t.Fatal("DeleteArchived() succeeded despite persistence failure")
@@ -328,6 +401,9 @@ func TestDeleteArchivedRollsBackMemoryWhenPersistenceFails(t *testing.T) {
 	if !ok || got != want {
 		t.Fatalf("retired record was not restored after persistence failure: %+v, exists=%v", got, ok)
 	}
+	if got := store.availabilityHistory[want.StableID]; !reflect.DeepEqual(got, wantAvailability) {
+		t.Fatalf("availability history was not restored after persistence failure: %+v", got)
+	}
 }
 
 func TestArchivedRecordAndRestoreArchivedKeepRetiredInvariant(t *testing.T) {
@@ -335,6 +411,8 @@ func TestArchivedRecordAndRestoreArchivedKeepRetiredInvariant(t *testing.T) {
 	want := NodeRecord{StableID: "retired", Name: "Retired", Active: false}
 	store.nodes[want.StableID] = want
 	store.mergedNodes[want.StableID] = []string{"old-key"}
+	wantAvailability := []AvailabilitySample{{CheckedAt: time.Now(), Online: false}}
+	store.availabilityHistory[want.StableID] = wantAvailability
 	record, err := store.ArchivedRecord(want.StableID)
 	if err != nil || record != want {
 		t.Fatalf("ArchivedRecord() = %+v, %v; want %+v", record, err, want)
@@ -342,7 +420,7 @@ func TestArchivedRecordAndRestoreArchivedKeepRetiredInvariant(t *testing.T) {
 	if err := store.DeleteArchived(want.StableID); err != nil {
 		t.Fatalf("DeleteArchived() error = %v", err)
 	}
-	if err := store.RestoreArchived(record, "old-key"); err != nil {
+	if err := store.RestoreArchivedState(record, wantAvailability, "old-key"); err != nil {
 		t.Fatalf("RestoreArchived() error = %v", err)
 	}
 	if got := store.nodes[want.StableID]; got != want {
@@ -350,6 +428,9 @@ func TestArchivedRecordAndRestoreArchivedKeepRetiredInvariant(t *testing.T) {
 	}
 	if got := store.MergedFromStableIDs(want.StableID); !reflect.DeepEqual(got, []string{"old-key"}) {
 		t.Fatalf("restored lineage = %#v", got)
+	}
+	if got := store.ArchivedAvailabilityHistory(want.StableID); !reflect.DeepEqual(got, wantAvailability) {
+		t.Fatalf("restored availability history = %#v", got)
 	}
 	if err := store.RestoreArchived(NodeRecord{StableID: "active", Active: true}); err == nil {
 		t.Fatal("RestoreArchived() accepted an active record")
