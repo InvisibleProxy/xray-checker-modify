@@ -682,7 +682,7 @@ func (m *Manager) schedulerLoop() {
 			}
 			req := RunRequest{
 				ProxyIDs:    schedule.ProxyIDs,
-				OnlyOnline:  schedule.OnlyOnline,
+				OnlyOnline:  true,
 				SkipOffline: true,
 				SubName:     schedule.SubName,
 				Protocol:    schedule.Protocol,
@@ -817,11 +817,8 @@ func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source stri
 				sem <- struct{}{}
 				defer func() { <-sem }()
 				proxyCfg := m.configForProxy(cfg, p)
-				if skipOffline {
-					if result, offline := m.offlineResult(p, proxyCfg, source); offline {
-						results <- result
-						return
-					}
+				if skipOffline && !m.proxyReadyForSpeedTest(p, false) {
+					return
 				}
 				results <- m.testProxyWithFallback(p, proxyCfg, source)
 			}(proxy)
@@ -892,11 +889,8 @@ func (m *Manager) runManualTestPhases(
 			defer func() { <-sem }()
 
 			proxyCfg := m.configForProxy(cfg, p)
-			if skipOffline {
-				if result, offline := m.offlineResult(p, proxyCfg, source); offline {
-					primaryResults <- manualPrimaryResult{proxy: p, config: proxyCfg, result: result}
-					return
-				}
+			if skipOffline && !m.proxyReadyForSpeedTest(p, true) {
+				return
 			}
 			primaryResults <- manualPrimaryResult{
 				proxy:  p,
@@ -1033,35 +1027,19 @@ func (m *Manager) testProxy(proxy *models.ProxyConfig, cfg TestConfig, source st
 	return result
 }
 
-func (m *Manager) offlineResult(proxy *models.ProxyConfig, cfg TestConfig, source string) (Result, bool) {
+func (m *Manager) proxyReadyForSpeedTest(proxy *models.ProxyConfig, allowMaintenance bool) bool {
 	if proxy.StableID == "" {
 		proxy.StableID = proxy.GenerateStableID()
 	}
 
-	details, err := m.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
-	if err != nil || details.Online {
-		return Result{}, false
+	var details checker.ProxyStatusDetails
+	var err error
+	if allowMaintenance {
+		details, err = m.proxyChecker.GetProxyStatusDetailsIncludingMaintenance(proxy.StableID)
+	} else {
+		details, err = m.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
 	}
-
-	result := Result{
-		StableID:  proxy.StableID,
-		Name:      proxy.Name,
-		SubName:   proxy.SubName,
-		Protocol:  proxy.Protocol,
-		URL:       cfg.URL,
-		Offline:   true,
-		CheckedAt: time.Now(),
-		Source:    source,
-	}
-	if details.HostCheck.Checked {
-		hostCheck := details.HostCheck
-		result.HostCheck = &hostCheck
-	}
-	if details.PingCheck.Checked {
-		pingCheck := details.PingCheck
-		result.PingCheck = &pingCheck
-	}
-	return result, true
+	return err == nil && details.EffectiveStatus() == checker.AvailabilityStateOnline
 }
 
 func (m *Manager) configForProxy(cfg TestConfig, proxy *models.ProxyConfig) TestConfig {
@@ -1107,9 +1085,15 @@ func (m *Manager) selectProxies(req RunRequest, allowMaintenance bool) []*models
 		if req.Protocol != "" && proxy.Protocol != req.Protocol {
 			continue
 		}
-		if req.OnlyOnline && (!allowMaintenance || m.proxyChecker.MonitoringEnabled(proxy.StableID)) {
-			online, _, err := m.proxyChecker.GetProxyStatusByStableID(proxy.StableID)
-			if err != nil || !online {
+		if req.OnlyOnline {
+			var details checker.ProxyStatusDetails
+			var err error
+			if allowMaintenance {
+				details, err = m.proxyChecker.GetProxyStatusDetailsIncludingMaintenance(proxy.StableID)
+			} else {
+				details, err = m.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+			}
+			if err != nil || details.EffectiveStatus() != checker.AvailabilityStateOnline {
 				continue
 			}
 		}

@@ -19,17 +19,19 @@ var (
 )
 
 type EndpointInfo struct {
-	Name        string
-	ServerInfo  string
-	Server      string
-	ServerPort  int
-	URL         string
-	ProxyPort   int
-	Index       int
-	Status      bool
-	Maintenance bool
-	Latency     time.Duration
-	StableID    string
+	Name               string
+	ServerInfo         string
+	Server             string
+	ServerPort         int
+	URL                string
+	ProxyPort          int
+	Index              int
+	Status             bool
+	AvailabilityStatus string
+	ProxyHealthy       bool
+	Maintenance        bool
+	Latency            time.Duration
+	StableID           string
 }
 
 func IndexHandler(version string, proxyChecker *checker.ProxyChecker) http.HandlerFunc {
@@ -57,12 +59,14 @@ func IndexHandler(version string, proxyChecker *checker.ProxyChecker) http.Handl
 			endpoints = make([]EndpointInfo, len(allEndpoints))
 			for i, ep := range allEndpoints {
 				endpoints[i] = EndpointInfo{
-					Name:        ep.Name,
-					Index:       ep.Index,
-					Status:      ep.Status,
-					Maintenance: ep.Maintenance,
-					Latency:     ep.Latency,
-					StableID:    ep.StableID,
+					Name:               ep.Name,
+					Index:              ep.Index,
+					Status:             ep.Status,
+					AvailabilityStatus: ep.AvailabilityStatus,
+					ProxyHealthy:       ep.ProxyHealthy,
+					Maintenance:        ep.Maintenance,
+					Latency:            ep.Latency,
+					StableID:           ep.StableID,
 				}
 			}
 		}
@@ -140,17 +144,22 @@ func ConfigStatusHandler(proxyChecker *checker.ProxyChecker) http.HandlerFunc {
 			w.Write([]byte("Maintenance"))
 			return
 		}
-		status, latency, err := proxyChecker.GetProxyStatusByStableID(found.StableID)
+		details, err := proxyChecker.GetProxyStatusDetailsByStableID(found.StableID)
 		if err != nil {
 			http.Error(w, "Status not available", http.StatusNotFound)
 			return
 		}
 
 		if config.CLIConfig.Proxy.SimulateLatency {
-			time.Sleep(time.Duration(latency))
+			time.Sleep(details.Latency)
 		}
 
-		if status {
+		if details.IsProxyFailure() {
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("X-Xray-Checker-Status", string(checker.AvailabilityStateProxyFailure))
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("Proxy failure"))
+		} else if !details.IsOffline() {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte("OK"))
 		} else {
@@ -170,20 +179,22 @@ func RegisterConfigEndpoints(proxies []*models.ProxyConfig, proxyChecker *checke
 
 		endpoint := fmt.Sprintf("./config/%s", proxy.StableID)
 
-		status, latency, _ := proxyChecker.GetProxyStatusByStableID(proxy.StableID)
+		details, _ := proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
 
 		endpoints = append(endpoints, EndpointInfo{
-			Name:        proxy.Name,
-			ServerInfo:  fmt.Sprintf("%s:%d", proxy.Server, proxy.Port),
-			Server:      proxy.Server,
-			ServerPort:  proxy.Port,
-			URL:         endpoint,
-			ProxyPort:   startPort + proxy.Index,
-			Index:       proxy.Index,
-			Status:      status,
-			Maintenance: !proxyChecker.MonitoringEnabled(proxy.StableID),
-			Latency:     latency,
-			StableID:    proxy.StableID,
+			Name:               proxy.Name,
+			ServerInfo:         fmt.Sprintf("%s:%d", proxy.Server, proxy.Port),
+			Server:             proxy.Server,
+			ServerPort:         proxy.Port,
+			URL:                endpoint,
+			ProxyPort:          startPort + proxy.Index,
+			Index:              proxy.Index,
+			Status:             !details.IsOffline(),
+			AvailabilityStatus: string(details.EffectiveStatus()),
+			ProxyHealthy:       details.Online,
+			Maintenance:        !proxyChecker.MonitoringEnabled(proxy.StableID),
+			Latency:            details.Latency,
+			StableID:           proxy.StableID,
 		})
 	}
 

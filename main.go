@@ -373,11 +373,13 @@ func main() {
 				select {
 				case <-ticker.C:
 					report, err := proxyChecker.CheckUnavailableProxies()
+					if len(report.Results) > 0 {
+						if archiveErr := nodeArchive.RecordAvailability(); archiveErr != nil {
+							logger.Warn("Failed to record node availability after recovery check: %v", archiveErr)
+						}
+					}
 					recovered := report.RecoveredStableIDs()
 					if len(recovered) > 0 {
-						if archiveErr := nodeArchive.RecordAvailability(); archiveErr != nil {
-							logger.Warn("Failed to record recovered node availability: %v", archiveErr)
-						}
 						notifyRecoveredNodes(recovered)
 						remnawaveService.Trigger()
 					}
@@ -514,7 +516,7 @@ func main() {
 	}))
 	protectedHandler.Handle("/api/v1/admin/backup", web.AdminBackupHandler(backupCreator))
 	protectedHandler.Handle("/api/v1/admin/backup/restore", web.AdminBackupRestoreHandler(backupRestorer, nodeMergeCoordinator.AcquireRestoreGuard))
-	protectedHandler.Handle("/api/v1/admin/speed-tests/run", web.AdminSpeedTestRunHandler(speedTestManager))
+	protectedHandler.Handle("/api/v1/admin/speed-tests/run", web.AdminSpeedTestRunHandler(speedTestManager, runAdminAvailabilityCheck))
 	protectedHandler.Handle("/api/v1/admin/speed-tests/node-url", web.AdminSpeedTestNodeURLHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/speed-tests/history", web.AdminSpeedTestHistoryHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/speed-tests", web.AdminSpeedTestSnapshotHandler(speedTestManager))
@@ -615,7 +617,7 @@ func offlineStableIDSet(proxyChecker *checker.ProxyChecker) map[string]bool {
 			stableID = proxy.GenerateStableID()
 		}
 		details, err := proxyChecker.GetProxyStatusDetailsByStableID(stableID)
-		if err == nil && !details.Online {
+		if err == nil && details.IsOffline() {
 			offline[stableID] = true
 		}
 	}
@@ -646,7 +648,7 @@ func recoveredStableIDs(proxyChecker *checker.ProxyChecker, offlineBefore map[st
 	recovered := make([]string, 0)
 	for stableID := range offlineBefore {
 		details, err := proxyChecker.GetProxyStatusDetailsByStableID(stableID)
-		if err == nil && details.Online {
+		if err == nil && details.EffectiveStatus() == checker.AvailabilityStateOnline {
 			recovered = append(recovered, stableID)
 		}
 	}

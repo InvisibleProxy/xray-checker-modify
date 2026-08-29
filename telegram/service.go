@@ -203,19 +203,21 @@ type Service struct {
 }
 
 type nodeAlertState struct {
-	FailCount       int
-	WasDown         bool
-	DownSince       time.Time
-	LastAlert       time.Time
-	AlertCount      int
-	NextAlert       time.Time
-	LastDiagnostics time.Time
-	HostCheck       checker.HostCheckDetails
-	PingCheck       checker.PingCheckDetails
-	Failure         checker.FailureDetails
-	RecoveryPending bool
-	RecoveredAt     time.Time
-	RecoveryLatency time.Duration
+	FailCount         int
+	WasDown           bool
+	Status            checker.AvailabilityState
+	DownSince         time.Time
+	ProxyFailureSince time.Time
+	LastAlert         time.Time
+	AlertCount        int
+	NextAlert         time.Time
+	LastDiagnostics   time.Time
+	HostCheck         checker.HostCheckDetails
+	PingCheck         checker.PingCheckDetails
+	Failure           checker.FailureDetails
+	RecoveryPending   bool
+	RecoveredAt       time.Time
+	RecoveryLatency   time.Duration
 }
 
 type nodeAlertStateFile struct {
@@ -245,21 +247,23 @@ type speedRetryKey struct {
 }
 
 type persistedNodeAlertState struct {
-	FailCount       int                 `json:"failCount"`
-	WasDown         bool                `json:"wasDown"`
-	DownSince       time.Time           `json:"downSince"`
-	LastAlert       time.Time           `json:"lastAlert"`
-	AlertCount      int                 `json:"alertCount"`
-	NextAlert       time.Time           `json:"nextAlert"`
-	LastDiagnostics time.Time           `json:"lastDiagnostics"`
-	HostCheck       *persistedHostCheck `json:"hostCheck,omitempty"`
-	PingCheck       *persistedPingCheck `json:"pingCheck,omitempty"`
-	FailureCode     string              `json:"failureCode,omitempty"`
-	FailureSummary  string              `json:"failureSummary,omitempty"`
-	FailureDetail   string              `json:"failureDetail,omitempty"`
-	RecoveryPending bool                `json:"recoveryPending,omitempty"`
-	RecoveredAt     time.Time           `json:"recoveredAt,omitempty"`
-	RecoveryLatency int64               `json:"recoveryLatencyMs,omitempty"`
+	FailCount         int                 `json:"failCount"`
+	WasDown           bool                `json:"wasDown"`
+	Status            string              `json:"status,omitempty"`
+	DownSince         time.Time           `json:"downSince"`
+	ProxyFailureSince time.Time           `json:"proxyFailureSince,omitempty"`
+	LastAlert         time.Time           `json:"lastAlert"`
+	AlertCount        int                 `json:"alertCount"`
+	NextAlert         time.Time           `json:"nextAlert"`
+	LastDiagnostics   time.Time           `json:"lastDiagnostics"`
+	HostCheck         *persistedHostCheck `json:"hostCheck,omitempty"`
+	PingCheck         *persistedPingCheck `json:"pingCheck,omitempty"`
+	FailureCode       string              `json:"failureCode,omitempty"`
+	FailureSummary    string              `json:"failureSummary,omitempty"`
+	FailureDetail     string              `json:"failureDetail,omitempty"`
+	RecoveryPending   bool                `json:"recoveryPending,omitempty"`
+	RecoveredAt       time.Time           `json:"recoveredAt,omitempty"`
+	RecoveryLatency   int64               `json:"recoveryLatencyMs,omitempty"`
 }
 
 type persistedHostCheck struct {
@@ -897,6 +901,8 @@ func (s *Service) runSpeedRetry(timerID uint64, kind string, req speedtest.RunRe
 		return
 	}
 	req.ProxyIDs = append([]string(nil), pendingIDs...)
+	req.OnlyOnline = true
+	req.SkipOffline = true
 	err := s.runSpeedTest(req, source)
 	if err == nil {
 		s.speedRetryMu.Unlock()
@@ -1028,6 +1034,13 @@ func speedRetryKindLabel(kind string) string {
 }
 
 func (s *Service) runSpeedTest(req speedtest.RunRequest, source string) error {
+	if source == "telegram" {
+		if err := s.runAvailabilityCheck(req.ProxyIDs); err != nil {
+			return fmt.Errorf("availability check failed: %w", err)
+		}
+		req.OnlyOnline = true
+		req.SkipOffline = true
+	}
 	if s.speedRunFunc != nil {
 		return s.speedRunFunc(req, source)
 	}
@@ -1107,14 +1120,16 @@ func (s *Service) NotifyNodeStatuses() bool {
 		if err != nil {
 			continue
 		}
-		isDown := !details.Online
+		status := details.EffectiveStatus()
+		hasIssue := status != checker.AvailabilityStateOnline
 
 		var shouldSendDownAlert bool
 		var shouldRefreshDiagnostics bool
 		s.mu.Lock()
 		state := s.alerts[proxy.StableID]
 		previous := state
-		if isDown {
+		if hasIssue {
+			state.Status = status
 			state.RecoveryPending = false
 			state.RecoveredAt = time.Time{}
 			state.RecoveryLatency = 0
@@ -1130,10 +1145,21 @@ func (s *Service) NotifyNodeStatuses() bool {
 				state.Failure = details.Failure
 			}
 			state.LastDiagnostics = latestDiagnosticsAt(state.LastDiagnostics, state.HostCheck, state.PingCheck)
-			if state.DownSince.IsZero() {
-				state.DownSince = details.DownSince
+			if status == checker.AvailabilityStateOffline {
+				state.ProxyFailureSince = time.Time{}
 				if state.DownSince.IsZero() {
-					state.DownSince = now
+					state.DownSince = details.DownSince
+					if state.DownSince.IsZero() {
+						state.DownSince = now
+					}
+				}
+			} else {
+				state.DownSince = time.Time{}
+				if state.ProxyFailureSince.IsZero() {
+					state.ProxyFailureSince = details.ProxyFailureSince
+					if state.ProxyFailureSince.IsZero() {
+						state.ProxyFailureSince = now
+					}
 				}
 			}
 			shouldRefreshDiagnostics = shouldRefreshNodeDiagnostics(state, cfg, now)
@@ -1159,7 +1185,7 @@ func (s *Service) NotifyNodeStatuses() bool {
 				recoveryAlerts = append(recoveryAlerts, nodeRecoveryAlert{
 					StableID:    proxy.StableID,
 					RecoveredAt: state.RecoveredAt,
-					Message:     formatNodeRecoveryMessage(proxy, state.RecoveryLatency, state.DownSince, state.RecoveredAt),
+					Message:     formatNodeRecoveryMessage(proxy, state.RecoveryLatency, state, state.RecoveredAt),
 				})
 			} else {
 				state = nodeAlertState{}
@@ -1175,7 +1201,7 @@ func (s *Service) NotifyNodeStatuses() bool {
 		}
 		s.mu.Unlock()
 
-		if isDown && shouldRefreshDiagnostics {
+		if hasIssue && shouldRefreshDiagnostics {
 			refreshRequests = append(refreshRequests, diagnosticsRefreshRequest{
 				StableID: proxy.StableID,
 				Name:     proxy.Name,
@@ -1192,10 +1218,10 @@ func (s *Service) NotifyNodeStatuses() bool {
 			logger.Warn("Failed to refresh host diagnostics for %s: %v", result.Name, result.Err)
 			continue
 		}
-		if result.Details.Online {
+		if result.Details.EffectiveStatus() == checker.AvailabilityStateOnline {
 			continue
 		}
-		if s.updateAlertDiagnostics(result.StableID, result.Details.HostCheck, result.Details.PingCheck, result.Details.Failure) {
+		if s.updateAlertDiagnostics(result.StableID, result.Details) {
 			stateChanged = true
 		}
 	}
@@ -1332,7 +1358,7 @@ func (s *Service) prepareNodeRecovery(proxy *models.ProxyConfig, details checker
 	return nodeRecoveryAlert{
 		StableID:    proxy.StableID,
 		RecoveredAt: state.RecoveredAt,
-		Message:     formatNodeRecoveryMessage(proxy, state.RecoveryLatency, state.DownSince, state.RecoveredAt),
+		Message:     formatNodeRecoveryMessage(proxy, state.RecoveryLatency, state, state.RecoveredAt),
 	}, true, previous != state
 }
 
@@ -1358,7 +1384,7 @@ func (s *Service) pendingNodeDownAlert(proxy *models.ProxyConfig, cfg Config, no
 	}
 
 	details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
-	if err == nil && details.Online {
+	if err == nil && details.EffectiveStatus() == checker.AvailabilityStateOnline {
 		return nodeDownAlert{}, false
 	}
 
@@ -1391,6 +1417,23 @@ func shouldNotifyNodeRecovery(state nodeAlertState, cfg Config, isMuted bool) bo
 	return nodeDownAlertWasSent(state)
 }
 
+func nodeAlertStatus(state nodeAlertState) checker.AvailabilityState {
+	if state.Status != "" {
+		return state.Status
+	}
+	if state.WasDown {
+		return checker.AvailabilityStateOffline
+	}
+	return ""
+}
+
+func nodeAlertIssueSince(state nodeAlertState) time.Time {
+	if nodeAlertStatus(state) == checker.AvailabilityStateProxyFailure {
+		return state.ProxyFailureSince
+	}
+	return state.DownSince
+}
+
 func nodeDownAlertWasSent(state nodeAlertState) bool {
 	return state.AlertCount > 0 || !state.LastAlert.IsZero()
 }
@@ -1409,7 +1452,7 @@ func (s *Service) confirmNodeDownAlertsSent(alerts []nodeDownAlert, sentAt time.
 			continue
 		}
 		state := s.alerts[alert.Proxy.StableID]
-		if state == (nodeAlertState{}) || !state.WasDown {
+		if state == (nodeAlertState{}) || !state.WasDown || nodeAlertStatus(state) != nodeAlertStatus(alert.State) {
 			continue
 		}
 
@@ -1800,7 +1843,7 @@ func (s *Service) offlineStableIDs() map[string]bool {
 		}
 
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
-		if err == nil && !details.Online {
+		if err == nil && details.IsOffline() {
 			result[proxy.StableID] = true
 		}
 	}
@@ -1815,7 +1858,7 @@ func (s *Service) refreshHostDiagnosticsForStillOffline(stableIDs map[string]boo
 	requests := make([]diagnosticsRefreshRequest, 0, len(stableIDs))
 	for stableID := range stableIDs {
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(stableID)
-		if err != nil || details.Online {
+		if err != nil || !details.IsOffline() {
 			continue
 		}
 		requests = append(requests, diagnosticsRefreshRequest{
@@ -1830,10 +1873,10 @@ func (s *Service) refreshHostDiagnosticsForStillOffline(stableIDs map[string]boo
 			logger.Warn("Failed to refresh host diagnostics for %s: %v", result.Name, result.Err)
 			continue
 		}
-		if result.Details.Online {
+		if result.Details.EffectiveStatus() == checker.AvailabilityStateOnline {
 			continue
 		}
-		if s.updateAlertDiagnostics(result.StableID, result.Details.HostCheck, result.Details.PingCheck, result.Details.Failure) {
+		if s.updateAlertDiagnostics(result.StableID, result.Details) {
 			stateChanged = true
 		}
 	}
@@ -1844,7 +1887,7 @@ func (s *Service) refreshHostDiagnosticsForStillOffline(stableIDs map[string]boo
 	}
 }
 
-func (s *Service) updateAlertDiagnostics(stableID string, hostCheck checker.HostCheckDetails, pingCheck checker.PingCheckDetails, failure checker.FailureDetails) bool {
+func (s *Service) updateAlertDiagnostics(stableID string, details checker.ProxyStatusDetails) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1854,14 +1897,36 @@ func (s *Service) updateAlertDiagnostics(stableID string, hostCheck checker.Host
 	}
 
 	previous := state
-	if hostCheck.Checked {
-		state.HostCheck = hostCheck
+	status := details.EffectiveStatus()
+	if status == checker.AvailabilityStateOnline {
+		return false
 	}
-	if pingCheck.Checked {
-		state.PingCheck = pingCheck
+	if previousStatus := nodeAlertStatus(state); previousStatus != "" && previousStatus != status {
+		state.Status = status
+		if status == checker.AvailabilityStateOffline {
+			state.ProxyFailureSince = time.Time{}
+			state.DownSince = details.DownSince
+			if state.DownSince.IsZero() {
+				state.DownSince = time.Now()
+			}
+		} else {
+			state.DownSince = time.Time{}
+			state.ProxyFailureSince = details.ProxyFailureSince
+			if state.ProxyFailureSince.IsZero() {
+				state.ProxyFailureSince = time.Now()
+			}
+		}
+	} else if state.Status == "" {
+		state.Status = status
 	}
-	if failure.Code != "" {
-		state.Failure = failure
+	if details.HostCheck.Checked {
+		state.HostCheck = details.HostCheck
+	}
+	if details.PingCheck.Checked {
+		state.PingCheck = details.PingCheck
+	}
+	if details.Failure.Code != "" {
+		state.Failure = details.Failure
 	}
 	state.LastDiagnostics = latestDiagnosticsAt(state.LastDiagnostics, state.HostCheck, state.PingCheck)
 	if previous == state {
@@ -2027,7 +2092,7 @@ func (s *Service) formatHelpMessage(cfg Config) formattedMessage {
 }
 
 func (s *Service) formatMenu(cfg Config, isAdmin bool) string {
-	total, online, offline := s.nodeCounts()
+	total, online, proxyFailures, offline := s.nodeCounts()
 	speedReports := "выключены"
 	if cfg.SpeedReportsEnabled && cfg.SpeedReportMode != "disabled" {
 		speedReports = "включены"
@@ -2051,7 +2116,7 @@ func (s *Service) formatMenu(cfg Config, isAdmin bool) string {
 	return strings.Join([]string{
 		"<b>InvisibleProxyChecker</b>",
 		"",
-		fmt.Sprintf("🟢 <b>%d</b> из %d · 🔴 <b>%d</b>", online, total, offline),
+		fmt.Sprintf("🟢 <b>%d</b> из %d · 🟡 <b>%d</b> · 🔴 <b>%d</b>", online, total, proxyFailures, offline),
 		fmt.Sprintf("⚡ Отчёты: <b>%s</b> · порог %s", htmlEscape(speedReports), htmlEscape(thresholdText)),
 		fmt.Sprintf("🔔 Алерты: <b>%s</b>%s", htmlEscape(alerts), htmlEscape(adminHint)),
 		"",
@@ -2061,7 +2126,7 @@ func (s *Service) formatMenu(cfg Config, isAdmin bool) string {
 
 func (s *Service) formatMenuMessage(cfg Config, isAdmin bool) formattedMessage {
 	fallback := s.formatMenu(cfg, isAdmin)
-	total, online, offline := s.nodeCounts()
+	total, online, proxyFailures, offline := s.nodeCounts()
 	speedReports := "выключены"
 	if cfg.SpeedReportsEnabled && cfg.SpeedReportMode != "disabled" {
 		speedReports = "все"
@@ -2081,7 +2146,7 @@ func (s *Service) formatMenuMessage(cfg Config, isAdmin bool) formattedMessage {
 	rich := strings.Join([]string{
 		"<h2>InvisibleProxyChecker</h2>",
 		"<table bordered>",
-		"<tr><th>Ноды</th><td>🟢 " + strconv.Itoa(online) + " / " + strconv.Itoa(total) + " · 🔴 " + strconv.Itoa(offline) + "</td></tr>",
+		"<tr><th>Ноды</th><td>🟢 " + strconv.Itoa(online) + " / " + strconv.Itoa(total) + " · 🟡 " + strconv.Itoa(proxyFailures) + " · 🔴 " + strconv.Itoa(offline) + "</td></tr>",
 		"<tr><th>Speed-test</th><td>" + htmlEscape(speedReports) + " · " + htmlEscape(threshold) + "</td></tr>",
 		"<tr><th>Алерты</th><td>" + htmlEscape(alerts) + "</td></tr>",
 		"</table>",
@@ -2092,10 +2157,10 @@ func (s *Service) formatMenuMessage(cfg Config, isAdmin bool) formattedMessage {
 
 func (s *Service) formatNodeList() string {
 	proxies := s.sortedProxies()
-	total, online, offline := s.nodeCounts()
+	total, online, proxyFailures, offline := s.nodeCounts()
 	lines := []string{
 		"<b>Ноды</b>",
-		fmt.Sprintf("🟢 <b>%d</b> из %d · 🔴 <b>%d</b>", online, total, offline),
+		fmt.Sprintf("🟢 <b>%d</b> из %d · 🟡 <b>%d</b> · 🔴 <b>%d</b>", online, total, proxyFailures, offline),
 		"",
 		"Выберите ноду кнопкой ниже, чтобы открыть статус, последние замеры и действия.",
 	}
@@ -2107,11 +2172,12 @@ func (s *Service) formatNodeList() string {
 
 func (s *Service) formatNodeListMessage() formattedMessage {
 	fallback := s.formatNodeList()
-	total, online, offline := s.nodeCounts()
+	total, online, proxyFailures, offline := s.nodeCounts()
 	rich := fmt.Sprintf(
-		"<h2>Ноды</h2><p>🟢 <b>%d</b> из %d · 🔴 <b>%d</b></p><footer>Откройте ноду кнопкой ниже — там статус, замеры и действия.</footer>",
+		"<h2>Ноды</h2><p>🟢 <b>%d</b> из %d · 🟡 <b>%d</b> · 🔴 <b>%d</b></p><footer>Откройте ноду кнопкой ниже — там статус, замеры и действия.</footer>",
 		online,
 		total,
+		proxyFailures,
 		offline,
 	)
 	if total == 0 {
@@ -2126,9 +2192,14 @@ func (s *Service) formatNodeDetails(stableID string) string {
 		return formatProxySearchMiss(matches)
 	}
 	details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
-	online := err == nil && details.Online
+	availabilityStatus := checker.AvailabilityStateOffline
+	if err == nil {
+		availabilityStatus = details.EffectiveStatus()
+	}
 	status := "🟢 доступна"
-	if !online {
+	if availabilityStatus == checker.AvailabilityStateProxyFailure {
+		status = "🟡 proxy failure"
+	} else if availabilityStatus == checker.AvailabilityStateOffline {
 		status = "🔴 недоступна"
 	}
 	latencyText := "—"
@@ -2142,11 +2213,15 @@ func (s *Service) formatNodeDetails(stableID string) string {
 		fmt.Sprintf("Статус: <b>%s</b> · %s", htmlEscape(status), htmlEscape(latencyText)),
 		fmt.Sprintf("Протокол: %s", htmlCode(proxy.Protocol)),
 	}
-	if !online && !details.DownSince.IsZero() {
+	if availabilityStatus == checker.AvailabilityStateOffline && !details.DownSince.IsZero() {
 		lines = append(lines, fmt.Sprintf("Недоступна с: <b>%s</b>", htmlEscape(formatCheckedAt(details.DownSince))))
 		lines = append(lines, fmt.Sprintf("Простой: <b>%s</b>", htmlEscape(formatDuration(time.Since(details.DownSince)))))
 	}
-	if !online {
+	if availabilityStatus == checker.AvailabilityStateProxyFailure && !details.ProxyFailureSince.IsZero() {
+		lines = append(lines, fmt.Sprintf("Proxy failure с: <b>%s</b>", htmlEscape(formatCheckedAt(details.ProxyFailureSince))))
+		lines = append(lines, fmt.Sprintf("Длительность proxy failure: <b>%s</b>", htmlEscape(formatDuration(time.Since(details.ProxyFailureSince)))))
+	}
+	if availabilityStatus != checker.AvailabilityStateOnline {
 		if failure := formatFailureHTML(details.Failure); failure != "" {
 			lines = append(lines, failure)
 		}
@@ -2187,10 +2262,15 @@ func (s *Service) formatNodeDetailsMessage(stableID string) formattedMessage {
 	}
 
 	details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
-	online := err == nil && details.Online
+	availabilityStatus := checker.AvailabilityStateOffline
+	if err == nil {
+		availabilityStatus = details.EffectiveStatus()
+	}
 	status := "🔴 недоступна"
-	if online {
+	if availabilityStatus == checker.AvailabilityStateOnline {
 		status = "🟢 доступна"
+	} else if availabilityStatus == checker.AvailabilityStateProxyFailure {
+		status = "🟡 proxy failure"
 	}
 	latency := "—"
 	if details.Latency > 0 {
@@ -2200,10 +2280,13 @@ func (s *Service) formatNodeDetailsMessage(stableID string) formattedMessage {
 	var rich strings.Builder
 	fmt.Fprintf(&rich, "<h2>%s</h2>", htmlEscape(proxy.Name))
 	fmt.Fprintf(&rich, "<p><b>%s</b> · %s · %s</p>", htmlEscape(status), htmlEscape(strings.ToUpper(proxy.Protocol)), htmlEscape(latency))
-	if !online && !details.DownSince.IsZero() {
+	if availabilityStatus == checker.AvailabilityStateOffline && !details.DownSince.IsZero() {
 		fmt.Fprintf(&rich, "<p>Простой: <b>%s</b> · с %s</p>", htmlEscape(formatDuration(time.Since(details.DownSince))), htmlEscape(formatCheckedAt(details.DownSince)))
 	}
-	if !online {
+	if availabilityStatus == checker.AvailabilityStateProxyFailure && !details.ProxyFailureSince.IsZero() {
+		fmt.Fprintf(&rich, "<p>Proxy failure: <b>%s</b> · с %s</p>", htmlEscape(formatDuration(time.Since(details.ProxyFailureSince))), htmlEscape(formatCheckedAt(details.ProxyFailureSince)))
+	}
+	if availabilityStatus != checker.AvailabilityStateOnline {
 		if failure := formatFailureHTML(details.Failure); failure != "" {
 			fmt.Fprintf(&rich, "<p>%s</p>", failure)
 		}
@@ -2316,49 +2399,62 @@ func replyThreadID(msg *message, cfg Config) int {
 	return cfg.MessageThreadID
 }
 
-func (s *Service) nodeCounts() (total int, online int, offline int) {
+func (s *Service) nodeCounts() (total int, online int, proxyFailures int, offline int) {
 	proxies := s.sortedProxies()
 	total = len(proxies)
 	for _, proxy := range proxies {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
-		ok, _, err := s.proxyChecker.GetProxyStatusByStableID(proxy.StableID)
-		if err != nil || !ok {
+		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+		if err != nil || details.EffectiveStatus() == checker.AvailabilityStateOffline {
 			offline++
+			continue
+		}
+		if details.EffectiveStatus() == checker.AvailabilityStateProxyFailure {
+			proxyFailures++
 			continue
 		}
 		online++
 	}
-	return total, online, offline
+	return total, online, proxyFailures, offline
 }
 
 func (s *Service) formatStatus() string {
 	proxies := s.sortedProxies()
 
 	var onlineLines []string
-	var offlineLines []string
+	var issueLines []string
+	proxyFailures := 0
+	offline := 0
 	for _, proxy := range proxies {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
-		online := err == nil && details.Online
-		line := formatProxyLineHTML(proxy, online, details.Latency, details.DownSince, details.HostCheck, details.PingCheck)
-		if !online {
-			offlineLines = append(offlineLines, line)
-		} else {
+		if err != nil {
+			details.Status = checker.AvailabilityStateOffline
+		}
+		line := formatProxyLineHTML(proxy, details)
+		switch details.EffectiveStatus() {
+		case checker.AvailabilityStateOnline:
 			onlineLines = append(onlineLines, line)
+		case checker.AvailabilityStateProxyFailure:
+			proxyFailures++
+			issueLines = append(issueLines, line)
+		default:
+			offline++
+			issueLines = append(issueLines, line)
 		}
 	}
 
 	lines := []string{
 		"<b>Статусы нод</b>",
-		fmt.Sprintf("🟢 <b>%d</b> из %d · 🔴 <b>%d</b>", len(onlineLines), len(proxies), len(offlineLines)),
+		fmt.Sprintf("🟢 <b>%d</b> из %d · 🟡 <b>%d</b> · 🔴 <b>%d</b>", len(onlineLines), len(proxies), proxyFailures, offline),
 	}
-	if len(offlineLines) > 0 {
+	if len(issueLines) > 0 {
 		lines = append(lines, "", "<b>Требуют внимания</b>")
-		lines = append(lines, limitLines(offlineLines, 12)...)
+		lines = append(lines, limitLines(issueLines, 12)...)
 	}
 	return trimHTMLMessage(strings.Join(lines, "\n"))
 }
@@ -2367,24 +2463,33 @@ func (s *Service) formatStatusMessage() formattedMessage {
 	fallback := s.formatStatus()
 	proxies := s.sortedProxies()
 	var onlineItems []string
-	var offlineItems []string
+	var issueItems []string
+	proxyFailures := 0
+	offline := 0
 	for _, proxy := range proxies {
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
-		online := err == nil && details.Online
-		item := formatProxyRichItem(proxy, online, details.Latency, details.DownSince, details.HostCheck, details.PingCheck)
-		if online {
+		if err != nil {
+			details.Status = checker.AvailabilityStateOffline
+		}
+		item := formatProxyRichItem(proxy, details)
+		switch details.EffectiveStatus() {
+		case checker.AvailabilityStateOnline:
 			onlineItems = append(onlineItems, item)
-		} else {
-			offlineItems = append(offlineItems, item)
+		case checker.AvailabilityStateProxyFailure:
+			proxyFailures++
+			issueItems = append(issueItems, item)
+		default:
+			offline++
+			issueItems = append(issueItems, item)
 		}
 	}
 
 	var rich strings.Builder
 	rich.WriteString("<h2>Статусы нод</h2>")
-	fmt.Fprintf(&rich, "<p>🟢 <b>%d</b> из %d · 🔴 <b>%d</b></p>", len(onlineItems), len(proxies), len(offlineItems))
-	if len(offlineItems) > 0 {
+	fmt.Fprintf(&rich, "<p>🟢 <b>%d</b> из %d · 🟡 <b>%d</b> · 🔴 <b>%d</b></p>", len(onlineItems), len(proxies), proxyFailures, offline)
+	if len(issueItems) > 0 {
 		rich.WriteString("<h3>Требуют внимания</h3><ul>")
-		rich.WriteString(strings.Join(limitRichItems(offlineItems, 12), ""))
+		rich.WriteString(strings.Join(limitRichItems(issueItems, 12), ""))
 		rich.WriteString("</ul>")
 	}
 	if len(onlineItems) > 0 {
@@ -2423,7 +2528,7 @@ func formatNodeAvailabilityCheckStartedMessage(proxy *models.ProxyConfig) format
 func (s *Service) formatIssuesSummary() string {
 	cfg := s.Config()
 	muted := mutedAlertNodeSet(cfg)
-	var offlineLines []string
+	var issueLines []string
 	for _, proxy := range s.sortedProxies() {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
@@ -2432,8 +2537,11 @@ func (s *Service) formatIssuesSummary() string {
 			continue
 		}
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
-		if err != nil || !details.Online {
-			offlineLines = append(offlineLines, formatProxyLineHTML(proxy, false, details.Latency, details.DownSince, details.HostCheck, details.PingCheck))
+		if err != nil {
+			details.Status = checker.AvailabilityStateOffline
+		}
+		if details.EffectiveStatus() != checker.AvailabilityStateOnline {
+			issueLines = append(issueLines, formatProxyLineHTML(proxy, details))
 		}
 	}
 
@@ -2441,13 +2549,13 @@ func (s *Service) formatIssuesSummary() string {
 	lines := []string{
 		"<b>Проблемные ноды</b>",
 	}
-	if len(offlineLines) == 0 && len(speedLines) == 0 {
+	if len(issueLines) == 0 && len(speedLines) == 0 {
 		lines = append(lines, "", "Проблем не найдено.")
 		return strings.Join(lines, "\n")
 	}
-	if len(offlineLines) > 0 {
-		lines = append(lines, "", "<b>Недоступны</b>")
-		lines = append(lines, limitLines(offlineLines, 12)...)
+	if len(issueLines) > 0 {
+		lines = append(lines, "", "<b>Проблемы доступности</b>")
+		lines = append(lines, limitLines(issueLines, 12)...)
 	}
 	if len(speedLines) > 0 {
 		lines = append(lines, "", "<b>Speed-test ниже порога или с ошибками</b>")
@@ -2460,28 +2568,31 @@ func (s *Service) formatIssuesSummaryMessage() formattedMessage {
 	fallback := s.formatIssuesSummary()
 	cfg := s.Config()
 	muted := mutedAlertNodeSet(cfg)
-	var offlineItems []string
+	var issueItems []string
 	for _, proxy := range s.sortedProxies() {
 		if muted[proxy.StableID] {
 			continue
 		}
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
-		if err != nil || !details.Online {
-			offlineItems = append(offlineItems, formatProxyRichItem(proxy, false, details.Latency, details.DownSince, details.HostCheck, details.PingCheck))
+		if err != nil {
+			details.Status = checker.AvailabilityStateOffline
+		}
+		if details.EffectiveStatus() != checker.AvailabilityStateOnline {
+			issueItems = append(issueItems, formatProxyRichItem(proxy, details))
 		}
 	}
 	speedResults := speedIssueResults(filterMutedSpeedResults(s.activeSpeedResults(s.speedManager.Snapshot().Results), cfg), cfg.LowSpeedThresholdMbps)
 
 	var rich strings.Builder
 	rich.WriteString("<h2>Проблемные ноды</h2>")
-	if len(offlineItems) == 0 && len(speedResults) == 0 {
+	if len(issueItems) == 0 && len(speedResults) == 0 {
 		rich.WriteString("<p>✅ Проблем не найдено.</p>")
 		return formattedMessage{HTML: fallback, RichHTML: rich.String()}
 	}
-	fmt.Fprintf(&rich, "<p>🔴 Недоступны: <b>%d</b> · ⚡ Speed-test: <b>%d</b></p>", len(offlineItems), len(speedResults))
-	if len(offlineItems) > 0 {
-		rich.WriteString("<h3>Недоступны</h3><ul>")
-		rich.WriteString(strings.Join(limitRichItems(offlineItems, 12), ""))
+	fmt.Fprintf(&rich, "<p>⚠️ Доступность: <b>%d</b> · ⚡ Speed-test: <b>%d</b></p>", len(issueItems), len(speedResults))
+	if len(issueItems) > 0 {
+		rich.WriteString("<h3>Проблемы доступности</h3><ul>")
+		rich.WriteString(strings.Join(limitRichItems(issueItems, 12), ""))
 		rich.WriteString("</ul>")
 	}
 	if len(speedResults) > 0 {
@@ -3197,7 +3308,7 @@ func (s *Service) loadAlertState() error {
 		}
 
 		state := persisted.toNodeAlertState()
-		if !state.WasDown && state.FailCount <= 0 && state.DownSince.IsZero() && state.LastAlert.IsZero() {
+		if !state.WasDown && state.FailCount <= 0 && state.DownSince.IsZero() && state.ProxyFailureSince.IsZero() && state.LastAlert.IsZero() {
 			continue
 		}
 		loaded[stableID] = state
@@ -3287,14 +3398,22 @@ func (s *Service) loadAlertState() error {
 
 	restored := 0
 	for stableID, state := range loaded {
-		if state.WasDown && !state.RecoveryPending && !state.DownSince.IsZero() {
-			if s.proxyChecker.RestoreOfflineStatus(stableID, state.DownSince, state.HostCheck, state.PingCheck, state.Failure) {
+		if !state.WasDown || state.RecoveryPending {
+			continue
+		}
+		switch nodeAlertStatus(state) {
+		case checker.AvailabilityStateOffline:
+			if !state.DownSince.IsZero() && s.proxyChecker.RestoreOfflineStatus(stableID, state.DownSince, state.HostCheck, state.PingCheck, state.Failure) {
+				restored++
+			}
+		case checker.AvailabilityStateProxyFailure:
+			if !state.ProxyFailureSince.IsZero() && s.proxyChecker.RestoreProxyFailureStatus(stableID, state.ProxyFailureSince, state.HostCheck, state.PingCheck, state.Failure) {
 				restored++
 			}
 		}
 	}
 
-	logger.Info("Loaded Telegram state: %d alert nodes, %d offline statuses, %d pending speed-test retries", len(loaded), restored, restoredRetries)
+	logger.Info("Loaded Telegram state: %d alert nodes, %d availability issue statuses, %d pending speed-test retries", len(loaded), restored, restoredRetries)
 	return nil
 }
 
@@ -3321,7 +3440,7 @@ func (s *Service) saveAlertState() error {
 		if !active[stableID] {
 			continue
 		}
-		if !state.WasDown && state.FailCount <= 0 && state.DownSince.IsZero() && state.LastAlert.IsZero() {
+		if !state.WasDown && state.FailCount <= 0 && state.DownSince.IsZero() && state.ProxyFailureSince.IsZero() && state.LastAlert.IsZero() {
 			continue
 		}
 		nodes[stableID] = persistedNodeAlertStateFrom(state)
@@ -3375,19 +3494,21 @@ func (s *Service) saveAlertState() error {
 
 func persistedNodeAlertStateFrom(state nodeAlertState) persistedNodeAlertState {
 	persisted := persistedNodeAlertState{
-		FailCount:       state.FailCount,
-		WasDown:         state.WasDown,
-		DownSince:       state.DownSince,
-		LastAlert:       state.LastAlert,
-		AlertCount:      state.AlertCount,
-		NextAlert:       state.NextAlert,
-		LastDiagnostics: state.LastDiagnostics,
-		RecoveryPending: state.RecoveryPending,
-		RecoveredAt:     state.RecoveredAt,
-		RecoveryLatency: state.RecoveryLatency.Milliseconds(),
-		FailureCode:     state.Failure.Code,
-		FailureSummary:  state.Failure.Summary,
-		FailureDetail:   state.Failure.Detail,
+		FailCount:         state.FailCount,
+		WasDown:           state.WasDown,
+		Status:            string(nodeAlertStatus(state)),
+		DownSince:         state.DownSince,
+		ProxyFailureSince: state.ProxyFailureSince,
+		LastAlert:         state.LastAlert,
+		AlertCount:        state.AlertCount,
+		NextAlert:         state.NextAlert,
+		LastDiagnostics:   state.LastDiagnostics,
+		RecoveryPending:   state.RecoveryPending,
+		RecoveredAt:       state.RecoveredAt,
+		RecoveryLatency:   state.RecoveryLatency.Milliseconds(),
+		FailureCode:       state.Failure.Code,
+		FailureSummary:    state.Failure.Summary,
+		FailureDetail:     state.Failure.Detail,
 	}
 	if state.HostCheck.Checked {
 		hostCheck := persistedHostCheckFrom(state.HostCheck)
@@ -3402,21 +3523,32 @@ func persistedNodeAlertStateFrom(state nodeAlertState) persistedNodeAlertState {
 
 func (p persistedNodeAlertState) toNodeAlertState() nodeAlertState {
 	state := nodeAlertState{
-		FailCount:       p.FailCount,
-		WasDown:         p.WasDown,
-		DownSince:       p.DownSince,
-		LastAlert:       p.LastAlert,
-		AlertCount:      p.AlertCount,
-		NextAlert:       p.NextAlert,
-		LastDiagnostics: p.LastDiagnostics,
-		RecoveryPending: p.RecoveryPending,
-		RecoveredAt:     p.RecoveredAt,
-		RecoveryLatency: time.Duration(p.RecoveryLatency) * time.Millisecond,
+		FailCount:         p.FailCount,
+		WasDown:           p.WasDown,
+		Status:            checker.AvailabilityState(strings.TrimSpace(p.Status)),
+		DownSince:         p.DownSince,
+		ProxyFailureSince: p.ProxyFailureSince,
+		LastAlert:         p.LastAlert,
+		AlertCount:        p.AlertCount,
+		NextAlert:         p.NextAlert,
+		LastDiagnostics:   p.LastDiagnostics,
+		RecoveryPending:   p.RecoveryPending,
+		RecoveredAt:       p.RecoveredAt,
+		RecoveryLatency:   time.Duration(p.RecoveryLatency) * time.Millisecond,
 		Failure: checker.FailureDetails{
 			Code:    p.FailureCode,
 			Summary: p.FailureSummary,
 			Detail:  p.FailureDetail,
 		},
+	}
+	switch state.Status {
+	case checker.AvailabilityStateOnline, checker.AvailabilityStateProxyFailure, checker.AvailabilityStateOffline:
+	default:
+		if state.WasDown {
+			state.Status = checker.AvailabilityStateOffline
+		} else {
+			state.Status = ""
+		}
 	}
 	if state.Failure.Code != "" && state.Failure.Summary == "" {
 		state.Failure.Summary = checker.FailureSummary(state.Failure.Code)
@@ -4002,10 +4134,15 @@ func statusRefreshMarkup() string {
 func (s *Service) nodeListMarkup() string {
 	var rows [][]inlineKeyboardButton
 	for _, proxy := range s.sortedProxies() {
-		online, _, err := s.proxyChecker.GetProxyStatusByStableID(proxy.StableID)
+		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
 		status := "🔴"
-		if err == nil && online {
-			status = "🟢"
+		if err == nil {
+			switch details.EffectiveStatus() {
+			case checker.AvailabilityStateOnline:
+				status = "🟢"
+			case checker.AvailabilityStateProxyFailure:
+				status = "🟡"
+			}
 		}
 		rows = append(rows, []inlineKeyboardButton{{
 			Text:         status + " " + shortButtonText(proxy.Name),
@@ -4254,54 +4391,84 @@ func formatPingCheckHTML(pingCheck checker.PingCheckDetails) string {
 	return "Ping 🔴"
 }
 
-func formatProxyLineHTML(proxy *models.ProxyConfig, online bool, latency time.Duration, downSince time.Time, hostCheck checker.HostCheckDetails, pingCheck checker.PingCheckDetails) string {
+func formatProxyLineHTML(proxy *models.ProxyConfig, details checker.ProxyStatusDetails) string {
 	latencyText := "—"
-	if latency > 0 {
-		latencyText = fmt.Sprintf("%d ms", latency.Milliseconds())
+	if details.Latency > 0 {
+		latencyText = fmt.Sprintf("%d ms", details.Latency.Milliseconds())
 	}
-	if online {
+	status := details.EffectiveStatus()
+	if status == checker.AvailabilityStateOnline {
 		return fmt.Sprintf("• 🟢 <b>%s</b> · %s", htmlEscape(proxy.Name), htmlEscape(latencyText))
 	}
-	parts := []string{"🔴 <b>" + htmlEscape(proxy.Name) + "</b>"}
-	if !downSince.IsZero() {
-		parts = append(parts, "простой "+htmlEscape(formatDuration(time.Since(downSince))))
+	marker := "🔴"
+	since := details.DownSince
+	durationLabel := "простой"
+	if status == checker.AvailabilityStateProxyFailure {
+		marker = "🟡"
+		since = details.ProxyFailureSince
+		durationLabel = "proxy failure"
 	}
-	if diagnostics := formatHostDiagnosticsHTML(hostCheck, pingCheck); diagnostics != "" {
+	parts := []string{marker + " <b>" + htmlEscape(proxy.Name) + "</b>"}
+	if !since.IsZero() {
+		parts = append(parts, durationLabel+" "+htmlEscape(formatDuration(time.Since(since))))
+	}
+	if diagnostics := formatHostDiagnosticsHTML(details.HostCheck, details.PingCheck); diagnostics != "" {
 		parts = append(parts, diagnostics)
 	}
 	return "• " + strings.Join(parts, " · ")
 }
 
-func formatProxyRichItem(proxy *models.ProxyConfig, online bool, latency time.Duration, downSince time.Time, hostCheck checker.HostCheckDetails, pingCheck checker.PingCheckDetails) string {
-	if online {
+func formatProxyRichItem(proxy *models.ProxyConfig, details checker.ProxyStatusDetails) string {
+	status := details.EffectiveStatus()
+	if status == checker.AvailabilityStateOnline {
 		latencyText := "—"
-		if latency > 0 {
-			latencyText = fmt.Sprintf("%d ms", latency.Milliseconds())
+		if details.Latency > 0 {
+			latencyText = fmt.Sprintf("%d ms", details.Latency.Milliseconds())
 		}
 		return fmt.Sprintf("<li>🟢 <b>%s</b> — %s</li>", htmlEscape(proxy.Name), htmlEscape(latencyText))
 	}
-	parts := []string{"🔴 <b>" + htmlEscape(proxy.Name) + "</b>"}
-	if !downSince.IsZero() {
-		parts = append(parts, "простой "+htmlEscape(formatDuration(time.Since(downSince))))
+	marker := "🔴"
+	since := details.DownSince
+	durationLabel := "простой"
+	if status == checker.AvailabilityStateProxyFailure {
+		marker = "🟡"
+		since = details.ProxyFailureSince
+		durationLabel = "proxy failure"
 	}
-	if diagnostics := formatHostDiagnosticsHTML(hostCheck, pingCheck); diagnostics != "" {
+	parts := []string{marker + " <b>" + htmlEscape(proxy.Name) + "</b>"}
+	if !since.IsZero() {
+		parts = append(parts, durationLabel+" "+htmlEscape(formatDuration(time.Since(since))))
+	}
+	if diagnostics := formatHostDiagnosticsHTML(details.HostCheck, details.PingCheck); diagnostics != "" {
 		parts = append(parts, diagnostics)
 	}
 	return "<li>" + strings.Join(parts, " · ") + "</li>"
 }
 
 func formatNodeDown(proxy *models.ProxyConfig, state nodeAlertState, now time.Time) string {
+	proxyFailure := nodeAlertStatus(state) == checker.AvailabilityStateProxyFailure
 	title := "⚠️ Нода недоступна"
+	marker := "🔴"
+	durationLabel := "Простой"
+	if proxyFailure {
+		title = "⚠️ Proxy failure"
+		marker = "🟡"
+		durationLabel = "Proxy failure"
+	}
 	if state.AlertCount > 1 {
-		title = "⚠️ Нода всё ещё недоступна"
+		if proxyFailure {
+			title = "⚠️ Proxy failure продолжается"
+		} else {
+			title = "⚠️ Нода всё ещё недоступна"
+		}
 	}
 
 	lines := []string{
 		fmt.Sprintf("<b>%s</b>", htmlEscape(title)),
-		fmt.Sprintf("🔴 <b>%s</b>", htmlEscape(proxy.Name)),
+		fmt.Sprintf("%s <b>%s</b>", marker, htmlEscape(proxy.Name)),
 	}
-	if !state.DownSince.IsZero() {
-		lines = append(lines, fmt.Sprintf("Простой: <b>%s</b> · с %s", htmlEscape(formatDuration(now.Sub(state.DownSince))), htmlEscape(formatCheckedAt(state.DownSince))))
+	if since := nodeAlertIssueSince(state); !since.IsZero() {
+		lines = append(lines, fmt.Sprintf("%s: <b>%s</b> · с %s", durationLabel, htmlEscape(formatDuration(now.Sub(since))), htmlEscape(formatCheckedAt(since))))
 	}
 	if failure := formatFailureHTML(state.Failure); failure != "" {
 		lines = append(lines, failure)
@@ -4320,13 +4487,24 @@ func formatNodeDown(proxy *models.ProxyConfig, state nodeAlertState, now time.Ti
 func formatNodeDownMessage(proxy *models.ProxyConfig, state nodeAlertState, now time.Time) formattedMessage {
 	fallback := formatNodeDown(proxy, state, now)
 	title := "Нода недоступна"
+	marker := "🔴"
+	durationLabel := "Простой"
+	if nodeAlertStatus(state) == checker.AvailabilityStateProxyFailure {
+		title = "Proxy failure"
+		marker = "🟡"
+		durationLabel = "Proxy failure"
+	}
 	if state.AlertCount > 1 {
-		title = "Нода всё ещё недоступна"
+		if nodeAlertStatus(state) == checker.AvailabilityStateProxyFailure {
+			title = "Proxy failure продолжается"
+		} else {
+			title = "Нода всё ещё недоступна"
+		}
 	}
 	var rich strings.Builder
-	fmt.Fprintf(&rich, "<h2>⚠️ %s</h2><p>🔴 <b>%s</b></p>", htmlEscape(title), htmlEscape(proxy.Name))
-	if !state.DownSince.IsZero() {
-		fmt.Fprintf(&rich, "<p>Простой: <b>%s</b> · с %s</p>", htmlEscape(formatDuration(now.Sub(state.DownSince))), htmlEscape(formatCheckedAt(state.DownSince)))
+	fmt.Fprintf(&rich, "<h2>⚠️ %s</h2><p>%s <b>%s</b></p>", htmlEscape(title), marker, htmlEscape(proxy.Name))
+	if since := nodeAlertIssueSince(state); !since.IsZero() {
+		fmt.Fprintf(&rich, "<p>%s: <b>%s</b> · с %s</p>", durationLabel, htmlEscape(formatDuration(now.Sub(since))), htmlEscape(formatCheckedAt(since)))
 	}
 	if failure := formatFailureHTML(state.Failure); failure != "" {
 		fmt.Fprintf(&rich, "<p>%s</p>", failure)
@@ -4493,12 +4671,18 @@ func formatMassNodeDownMessage(group nodeDownIncidentGroup, now time.Time) forma
 	}
 	var items []string
 	for _, alert := range group.Alerts {
-		downtime := "—"
-		if !alert.State.DownSince.IsZero() {
-			downtime = formatDuration(now.Sub(alert.State.DownSince))
+		duration := "—"
+		if since := nodeAlertIssueSince(alert.State); !since.IsZero() {
+			duration = formatDuration(now.Sub(since))
 		}
-		lines = append(lines, fmt.Sprintf("• <b>%s</b> · %s", htmlEscape(alert.Proxy.Name), htmlEscape(downtime)))
-		items = append(items, fmt.Sprintf("<li><b>%s</b> — %s</li>", htmlEscape(alert.Proxy.Name), htmlEscape(downtime)))
+		marker := "🔴"
+		durationLabel := "простой"
+		if nodeAlertStatus(alert.State) == checker.AvailabilityStateProxyFailure {
+			marker = "🟡"
+			durationLabel = "proxy failure"
+		}
+		lines = append(lines, fmt.Sprintf("• %s <b>%s</b> · %s %s", marker, htmlEscape(alert.Proxy.Name), durationLabel, htmlEscape(duration)))
+		items = append(items, fmt.Sprintf("<li>%s <b>%s</b> — %s %s</li>", marker, htmlEscape(alert.Proxy.Name), durationLabel, htmlEscape(duration)))
 	}
 	fallback := trimHTMLMessage(strings.Join(lines, "\n"))
 	rich := fmt.Sprintf("<h2>🚨 Массовый сбой нод</h2><p>%s · <b>%d из %d</b></p><blockquote>Причина: <b>%s</b> · <code>%s</code></blockquote><ul>%s</ul>",
@@ -4508,16 +4692,20 @@ func formatMassNodeDownMessage(group nodeDownIncidentGroup, now time.Time) forma
 
 func formatNodeDownGroup(alerts []nodeDownAlert, now time.Time) string {
 	lines := []string{
-		fmt.Sprintf("<b>⚠️ Недоступны %d ноды</b>", len(alerts)),
+		fmt.Sprintf("<b>⚠️ Проблемы у %d нод</b>", len(alerts)),
 		"",
 	}
 	for _, alert := range alerts {
 		state := alert.State
-		downtime := "—"
-		if !state.DownSince.IsZero() {
-			downtime = formatDuration(now.Sub(state.DownSince))
+		duration := "—"
+		if since := nodeAlertIssueSince(state); !since.IsZero() {
+			duration = formatDuration(now.Sub(since))
 		}
-		parts := []string{fmt.Sprintf("простой %s", htmlEscape(downtime))}
+		durationLabel := "простой"
+		if nodeAlertStatus(state) == checker.AvailabilityStateProxyFailure {
+			durationLabel = "proxy failure"
+		}
+		parts := []string{fmt.Sprintf("%s %s", durationLabel, htmlEscape(duration))}
 		if alert.State.Failure.Summary != "" {
 			parts = append(parts, "причина "+htmlEscape(alert.State.Failure.Summary))
 		}
@@ -4537,9 +4725,9 @@ func formatNodeDownGroupMessage(alerts []nodeDownAlert, now time.Time) formatted
 	var details []string
 	for _, alert := range alerts {
 		state := alert.State
-		downtime := "—"
-		if !state.DownSince.IsZero() {
-			downtime = formatDuration(now.Sub(state.DownSince))
+		duration := "—"
+		if since := nodeAlertIssueSince(state); !since.IsZero() {
+			duration = formatDuration(now.Sub(since))
 		}
 		diagnostics := formatHostDiagnosticsHTML(state.HostCheck, state.PingCheck)
 		if diagnostics == "" {
@@ -4549,10 +4737,14 @@ func formatNodeDownGroupMessage(alerts []nodeDownAlert, now time.Time) formatted
 		if cause == "" {
 			cause = "причина не определена"
 		}
-		items = append(items, fmt.Sprintf("<li>🔴 <b>%s</b> — %s · %s · %s</li>", htmlEscape(alert.Proxy.Name), htmlEscape(downtime), htmlEscape(cause), diagnostics))
+		marker := "🔴"
+		if nodeAlertStatus(state) == checker.AvailabilityStateProxyFailure {
+			marker = "🟡"
+		}
+		items = append(items, fmt.Sprintf("<li>%s <b>%s</b> — %s · %s · %s</li>", marker, htmlEscape(alert.Proxy.Name), htmlEscape(duration), htmlEscape(cause), diagnostics))
 		details = append(details, fmt.Sprintf("<li><b>%s</b> — <code>%s</code> · %s</li>", htmlEscape(alert.Proxy.Name), htmlEscape(alert.Proxy.StableID), htmlEscape(strings.ToUpper(alert.Proxy.Protocol))))
 	}
-	rich := fmt.Sprintf("<h2>⚠️ Недоступны ноды: %d</h2><ul>%s</ul><details><summary>Технические данные</summary><ul>%s</ul></details>",
+	rich := fmt.Sprintf("<h2>⚠️ Проблемы у нод: %d</h2><ul>%s</ul><details><summary>Технические данные</summary><ul>%s</ul></details>",
 		len(alerts), strings.Join(items, ""), strings.Join(details, ""))
 	return formattedMessage{HTML: fallback, RichHTML: rich}
 }
@@ -4572,18 +4764,35 @@ func formatNodeRecovery(proxy *models.ProxyConfig, latency time.Duration, downSi
 	return strings.Join(lines, "\n")
 }
 
-func formatNodeRecoveryMessage(proxy *models.ProxyConfig, latency time.Duration, downSince time.Time, recoveredAt time.Time) formattedMessage {
-	fallback := formatNodeRecovery(proxy, latency, downSince, recoveredAt)
+func formatNodeRecoveryMessage(proxy *models.ProxyConfig, latency time.Duration, previous nodeAlertState, recoveredAt time.Time) formattedMessage {
+	since := nodeAlertIssueSince(previous)
+	proxyFailure := nodeAlertStatus(previous) == checker.AvailabilityStateProxyFailure
+	if !proxyFailure {
+		fallback := formatNodeRecovery(proxy, latency, since, recoveredAt)
+		latencyText := "—"
+		if latency > 0 {
+			latencyText = fmt.Sprintf("%d ms", latency.Milliseconds())
+		}
+		downtime := "—"
+		if !since.IsZero() {
+			downtime = formatDuration(recoveredAt.Sub(since))
+		}
+		rich := fmt.Sprintf("<h2>✅ Нода снова доступна</h2><p><b>%s</b></p><table bordered><tr><th>Простой</th><td>%s</td></tr><tr><th>Задержка</th><td>%s</td></tr></table><details><summary>StableID</summary><p><code>%s</code></p></details>",
+			htmlEscape(proxy.Name), htmlEscape(downtime), htmlEscape(latencyText), htmlEscape(proxy.StableID))
+		return formattedMessage{HTML: fallback, RichHTML: rich}
+	}
+
 	latencyText := "—"
 	if latency > 0 {
 		latencyText = fmt.Sprintf("%d ms", latency.Milliseconds())
 	}
-	downtime := "—"
-	if !downSince.IsZero() {
-		downtime = formatDuration(recoveredAt.Sub(downSince))
+	duration := "—"
+	if !since.IsZero() {
+		duration = formatDuration(recoveredAt.Sub(since))
 	}
-	rich := fmt.Sprintf("<h2>✅ Нода снова доступна</h2><p><b>%s</b></p><table bordered><tr><th>Простой</th><td>%s</td></tr><tr><th>Задержка</th><td>%s</td></tr></table><details><summary>StableID</summary><p><code>%s</code></p></details>",
-		htmlEscape(proxy.Name), htmlEscape(downtime), htmlEscape(latencyText), htmlEscape(proxy.StableID))
+	fallback := fmt.Sprintf("✅ <b>%s</b>: proxy снова работает\nProxy failure: <b>%s</b>\nЗадержка: <b>%s</b>", htmlEscape(proxy.Name), htmlEscape(duration), htmlEscape(latencyText))
+	rich := fmt.Sprintf("<h2>✅ Proxy снова работает</h2><p><b>%s</b></p><table bordered><tr><th>Proxy failure</th><td>%s</td></tr><tr><th>Задержка</th><td>%s</td></tr></table><details><summary>StableID</summary><p><code>%s</code></p></details>",
+		htmlEscape(proxy.Name), htmlEscape(duration), htmlEscape(latencyText), htmlEscape(proxy.StableID))
 	return formattedMessage{HTML: fallback, RichHTML: rich}
 }
 

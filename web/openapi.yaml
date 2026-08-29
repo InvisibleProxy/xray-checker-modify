@@ -903,7 +903,14 @@ components:
           example: "US-Server-1"
         online:
           type: boolean
+          description: True unless every availability diagnostic failed; proxy_failure nodes remain host-reachable.
           example: true
+        status:
+          type: string
+          enum: [online, proxy_failure, offline]
+        proxyHealthy:
+          type: boolean
+          description: True only when the real proxy check succeeded.
         maintenance:
           type: boolean
           description: True when operator-paused monitoring excludes this node from availability and speed statistics.
@@ -914,18 +921,22 @@ components:
 
     AvailabilitySample:
       type: object
-      required: [checkedAt, online, latencyMs]
+      required: [checkedAt, online, status, latencyMs]
       properties:
         checkedAt:
           type: string
           format: date-time
         online:
           type: boolean
+          description: False only for hard offline; proxy_failure remains reachable.
+        status:
+          type: string
+          enum: [online, proxy_failure, offline]
         latencyMs:
           type: integer
           format: int64
           minimum: 0
-          description: Proxy check latency in milliseconds; zero for offline checks.
+          description: Proxy check latency in milliseconds; zero for proxy_failure and offline checks.
         failureCode:
           type: string
         failureSummary:
@@ -962,7 +973,14 @@ components:
           example: 10000
         online:
           type: boolean
+          description: True unless every availability diagnostic failed; inspect status and proxyHealthy for service health.
           example: true
+        status:
+          type: string
+          enum: [online, proxy_failure, offline]
+        proxyHealthy:
+          type: boolean
+          description: True only when the real proxy check succeeded.
         maintenance:
           type: boolean
           description: True when monitoring is paused for planned maintenance.
@@ -983,6 +1001,9 @@ components:
         offline:
           type: integer
           example: 2
+        proxyFailures:
+          type: integer
+          description: Reachable nodes whose real proxy check failed.
         maintenance:
           type: integer
           description: Nodes excluded from online/offline totals by maintenance mode.
@@ -1061,6 +1082,12 @@ components:
               type: string
               format: date-time
             downtimeSec:
+              type: integer
+              format: int64
+            proxyFailureSince:
+              type: string
+              format: date-time
+            proxyFailureSec:
               type: integer
               format: int64
             hostCheckChecked:
@@ -1177,6 +1204,7 @@ components:
             type: string
         onlyOnline:
           type: boolean
+          description: Legacy/UI filter value. Scheduled execution always requires effective status online even when this value is false.
         subName:
           type: string
         protocol:
@@ -1205,8 +1233,10 @@ components:
             type: string
         onlyOnline:
           type: boolean
+          description: The admin manual-run handler forces this to true after its availability check.
         skipOffline:
           type: boolean
+          description: The admin manual-run handler forces this to true; a node that becomes unavailable before transfer is skipped without a result/history entry.
         subName:
           type: string
         protocol:
@@ -1379,7 +1409,7 @@ components:
 
     NodeMergeNodeSnapshot:
       type: object
-      required: [stableId, name, subName, server, port, protocol, active, resultCount, totalDowntimeSec, incidentCount]
+      required: [stableId, name, subName, server, port, protocol, active, resultCount, totalDowntimeSec, incidentCount, totalProxyFailureSec, proxyFailureCount]
       properties:
         stableId:
           type: string
@@ -1408,6 +1438,11 @@ components:
           type: integer
           format: int64
         incidentCount:
+          type: integer
+        totalProxyFailureSec:
+          type: integer
+          format: int64
+        proxyFailureCount:
           type: integer
 
     NodeMergePreview:
@@ -1547,6 +1582,20 @@ components:
           type: integer
           format: int64
         currentDownSince:
+          type: string
+          format: date-time
+        totalProxyFailureSec:
+          type: integer
+          format: int64
+        proxyFailureCount:
+          type: integer
+        longestProxyFailureSec:
+          type: integer
+          format: int64
+        currentProxyFailureSince:
+          type: string
+          format: date-time
+        lastProxyFailureAt:
           type: string
           format: date-time
         ipInfoUrl:

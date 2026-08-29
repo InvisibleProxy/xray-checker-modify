@@ -311,17 +311,29 @@ func mergeNodeState(state *nodearchive.StateFile, sourceID, targetID string, now
 	if err != nil {
 		return fmt.Errorf("merge total downtime: %w", err)
 	}
+	target.TotalProxyFailureSec, err = addInt64(target.TotalProxyFailureSec, source.TotalProxyFailureSec)
+	if err != nil {
+		return fmt.Errorf("merge total proxy failure: %w", err)
+	}
 	target.IncidentCount, err = addInt(target.IncidentCount, source.IncidentCount)
 	if err != nil {
 		return fmt.Errorf("merge incident count: %w", err)
 	}
+	target.ProxyFailureCount, err = addInt(target.ProxyFailureCount, source.ProxyFailureCount)
+	if err != nil {
+		return fmt.Errorf("merge proxy failure count: %w", err)
+	}
 	target.FirstSeenAt = earliestNonZero(target.FirstSeenAt, source.FirstSeenAt)
 	target.LastSeenAt = latestTime(target.LastSeenAt, source.LastSeenAt)
 	target.LastOfflineAt = latestTime(target.LastOfflineAt, source.LastOfflineAt)
+	target.LastProxyFailureAt = latestTime(target.LastProxyFailureAt, source.LastProxyFailureAt)
 	target.LastOnlineAt = latestTime(target.LastOnlineAt, source.LastOnlineAt)
 	target.LastStatusAt = latestTime(target.LastStatusAt, source.LastStatusAt)
 	if source.LongestDowntimeSec > target.LongestDowntimeSec {
 		target.LongestDowntimeSec = source.LongestDowntimeSec
+	}
+	if source.LongestProxyFailureSec > target.LongestProxyFailureSec {
+		target.LongestProxyFailureSec = source.LongestProxyFailureSec
 	}
 	mergeGeoState(&target, source)
 	target.StableID = targetID

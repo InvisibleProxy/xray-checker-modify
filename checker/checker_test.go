@@ -48,7 +48,7 @@ func TestGetProxyStatusByStableIDFallsBackToStatusDetails(t *testing.T) {
 	}
 }
 
-func TestUnavailableStatusIsStoredBeforeDiagnosticsComplete(t *testing.T) {
+func TestProxyFailureIsStoredBeforeDiagnosticsComplete(t *testing.T) {
 	proxy := testProxy("node-1", "Node one")
 	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{proxy})
 	proxyChecker.storeStatusDetails(proxy.StableID, true, 10*time.Millisecond, nil, nil)
@@ -84,10 +84,10 @@ func TestUnavailableStatusIsStoredBeforeDiagnosticsComplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if details.Online || details.DownSince.IsZero() {
-		t.Fatalf("offline transition was not stored before diagnostics: %+v", details)
+	if details.Online || !details.IsProxyFailure() || details.ProxyFailureSince.IsZero() || !details.DownSince.IsZero() {
+		t.Fatalf("proxy-failure transition was not stored before diagnostics: %+v", details)
 	}
-	downSince := details.DownSince
+	proxyFailureSince := details.ProxyFailureSince
 	if details.HostCheck.Checked || details.PingCheck.Checked {
 		t.Fatalf("diagnostics unexpectedly completed before release: %+v", details)
 	}
@@ -103,11 +103,78 @@ func TestUnavailableStatusIsStoredBeforeDiagnosticsComplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !details.DownSince.Equal(downSince) {
-		t.Fatalf("DownSince changed after diagnostics: got %s, want %s", details.DownSince, downSince)
+	if !details.IsProxyFailure() || !details.ProxyFailureSince.Equal(proxyFailureSince) || !details.DownSince.IsZero() {
+		t.Fatalf("proxy failure was incorrectly converted to downtime: %+v", details)
 	}
 	if !details.HostCheck.Checked || !details.PingCheck.Checked || !details.PingCheck.Online {
 		t.Fatalf("completed diagnostics were not stored: %+v", details)
+	}
+}
+
+func TestProxyFailureRequiresTCPAndPingFailureBeforeOffline(t *testing.T) {
+	tests := []struct {
+		name       string
+		hostOnline bool
+		pingOnline bool
+		wantStatus AvailabilityState
+	}{
+		{name: "both diagnostics pass", hostOnline: true, pingOnline: true, wantStatus: AvailabilityStateProxyFailure},
+		{name: "only TCP passes", hostOnline: true, pingOnline: false, wantStatus: AvailabilityStateProxyFailure},
+		{name: "only ping passes", hostOnline: false, pingOnline: true, wantStatus: AvailabilityStateProxyFailure},
+		{name: "all checks fail", hostOnline: false, pingOnline: false, wantStatus: AvailabilityStateOffline},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proxy := testProxy("node-1", "Node one")
+			proxyChecker := newTestProxyChecker([]*models.ProxyConfig{proxy})
+			proxyChecker.storeStatusDetails(proxy.StableID, true, 10*time.Millisecond, nil, nil)
+			proxyChecker.hostDiagnosticsFunc = func(*models.ProxyConfig) (HostCheckDetails, PingCheckDetails) {
+				return HostCheckDetails{Checked: true, Online: tt.hostOnline}, PingCheckDetails{Checked: true, Online: tt.pingOnline}
+			}
+
+			proxyChecker.markUnavailableAndCollectDiagnostics(proxy, failureDetails(FailureCodeProxyTimeout, "timeout"))
+			details, err := proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if details.EffectiveStatus() != tt.wantStatus {
+				t.Fatalf("status = %s, want %s: %+v", details.EffectiveStatus(), tt.wantStatus, details)
+			}
+			if tt.wantStatus == AvailabilityStateOffline {
+				if details.DownSince.IsZero() || !details.ProxyFailureSince.IsZero() {
+					t.Fatalf("offline timestamps = %+v", details)
+				}
+			} else if details.ProxyFailureSince.IsZero() || !details.DownSince.IsZero() {
+				t.Fatalf("proxy-failure timestamps = %+v", details)
+			}
+		})
+	}
+}
+
+func TestOfflineDowntimeStartsAfterProxyFailureDiagnostics(t *testing.T) {
+	proxy := testProxy("node-1", "Node one")
+	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{proxy})
+	proxyFailureSince := time.Now().Add(-time.Hour)
+	proxyChecker.statusDetails.Store(proxy.StableID, ProxyStatusDetails{
+		Status:            AvailabilityStateProxyFailure,
+		ProxyFailureSince: proxyFailureSince,
+	})
+
+	proxyChecker.storeOfflineDiagnostics(
+		proxy.StableID,
+		HostCheckDetails{Checked: true, Online: false},
+		PingCheckDetails{Checked: true, Online: false},
+	)
+	details, err := proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !details.IsOffline() || details.DownSince.IsZero() || !details.ProxyFailureSince.IsZero() {
+		t.Fatalf("offline transition = %+v", details)
+	}
+	if details.DownSince.Sub(proxyFailureSince) < 59*time.Minute {
+		t.Fatalf("downtime was backdated to proxy failure: proxy failure=%s downtime=%s", proxyFailureSince, details.DownSince)
 	}
 }
 

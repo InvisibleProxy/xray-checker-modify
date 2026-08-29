@@ -53,6 +53,9 @@ func TestApplyPendingMergesPersistedStateAndConfirms(t *testing.T) {
 	if target.TotalDowntimeSec != 450 || target.IncidentCount != 7 || target.LongestDowntimeSec != 360 {
 		t.Fatalf("availability counters were not merged: %#v", target)
 	}
+	if target.TotalProxyFailureSec != 320 || target.ProxyFailureCount != 4 || target.LongestProxyFailureSec != 200 {
+		t.Fatalf("proxy failure counters were not merged: %#v", target)
+	}
 	wantFirstSeen := registry.Nodes[testSourceID].FirstSeenAt
 	if !target.FirstSeenAt.Equal(wantFirstSeen) {
 		t.Fatalf("first seen = %s, want %s", target.FirstSeenAt, wantFirstSeen)
@@ -335,39 +338,45 @@ func TestRestoreGuardSerializesMergeStaging(t *testing.T) {
 func testStateFixture() (nodearchive.StateFile, speedResultState) {
 	now := time.Now().UTC().Truncate(time.Second)
 	source := nodearchive.NodeRecord{
-		StableID:           testSourceID,
-		Name:               "Estonia",
-		SubName:            "InvisibleProxy",
-		Server:             "94.156.236.38",
-		Port:               3128,
-		Protocol:           "vless",
-		Active:             false,
-		FirstSeenAt:        now.Add(-72 * time.Hour),
-		LastSeenAt:         now.Add(-2 * time.Hour),
-		RetiredAt:          now.Add(-90 * time.Minute),
-		GeoIP:              "94.156.236.38",
-		GeoCountry:         "Estonia",
-		GeoCountryCode:     "EE",
-		GeoUpdatedAt:       now.Add(-time.Hour),
-		TotalDowntimeSec:   420,
-		IncidentCount:      5,
-		LongestDowntimeSec: 360,
+		StableID:               testSourceID,
+		Name:                   "Estonia",
+		SubName:                "InvisibleProxy",
+		Server:                 "94.156.236.38",
+		Port:                   3128,
+		Protocol:               "vless",
+		Active:                 false,
+		FirstSeenAt:            now.Add(-72 * time.Hour),
+		LastSeenAt:             now.Add(-2 * time.Hour),
+		RetiredAt:              now.Add(-90 * time.Minute),
+		GeoIP:                  "94.156.236.38",
+		GeoCountry:             "Estonia",
+		GeoCountryCode:         "EE",
+		GeoUpdatedAt:           now.Add(-time.Hour),
+		TotalDowntimeSec:       420,
+		IncidentCount:          5,
+		LongestDowntimeSec:     360,
+		TotalProxyFailureSec:   300,
+		ProxyFailureCount:      3,
+		LongestProxyFailureSec: 200,
 	}
 	target := nodearchive.NodeRecord{
-		StableID:           testTargetID,
-		Name:               "Estonia",
-		SubName:            "InvisibleProxy",
-		Server:             "94.156.236.38",
-		Port:               3128,
-		Protocol:           "vless",
-		Active:             true,
-		FirstSeenAt:        now.Add(-time.Hour),
-		LastSeenAt:         now,
-		GeoCountry:         "Unknown",
-		GeoUpdatedAt:       now.Add(-2 * time.Hour),
-		TotalDowntimeSec:   30,
-		IncidentCount:      2,
-		LongestDowntimeSec: 20,
+		StableID:               testTargetID,
+		Name:                   "Estonia",
+		SubName:                "InvisibleProxy",
+		Server:                 "94.156.236.38",
+		Port:                   3128,
+		Protocol:               "vless",
+		Active:                 true,
+		FirstSeenAt:            now.Add(-time.Hour),
+		LastSeenAt:             now,
+		GeoCountry:             "Unknown",
+		GeoUpdatedAt:           now.Add(-2 * time.Hour),
+		TotalDowntimeSec:       30,
+		IncidentCount:          2,
+		LongestDowntimeSec:     20,
+		TotalProxyFailureSec:   20,
+		ProxyFailureCount:      1,
+		LongestProxyFailureSec: 15,
 	}
 	registry := nodearchive.StateFile{
 		Version:   1,

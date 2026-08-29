@@ -32,10 +32,14 @@ type AdminProxyInfo struct {
 	Protocol           string `json:"protocol"`
 	ProxyPort          int    `json:"proxyPort"`
 	Online             bool   `json:"online"`
+	Status             string `json:"status"`
+	ProxyHealthy       bool   `json:"proxyHealthy"`
 	Maintenance        bool   `json:"maintenance"`
 	LatencyMs          int64  `json:"latencyMs"`
 	DownSince          string `json:"downSince,omitempty"`
 	DowntimeSec        int64  `json:"downtimeSec"`
+	ProxyFailureSince  string `json:"proxyFailureSince,omitempty"`
+	ProxyFailureSec    int64  `json:"proxyFailureSec"`
 	HostCheckChecked   bool   `json:"hostCheckChecked"`
 	HostCheckOnline    bool   `json:"hostCheckOnline"`
 	HostCheckLatencyMs int64  `json:"hostCheckLatencyMs"`
@@ -479,7 +483,7 @@ func parseHistoryTime(raw, name string) (time.Time, error) {
 	return parsed, nil
 }
 
-func AdminSpeedTestRunHandler(manager *speedtest.Manager) http.HandlerFunc {
+func AdminSpeedTestRunHandler(manager *speedtest.Manager, availabilityChecks ...AdminProxyCheckFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -495,6 +499,14 @@ func AdminSpeedTestRunHandler(manager *speedtest.Manager) http.HandlerFunc {
 			writeError(w, "Select at least one node", http.StatusBadRequest)
 			return
 		}
+		if len(availabilityChecks) > 0 && availabilityChecks[0] != nil {
+			if err := availabilityChecks[0](req.ProxyIDs); err != nil {
+				writeError(w, fmt.Sprintf("availability check failed: %v", err), http.StatusBadRequest)
+				return
+			}
+		}
+		req.OnlyOnline = true
+		req.SkipOffline = true
 		if err := manager.Run(req, "manual"); err != nil {
 			status := http.StatusBadRequest
 			if strings.Contains(err.Error(), "already running") {
@@ -772,6 +784,12 @@ func adminProxyInfo(proxy *models.ProxyConfig, details checker.ProxyStatusDetail
 		downSince = details.DownSince.Format(time.RFC3339)
 		downtimeSec = int64(time.Since(details.DownSince).Seconds())
 	}
+	proxyFailureSince := ""
+	proxyFailureSec := int64(0)
+	if !details.ProxyFailureSince.IsZero() {
+		proxyFailureSince = details.ProxyFailureSince.Format(time.RFC3339)
+		proxyFailureSec = int64(time.Since(details.ProxyFailureSince).Seconds())
+	}
 
 	return AdminProxyInfo{
 		StableID:           proxy.StableID,
@@ -781,11 +799,15 @@ func adminProxyInfo(proxy *models.ProxyConfig, details checker.ProxyStatusDetail
 		Port:               proxy.Port,
 		Protocol:           proxy.Protocol,
 		ProxyPort:          startPort + proxy.Index,
-		Online:             details.Online,
+		Online:             !details.IsOffline(),
+		Status:             string(details.EffectiveStatus()),
+		ProxyHealthy:       details.Online,
 		Maintenance:        maintenance,
 		LatencyMs:          details.Latency.Milliseconds(),
 		DownSince:          downSince,
 		DowntimeSec:        downtimeSec,
+		ProxyFailureSince:  proxyFailureSince,
+		ProxyFailureSec:    proxyFailureSec,
 		HostCheckChecked:   details.HostCheck.Checked,
 		HostCheckOnline:    details.HostCheck.Online,
 		HostCheckLatencyMs: details.HostCheck.Latency.Milliseconds(),

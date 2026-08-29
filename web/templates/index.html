@@ -186,6 +186,10 @@
       .status-offline {
         background: var(--color-red);
       }
+      .status-proxy-failure {
+        background: var(--color-yellow);
+        box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.16);
+      }
       .status-maintenance {
         background-color: #f59e0b;
         box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.16);
@@ -221,6 +225,10 @@
       .filter-offline {
         background: var(--filter-offline-bg);
         color: var(--color-red);
+      }
+      .filter-proxy-failure {
+        background: rgba(245, 158, 11, 0.15);
+        color: var(--color-yellow);
       }
       .filter-all {
         background: var(--hover-bg);
@@ -493,7 +501,7 @@
         <div class="badge-card" :class="badgeClasses" :style="badgeStyle">
           <div
             class="badge-status"
-            :class="badgeProxy.maintenance ? 'status-maintenance' : (badgeProxy.status ? 'status-online pulse' : 'status-offline')"
+            :class="badgeProxy.maintenance ? 'status-maintenance' : (badgeProxy.availabilityStatus === 'online' ? 'status-online pulse' : (badgeProxy.availabilityStatus === 'proxy_failure' ? 'status-proxy-failure' : 'status-offline'))"
           ></div>
           <span
             x-show="badgeShowName"
@@ -504,7 +512,7 @@
             x-show="badgeShowLatency"
             class="badge-latency"
             :class="badgeProxy.latencyMs === 0 ? 'text-muted' : badgeProxy.latencyMs < 500 ? 'latency-good' : badgeProxy.latencyMs < 1000 ? 'latency-medium' : 'latency-bad'"
-            x-text="badgeProxy.maintenance ? 'Maintenance' : badgeProxy.latency"
+            x-text="badgeProxy.maintenance ? 'Maintenance' : (badgeProxy.availabilityStatus === 'proxy_failure' ? 'Proxy failure' : badgeProxy.latency)"
           ></span>
         </div>
       </div>
@@ -646,7 +654,7 @@
       </header>
 
       <!-- Stats -->
-      <div x-show="showStats" class="grid grid-cols-4 gap-2 sm:gap-3 mb-6">
+      <div x-show="showStats" class="grid grid-cols-5 gap-2 sm:gap-3 mb-6">
         <div class="card rounded-lg p-2 sm:p-4 text-center">
           <div
             class="text-base sm:text-xl font-semibold text-primary"
@@ -664,6 +672,15 @@
             0
           </div>
           <div class="text-xs text-muted mt-0.5">Online</div>
+        </div>
+        <div class="card rounded-lg p-2 sm:p-4 text-center">
+          <div
+            class="text-base sm:text-xl font-semibold latency-medium"
+            x-text="stats.proxyFailures"
+          >
+            0
+          </div>
+          <div class="text-xs text-muted mt-0.5">Proxy failure</div>
         </div>
         <div class="card rounded-lg p-2 sm:p-4 text-center">
           <div
@@ -871,6 +888,13 @@
                 Online
               </button>
               <button
+                @click="setFilter('proxy_failure')"
+                :class="filter === 'proxy_failure' ? 'filter-proxy-failure' : 'text-muted hover:text-secondary'"
+                class="px-3 py-1 rounded text-xs font-medium"
+              >
+                Proxy failure
+              </button>
+              <button
                 @click="setFilter('offline')"
                 :class="filter === 'offline' ? 'filter-offline' : 'text-muted hover:text-secondary'"
                 class="px-3 py-1 rounded text-xs font-medium"
@@ -915,7 +939,7 @@
             <div class="relative flex-shrink-0">
               <div
                 class="w-2 h-2 rounded-full"
-                :class="proxy.maintenance ? 'status-maintenance' : (proxy.status ? 'status-online pulse' : 'status-offline')"
+                :class="proxy.maintenance ? 'status-maintenance' : (proxy.availabilityStatus === 'online' ? 'status-online pulse' : (proxy.availabilityStatus === 'proxy_failure' ? 'status-proxy-failure' : 'status-offline'))"
               ></div>
             </div>
 
@@ -954,7 +978,7 @@
               <span
                 class="text-xs tabular-nums"
                 :class="proxy.latencyMs === 0 ? 'text-muted' : proxy.latencyMs < 500 ? 'latency-good' : proxy.latencyMs < 1000 ? 'latency-medium' : 'latency-bad'"
-                x-text="proxy.maintenance ? 'Maintenance' : proxy.latency"
+                x-text="proxy.maintenance ? 'Maintenance' : (proxy.availabilityStatus === 'proxy_failure' ? 'Proxy failure' : proxy.latency)"
               ></span>
               <div class="flex items-center gap-0.5">
                 <template x-for="i in 5" :key="i">
@@ -1125,19 +1149,22 @@
 
           proxies: [
             {{ range $.Endpoints }}
-            { name: "{{.Name}}", stableId: "{{.StableID}}", {{ if $.ShowServerDetails }}serverInfo: "{{.ServerInfo}}", server: "{{.Server}}", serverPort: {{.ServerPort}}, proxyPort: {{.ProxyPort}}, {{ end }}{{ if not $.IsPublic }}url: "{{.URL}}", {{ end }}index: {{.Index}}, status: {{.Status}}, maintenance: {{.Maintenance}}, latency: "{{ formatLatency .Latency }}", latencyMs: {{ .Latency.Milliseconds }} },
+            { name: "{{.Name}}", stableId: "{{.StableID}}", {{ if $.ShowServerDetails }}serverInfo: "{{.ServerInfo}}", server: "{{.Server}}", serverPort: {{.ServerPort}}, proxyPort: {{.ProxyPort}}, {{ end }}{{ if not $.IsPublic }}url: "{{.URL}}", {{ end }}index: {{.Index}}, status: {{.Status}}, availabilityStatus: "{{.AvailabilityStatus}}", proxyHealthy: {{.ProxyHealthy}}, maintenance: {{.Maintenance}}, latency: "{{ formatLatency .Latency }}", latencyMs: {{ .Latency.Milliseconds }} },
             {{ end }}
           ],
 
           get stats() {
             const maintenance = this.proxies.filter(p => p.maintenance).length;
             const monitored = this.proxies.length - maintenance;
-            const online = this.proxies.filter(p => !p.maintenance && p.status).length;
-            const withLatency = this.proxies.filter(p => !p.maintenance && p.status && p.latencyMs > 0);
+            const online = this.proxies.filter(p => !p.maintenance && p.availabilityStatus === 'online').length;
+            const proxyFailures = this.proxies.filter(p => !p.maintenance && p.availabilityStatus === 'proxy_failure').length;
+            const offline = this.proxies.filter(p => !p.maintenance && p.availabilityStatus === 'offline').length;
+            const withLatency = this.proxies.filter(p => !p.maintenance && p.availabilityStatus === 'online' && p.latencyMs > 0);
             return {
               total: this.proxies.length,
               online,
-              offline: monitored - online,
+              proxyFailures,
+              offline,
               maintenance,
               avgLatency: withLatency.length ? Math.round(withLatency.reduce((s, p) => s + p.latencyMs, 0) / withLatency.length) : 0
             };
@@ -1149,8 +1176,9 @@
               const q = this.search.toLowerCase();
               r = r.filter(p => p.name.toLowerCase().includes(q) || (p.serverInfo && p.serverInfo.toLowerCase().includes(q)));
             }
-            if (this.filter === 'online') r = r.filter(p => !p.maintenance && p.status);
-            else if (this.filter === 'offline') r = r.filter(p => !p.maintenance && !p.status);
+            if (this.filter === 'online') r = r.filter(p => !p.maintenance && p.availabilityStatus === 'online');
+            else if (this.filter === 'proxy_failure') r = r.filter(p => !p.maintenance && p.availabilityStatus === 'proxy_failure');
+            else if (this.filter === 'offline') r = r.filter(p => !p.maintenance && p.availabilityStatus === 'offline');
             else if (this.filter === 'maintenance') r = r.filter(p => p.maintenance);
 
             return [...r].sort((a, b) => {
@@ -1166,7 +1194,10 @@
                 if (b.latencyMs === 0) return -1;
                 return b.latencyMs - a.latencyMs;
               }
-              if (this.sort === 'status') return b.status - a.status;
+              if (this.sort === 'status') {
+                const rank = { offline: 0, proxy_failure: 1, online: 2 };
+                return (rank[b.availabilityStatus] || 0) - (rank[a.availabilityStatus] || 0);
+              }
               if (this.sort === 'name') return this.stripLeadingEmoji(a.name).localeCompare(this.stripLeadingEmoji(b.name));
               return a.index - b.index;
             });
@@ -1301,6 +1332,8 @@
                   const proxy = this.proxies.find(p => p.stableId === updated.stableId);
                   if (proxy) {
                     proxy.status = updated.online;
+                    proxy.availabilityStatus = updated.status;
+                    proxy.proxyHealthy = updated.proxyHealthy;
                     proxy.maintenance = updated.maintenance;
                     proxy.latencyMs = updated.latencyMs;
                     proxy.latency = updated.latencyMs > 0 ? updated.latencyMs + 'ms' : 'n/a';
@@ -1311,6 +1344,8 @@
                   const updated = json.data.find(p => p.stableId === this.badgeProxy.stableId);
                   if (updated) {
                     this.badgeProxy.status = updated.online;
+                    this.badgeProxy.availabilityStatus = updated.status;
+                    this.badgeProxy.proxyHealthy = updated.proxyHealthy;
                     this.badgeProxy.maintenance = updated.maintenance;
                     this.badgeProxy.latencyMs = updated.latencyMs;
                     this.badgeProxy.latency = updated.latencyMs > 0 ? updated.latencyMs + 'ms' : 'n/a';

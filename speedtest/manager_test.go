@@ -42,6 +42,67 @@ func TestMaintenanceNodesAreExcludedFromSpeedTestSelection(t *testing.T) {
 	}
 }
 
+func TestAutomaticSpeedTestSelectionRequiresHealthyProxy(t *testing.T) {
+	proxyFailure := &models.ProxyConfig{StableID: "proxy-failure", Name: "Proxy failure"}
+	offline := &models.ProxyConfig{StableID: "offline", Name: "Offline"}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxyFailure, offline}, 10000, "", 1, "", "", 1, 0, "status")
+	if !proxyChecker.RestoreProxyFailureStatus(proxyFailure.StableID, time.Now().Add(-time.Minute), checker.HostCheckDetails{Checked: true, Online: true}, checker.PingCheckDetails{}) {
+		t.Fatal("failed to prepare proxy-failure state")
+	}
+	if !proxyChecker.RestoreOfflineStatus(offline.StableID, time.Now().Add(-time.Minute), checker.HostCheckDetails{Checked: true, Online: false}, checker.PingCheckDetails{Checked: true, Online: false}) {
+		t.Fatal("failed to prepare offline state")
+	}
+	manager := NewManager(proxyChecker, 10000, "", TestConfig{})
+	selected := manager.selectProxies(RunRequest{ProxyIDs: []string{proxyFailure.StableID, offline.StableID}, OnlyOnline: true}, false)
+	if len(selected) != 0 {
+		t.Fatalf("automatic selection = %+v, want no unhealthy nodes", selected)
+	}
+	manual := manager.selectProxies(RunRequest{ProxyIDs: []string{proxyFailure.StableID, offline.StableID}}, false)
+	if len(manual) != 2 {
+		t.Fatalf("manual selection = %+v, want both explicitly selected nodes", manual)
+	}
+}
+
+func TestUnavailableNodesAreSkippedWithoutSpeedResultOrHistory(t *testing.T) {
+	proxyFailure := &models.ProxyConfig{StableID: "proxy-failure", Name: "Proxy failure"}
+	offline := &models.ProxyConfig{StableID: "offline", Name: "Offline"}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxyFailure, offline}, 10000, "", 1, "", "", 1, 0, "status")
+	if !proxyChecker.RestoreProxyFailureStatus(proxyFailure.StableID, time.Now().Add(-time.Minute), checker.HostCheckDetails{Checked: true, Online: true}, checker.PingCheckDetails{Checked: true, Online: true}) {
+		t.Fatal("failed to prepare proxy-failure state")
+	}
+	if !proxyChecker.RestoreOfflineStatus(offline.StableID, time.Now().Add(-time.Minute), checker.HostCheckDetails{Checked: true}, checker.PingCheckDetails{Checked: true}) {
+		t.Fatal("failed to prepare offline state")
+	}
+
+	manager := NewManager(proxyChecker, 10000, "", TestConfig{})
+	reports := make(reportRecorder, 1)
+	manager.SetReporter(reports)
+	if err := manager.Run(RunRequest{
+		ProxyIDs:    []string{proxyFailure.StableID, offline.StableID},
+		SkipOffline: true,
+	}, "schedule"); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case report := <-reports:
+		if report.Selected != 2 || len(report.Results) != 0 {
+			t.Fatalf("skipped report = %+v, want selected nodes but no speed results", report)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for skipped speed-test report")
+	}
+	if results := manager.Snapshot().Results; len(results) != 0 {
+		t.Fatalf("unavailable nodes created latest results: %+v", results)
+	}
+	if history := manager.ResultHistory(proxyFailure.StableID); len(history) != 0 {
+		t.Fatalf("proxy failure created history: %+v", history)
+	}
+	if history := manager.ResultHistory(offline.StableID); len(history) != 0 {
+		t.Fatalf("offline node created history: %+v", history)
+	}
+}
+
 func TestManualMaintenanceProbeIsVisibleButNotAddedToHistory(t *testing.T) {
 	paused := &models.ProxyConfig{StableID: "paused", Name: "Paused"}
 	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{paused}, 10000, "", 1, "", "", 1, 0, "status")
@@ -307,23 +368,9 @@ func TestUpdatedTestURLIsUsedByScheduledConfig(t *testing.T) {
 	if schedule.Config.URL != "https://new.example.com/test.bin" {
 		t.Fatalf("scheduled URL = %q, want updated URL", schedule.Config.URL)
 	}
-	if !proxyChecker.RestoreOfflineStatus(proxy.StableID, time.Now().Add(-time.Minute), checker.HostCheckDetails{}, checker.PingCheckDetails{}) {
-		t.Fatal("failed to prepare offline proxy state")
-	}
-	if err := manager.Run(RunRequest{
-		ProxyIDs:    []string{proxy.StableID},
-		SkipOffline: true,
-		Config:      schedule.Config,
-	}, "schedule"); err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(time.Second)
-	for manager.Snapshot().LastRun.Running && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	results := manager.Snapshot().Results
-	if len(results) != 1 || results[0].URL != "https://new.example.com/test.bin" {
-		t.Fatalf("scheduled result = %+v, want updated URL", results)
+	proxyConfig := manager.configForProxy(schedule.Config, proxy)
+	if proxyConfig.URL != "https://new.example.com/test.bin" {
+		t.Fatalf("scheduled proxy URL = %q, want updated URL", proxyConfig.URL)
 	}
 
 	reloaded := NewManager(proxyChecker, 10000, manager.statePath, TestConfig{})

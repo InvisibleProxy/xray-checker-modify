@@ -809,6 +809,32 @@ func TestAdminProxyCheckHandlerChecksSelectedNodes(t *testing.T) {
 	}
 }
 
+func TestAdminSpeedTestRunChecksAvailabilityBeforeFiltering(t *testing.T) {
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "Node one", Protocol: "vless", Server: "node.example.com", Port: 443, UUID: "uuid"}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "", "", 1, 0, "status")
+	if !proxyChecker.RestoreProxyFailureStatus(proxy.StableID, time.Now().Add(-time.Minute), checker.HostCheckDetails{Checked: true, Online: true}, checker.PingCheckDetails{}) {
+		t.Fatal("failed to seed proxy-failure status")
+	}
+	manager := speedtest.NewManager(proxyChecker, 10000, "", speedtest.TestConfig{})
+	called := false
+	handler := AdminSpeedTestRunHandler(manager, func(stableIDs []string) error {
+		called = true
+		if len(stableIDs) != 1 || stableIDs[0] != proxy.StableID {
+			t.Fatalf("availability IDs = %v", stableIDs)
+		}
+		return nil
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/speed-tests/run", strings.NewReader(`{"proxyIds":["node-1"],"config":{}}`))
+	handler.ServeHTTP(rec, req)
+	if !called {
+		t.Fatal("manual speed-test did not run availability check first")
+	}
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "no proxies selected") {
+		t.Fatalf("expected unhealthy node to be filtered, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAdminProxyCheckHandlerRequiresSelection(t *testing.T) {
 	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
 	handler := AdminProxyCheckHandler(func([]string) error { return nil }, proxyChecker, 10000)
@@ -857,6 +883,29 @@ func TestConfigStatusHandlerReturnsOKDuringMaintenance(t *testing.T) {
 	}
 	if rec.Header().Get("X-Xray-Checker-Status") != "maintenance" {
 		t.Fatalf("maintenance response header = %q", rec.Header().Get("X-Xray-Checker-Status"))
+	}
+}
+
+func TestConfigStatusHandlerReturnsProxyFailureWithoutOffline(t *testing.T) {
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "Node one"}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "", "", 1, 0, "status")
+	if !proxyChecker.RestoreProxyFailureStatus(
+		proxy.StableID,
+		time.Now().Add(-time.Minute),
+		checker.HostCheckDetails{Checked: true, Online: true},
+		checker.PingCheckDetails{Checked: true, Online: true},
+	) {
+		t.Fatal("failed to seed proxy-failure status")
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/config/node-1", nil)
+	ConfigStatusHandler(proxyChecker).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "Proxy failure" {
+		t.Fatalf("proxy-failure response = %d %q", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Xray-Checker-Status"); got != string(checker.AvailabilityStateProxyFailure) {
+		t.Fatalf("proxy-failure response header = %q", got)
 	}
 }
 

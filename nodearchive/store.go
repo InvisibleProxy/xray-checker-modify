@@ -57,10 +57,11 @@ type StateFile struct {
 }
 
 // AvailabilitySample is one real proxy availability check retained for the
-// admin card latency graph. Offline checks deliberately carry no latency.
+// admin card latency graph. Non-online checks deliberately carry no latency.
 type AvailabilitySample struct {
 	CheckedAt      time.Time `json:"checkedAt"`
 	Online         bool      `json:"online"`
+	Status         string    `json:"status,omitempty"`
 	LatencyMs      int64     `json:"latencyMs"`
 	FailureCode    string    `json:"failureCode,omitempty"`
 	FailureSummary string    `json:"failureSummary,omitempty"`
@@ -89,40 +90,45 @@ type IncidentRecord struct {
 }
 
 type NodeRecord struct {
-	StableID            string    `json:"stableId"`
-	Name                string    `json:"name"`
-	SubName             string    `json:"subName"`
-	Server              string    `json:"server"`
-	Port                int       `json:"port"`
-	Protocol            string    `json:"protocol"`
-	Active              bool      `json:"active"`
-	Maintenance         bool      `json:"maintenance,omitempty"`
-	MaintenanceSince    time.Time `json:"maintenanceSince,omitempty"`
-	FirstSeenAt         time.Time `json:"firstSeenAt"`
-	LastSeenAt          time.Time `json:"lastSeenAt"`
-	RetiredAt           time.Time `json:"retiredAt,omitempty"`
-	ClaimedCountry      string    `json:"claimedCountry,omitempty"`
-	ClaimedCountryCode  string    `json:"claimedCountryCode,omitempty"`
-	GeoIP               string    `json:"geoIp,omitempty"`
-	GeoCountry          string    `json:"geoCountry,omitempty"`
-	GeoCountryCode      string    `json:"geoCountryCode,omitempty"`
-	GeoOrg              string    `json:"geoOrg,omitempty"`
-	GeoUpdatedAt        time.Time `json:"geoUpdatedAt,omitempty"`
-	GeoError            string    `json:"geoError,omitempty"`
-	IfconfigIP          string    `json:"ifconfigIp,omitempty"`
-	IfconfigCountry     string    `json:"ifconfigCountry,omitempty"`
-	IfconfigCountryCode string    `json:"ifconfigCountryCode,omitempty"`
-	IfconfigASN         string    `json:"ifconfigAsn,omitempty"`
-	IfconfigOrg         string    `json:"ifconfigOrg,omitempty"`
-	IfconfigUpdatedAt   time.Time `json:"ifconfigUpdatedAt,omitempty"`
-	IfconfigError       string    `json:"ifconfigError,omitempty"`
-	TotalDowntimeSec    int64     `json:"totalDowntimeSec"`
-	IncidentCount       int       `json:"incidentCount"`
-	LongestDowntimeSec  int64     `json:"longestDowntimeSec"`
-	CurrentDownSince    time.Time `json:"currentDownSince,omitempty"`
-	LastOfflineAt       time.Time `json:"lastOfflineAt,omitempty"`
-	LastOnlineAt        time.Time `json:"lastOnlineAt,omitempty"`
-	LastStatusAt        time.Time `json:"lastStatusAt,omitempty"`
+	StableID                 string    `json:"stableId"`
+	Name                     string    `json:"name"`
+	SubName                  string    `json:"subName"`
+	Server                   string    `json:"server"`
+	Port                     int       `json:"port"`
+	Protocol                 string    `json:"protocol"`
+	Active                   bool      `json:"active"`
+	Maintenance              bool      `json:"maintenance,omitempty"`
+	MaintenanceSince         time.Time `json:"maintenanceSince,omitempty"`
+	FirstSeenAt              time.Time `json:"firstSeenAt"`
+	LastSeenAt               time.Time `json:"lastSeenAt"`
+	RetiredAt                time.Time `json:"retiredAt,omitempty"`
+	ClaimedCountry           string    `json:"claimedCountry,omitempty"`
+	ClaimedCountryCode       string    `json:"claimedCountryCode,omitempty"`
+	GeoIP                    string    `json:"geoIp,omitempty"`
+	GeoCountry               string    `json:"geoCountry,omitempty"`
+	GeoCountryCode           string    `json:"geoCountryCode,omitempty"`
+	GeoOrg                   string    `json:"geoOrg,omitempty"`
+	GeoUpdatedAt             time.Time `json:"geoUpdatedAt,omitempty"`
+	GeoError                 string    `json:"geoError,omitempty"`
+	IfconfigIP               string    `json:"ifconfigIp,omitempty"`
+	IfconfigCountry          string    `json:"ifconfigCountry,omitempty"`
+	IfconfigCountryCode      string    `json:"ifconfigCountryCode,omitempty"`
+	IfconfigASN              string    `json:"ifconfigAsn,omitempty"`
+	IfconfigOrg              string    `json:"ifconfigOrg,omitempty"`
+	IfconfigUpdatedAt        time.Time `json:"ifconfigUpdatedAt,omitempty"`
+	IfconfigError            string    `json:"ifconfigError,omitempty"`
+	TotalDowntimeSec         int64     `json:"totalDowntimeSec"`
+	IncidentCount            int       `json:"incidentCount"`
+	LongestDowntimeSec       int64     `json:"longestDowntimeSec"`
+	CurrentDownSince         time.Time `json:"currentDownSince,omitempty"`
+	LastOfflineAt            time.Time `json:"lastOfflineAt,omitempty"`
+	TotalProxyFailureSec     int64     `json:"totalProxyFailureSec"`
+	ProxyFailureCount        int       `json:"proxyFailureCount"`
+	LongestProxyFailureSec   int64     `json:"longestProxyFailureSec"`
+	CurrentProxyFailureSince time.Time `json:"currentProxyFailureSince,omitempty"`
+	LastProxyFailureAt       time.Time `json:"lastProxyFailureAt,omitempty"`
+	LastOnlineAt             time.Time `json:"lastOnlineAt,omitempty"`
+	LastStatusAt             time.Time `json:"lastStatusAt,omitempty"`
 }
 
 type Summary struct {
@@ -318,6 +324,7 @@ func (s *Store) SyncProxies(proxies []*models.ProxyConfig) error {
 		record.RetiredAt = now
 		record.LastSeenAt = now
 		record = closeDowntime(record, now)
+		record = closeProxyFailure(record, now)
 		if incidentIndex := s.findActiveIncidentLocked(incidentKindNode, "node:"+stableID); incidentIndex >= 0 {
 			s.resolveIncidentLocked(incidentIndex, now)
 			changed = true
@@ -379,6 +386,7 @@ func (s *Store) SetMaintenance(stableID string, enabled bool) (NodeRecord, error
 	if enabled {
 		record.MaintenanceSince = now
 		record = closeDowntime(record, now)
+		record = closeProxyFailure(record, now)
 		if incidentIndex := s.findActiveIncidentLocked(incidentKindNode, "node:"+stableID); incidentIndex >= 0 {
 			s.resolveIncidentLocked(incidentIndex, now)
 		}
@@ -482,6 +490,7 @@ func (s *Store) RecordAvailability() error {
 		previous := record
 		if record.Maintenance {
 			record = closeDowntime(record, now)
+			record = closeProxyFailure(record, now)
 			if incidentIndex := s.findActiveIncidentLocked(incidentKindNode, "node:"+proxy.StableID); incidentIndex >= 0 {
 				s.resolveIncidentLocked(incidentIndex, now)
 				changed = true
@@ -528,6 +537,7 @@ func (s *Store) RecordAvailability() error {
 		record.RetiredAt = now
 		record.LastSeenAt = now
 		record = closeDowntime(record, now)
+		record = closeProxyFailure(record, now)
 		if previous != record {
 			s.nodes[stableID] = record
 			changed = true
@@ -578,11 +588,12 @@ func (s *Store) recordAvailabilitySampleLocked(stableID string, details checker.
 	}
 	sample := AvailabilitySample{
 		CheckedAt:      details.CheckedAt,
-		Online:         details.Online,
+		Online:         !details.IsOffline(),
+		Status:         string(details.EffectiveStatus()),
 		FailureCode:    strings.TrimSpace(details.Failure.Code),
 		FailureSummary: strings.TrimSpace(details.Failure.Summary),
 	}
-	if sample.Online && details.Latency > 0 {
+	if details.EffectiveStatus() == checker.AvailabilityStateOnline && details.Latency > 0 {
 		sample.LatencyMs = details.Latency.Milliseconds()
 	}
 	s.availabilityHistory[stableID] = append([]AvailabilitySample{sample}, s.availabilityHistory[stableID]...)
@@ -640,7 +651,19 @@ func normalizeAvailabilitySamples(entries []AvailabilitySample, now time.Time, r
 			continue
 		}
 		seen[key] = true
-		if !sample.Online || sample.LatencyMs < 0 {
+		status := checker.AvailabilityState(strings.TrimSpace(sample.Status))
+		switch status {
+		case checker.AvailabilityStateOnline, checker.AvailabilityStateProxyFailure, checker.AvailabilityStateOffline:
+		default:
+			if sample.Online {
+				status = checker.AvailabilityStateOnline
+			} else {
+				status = checker.AvailabilityStateOffline
+			}
+		}
+		sample.Status = string(status)
+		sample.Online = status != checker.AvailabilityStateOffline
+		if status != checker.AvailabilityStateOnline || sample.LatencyMs < 0 {
 			sample.LatencyMs = 0
 		}
 		sample.FailureCode = strings.TrimSpace(sample.FailureCode)
@@ -1109,22 +1132,37 @@ func applyProxy(record NodeRecord, proxy *models.ProxyConfig, now time.Time) Nod
 
 func applyAvailability(record NodeRecord, details checker.ProxyStatusDetails, now time.Time) NodeRecord {
 	record.LastStatusAt = now
-	if details.Online {
+	switch details.EffectiveStatus() {
+	case checker.AvailabilityStateOnline:
 		record.LastOnlineAt = now
 		record = closeDowntime(record, now)
+		record = closeProxyFailure(record, now)
+		return record
+	case checker.AvailabilityStateProxyFailure:
+		record = closeDowntime(record, now)
+		failureSince := details.ProxyFailureSince
+		if failureSince.IsZero() {
+			failureSince = now
+		}
+		record.LastProxyFailureAt = now
+		if record.CurrentProxyFailureSince.IsZero() {
+			record.CurrentProxyFailureSince = failureSince
+			record.ProxyFailureCount++
+		}
+		return record
+	default:
+		record = closeProxyFailure(record, now)
+		downSince := details.DownSince
+		if downSince.IsZero() {
+			downSince = now
+		}
+		record.LastOfflineAt = now
+		if record.CurrentDownSince.IsZero() {
+			record.CurrentDownSince = downSince
+			record.IncidentCount++
+		}
 		return record
 	}
-
-	downSince := details.DownSince
-	if downSince.IsZero() {
-		downSince = now
-	}
-	record.LastOfflineAt = now
-	if record.CurrentDownSince.IsZero() {
-		record.CurrentDownSince = downSince
-		record.IncidentCount++
-	}
-	return record
 }
 
 func closeDowntime(record NodeRecord, closedAt time.Time) NodeRecord {
@@ -1144,12 +1182,29 @@ func closeDowntime(record NodeRecord, closedAt time.Time) NodeRecord {
 	return record
 }
 
+func closeProxyFailure(record NodeRecord, closedAt time.Time) NodeRecord {
+	if record.CurrentProxyFailureSince.IsZero() {
+		return record
+	}
+	if closedAt.Before(record.CurrentProxyFailureSince) {
+		record.CurrentProxyFailureSince = time.Time{}
+		return record
+	}
+	durationSec := int64(closedAt.Sub(record.CurrentProxyFailureSince).Seconds())
+	record.TotalProxyFailureSec += durationSec
+	if durationSec > record.LongestProxyFailureSec {
+		record.LongestProxyFailureSec = durationSec
+	}
+	record.CurrentProxyFailureSince = time.Time{}
+	return record
+}
+
 func (s *Store) updateNodeIncidentLocked(proxy *models.ProxyConfig, details checker.ProxyStatusDetails, now time.Time) bool {
 	if proxy == nil || proxy.StableID == "" {
 		return false
 	}
 	index := s.findActiveIncidentLocked(incidentKindNode, "node:"+proxy.StableID)
-	if details.Online {
+	if !details.IsOffline() {
 		if index < 0 {
 			return false
 		}

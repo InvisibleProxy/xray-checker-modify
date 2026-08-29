@@ -114,6 +114,53 @@ func TestApplyAvailabilityUsesExistingDownSince(t *testing.T) {
 	}
 }
 
+func TestApplyAvailabilityTracksProxyFailureWithoutDowntime(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	failureSince := now.Add(-2 * time.Hour)
+	record := applyAvailability(NodeRecord{StableID: "de"}, checker.ProxyStatusDetails{
+		Status:            checker.AvailabilityStateProxyFailure,
+		ProxyFailureSince: failureSince,
+		Failure:           checker.FailureDetails{Code: checker.FailureCodeProxyTimeout},
+	}, now)
+
+	if !record.CurrentDownSince.IsZero() || record.TotalDowntimeSec != 0 || record.IncidentCount != 0 {
+		t.Fatalf("proxy failure changed downtime statistics: %+v", record)
+	}
+	if !record.CurrentProxyFailureSince.Equal(failureSince) || record.ProxyFailureCount != 1 {
+		t.Fatalf("proxy failure was not opened: %+v", record)
+	}
+
+	recoveredAt := now.Add(time.Hour)
+	record = applyAvailability(record, checker.ProxyStatusDetails{Online: true, Status: checker.AvailabilityStateOnline}, recoveredAt)
+	if !record.CurrentProxyFailureSince.IsZero() {
+		t.Fatalf("current proxy failure was not closed: %+v", record)
+	}
+	if record.TotalProxyFailureSec != int64(recoveredAt.Sub(failureSince).Seconds()) || record.LongestProxyFailureSec != record.TotalProxyFailureSec {
+		t.Fatalf("proxy failure duration statistics = %+v", record)
+	}
+}
+
+func TestProxyFailureTransitionsToOfflineWithoutDoubleCounting(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	failureSince := now.Add(-time.Hour)
+	record := applyAvailability(NodeRecord{StableID: "de"}, checker.ProxyStatusDetails{
+		Status:            checker.AvailabilityStateProxyFailure,
+		ProxyFailureSince: failureSince,
+	}, now)
+
+	offlineAt := now.Add(10 * time.Minute)
+	record = applyAvailability(record, checker.ProxyStatusDetails{
+		Status:    checker.AvailabilityStateOffline,
+		DownSince: offlineAt,
+	}, offlineAt)
+	if !record.CurrentProxyFailureSince.IsZero() || record.TotalProxyFailureSec != int64(offlineAt.Sub(failureSince).Seconds()) {
+		t.Fatalf("proxy failure was not closed on offline transition: %+v", record)
+	}
+	if !record.CurrentDownSince.Equal(offlineAt) || record.IncidentCount != 1 {
+		t.Fatalf("offline interval was not opened independently: %+v", record)
+	}
+}
+
 func TestNodeIncidentJournalOpensAndResolves(t *testing.T) {
 	store := NewStore("", nil)
 	proxy := &models.ProxyConfig{StableID: "node-1", Name: "Node 1", SubName: "Primary"}
@@ -199,6 +246,9 @@ func TestAvailabilityHistoryNormalizesDeduplicatesAndFiltersRange(t *testing.T) 
 	if !got[0].Online || got[0].LatencyMs != 42 || got[1].Online || got[1].LatencyMs != 0 {
 		t.Fatalf("normalized history = %+v", got)
 	}
+	if got[0].Status != string(checker.AvailabilityStateOnline) || got[1].Status != string(checker.AvailabilityStateOffline) {
+		t.Fatalf("legacy history statuses were not normalized: %+v", got)
+	}
 	if got[1].FailureCode != checker.FailureCodeTCPTimeout || got[1].FailureSummary != "Timeout" {
 		t.Fatalf("failure fields were not normalized: %+v", got[1])
 	}
@@ -252,11 +302,12 @@ func TestSetMaintenancePersistsAndClosesActiveDowntime(t *testing.T) {
 	store := NewStore(path, nil)
 	startedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
 	store.nodes["node-1"] = NodeRecord{
-		StableID:         "node-1",
-		Name:             "Node 1",
-		Active:           true,
-		CurrentDownSince: startedAt,
-		IncidentCount:    1,
+		StableID:                 "node-1",
+		Name:                     "Node 1",
+		Active:                   true,
+		CurrentDownSince:         startedAt,
+		CurrentProxyFailureSince: startedAt,
+		IncidentCount:            1,
 	}
 	store.incidents = []IncidentRecord{{
 		ID:        "incident-1",
@@ -271,11 +322,14 @@ func TestSetMaintenancePersistsAndClosesActiveDowntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !record.Maintenance || record.MaintenanceSince.IsZero() || !record.CurrentDownSince.IsZero() {
+	if !record.Maintenance || record.MaintenanceSince.IsZero() || !record.CurrentDownSince.IsZero() || !record.CurrentProxyFailureSince.IsZero() {
 		t.Fatalf("maintenance record = %+v", record)
 	}
 	if record.TotalDowntimeSec <= 0 {
 		t.Fatalf("closed downtime = %d, want positive", record.TotalDowntimeSec)
+	}
+	if record.TotalProxyFailureSec <= 0 {
+		t.Fatalf("closed proxy failure = %d, want positive", record.TotalProxyFailureSec)
 	}
 	if store.incidents[0].Status != incidentStatusResolved || store.incidents[0].ResolvedAt.IsZero() {
 		t.Fatalf("incident was not resolved: %+v", store.incidents[0])
@@ -429,7 +483,12 @@ func TestArchivedRecordAndRestoreArchivedKeepRetiredInvariant(t *testing.T) {
 	if got := store.MergedFromStableIDs(want.StableID); !reflect.DeepEqual(got, []string{"old-key"}) {
 		t.Fatalf("restored lineage = %#v", got)
 	}
-	if got := store.ArchivedAvailabilityHistory(want.StableID); !reflect.DeepEqual(got, wantAvailability) {
+	wantRestoredAvailability := []AvailabilitySample{{
+		CheckedAt: wantAvailability[0].CheckedAt,
+		Online:    false,
+		Status:    string(checker.AvailabilityStateOffline),
+	}}
+	if got := store.ArchivedAvailabilityHistory(want.StableID); !reflect.DeepEqual(got, wantRestoredAvailability) {
 		t.Fatalf("restored availability history = %#v", got)
 	}
 	if err := store.RestoreArchived(NodeRecord{StableID: "active", Active: true}); err == nil {

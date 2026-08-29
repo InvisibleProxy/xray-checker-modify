@@ -18,18 +18,20 @@ import (
 const transactionFormatVersion = 1
 
 type NodeSnapshot struct {
-	StableID         string    `json:"stableId"`
-	Name             string    `json:"name"`
-	SubName          string    `json:"subName"`
-	Server           string    `json:"server"`
-	Port             int       `json:"port"`
-	Protocol         string    `json:"protocol"`
-	Active           bool      `json:"active"`
-	FirstSeenAt      time.Time `json:"firstSeenAt,omitempty"`
-	LastSeenAt       time.Time `json:"lastSeenAt,omitempty"`
-	ResultCount      int       `json:"resultCount"`
-	TotalDowntimeSec int64     `json:"totalDowntimeSec"`
-	IncidentCount    int       `json:"incidentCount"`
+	StableID             string    `json:"stableId"`
+	Name                 string    `json:"name"`
+	SubName              string    `json:"subName"`
+	Server               string    `json:"server"`
+	Port                 int       `json:"port"`
+	Protocol             string    `json:"protocol"`
+	Active               bool      `json:"active"`
+	FirstSeenAt          time.Time `json:"firstSeenAt,omitempty"`
+	LastSeenAt           time.Time `json:"lastSeenAt,omitempty"`
+	ResultCount          int       `json:"resultCount"`
+	TotalDowntimeSec     int64     `json:"totalDowntimeSec"`
+	TotalProxyFailureSec int64     `json:"totalProxyFailureSec"`
+	IncidentCount        int       `json:"incidentCount"`
+	ProxyFailureCount    int       `json:"proxyFailureCount"`
 }
 
 type Preview struct {
@@ -281,17 +283,19 @@ func confirmationToken(source, target nodearchive.NodeRecord) string {
 
 func nodeSnapshot(record nodearchive.NodeRecord, resultCount int) NodeSnapshot {
 	return NodeSnapshot{
-		StableID:         record.StableID,
-		Name:             record.Name,
-		SubName:          record.SubName,
-		Server:           record.Server,
-		Port:             record.Port,
-		Protocol:         record.Protocol,
-		Active:           record.Active,
-		FirstSeenAt:      record.FirstSeenAt,
-		LastSeenAt:       record.LastSeenAt,
-		ResultCount:      resultCount,
-		TotalDowntimeSec: record.TotalDowntimeSec,
-		IncidentCount:    record.IncidentCount,
+		StableID:             record.StableID,
+		Name:                 record.Name,
+		SubName:              record.SubName,
+		Server:               record.Server,
+		Port:                 record.Port,
+		Protocol:             record.Protocol,
+		Active:               record.Active,
+		FirstSeenAt:          record.FirstSeenAt,
+		LastSeenAt:           record.LastSeenAt,
+		ResultCount:          resultCount,
+		TotalDowntimeSec:     record.TotalDowntimeSec,
+		TotalProxyFailureSec: record.TotalProxyFailureSec,
+		IncidentCount:        record.IncidentCount,
+		ProxyFailureCount:    record.ProxyFailureCount,
 	}
 }

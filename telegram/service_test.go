@@ -501,6 +501,126 @@ func TestPendingNodeDownAlertRequiresRepeatedFailure(t *testing.T) {
 	}
 }
 
+func TestPendingProxyFailureAlertUsesSeparateStatusAndDuration(t *testing.T) {
+	proxy := &models.ProxyConfig{Protocol: "vless", Server: "example.com", Port: 443, Name: "NL", UUID: "uuid"}
+	proxy.StableID = proxy.GenerateStableID()
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "", "", 1, 0, "status")
+	failureSince := time.Now().Add(-time.Hour).Truncate(time.Second)
+	hostCheck := checker.HostCheckDetails{Checked: true, Online: true, Target: "example.com:443"}
+	pingCheck := checker.PingCheckDetails{Checked: true, Online: true, Target: "example.com"}
+	failure := checker.FailureDetails{Code: checker.FailureCodeProxyTimeout, Summary: checker.FailureSummary(checker.FailureCodeProxyTimeout)}
+	if !proxyChecker.RestoreProxyFailureStatus(proxy.StableID, failureSince, hostCheck, pingCheck, failure) {
+		t.Fatal("failed to seed proxy-failure status")
+	}
+
+	service := NewService("", proxyChecker, nil, 10000)
+	cfg := DefaultConfig()
+	now := time.Now().Truncate(time.Second)
+	service.alerts[proxy.StableID] = nodeAlertState{
+		FailCount:         2,
+		WasDown:           true,
+		Status:            checker.AvailabilityStateProxyFailure,
+		ProxyFailureSince: failureSince,
+		NextAlert:         now,
+		HostCheck:         hostCheck,
+		PingCheck:         pingCheck,
+		Failure:           failure,
+	}
+
+	alert, ok := service.pendingNodeDownAlert(proxy, cfg, now)
+	if !ok {
+		t.Fatal("proxy-failure alert was not allowed after repeated failures")
+	}
+	message := formatNodeDownMessage(proxy, alert.State, now)
+	if !strings.Contains(message.HTML, "Proxy failure") || strings.Contains(message.HTML, "Простой:") || !strings.Contains(message.HTML, checker.FailureCodeProxyTimeout) {
+		t.Fatalf("proxy-failure alert = %q", message.HTML)
+	}
+}
+
+func TestDiagnosticsTransitionOfflineToProxyFailurePreservesAlertSchedule(t *testing.T) {
+	stableID := "node-1"
+	downSince := time.Now().Add(-time.Hour).Truncate(time.Second)
+	lastAlert := downSince.Add(15 * time.Minute)
+	nextAlert := downSince.Add(45 * time.Minute)
+	proxyFailureSince := time.Now().Add(-time.Minute).Truncate(time.Second)
+	service := &Service{alerts: map[string]nodeAlertState{
+		stableID: {
+			FailCount:  5,
+			WasDown:    true,
+			Status:     checker.AvailabilityStateOffline,
+			DownSince:  downSince,
+			LastAlert:  lastAlert,
+			AlertCount: 2,
+			NextAlert:  nextAlert,
+			HostCheck:  checker.HostCheckDetails{Checked: true},
+			PingCheck:  checker.PingCheckDetails{Checked: true},
+		},
+	}}
+	details := checker.ProxyStatusDetails{
+		Status:            checker.AvailabilityStateProxyFailure,
+		ProxyFailureSince: proxyFailureSince,
+		HostCheck:         checker.HostCheckDetails{Checked: true, Online: true},
+		PingCheck:         checker.PingCheckDetails{Checked: true, Online: true},
+		Failure:           checker.FailureDetails{Code: checker.FailureCodeProxyTimeout},
+	}
+	if !service.updateAlertDiagnostics(stableID, details) {
+		t.Fatal("diagnostics transition was not stored")
+	}
+	state := service.alerts[stableID]
+	if state.Status != checker.AvailabilityStateProxyFailure || !state.DownSince.IsZero() || !state.ProxyFailureSince.Equal(proxyFailureSince) {
+		t.Fatalf("proxy-failure transition = %+v", state)
+	}
+	if state.FailCount != 5 || state.AlertCount != 2 || !state.LastAlert.Equal(lastAlert) || !state.NextAlert.Equal(nextAlert) {
+		t.Fatalf("diagnostics transition changed alert schedule: %+v", state)
+	}
+}
+
+func TestNotifyNodeStatusesKeepsAlertLifecycleAcrossIssueTransition(t *testing.T) {
+	proxy := &models.ProxyConfig{Protocol: "vless", Server: "example.com", Port: 443, Name: "NL", UUID: "uuid"}
+	proxy.StableID = proxy.GenerateStableID()
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "", "", 1, 0, "status")
+	proxyFailureSince := time.Now().Add(-time.Minute).Truncate(time.Second)
+	if !proxyChecker.RestoreProxyFailureStatus(
+		proxy.StableID,
+		proxyFailureSince,
+		checker.HostCheckDetails{Checked: true, Online: true},
+		checker.PingCheckDetails{Checked: true, Online: true},
+		checker.FailureDetails{Code: checker.FailureCodeProxyTimeout},
+	) {
+		t.Fatal("failed to seed proxy-failure status")
+	}
+
+	lastAlert := time.Now().Add(-30 * time.Minute).Truncate(time.Second)
+	nextAlert := time.Now().Add(30 * time.Minute).Truncate(time.Second)
+	service := NewService("", proxyChecker, nil, 10000)
+	service.setConfig(Config{
+		Enabled:            true,
+		ChatID:             "1",
+		NodeAlertsEnabled:  true,
+		AlertAfterFailures: 2,
+		MutedNodeIDs:       []string{proxy.StableID},
+		TimeoutSec:         1,
+	})
+	service.alerts[proxy.StableID] = nodeAlertState{
+		FailCount:  4,
+		WasDown:    true,
+		Status:     checker.AvailabilityStateOffline,
+		DownSince:  time.Now().Add(-time.Hour),
+		LastAlert:  lastAlert,
+		AlertCount: 2,
+		NextAlert:  nextAlert,
+	}
+
+	service.NotifyNodeStatuses()
+	state := service.alerts[proxy.StableID]
+	if state.Status != checker.AvailabilityStateProxyFailure || !state.DownSince.IsZero() || !state.ProxyFailureSince.Equal(proxyFailureSince) {
+		t.Fatalf("issue transition = %+v", state)
+	}
+	if state.FailCount != 5 || state.AlertCount != 2 || !state.LastAlert.Equal(lastAlert) || !state.NextAlert.Equal(nextAlert) {
+		t.Fatalf("issue transition reset alert lifecycle: %+v", state)
+	}
+}
+
 func TestNotifyNodeStatusesPreservesMutedOfflineState(t *testing.T) {
 	proxy := &models.ProxyConfig{
 		Protocol: "vless",
@@ -1073,6 +1193,9 @@ func TestConfirmationRetryRunsOnlyLowSpeedAndUnresolvedDeadlineNodes(t *testing.
 		if got.req.Config != report.Config {
 			t.Fatalf("retry config = %+v, want %+v", got.req.Config, report.Config)
 		}
+		if !got.req.OnlyOnline {
+			t.Fatal("confirmation retry must require a healthy proxy")
+		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for confirmation retry")
 	}
@@ -1502,6 +1625,26 @@ func TestRecoveryStateSurvivesPersistenceAndClearsOnlyAfterConfirmation(t *testi
 	}
 }
 
+func TestProxyFailureAlertStateSurvivesPersistence(t *testing.T) {
+	failureSince := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	want := nodeAlertState{
+		FailCount:         4,
+		WasDown:           true,
+		Status:            checker.AvailabilityStateProxyFailure,
+		ProxyFailureSince: failureSince,
+		LastAlert:         failureSince.Add(5 * time.Minute),
+		AlertCount:        2,
+		Failure: checker.FailureDetails{
+			Code:    checker.FailureCodeProxyTimeout,
+			Summary: checker.FailureSummary(checker.FailureCodeProxyTimeout),
+		},
+	}
+	got := persistedNodeAlertStateFrom(want).toNodeAlertState()
+	if got.Status != checker.AvailabilityStateProxyFailure || !got.ProxyFailureSince.Equal(failureSince) || !got.DownSince.IsZero() || got.Failure.Code != checker.FailureCodeProxyTimeout {
+		t.Fatalf("persisted proxy-failure state = %+v, want %+v", got, want)
+	}
+}
+
 func TestPrepareNodeRecoveryDoesNotAdvanceFailureOrReminderState(t *testing.T) {
 	proxy := &models.ProxyConfig{StableID: "node-1", Name: "Node one"}
 	recoveredAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
@@ -1548,6 +1691,32 @@ func TestAvailabilityCheckUsesInjectedWorkflow(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != "node-1" {
 		t.Fatalf("availability callback IDs = %v", got)
+	}
+}
+
+func TestTelegramSpeedTestChecksAvailabilityBeforeRun(t *testing.T) {
+	service := &Service{}
+	checked := false
+	run := false
+	service.SetAvailabilityCheckFunc(func(stableIDs []string) error {
+		checked = true
+		if len(stableIDs) != 1 || stableIDs[0] != "node-1" {
+			t.Fatalf("availability IDs = %v", stableIDs)
+		}
+		return nil
+	})
+	service.speedRunFunc = func(req speedtest.RunRequest, source string) error {
+		run = true
+		if source != "telegram" || !req.OnlyOnline || !req.SkipOffline {
+			t.Fatalf("telegram run request = %+v, source=%q", req, source)
+		}
+		return nil
+	}
+	if err := service.runSpeedTest(speedtest.RunRequest{ProxyIDs: []string{"node-1"}}, "telegram"); err != nil {
+		t.Fatalf("runSpeedTest() error = %v", err)
+	}
+	if !checked || !run {
+		t.Fatalf("availability checked=%t speedtest run=%t", checked, run)
 	}
 }
 
@@ -1629,19 +1798,31 @@ func TestRecentMeasurementsUseRichFormattedTable(t *testing.T) {
 		UUID:     "uuid",
 	}
 	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "", "", 1, 0, "status")
-	if !proxyChecker.RestoreOfflineStatus(proxy.StableID, time.Now().Add(-time.Minute), checker.HostCheckDetails{}, checker.PingCheckDetails{}) {
-		t.Fatal("failed to prepare offline proxy state")
+	dir := t.TempDir()
+	schedulePath := filepath.Join(dir, "speedtest_schedule.json")
+	checkedAt := time.Now().UTC().Add(-time.Minute)
+	state := map[string]interface{}{
+		"version":   1,
+		"updatedAt": checkedAt,
+		"results": map[string]speedtest.Result{
+			proxy.StableID: {
+				StableID:  proxy.StableID,
+				Name:      proxy.Name,
+				Mbps:      42,
+				CheckedAt: checkedAt,
+			},
+		},
 	}
-	manager := speedtest.NewManager(proxyChecker, 10000, "", speedtest.TestConfig{})
-	if err := manager.Run(speedtest.RunRequest{
-		ProxyIDs:    []string{proxy.StableID},
-		SkipOffline: true,
-	}, "schedule"); err != nil {
+	data, err := json.Marshal(state)
+	if err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(time.Second)
-	for manager.Snapshot().LastRun.Running && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+	if err := os.WriteFile(filepath.Join(dir, "speedtest_results.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager := speedtest.NewManager(proxyChecker, 10000, schedulePath, speedtest.TestConfig{})
+	if err := manager.Load(); err != nil {
+		t.Fatal(err)
 	}
 
 	service := NewService("", proxyChecker, manager, 10000)
@@ -1734,7 +1915,7 @@ func TestTelegramInteractiveViewsAndTransportExcludeMaintenanceNodes(t *testing.
 	if proxies := service.sortedProxies(); len(proxies) != 1 || proxies[0].StableID != active.StableID {
 		t.Fatalf("Telegram proxies = %+v, want only active", proxies)
 	}
-	if total, _, _ := service.nodeCounts(); total != 1 {
+	if total, _, _, _ := service.nodeCounts(); total != 1 {
 		t.Fatalf("Telegram node total = %d, want 1", total)
 	}
 	if proxy, matches := service.findProxy(paused.StableID); proxy != nil || len(matches) != 0 {

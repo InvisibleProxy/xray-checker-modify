@@ -908,7 +908,8 @@ func evaluateLocations(
 				item.hasHealthy = true
 				continue
 			}
-			if details.DownSince.IsZero() || now.Sub(details.DownSince) < time.Duration(policy.OutageMinutes)*time.Minute || observations[stableID] < policy.MinimumFailures {
+			failureSince := details.ServiceFailureSince()
+			if failureSince.IsZero() || now.Sub(failureSince) < time.Duration(policy.OutageMinutes)*time.Minute || observations[stableID] < policy.MinimumFailures {
 				item.hasPending = true
 				continue
 			}

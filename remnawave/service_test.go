@@ -190,7 +190,38 @@ func (f *fakeProxySource) setOffline(downSince time.Time, stableIDs ...string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, stableID := range stableIDs {
-		f.statuses[stableID] = checker.ProxyStatusDetails{Online: false, DownSince: downSince}
+		f.statuses[stableID] = checker.ProxyStatusDetails{Online: false, Status: checker.AvailabilityStateOffline, DownSince: downSince}
+	}
+}
+
+func (f *fakeProxySource) setProxyFailure(failureSince time.Time, stableIDs ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, stableID := range stableIDs {
+		f.statuses[stableID] = checker.ProxyStatusDetails{
+			Online:            false,
+			Status:            checker.AvailabilityStateProxyFailure,
+			ProxyFailureSince: failureSince,
+			Failure:           checker.FailureDetails{Code: checker.FailureCodeProxyTimeout},
+		}
+	}
+}
+
+func TestServiceKeepsProxyFailureInAnnounceEvaluation(t *testing.T) {
+	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	api, proxies := oneAudienceFixture(now, map[string]string{})
+	proxies.setProxyFailure(now.Add(-20*time.Minute), "stable-a")
+	service := testService(t, api, proxies, &fakeIncidentSource{}, &now)
+	service.config = audienceConfig("")
+
+	for range 3 {
+		service.ObserveFullCheck()
+	}
+	if _, err := service.SyncNow(context.Background()); err != nil {
+		t.Fatalf("SyncNow: %v", err)
+	}
+	if len(api.updates) != 1 || !strings.Contains(api.updates[0].Headers[announceHeader], "Все доступные вам локации временно недоступны") {
+		t.Fatalf("proxy failure did not preserve outage announce behavior: %+v", api.updates)
 	}
 }
 
