@@ -119,6 +119,28 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 	}
 }
 
+func TestAdminTemplateColorsAvailabilityDiagnosticsIndependently(t *testing.T) {
+	var rendered bytes.Buffer
+	if err := RenderAdmin(&rendered); err != nil {
+		t.Fatalf("RenderAdmin() error = %v", err)
+	}
+	html := rendered.String()
+	for _, marker := range []string{
+		`function nodeAvailabilityDetailsHTML(proxy)`,
+		`availability-diagnostic ${proxy.hostCheckOnline ? "ok" : "error"}`,
+		`availability-diagnostic ${proxy.pingCheckOnline ? "ok" : "error"}`,
+		`class="availability-separator"`,
+		`${nodeAvailabilityDetailsHTML(proxy)}`,
+		`availability.innerHTML = nodeAvailabilityDetailsHTML(proxy)`,
+		`.node-detail-stat .availability-diagnostic.ok`,
+		`.node-detail-stat .availability-diagnostic.error`,
+	} {
+		if !strings.Contains(html, marker) {
+			t.Errorf("admin template missing independently colored availability marker %q", marker)
+		}
+	}
+}
+
 func TestWebTemplatesCopyNodeAddressesAndRefreshLiveData(t *testing.T) {
 	var dashboard bytes.Buffer
 	if err := RenderIndex(&dashboard, PageData{

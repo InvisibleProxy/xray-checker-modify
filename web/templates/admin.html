@@ -879,6 +879,20 @@
         font-weight: 600;
         overflow-wrap: anywhere;
       }
+      .node-detail-stat .availability-diagnostic,
+      .node-detail-stat .availability-separator {
+        display: inline;
+        font-size: inherit;
+      }
+      .node-detail-stat .availability-diagnostic.ok {
+        color: var(--green);
+      }
+      .node-detail-stat .availability-diagnostic.error {
+        color: var(--red);
+      }
+      .node-detail-stat .availability-separator {
+        color: var(--muted);
+      }
       .chart-toolbar {
         display: flex;
         align-items: center;
@@ -3896,6 +3910,22 @@
         return parts.join(" · ") || "Diagnostics unavailable";
       }
 
+      function nodeAvailabilityDetailsHTML(proxy) {
+        if (proxy.maintenance || proxy.online) {
+          return escapeHtml(nodeAvailabilityDetails(proxy));
+        }
+        const parts = [];
+        if (proxy.hostCheckChecked) {
+          const text = `TCP ${proxy.hostCheckOnline ? `OK${proxy.hostCheckLatencyMs ? ` ${proxy.hostCheckLatencyMs} ms` : ""}` : "No"}`;
+          parts.push(`<span class="availability-diagnostic ${proxy.hostCheckOnline ? "ok" : "error"}">${escapeHtml(text)}</span>`);
+        }
+        if (proxy.pingCheckChecked) {
+          const text = `Ping ${proxy.pingCheckOnline ? `OK${proxy.pingCheckLatencyMs ? ` ${proxy.pingCheckLatencyMs} ms` : ""}` : "No"}`;
+          parts.push(`<span class="availability-diagnostic ${proxy.pingCheckOnline ? "ok" : "error"}">${escapeHtml(text)}</span>`);
+        }
+        return parts.join('<span class="availability-separator"> · </span>') || escapeHtml(nodeAvailabilityDetails(proxy));
+      }
+
       function nodeDetailHTML(proxy, result, history) {
         const overview = overviewNodeFor(proxy.stableId);
         const down = proxy.maintenance
@@ -3909,7 +3939,7 @@
         return `<div class="node-card-detail">
           <div class="node-detail-grid">
             <div class="node-detail-stat"><span>Server</span><strong class="mono">${copyIPButton(proxy.server, "data-node-detail-ip")}:<span data-node-detail-port>${escapeHtml(proxy.port)}</span></strong></div>
-            <div class="node-detail-stat"><span>Availability</span><strong class="${proxy.maintenance ? "warn" : (proxy.online ? "ok" : "error")}" data-node-detail-availability>${escapeHtml(nodeAvailabilityDetails(proxy))}</strong></div>
+            <div class="node-detail-stat"><span>Availability</span><strong class="${proxy.maintenance ? "warn" : (proxy.online ? "ok" : "error")}" data-node-detail-availability>${nodeAvailabilityDetailsHTML(proxy)}</strong></div>
             <div class="node-detail-stat"><span>Down since</span><strong data-node-detail-down>${escapeHtml(down)}</strong></div>
             <div class="node-detail-stat"><span>Failure</span><strong data-node-detail-failure title="${escapeHtml(proxy.failureDetail || "")}">${escapeHtml(failure)}</strong></div>
           </div>
@@ -4140,7 +4170,7 @@
         server.dataset.copyIp = proxy.server;
         server.textContent = proxy.server;
         card.querySelector("[data-node-detail-port]").textContent = proxy.port;
-        availability.textContent = nodeAvailabilityDetails(proxy);
+        availability.innerHTML = nodeAvailabilityDetailsHTML(proxy);
         availability.className = proxy.maintenance ? "warn" : (proxy.online ? "ok" : "error");
         const overview = overviewNodeFor(proxy.stableId);
         down.textContent = proxy.maintenance
