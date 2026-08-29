@@ -26,15 +26,101 @@ func TestDecodeConfigMigratesUnversionedSparseState(t *testing.T) {
 		config.Policy.Messages.Healthy.Enabled {
 		t.Fatalf("message scenarios were not normalized: %+v", config.Policy.Messages)
 	}
-	if config.SquadPairs == nil || config.NodeMappings == nil {
+	if config.SquadPairs == nil || config.Locations == nil || config.NodeMappings != nil {
 		t.Fatalf("nil collections were not normalized: %+v", config)
 	}
 }
 
-func TestDecodeConfigRejectsCaseInsensitiveStableIDCollision(t *testing.T) {
-	data := []byte(`{"version":1,"policy":{"outageMinutes":15,"minimumFailures":3,"recoveryMinutes":5},"squadPairs":[],"nodeMappings":{"Stable-A":{"hostUuid":"host-a"},"stable-a":{"hostUuid":"host-b"}}}`)
+func TestDecodeConfigRejectsCaseInsensitiveStableIDCollisionAcrossLocations(t *testing.T) {
+	data := []byte(`{"version":5,"policy":{"outageMinutes":15,"minimumFailures":3,"recoveryMinutes":5},"squadPairs":[],"locations":{"de":{"members":{"Stable-A":"host-a"}},"nl":{"members":{"stable-a":"host-b"}}}}`)
 	if _, err := DecodeConfig(data); err == nil || !strings.Contains(err.Error(), "case-insensitive StableID collision") {
 		t.Fatalf("case-insensitive StableID collision was not rejected: %v", err)
+	}
+}
+
+func TestConfigRejectsEmptyAnnounceLocation(t *testing.T) {
+	config := defaultConfig()
+	config.Locations["de"] = AnnounceLocation{Members: map[string]string{}}
+	if err := validateConfig(config); err == nil || !strings.Contains(err.Error(), "requires at least one member") {
+		t.Fatalf("empty announce location was not rejected: %v", err)
+	}
+}
+
+func TestDecodeConfigMigratesV4NodeMappingsToLocations(t *testing.T) {
+	config, err := DecodeConfig([]byte(`{
+  "version": 4,
+  "policy": {
+    "enabled": true,
+    "outageMinutes": 15,
+    "minimumFailures": 3,
+    "recoveryMinutes": 5
+  },
+  "squadPairs": [],
+  "nodeMappings": {
+    "stable-a": {"hostUuid": "host-a", "groupKey": "de", "publicLabel": "Германия"},
+    "stable-b": {"hostUuid": "host-b", "groupKey": "de", "publicLabel": "Германия"},
+    "stable-c": {"hostUuid": "host-c", "publicLabel": "Нидерланды"}
+  }
+}`))
+	if err != nil {
+		t.Fatalf("DecodeConfig: %v", err)
+	}
+	if config.Version != ConfigVersion || config.NodeMappings != nil || len(config.Locations) != 2 {
+		t.Fatalf("v4 location migration = %+v", config)
+	}
+	de := config.Locations["de"]
+	if de.PublicLabel != "Германия" || len(de.Members) != 2 || de.Members["stable-a"] != "host-a" || de.Members["stable-b"] != "host-b" {
+		t.Fatalf("grouped location = %+v", de)
+	}
+	fallback := config.Locations["host-c"]
+	if fallback.PublicLabel != "Нидерланды" || len(fallback.Members) != 1 || fallback.Members["stable-c"] != "host-c" {
+		t.Fatalf("host-key fallback location = %+v", fallback)
+	}
+
+	path := filepath.Join(t.TempDir(), "remnawave_announce_config.json")
+	if err := writeConfigFile(path, config, time.Now()); err != nil {
+		t.Fatalf("writeConfigFile: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read migrated config: %v", err)
+	}
+	if strings.Contains(string(data), `"nodeMappings"`) || !strings.Contains(string(data), `"locations"`) {
+		t.Fatalf("persisted migrated config still contains legacy mappings: %s", data)
+	}
+}
+
+func TestDecodeConfigMigratesImplicitLegacyLocationLabelDeterministically(t *testing.T) {
+	config, err := DecodeConfig([]byte(`{
+  "version": 4,
+  "policy": {"outageMinutes": 15, "minimumFailures": 3, "recoveryMinutes": 5},
+  "squadPairs": [],
+  "nodeMappings": {
+    "stable-a": {"hostUuid": "host-a", "publicLabel": "Zulu"},
+    "stable-b": {"hostUuid": "host-a", "publicLabel": "alpha"}
+  }
+}`))
+	if err != nil {
+		t.Fatalf("DecodeConfig: %v", err)
+	}
+	location := config.Locations["host-a"]
+	if location.PublicLabel != "alpha" || len(location.Members) != 2 {
+		t.Fatalf("implicit legacy label migration = %+v", location)
+	}
+}
+
+func TestDecodeConfigRejectsConflictingExplicitLegacyLocationLabels(t *testing.T) {
+	data := []byte(`{
+  "version": 4,
+  "policy": {"outageMinutes": 15, "minimumFailures": 3, "recoveryMinutes": 5},
+  "squadPairs": [],
+  "nodeMappings": {
+    "stable-a": {"hostUuid": "host-a", "groupKey": "de", "publicLabel": "Germany"},
+    "stable-b": {"hostUuid": "host-b", "groupKey": "de", "publicLabel": "Deutschland"}
+  }
+}`)
+	if _, err := DecodeConfig(data); err == nil || !strings.Contains(err.Error(), "conflicting public labels") {
+		t.Fatalf("conflicting explicit legacy labels were accepted: %v", err)
 	}
 }
 
@@ -44,7 +130,7 @@ func TestConfigRoundTripDoesNotContainAPIToken(t *testing.T) {
 	config.Policy.Enabled = true
 	config.Policy.Messages.SingleLocation.Template = "Недоступна: {location}"
 	config.SquadPairs = []SquadPair{{InternalSquadUUID: "internal-1", ExternalSquadUUID: "external-1"}}
-	config.NodeMappings["stable-1"] = NodeMapping{HostUUID: "host-1", GroupKey: "de", PublicLabel: "Германия"}
+	config.Locations["de"] = AnnounceLocation{PublicLabel: "Германия", Members: map[string]string{"stable-1": "host-1"}}
 	if err := writeConfigFile(path, config, time.Now()); err != nil {
 		t.Fatalf("writeConfigFile: %v", err)
 	}
@@ -59,8 +145,8 @@ func TestConfigRoundTripDoesNotContainAPIToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeConfig: %v", err)
 	}
-	if loaded.NodeMappings["stable-1"].HostUUID != "host-1" {
-		t.Fatalf("mapping was not preserved: %+v", loaded.NodeMappings)
+	if loaded.Locations["de"].Members["stable-1"] != "host-1" || loaded.NodeMappings != nil {
+		t.Fatalf("location was not preserved canonically: %+v", loaded)
 	}
 	if loaded.Policy.Messages.SingleLocation.Template != "Недоступна: {location}" {
 		t.Fatalf("message template was not preserved: %+v", loaded.Policy.Messages)

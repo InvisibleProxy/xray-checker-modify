@@ -15,7 +15,9 @@ func DecodeConfig(data []byte) (ConfigFile, error) {
 	if err := decodeSingleJSON(data, &config); err != nil {
 		return ConfigFile{}, fmt.Errorf("decode Remnawave announce config: %w", err)
 	}
-	normalizeConfig(&config)
+	if err := normalizeConfig(&config); err != nil {
+		return ConfigFile{}, err
+	}
 	if err := validateConfig(config); err != nil {
 		return ConfigFile{}, err
 	}
@@ -80,7 +82,9 @@ func readRuntimeFile(path string) (RuntimeFile, error) {
 func writeConfigFile(path string, config ConfigFile, now time.Time) error {
 	config.Version = ConfigVersion
 	config.UpdatedAt = now.UTC()
-	normalizeConfig(&config)
+	if err := normalizeConfig(&config); err != nil {
+		return err
+	}
 	if err := validateConfig(config); err != nil {
 		return err
 	}

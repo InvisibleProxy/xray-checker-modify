@@ -771,8 +771,8 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
     put:
-      summary: Replace Remnawave announce policy and mappings
-      description: Persists only non-secret policy, Internal-to-External Squad pairs and StableID-to-Host mappings.
+      summary: Replace Remnawave announce policy and location mappings
+      description: Persists only non-secret policy, Internal-to-External Squad pairs and location membership. Locations are the canonical announce identity; each member maps an exact checker StableID to a Remnawave Host UUID. Deprecated nodeMappings input is accepted when locations is omitted or describes the same locations.
       tags: [Admin]
       requestBody:
         required: true
@@ -1663,19 +1663,19 @@ components:
         partialSingleLocation:
           allOf:
             - $ref: '#/components/schemas/RemnawaveMessageScenario'
-            - description: Used when at least one server remains healthy in one redundancy group. Supports {location}, {affected}, and {total}.
+            - description: Used when at least one server remains healthy in one location. Supports {location}, {affected}, and {total}.
         partialMultipleLocations:
           allOf:
             - $ref: '#/components/schemas/RemnawaveMessageScenario'
-            - description: Used when at least one server remains healthy in several redundancy groups. Supports {locations}, {affected}, and {total}.
+            - description: Used when at least one server remains healthy in several locations. Supports {locations}, {affected}, and {total}.
         maintenanceSingleLocation:
           allOf:
             - $ref: '#/components/schemas/RemnawaveMessageScenario'
-            - description: Used when every member of one redundancy group is offline and in maintenance. Supports {location}, {affected}, and {total}.
+            - description: Used when every member of one location is offline and in maintenance. Supports {location}, {affected}, and {total}.
         maintenanceMultipleLocations:
           allOf:
             - $ref: '#/components/schemas/RemnawaveMessageScenario'
-            - description: Used when every member is offline and in maintenance in several redundancy groups. Supports {locations}, {affected}, and {total}.
+            - description: Used when every member is offline and in maintenance in several locations. Supports {locations}, {affected}, and {total}.
         healthy:
           allOf:
             - $ref: '#/components/schemas/RemnawaveMessageScenario'
@@ -1743,6 +1743,8 @@ components:
 
     RemnawaveNodeMapping:
       type: object
+      deprecated: true
+      description: Legacy server-first mapping accepted for compatibility when locations is omitted or equivalent.
       required: [hostUuid]
       properties:
         hostUuid:
@@ -1754,11 +1756,30 @@ components:
         publicLabel:
           type: string
           maxLength: 80
-          description: User-facing location label; defaults to the Host remark.
+          description: Legacy user-facing location label. Canonical locations use their enclosing map key and do not derive identity from Host remarks.
+
+    RemnawaveLocation:
+      type: object
+      required: [members]
+      properties:
+        publicLabel:
+          type: string
+          maxLength: 80
+          description: User-facing location label. The enclosing map key is the stable location identity.
+        members:
+          type: object
+          minProperties: 1
+          description: Map keyed by exact checker StableID with the corresponding Remnawave Host UUID as its value. Members are filtered by audience before the location state is evaluated.
+          additionalProperties:
+            type: string
 
     RemnawaveSettings:
       type: object
-      required: [policy, squadPairs, nodeMappings]
+      required: [policy, squadPairs]
+      description: Location-first settings. Current clients use locations; legacy clients may send nodeMappings when locations is omitted. If both mapping shapes are supplied, they must describe the same locations.
+      anyOf:
+        - required: [locations]
+        - required: [nodeMappings]
       properties:
         policy:
           $ref: '#/components/schemas/RemnawavePolicy'
@@ -1766,9 +1787,15 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RemnawaveSquadPair'
+        locations:
+          type: object
+          description: Map keyed by a stable public-location key. Adding or replacing members does not create a new announce binding.
+          additionalProperties:
+            $ref: '#/components/schemas/RemnawaveLocation'
         nodeMappings:
           type: object
-          description: Map keyed by exact checker StableID.
+          deprecated: true
+          description: Legacy map keyed by exact checker StableID. Accepted when locations is omitted or describes the same locations.
           additionalProperties:
             $ref: '#/components/schemas/RemnawaveNodeMapping'
 

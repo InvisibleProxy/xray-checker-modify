@@ -204,7 +204,7 @@ func TestWebTemplatesExposeSharedEnglishRussianLocalization(t *testing.T) {
 		`document.documentElement.lang = language`,
 		`"Nodes Overview": "Nodes Overview"`,
 		`"Check": "Check", "Run": "Run"`,
-		`"StableID to Host mapping": "Маппинг StableID → Host"`,
+		`"Announce locations": "Локации Announce"`,
 		`"Loading speed-test history…": "Загрузка speedtest history…"`,
 		`"IP / server copied!": "IP / сервер скопирован!"`,
 	} {
@@ -265,6 +265,15 @@ func TestAdminTemplateExposesRemnawaveMessageConstructor(t *testing.T) {
 		`partialAvailabilityFallback: $("remnawave-message-partial-fallback-template").value.trim()`,
 		`maintenanceFallback: $("remnawave-message-maintenance-fallback-template").value.trim()`,
 		`maintenanceMixedFallback: $("remnawave-message-maintenance-mixed-fallback-template").value.trim()`,
+		`id="remnawave-add-location"`,
+		`id="remnawave-locations"`,
+		`function remnawaveLocationRowsFromForm()`,
+		`function renderRemnawaveLocations(input)`,
+		`data-remnawave-location-key`,
+		`data-remnawave-member-node`,
+		`data-remnawave-member-host`,
+		`const locations = Object.create(null);`,
+		`locations,`,
 		`function activeSpeedResults()`,
 		`activeIDs.has(result.stableId)`,
 		`function monitoringSpeedResults()`,
@@ -274,6 +283,9 @@ func TestAdminTemplateExposesRemnawaveMessageConstructor(t *testing.T) {
 		if !strings.Contains(html, marker) {
 			t.Fatalf("admin template does not contain %q", marker)
 		}
+	}
+	if strings.Contains(html, `nodeMappings,`) || strings.Contains(html, `remnawave-node-mappings`) {
+		t.Fatal("admin template still serializes the legacy server-first Remnawave mapping")
 	}
 }
 

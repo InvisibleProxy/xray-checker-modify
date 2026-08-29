@@ -295,13 +295,21 @@ func (s *Service) UpdateSettings(settings Settings) (Snapshot, error) {
 			settings.Policy.Messages.MaintenanceMixedFallback = current.MaintenanceMixedFallback
 		}
 	}
-	config := ConfigFile{
-		Version:      ConfigVersion,
-		Policy:       settings.Policy,
-		SquadPairs:   append([]SquadPair(nil), settings.SquadPairs...),
-		NodeMappings: cloneNodeMappings(settings.NodeMappings),
+	locations, err := canonicalSettingsLocations(settings)
+	if err != nil {
+		s.operationMu.Unlock()
+		return Snapshot{}, err
 	}
-	normalizeConfig(&config)
+	config := ConfigFile{
+		Version:    ConfigVersion,
+		Policy:     settings.Policy,
+		SquadPairs: append([]SquadPair(nil), settings.SquadPairs...),
+		Locations:  locations,
+	}
+	if err := normalizeConfig(&config); err != nil {
+		s.operationMu.Unlock()
+		return Snapshot{}, err
+	}
 	if err := validateConfig(config); err != nil {
 		s.operationMu.Unlock()
 		return Snapshot{}, err
@@ -425,6 +433,7 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 	s.topology.ExternalSquads = cloneExternalSquads(externalSquads)
 	config := s.config
 	config.SquadPairs = append([]SquadPair(nil), config.SquadPairs...)
+	config.Locations = cloneLocations(config.Locations)
 	config.NodeMappings = cloneNodeMappings(config.NodeMappings)
 	runtime := s.runtime
 	runtime.Managed = cloneManaged(runtime.Managed)
@@ -700,8 +709,13 @@ func computeDesiredAnnouncements(
 			return nil, recoverySince, fmt.Errorf("configured external squad %s no longer exists", pair.ExternalSquadUUID)
 		}
 		visibleHosts := visibleHostSet(internal, topology.Hosts)
-		groups := evaluateGroups(
-			config,
+		locations, err := effectiveLocations(config)
+		if err != nil {
+			return nil, recoverySince, err
+		}
+		groups := evaluateLocations(
+			locations,
+			config.Policy,
 			visibleHosts,
 			hostByUUID,
 			proxyByStableID,
@@ -849,8 +863,9 @@ func visibleHostSet(internal InternalSquad, hosts []Host) map[string]bool {
 	return result
 }
 
-func evaluateGroups(
-	config ConfigFile,
+func evaluateLocations(
+	locations map[string]AnnounceLocation,
+	policy Policy,
 	visibleHosts map[string]bool,
 	hostByUUID map[string]Host,
 	proxyByStableID map[string]*models.ProxyConfig,
@@ -862,7 +877,6 @@ func evaluateGroups(
 ) map[string]groupEvaluation {
 	type aggregate struct {
 		label           string
-		labelExplicit   bool
 		hasHealthy      bool
 		hasPending      bool
 		hasAmbiguous    bool
@@ -870,54 +884,42 @@ func evaluateGroups(
 		down            int
 		maintenanceDown int
 	}
-	aggregates := make(map[string]*aggregate)
-	for stableID, mapping := range config.NodeMappings {
-		if !visibleHosts[mapping.HostUUID] || proxyByStableID[stableID] == nil {
+	result := make(map[string]groupEvaluation, len(locations))
+	for key, location := range locations {
+		item := &aggregate{label: publicLocationLabel(location, key)}
+		for stableID, hostUUID := range location.Members {
+			if !visibleHosts[hostUUID] || proxyByStableID[stableID] == nil {
+				continue
+			}
+			if _, ok := hostByUUID[hostUUID]; !ok {
+				continue
+			}
+			item.members++
+			if checkEndpointIDs[stableID] {
+				item.hasAmbiguous = true
+				continue
+			}
+			details, ok := statuses[stableID]
+			if !ok {
+				item.hasPending = true
+				continue
+			}
+			if details.Online {
+				item.hasHealthy = true
+				continue
+			}
+			if details.DownSince.IsZero() || now.Sub(details.DownSince) < time.Duration(policy.OutageMinutes)*time.Minute || observations[stableID] < policy.MinimumFailures {
+				item.hasPending = true
+				continue
+			}
+			item.down++
+			if maintenance[stableID] {
+				item.maintenanceDown++
+			}
+		}
+		if item.members == 0 {
 			continue
 		}
-		host, ok := hostByUUID[mapping.HostUUID]
-		if !ok {
-			continue
-		}
-		groupKey := mapping.GroupKey
-		if groupKey == "" {
-			groupKey = mapping.HostUUID
-		}
-		label, labelExplicit := publicGroupLabel(mapping, host, groupKey)
-		item := aggregates[groupKey]
-		if item == nil {
-			item = &aggregate{label: label, labelExplicit: labelExplicit}
-			aggregates[groupKey] = item
-		} else if (labelExplicit && !item.labelExplicit) || (labelExplicit == item.labelExplicit && strings.ToLower(label) < strings.ToLower(item.label)) {
-			item.label = label
-			item.labelExplicit = labelExplicit
-		}
-		item.members++
-		if checkEndpointIDs[stableID] {
-			item.hasAmbiguous = true
-			continue
-		}
-		details, ok := statuses[stableID]
-		if !ok {
-			item.hasPending = true
-			continue
-		}
-		if details.Online {
-			item.hasHealthy = true
-			continue
-		}
-		if details.DownSince.IsZero() || now.Sub(details.DownSince) < time.Duration(config.Policy.OutageMinutes)*time.Minute || observations[stableID] < config.Policy.MinimumFailures {
-			item.hasPending = true
-			continue
-		}
-		item.down++
-		if maintenance[stableID] {
-			item.maintenanceDown++
-		}
-	}
-
-	result := make(map[string]groupEvaluation, len(aggregates))
-	for key, item := range aggregates {
 		state := groupDown
 		switch {
 		case item.hasHealthy && item.down > 0:
@@ -936,22 +938,67 @@ func evaluateGroups(
 	return result
 }
 
-func publicGroupLabel(mapping NodeMapping, host Host, groupKey string) (string, bool) {
-	if label := strings.TrimSpace(mapping.PublicLabel); label != "" {
-		return label, true
+func publicLocationLabel(location AnnounceLocation, locationKey string) string {
+	if label := strings.TrimSpace(location.PublicLabel); label != "" {
+		return label
 	}
-	for _, candidate := range []string{strings.TrimSpace(host.Remark), strings.TrimSpace(groupKey)} {
+	for _, candidate := range []string{strings.TrimSpace(locationKey)} {
 		if candidate != "" && validateDisplayText("public label", candidate, 80) == nil {
-			return candidate, false
+			return candidate
 		}
 	}
-	return "Локация", false
+	return "Локация"
+}
+
+func canonicalSettingsLocations(settings Settings) (map[string]AnnounceLocation, error) {
+	if settings.Locations == nil && settings.NodeMappings == nil {
+		return nil, fmt.Errorf("locations is required")
+	}
+	if settings.Locations == nil {
+		return locationsFromNodeMappings(settings.NodeMappings)
+	}
+	locations, err := normalizeLocationMap(settings.Locations)
+	if err != nil {
+		return nil, err
+	}
+	if settings.NodeMappings == nil {
+		return locations, nil
+	}
+	legacy, err := locationsFromNodeMappings(settings.NodeMappings)
+	if err != nil {
+		return nil, err
+	}
+	if !announceLocationsEqual(locations, legacy) {
+		return nil, fmt.Errorf("locations and deprecated nodeMappings describe different announce locations")
+	}
+	return locations, nil
+}
+
+func effectiveLocations(config ConfigFile) (map[string]AnnounceLocation, error) {
+	if len(config.Locations) > 0 || len(config.NodeMappings) == 0 {
+		return config.Locations, nil
+	}
+	return locationsFromNodeMappings(config.NodeMappings)
+}
+
+func announceLocationsEqual(left, right map[string]AnnounceLocation) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, leftLocation := range left {
+		rightLocation, ok := right[key]
+		if !ok || leftLocation.PublicLabel != rightLocation.PublicLabel || !stringMapEqual(leftLocation.Members, rightLocation.Members) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Service) Snapshot() Snapshot {
 	s.mu.RLock()
 	config := s.config
 	config.SquadPairs = append([]SquadPair(nil), config.SquadPairs...)
+	config.Locations = cloneLocations(config.Locations)
 	config.NodeMappings = cloneNodeMappings(config.NodeMappings)
 	topology := cloneTopology(s.topology)
 	status := s.status

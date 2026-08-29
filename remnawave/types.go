@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	ConfigVersion  = 4
+	ConfigVersion  = 5
 	RuntimeVersion = 4
 
 	announceHeader       = "announce"
@@ -61,28 +61,42 @@ type SquadPair struct {
 	MonitoringOnly    bool   `json:"monitoringOnly,omitempty"`
 }
 
-// NodeMapping is keyed by the checker StableID in ConfigFile.NodeMappings.
-// Several StableIDs may intentionally point at one Remnawave Host UUID (for
-// example after DNS expansion), and several hosts may share one GroupKey for
-// public-location redundancy.
+// NodeMapping is the legacy v1-v4 server-first config shape. It remains
+// decodable so existing installations and older admin clients can migrate to
+// the location-first ConfigFile.Locations model.
 type NodeMapping struct {
 	HostUUID    string `json:"hostUuid"`
 	GroupKey    string `json:"groupKey,omitempty"`
 	PublicLabel string `json:"publicLabel,omitempty"`
 }
 
+// AnnounceLocation is the primary persisted unit for outage evaluation. The
+// map key in ConfigFile.Locations is its stable identity; PublicLabel is only
+// user-facing text. Members may span several Remnawave Hosts and are filtered
+// per audience before full/partial/maintenance state is calculated.
+type AnnounceLocation struct {
+	PublicLabel string            `json:"publicLabel,omitempty"`
+	Members     map[string]string `json:"members"`
+}
+
 type ConfigFile struct {
-	Version      int                    `json:"version"`
-	UpdatedAt    time.Time              `json:"updatedAt"`
-	Policy       Policy                 `json:"policy"`
-	SquadPairs   []SquadPair            `json:"squadPairs"`
-	NodeMappings map[string]NodeMapping `json:"nodeMappings"`
+	Version    int                         `json:"version"`
+	UpdatedAt  time.Time                   `json:"updatedAt"`
+	Policy     Policy                      `json:"policy"`
+	SquadPairs []SquadPair                 `json:"squadPairs"`
+	Locations  map[string]AnnounceLocation `json:"locations"`
+	// NodeMappings is accepted only while decoding v1-v4 state. New writes
+	// always persist Locations and omit this field.
+	NodeMappings map[string]NodeMapping `json:"nodeMappings,omitempty"`
 }
 
 type Settings struct {
-	Policy       Policy                 `json:"policy"`
-	SquadPairs   []SquadPair            `json:"squadPairs"`
-	NodeMappings map[string]NodeMapping `json:"nodeMappings"`
+	Policy     Policy                      `json:"policy"`
+	SquadPairs []SquadPair                 `json:"squadPairs"`
+	Locations  map[string]AnnounceLocation `json:"locations"`
+	// NodeMappings is a deprecated compatibility projection for v4 admin/API
+	// clients. Locations remains canonical when both fields are supplied.
+	NodeMappings map[string]NodeMapping `json:"nodeMappings,omitempty"`
 }
 
 type ManagedAnnouncement struct {
@@ -196,10 +210,10 @@ func defaultPolicy() Policy {
 
 func defaultConfig() ConfigFile {
 	return ConfigFile{
-		Version:      ConfigVersion,
-		Policy:       defaultPolicy(),
-		SquadPairs:   []SquadPair{},
-		NodeMappings: map[string]NodeMapping{},
+		Version:    ConfigVersion,
+		Policy:     defaultPolicy(),
+		SquadPairs: []SquadPair{},
+		Locations:  map[string]AnnounceLocation{},
 	}
 }
 
@@ -210,12 +224,13 @@ func defaultRuntime() RuntimeFile {
 	}
 }
 
-func normalizeConfig(config *ConfigFile) {
+func normalizeConfig(config *ConfigFile) error {
 	sourceVersion := config.Version
 	if config.Version >= 0 && config.Version < ConfigVersion {
 		// v0 was the unversioned development format. v1 had hardcoded outage
 		// messages and one optional normalMessage. v2 added configurable outage
-		// scenarios, v3 partial availability, and v4 maintenance scenarios.
+		// scenarios, v3 partial availability, v4 maintenance scenarios, and v5
+		// replaced server-first nodeMappings with explicit locations.
 		config.Version = ConfigVersion
 	}
 	if config.Policy.OutageMinutes == 0 {
@@ -241,15 +256,56 @@ func normalizeConfig(config *ConfigFile) {
 		config.SquadPairs[index].InternalSquadUUID = strings.TrimSpace(config.SquadPairs[index].InternalSquadUUID)
 		config.SquadPairs[index].ExternalSquadUUID = strings.TrimSpace(config.SquadPairs[index].ExternalSquadUUID)
 	}
-	if config.NodeMappings == nil {
-		config.NodeMappings = map[string]NodeMapping{}
+	if len(config.NodeMappings) > 0 {
+		if config.Locations != nil {
+			return fmt.Errorf("Remnawave config contains both locations and legacy nodeMappings")
+		}
+		locations, err := locationsFromNodeMappings(config.NodeMappings)
+		if err != nil {
+			return err
+		}
+		config.Locations = locations
 	}
-	for stableID, mapping := range config.NodeMappings {
+	config.NodeMappings = nil
+	if config.Locations == nil {
+		config.Locations = map[string]AnnounceLocation{}
+	}
+	locations, err := normalizeLocationMap(config.Locations)
+	if err != nil {
+		return err
+	}
+	config.Locations = locations
+	return nil
+}
+
+func locationsFromNodeMappings(mappings map[string]NodeMapping) (map[string]AnnounceLocation, error) {
+	locations := make(map[string]AnnounceLocation)
+	explicitLabels := make(map[string]string)
+	for _, stableID := range sortedMapKeys(mappings) {
+		mapping := mappings[stableID]
 		mapping.HostUUID = strings.TrimSpace(mapping.HostUUID)
 		mapping.GroupKey = strings.TrimSpace(mapping.GroupKey)
 		mapping.PublicLabel = strings.TrimSpace(mapping.PublicLabel)
-		config.NodeMappings[stableID] = mapping
+		locationKey := mapping.GroupKey
+		if locationKey == "" {
+			locationKey = mapping.HostUUID
+		} else if mapping.PublicLabel != "" {
+			if previous, exists := explicitLabels[locationKey]; exists && previous != mapping.PublicLabel {
+				return nil, fmt.Errorf("redundancy group %s has conflicting public labels", locationKey)
+			}
+			explicitLabels[locationKey] = mapping.PublicLabel
+		}
+		location := locations[locationKey]
+		if location.Members == nil {
+			location.Members = map[string]string{}
+		}
+		if mapping.PublicLabel != "" && (location.PublicLabel == "" || lessFolded(mapping.PublicLabel, location.PublicLabel)) {
+			location.PublicLabel = mapping.PublicLabel
+		}
+		location.Members[stableID] = mapping.HostUUID
+		locations[locationKey] = location
 	}
+	return locations, nil
 }
 
 func normalizeRuntime(runtime *RuntimeFile) {
@@ -298,7 +354,6 @@ func validateConfig(config ConfigFile) error {
 
 	internalSeen := make(map[string]bool)
 	externalTargets := make(map[string]bool)
-	groupLabels := make(map[string]string)
 	stableIDs := make(map[string]string)
 	for index, pair := range config.SquadPairs {
 		if pair.InternalSquadUUID == "" || pair.ExternalSquadUUID == "" {
@@ -319,29 +374,31 @@ func validateConfig(config ConfigFile) error {
 		}
 	}
 
-	for stableID, mapping := range config.NodeMappings {
-		if stableID == "" || len(stableID) > 512 || strings.ContainsAny(stableID, "\r\n") {
-			return fmt.Errorf("nodeMappings contains an invalid StableID")
+	for locationKey, location := range config.Locations {
+		if locationKey == "" || len(locationKey) > 128 || strings.ContainsAny(locationKey, "\r\n") {
+			return fmt.Errorf("locations contains an invalid location key")
 		}
-		foldedStableID := strings.ToLower(stableID)
-		if previous, exists := stableIDs[foldedStableID]; exists && previous != stableID {
-			return fmt.Errorf("nodeMappings contains case-insensitive StableID collision: %s and %s", previous, stableID)
-		}
-		stableIDs[foldedStableID] = stableID
-		if mapping.HostUUID == "" || invalidIdentifier(mapping.HostUUID) {
-			return fmt.Errorf("nodeMappings[%s] requires a valid host UUID", stableID)
-		}
-		if mapping.GroupKey != "" && (len(mapping.GroupKey) > 128 || strings.ContainsAny(mapping.GroupKey, "\r\n")) {
-			return fmt.Errorf("nodeMappings[%s].groupKey is invalid", stableID)
-		}
-		if err := validateDisplayText("nodeMappings["+stableID+"].publicLabel", mapping.PublicLabel, 80); err != nil {
+		if err := validateDisplayText("locations["+locationKey+"].publicLabel", location.PublicLabel, 80); err != nil {
 			return err
 		}
-		if mapping.GroupKey != "" && mapping.PublicLabel != "" {
-			if previous, exists := groupLabels[mapping.GroupKey]; exists && previous != mapping.PublicLabel {
-				return fmt.Errorf("redundancy group %s has conflicting public labels", mapping.GroupKey)
+		if len(location.Members) == 0 {
+			return fmt.Errorf("locations[%s] requires at least one member", locationKey)
+		}
+		for stableID, hostUUID := range location.Members {
+			if stableID == "" || len(stableID) > 512 || strings.ContainsAny(stableID, "\r\n") {
+				return fmt.Errorf("locations[%s].members contains an invalid StableID", locationKey)
 			}
-			groupLabels[mapping.GroupKey] = mapping.PublicLabel
+			foldedStableID := strings.ToLower(stableID)
+			if previous, exists := stableIDs[foldedStableID]; exists && previous != stableID {
+				return fmt.Errorf("locations contains case-insensitive StableID collision: %s and %s", previous, stableID)
+			}
+			if previous, exists := stableIDs[foldedStableID]; exists && previous == stableID {
+				return fmt.Errorf("StableID %s belongs to more than one announce location", stableID)
+			}
+			stableIDs[foldedStableID] = stableID
+			if hostUUID == "" || invalidIdentifier(hostUUID) {
+				return fmt.Errorf("locations[%s].members[%s] requires a valid host UUID", locationKey, stableID)
+			}
 		}
 	}
 	return nil
@@ -446,11 +503,75 @@ func invalidIdentifier(value string) bool {
 }
 
 func configSettings(config ConfigFile) Settings {
+	locations := cloneLocations(config.Locations)
+	if len(locations) == 0 && len(config.NodeMappings) > 0 {
+		if migrated, err := locationsFromNodeMappings(config.NodeMappings); err == nil {
+			locations = migrated
+		}
+	}
 	return Settings{
 		Policy:       config.Policy,
 		SquadPairs:   append([]SquadPair(nil), config.SquadPairs...),
-		NodeMappings: cloneNodeMappings(config.NodeMappings),
+		Locations:    locations,
+		NodeMappings: nodeMappingsFromLocations(locations),
 	}
+}
+
+func nodeMappingsFromLocations(locations map[string]AnnounceLocation) map[string]NodeMapping {
+	result := make(map[string]NodeMapping)
+	for locationKey, location := range locations {
+		for stableID, hostUUID := range location.Members {
+			result[stableID] = NodeMapping{
+				HostUUID:    hostUUID,
+				GroupKey:    locationKey,
+				PublicLabel: location.PublicLabel,
+			}
+		}
+	}
+	return result
+}
+
+func cloneLocations(input map[string]AnnounceLocation) map[string]AnnounceLocation {
+	result := make(map[string]AnnounceLocation, len(input))
+	for key, location := range input {
+		location.Members = cloneLocationMembers(location.Members)
+		result[key] = location
+	}
+	return result
+}
+
+func cloneLocationMembers(input map[string]string) map[string]string {
+	result := make(map[string]string, len(input))
+	for stableID, hostUUID := range input {
+		result[stableID] = hostUUID
+	}
+	return result
+}
+
+func normalizeLocationMap(input map[string]AnnounceLocation) (map[string]AnnounceLocation, error) {
+	result := make(map[string]AnnounceLocation, len(input))
+	for key, location := range input {
+		normalizedKey := strings.TrimSpace(key)
+		if _, exists := result[normalizedKey]; exists {
+			return nil, fmt.Errorf("locations contains duplicate key after trimming: %s", normalizedKey)
+		}
+		location.PublicLabel = strings.TrimSpace(location.PublicLabel)
+		location.Members = cloneLocationMembers(location.Members)
+		for stableID, hostUUID := range location.Members {
+			location.Members[stableID] = strings.TrimSpace(hostUUID)
+		}
+		result[normalizedKey] = location
+	}
+	return result, nil
+}
+
+func lessFolded(left, right string) bool {
+	leftFolded := strings.ToLower(left)
+	rightFolded := strings.ToLower(right)
+	if leftFolded == rightFolded {
+		return left < right
+	}
+	return leftFolded < rightFolded
 }
 
 func cloneNodeMappings(input map[string]NodeMapping) map[string]NodeMapping {

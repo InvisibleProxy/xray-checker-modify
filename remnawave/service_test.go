@@ -167,7 +167,9 @@ func TestServiceUsesRegularOutageWhenOfflineLocationIsNotEntirelyMaintenance(t *
 	proxies.maintenance = map[string]bool{"stable-a": true}
 	service := testService(t, api, proxies, &fakeIncidentSource{}, &now)
 	service.config = audienceConfig("")
-	service.config.NodeMappings["stable-b"] = NodeMapping{HostUUID: "host-b", GroupKey: "de", PublicLabel: "Германия"}
+	location := service.config.Locations["de"]
+	location.Members["stable-b"] = "host-b"
+	service.config.Locations["de"] = location
 
 	for range 3 {
 		service.ObserveFullCheck()
@@ -234,9 +236,11 @@ func TestServiceUsesAudienceTopologyAndGroupRedundancy(t *testing.T) {
 			{InternalSquadUUID: "internal-users", ExternalSquadUUID: "external-users"},
 			{InternalSquadUUID: "internal-service", ExternalSquadUUID: "external-service", MonitoringOnly: true},
 		},
-		NodeMappings: map[string]NodeMapping{
-			"stable-a": {HostUUID: "host-a", GroupKey: "de", PublicLabel: "Германия"},
-			"stable-b": {HostUUID: "host-b", GroupKey: "de", PublicLabel: "Германия"},
+		Locations: map[string]AnnounceLocation{
+			"de": {
+				PublicLabel: "Германия",
+				Members:     map[string]string{"stable-a": "host-a", "stable-b": "host-b"},
+			},
 		},
 	}
 	for range 3 {
@@ -352,6 +356,44 @@ func TestServicePreservesUnmanagedAnnounce(t *testing.T) {
 	}
 	if len(snapshot.Status.Conflicts) != 1 || !strings.Contains(snapshot.Status.Conflicts[0], "appendable single-line") {
 		t.Fatalf("ownership conflict was not reported: %+v", snapshot.Status)
+	}
+}
+
+func TestServiceKeepsExactOwnedAnnounceAfterLegacyLocationMigration(t *testing.T) {
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	current := announceValuePrefix + defaultAllLocationsTemplate
+	api, proxies := oneAudienceFixture(now, map[string]string{announceHeader: current, "x-test": "keep"})
+	service := testService(t, api, proxies, &fakeIncidentSource{}, &now)
+	config, err := DecodeConfig([]byte(`{
+  "version": 4,
+  "policy": {"enabled": true, "outageMinutes": 15, "minimumFailures": 3, "recoveryMinutes": 5},
+  "squadPairs": [{"internalSquadUuid": "internal-users", "externalSquadUuid": "external-users"}],
+  "nodeMappings": {"stable-a": {"hostUuid": "host-a", "groupKey": "de", "publicLabel": "Германия"}}
+}`))
+	if err != nil {
+		t.Fatalf("DecodeConfig: %v", err)
+	}
+	service.config = config
+	service.runtime.Managed["external-users"] = ManagedAnnouncement{
+		Value:             current,
+		Message:           defaultAllLocationsTemplate,
+		Groups:            map[string]string{"de": "Германия"},
+		PartialGroups:     map[string]string{},
+		MaintenanceGroups: map[string]string{},
+	}
+	for range 3 {
+		service.ObserveFullCheck()
+	}
+
+	if _, err := service.SyncNow(context.Background()); err != nil {
+		t.Fatalf("SyncNow: %v", err)
+	}
+	if len(api.updates) != 0 {
+		t.Fatalf("exact owned announce was rewritten after migration: %+v", api.updates)
+	}
+	managed := service.runtime.Managed["external-users"]
+	if managed.Value != current || managed.Groups["de"] != "Германия" || !managed.UpdatedAt.IsZero() {
+		t.Fatalf("exact ownership continuity changed after migration: %+v", managed)
 	}
 }
 
@@ -608,6 +650,32 @@ func TestUpdateSettingsPreservesPartialScenariosForV2Client(t *testing.T) {
 	}
 }
 
+func TestUpdateSettingsMigratesLegacyMappingsAndRejectsConflictingDualShape(t *testing.T) {
+	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	service := testService(t, &fakeAPI{}, &fakeProxySource{}, &fakeIncidentSource{}, &now)
+	service.config = audienceConfig("")
+
+	legacy := configSettings(service.config)
+	legacy.Locations = nil
+	snapshot, err := service.UpdateSettings(legacy)
+	if err != nil {
+		t.Fatalf("legacy UpdateSettings: %v", err)
+	}
+	if snapshot.Settings.Locations["de"].Members["stable-a"] != "host-a" {
+		t.Fatalf("legacy mappings were not migrated: %+v", snapshot.Settings)
+	}
+	if _, err := service.UpdateSettings(snapshot.Settings); err != nil {
+		t.Fatalf("equivalent dual settings rejected: %v", err)
+	}
+
+	conflicting := snapshot.Settings
+	conflicting.NodeMappings = cloneNodeMappings(conflicting.NodeMappings)
+	conflicting.NodeMappings["stable-a"] = NodeMapping{HostUUID: "host-a", GroupKey: "nl", PublicLabel: "Нидерланды"}
+	if _, err := service.UpdateSettings(conflicting); err == nil || !strings.Contains(err.Error(), "describe different announce locations") {
+		t.Fatalf("conflicting dual settings were not rejected: %v", err)
+	}
+}
+
 func TestServiceTargetsOnlyHostAudienceInternalSquad(t *testing.T) {
 	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
 	api := &fakeAPI{
@@ -637,9 +705,9 @@ func TestServiceTargetsOnlyHostAudienceInternalSquad(t *testing.T) {
 			{InternalSquadUUID: "internal-1", ExternalSquadUUID: "external-1"},
 			{InternalSquadUUID: "internal-2", ExternalSquadUUID: "external-2"},
 		},
-		NodeMappings: map[string]NodeMapping{
-			"stable-1": {HostUUID: "host-1", PublicLabel: "Германия"},
-			"stable-2": {HostUUID: "host-2", PublicLabel: "Нидерланды"},
+		Locations: map[string]AnnounceLocation{
+			"host-1": {PublicLabel: "Германия", Members: map[string]string{"stable-1": "host-1"}},
+			"host-2": {PublicLabel: "Нидерланды", Members: map[string]string{"stable-2": "host-2"}},
 		},
 	}
 	for range 3 {
@@ -686,9 +754,14 @@ func TestServiceScopesSameRedundancyGroupKeyPerAudience(t *testing.T) {
 			{InternalSquadUUID: "internal-standard", ExternalSquadUUID: "external-standard"},
 			{InternalSquadUUID: "internal-extended", ExternalSquadUUID: "external-extended"},
 		},
-		NodeMappings: map[string]NodeMapping{
-			"stable-standard-de": {HostUUID: "host-standard-de", GroupKey: "de", PublicLabel: "Германия"},
-			"stable-extended-de": {HostUUID: "host-extended-de", GroupKey: "de", PublicLabel: "Германия"},
+		Locations: map[string]AnnounceLocation{
+			"de": {
+				PublicLabel: "Германия",
+				Members: map[string]string{
+					"stable-standard-de": "host-standard-de",
+					"stable-extended-de": "host-extended-de",
+				},
+			},
 		},
 	}
 	for range 3 {
@@ -735,10 +808,10 @@ func TestServiceUpdatesAnnounceAcrossConfiguredImpactScenarios(t *testing.T) {
 			Enabled: true, OutageMinutes: 15, MinimumFailures: 3, RecoveryMinutes: 5, Messages: messages,
 		},
 		SquadPairs: []SquadPair{{InternalSquadUUID: "internal-users", ExternalSquadUUID: "external-users"}},
-		NodeMappings: map[string]NodeMapping{
-			"stable-de": {HostUUID: "host-de", GroupKey: "de", PublicLabel: "Германия"},
-			"stable-nl": {HostUUID: "host-nl", GroupKey: "nl", PublicLabel: "Нидерланды"},
-			"stable-us": {HostUUID: "host-us", GroupKey: "us", PublicLabel: "США"},
+		Locations: map[string]AnnounceLocation{
+			"de": {PublicLabel: "Германия", Members: map[string]string{"stable-de": "host-de"}},
+			"nl": {PublicLabel: "Нидерланды", Members: map[string]string{"stable-nl": "host-nl"}},
+			"us": {PublicLabel: "США", Members: map[string]string{"stable-us": "host-us"}},
 		},
 	}
 
@@ -817,10 +890,12 @@ func audienceConfig(normalMessage string) ConfigFile {
 		messages.Healthy = MessageScenario{Enabled: true, Template: normalMessage}
 	}
 	return ConfigFile{
-		Version:      ConfigVersion,
-		Policy:       Policy{Enabled: true, OutageMinutes: 15, MinimumFailures: 3, RecoveryMinutes: 5, Messages: messages},
-		SquadPairs:   []SquadPair{{InternalSquadUUID: "internal-users", ExternalSquadUUID: "external-users"}},
-		NodeMappings: map[string]NodeMapping{"stable-a": {HostUUID: "host-a", GroupKey: "de", PublicLabel: "Германия"}},
+		Version:    ConfigVersion,
+		Policy:     Policy{Enabled: true, OutageMinutes: 15, MinimumFailures: 3, RecoveryMinutes: 5, Messages: messages},
+		SquadPairs: []SquadPair{{InternalSquadUUID: "internal-users", ExternalSquadUUID: "external-users"}},
+		Locations: map[string]AnnounceLocation{
+			"de": {PublicLabel: "Германия", Members: map[string]string{"stable-a": "host-a"}},
+		},
 	}
 }
 

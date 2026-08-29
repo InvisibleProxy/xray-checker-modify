@@ -45,14 +45,15 @@ func TestAdminRemnawaveHandlerGetsAndUpdatesSanitizedSettings(t *testing.T) {
 		t.Fatalf("GET status/body = %d %s", getRecorder.Code, getRecorder.Body.String())
 	}
 
-	putBody := `{"policy":{"enabled":true,"outageMinutes":15,"minimumFailures":3,"recoveryMinutes":5,"messages":{"singleLocation":{"enabled":true,"template":"Недоступна: {location}"},"multipleLocations":{"enabled":true,"template":"Недоступны: {locations}"},"allLocations":{"enabled":true,"template":"Все недоступны"},"partialSingleLocation":{"enabled":true,"template":"Часть недоступна: {location}"},"partialMultipleLocations":{"enabled":true,"template":"Частично недоступны: {locations}"},"healthy":{"enabled":false,"template":"Всё стабильно"},"partialFallback":"Недоступно: {unavailable}/{total}","partialAvailabilityFallback":"Частично недоступно: {affected}/{total}"}},"squadPairs":[{"internalSquadUuid":"internal-1","externalSquadUuid":"external-1"}],"nodeMappings":{"stable-1":{"hostUuid":"host-1","groupKey":"de","publicLabel":"Германия"}}}`
+	putBody := `{"policy":{"enabled":true,"outageMinutes":15,"minimumFailures":3,"recoveryMinutes":5,"messages":{"singleLocation":{"enabled":true,"template":"Недоступна: {location}"},"multipleLocations":{"enabled":true,"template":"Недоступны: {locations}"},"allLocations":{"enabled":true,"template":"Все недоступны"},"partialSingleLocation":{"enabled":true,"template":"Часть недоступна: {location}"},"partialMultipleLocations":{"enabled":true,"template":"Частично недоступны: {locations}"},"healthy":{"enabled":false,"template":"Всё стабильно"},"partialFallback":"Недоступно: {unavailable}/{total}","partialAvailabilityFallback":"Частично недоступно: {affected}/{total}"}},"squadPairs":[{"internalSquadUuid":"internal-1","externalSquadUuid":"external-1"}],"locations":{"de":{"publicLabel":"Германия","members":{"stable-1":"host-1"}}}}`
 	put := httptest.NewRequest(http.MethodPut, "/api/v1/admin/remnawave", strings.NewReader(putBody))
 	putRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(putRecorder, put)
 	if putRecorder.Code != http.StatusOK {
 		t.Fatalf("PUT status/body = %d %s", putRecorder.Code, putRecorder.Body.String())
 	}
-	if !service.updated.Policy.Enabled || service.updated.NodeMappings["stable-1"].HostUUID != "host-1" ||
+	if !service.updated.Policy.Enabled || service.updated.Locations["de"].Members["stable-1"] != "host-1" ||
+		service.updated.Locations["de"].PublicLabel != "Германия" ||
 		service.updated.Policy.Messages.SingleLocation.Template != "Недоступна: {location}" ||
 		service.updated.Policy.Messages.PartialSingleLocation.Template != "Часть недоступна: {location}" {
 		t.Fatalf("updated settings = %+v", service.updated)
