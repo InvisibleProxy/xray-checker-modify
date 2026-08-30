@@ -7,13 +7,19 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"xray-checker/diagnostics"
 )
 
 const (
 	ProtocolVersion = 1
 	EnrollPath      = "/api/v1/agent/enroll"
 	HeartbeatPath   = "/api/v1/agent/heartbeat"
+	JobPollPath     = "/api/v1/agent/jobs/next"
+	ObservationPath = "/api/v1/agent/observations"
 )
+
+const MaxExecutionConfigBytes = 512 * 1024
 
 type EnrollRequest struct {
 	ProtocolVersion      int      `json:"protocolVersion"`
@@ -41,6 +47,34 @@ type HeartbeatRequest struct {
 
 type HeartbeatResponse struct {
 	AgentID    string    `json:"agentId"`
+	AcceptedAt time.Time `json:"acceptedAt"`
+}
+
+// ControlRequest is the minimal signed body used by an enrolled agent when it
+// asks for work. Authentication remains bound to the HTTP method, path, body,
+// timestamp and monotonic sequence through ControlSigningPayload.
+type ControlRequest struct {
+	ProtocolVersion int    `json:"protocolVersion"`
+	AgentID         string `json:"agentId"`
+}
+
+// JobAssignment deliberately keeps credential-bearing execution material out
+// of diagnostics.DiagnosticJob and therefore out of session exports. The
+// controller retains it only in the ephemeral delivery queue.
+type JobAssignment struct {
+	Job        diagnostics.DiagnosticJob `json:"job"`
+	XrayConfig json.RawMessage           `json:"xrayConfig"`
+	SocksPort  int                       `json:"socksPort"`
+	TargetHost string                    `json:"targetHost"`
+	TargetPort int                       `json:"targetPort"`
+}
+
+type JobPollResponse struct {
+	Job *JobAssignment `json:"job,omitempty"`
+}
+
+type ObservationResponse struct {
+	JobID      string    `json:"jobId"`
 	AcceptedAt time.Time `json:"acceptedAt"`
 }
 

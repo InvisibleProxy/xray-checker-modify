@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -14,7 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"xray-checker/diagnostics"
 	"xray-checker/probeagent"
+	"xray-checker/remoteprobe"
 )
 
 func TestProbeAgentEnrollmentAndSignedHeartbeatHandlers(t *testing.T) {
@@ -79,6 +82,59 @@ func TestProbeAgentHandlerRejectsSpoofedForwardedIP(t *testing.T) {
 	}
 }
 
+func TestProbeAgentSignedJobPollAndObservationHandlers(t *testing.T) {
+	now := time.Now().UTC()
+	registry := newWebTestAgentRegistry(t, now)
+	created, err := registry.Create(probeagent.CreateAgentRequest{
+		DisplayName: "Remote probe", ExpectedSourceIP: "203.0.113.40",
+		ControllerIP: "198.51.100.10", ControllerURL: "https://checker.example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityPublic, identityPrivate, _ := ed25519.GenerateKey(rand.Reader)
+	observationPublic, _, _ := ed25519.GenerateKey(rand.Reader)
+	if _, err := registry.Enroll(probeagent.EnrollRequest{
+		ProtocolVersion: probeagent.ProtocolVersion, AgentID: created.Agent.AgentID,
+		EnrollmentToken: created.EnrollmentToken, IdentityPublicKey: identityPublic,
+		ObservationPublicKey: observationPublic, AgentVersion: "test",
+		Capabilities: []string{"control-v1", "diagnostic-v1"},
+	}, netip.MustParseAddr("203.0.113.40")); err != nil {
+		t.Fatal(err)
+	}
+	service := &fakeDiagnosticSessionService{assignment: &probeagent.JobAssignment{Job: diagnostics.DiagnosticJob{
+		SchemaVersion: diagnostics.JobSchemaVersion, JobID: "job-one", SessionID: "session-one",
+		AgentID: created.Agent.AgentID, Nonce: "nonce-one", StableID: "node-one",
+		ConfigFingerprint: diagnostics.ConfigFingerprint([]byte(`{"safe":true}`)),
+		Profile:           diagnostics.TestProfile{ID: "default-status", Method: diagnostics.ProbeMethodStatus},
+		ExpiresAt:         now.Add(time.Minute),
+	}}}
+	poll := probeagent.ControlRequest{ProtocolVersion: probeagent.ProtocolVersion, AgentID: created.Agent.AgentID}
+	pollBody, _ := json.Marshal(poll)
+	pollRequest := signedAgentRequest(t, probeagent.JobPollPath, pollBody, poll.AgentID, now, 1, identityPrivate)
+	pollRecorder := httptest.NewRecorder()
+	ProbeAgentJobHandler(registry, service, "proxy-secret").ServeHTTP(pollRecorder, pollRequest)
+	if pollRecorder.Code != http.StatusOK || !bytes.Contains(pollRecorder.Body.Bytes(), []byte("job-one")) {
+		t.Fatalf("job poll status = %d, body = %s", pollRecorder.Code, pollRecorder.Body.String())
+	}
+
+	observation := diagnostics.Observation{
+		SchemaVersion: diagnostics.ObservationSchemaVersion, AgentID: created.Agent.AgentID,
+		SessionID: "session-one", JobID: "job-one", Nonce: "nonce-one", StableID: "node-one",
+		ConfigFingerprint: service.assignment.Job.ConfigFingerprint, CheckedAt: now,
+		EndpointProfile: "default-status", Status: diagnostics.ProbeStatusOnline,
+		DirectConnectivity: diagnostics.CheckEvidence{Checked: true, Online: true}, AgentVersion: "test",
+		Signature: []byte("observation-signature"),
+	}
+	observationBody, _ := json.Marshal(observation)
+	observationRequest := signedAgentRequest(t, probeagent.ObservationPath, observationBody, observation.AgentID, now, 2, identityPrivate)
+	observationRecorder := httptest.NewRecorder()
+	ProbeAgentObservationHandler(registry, service, "proxy-secret").ServeHTTP(observationRecorder, observationRequest)
+	if observationRecorder.Code != http.StatusOK || service.accepted.JobID != "job-one" {
+		t.Fatalf("observation status = %d, body = %s, accepted = %+v", observationRecorder.Code, observationRecorder.Body.String(), service.accepted)
+	}
+}
+
 func TestAdminDiagnosticAgentCreationReturnsComposeOnce(t *testing.T) {
 	registry := newWebTestAgentRegistry(t, time.Now().UTC())
 	body := []byte(`{"displayName":"EU probe","expectedSourceIp":"203.0.113.40","controllerIp":"198.51.100.10","controllerUrl":"https://checker.example.com"}`)
@@ -115,4 +171,41 @@ func newWebTestAgentRegistry(t *testing.T, now time.Time) *probeagent.Registry {
 		t.Fatal(err)
 	}
 	return registry
+}
+
+func signedAgentRequest(t *testing.T, path string, body []byte, agentID string, timestamp time.Time, sequence uint64, privateKey ed25519.PrivateKey) *http.Request {
+	t.Helper()
+	payload, err := probeagent.ControlSigningPayload(http.MethodPost, path, agentID, timestamp, sequence, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	request.RemoteAddr = "172.18.0.4:12345"
+	request.Header.Set(probeagent.ProxySecretHeader, "proxy-secret")
+	request.Header.Set(probeagent.ForwardedIPHeader, "203.0.113.40")
+	request.Header.Set("X-Probe-Agent-ID", agentID)
+	request.Header.Set("X-Probe-Timestamp", timestamp.Format(time.RFC3339Nano))
+	request.Header.Set("X-Probe-Sequence", strconv.FormatUint(sequence, 10))
+	request.Header.Set("X-Probe-Signature", base64.RawStdEncoding.EncodeToString(ed25519.Sign(privateKey, payload)))
+	return request
+}
+
+type fakeDiagnosticSessionService struct {
+	assignment *probeagent.JobAssignment
+	accepted   diagnostics.Observation
+}
+
+func (f *fakeDiagnosticSessionService) Enabled() bool { return true }
+func (f *fakeDiagnosticSessionService) CreateManual(remoteprobe.CreateManualRequest) (remoteprobe.SessionView, error) {
+	return remoteprobe.SessionView{}, nil
+}
+func (f *fakeDiagnosticSessionService) Sessions(string) []remoteprobe.SessionView { return nil }
+func (f *fakeDiagnosticSessionService) Cancel(string) error                       { return nil }
+func (f *fakeDiagnosticSessionService) Export(string) ([]byte, error)             { return []byte(`{}`), nil }
+func (f *fakeDiagnosticSessionService) Claim(context.Context, string) (*probeagent.JobAssignment, error) {
+	return f.assignment, nil
+}
+func (f *fakeDiagnosticSessionService) AcceptObservation(observation diagnostics.Observation) (diagnostics.AcceptedObservation, error) {
+	f.accepted = observation
+	return diagnostics.AcceptedObservation{Observation: observation, AcceptedAt: time.Now().UTC(), Reliable: true}, nil
 }

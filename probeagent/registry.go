@@ -242,6 +242,39 @@ func (r *Registry) Snapshot() []AgentSnapshot {
 	return result
 }
 
+func (r *Registry) Agent(agentID string) (AgentSnapshot, bool) {
+	if r == nil {
+		return AgentSnapshot{}, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	record, ok := r.state.Agents[strings.TrimSpace(agentID)]
+	if !ok {
+		return AgentSnapshot{}, false
+	}
+	return r.snapshot(record), true
+}
+
+// ObservationPublicKey exposes only the enrolled public verification key.
+// Revoked or disabled identities fail closed and cannot complete jobs that
+// were already dispatched.
+func (r *Registry) ObservationPublicKey(agentID string) (ed25519.PublicKey, bool) {
+	if r == nil || !r.Enabled() {
+		return nil, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	record, ok := r.state.Agents[strings.TrimSpace(agentID)]
+	if !ok || !record.Enabled || !record.RevokedAt.IsZero() || record.EnrolledAt.IsZero() {
+		return nil, false
+	}
+	decoded, err := base64.RawStdEncoding.DecodeString(record.ObservationPublicKey)
+	if err != nil || len(decoded) != ed25519.PublicKeySize {
+		return nil, false
+	}
+	return ed25519.PublicKey(append([]byte(nil), decoded...)), true
+}
+
 func (r *Registry) Create(request CreateAgentRequest) (CreationResult, error) {
 	if !r.Enabled() {
 		return CreationResult{}, ErrDisabled
@@ -461,6 +494,58 @@ func (r *Registry) AcceptHeartbeat(request HeartbeatRequest, sourceIP netip.Addr
 		return HeartbeatResponse{}, err
 	}
 	return HeartbeatResponse{AgentID: record.AgentID, AcceptedAt: now}, nil
+}
+
+// AcceptControlRequest authenticates a non-heartbeat agent request with the
+// same exact source-IP, timestamp, identity and persisted replay protections.
+// It intentionally updates no health/capability fields.
+func (r *Registry) AcceptControlRequest(agentID string, sourceIP netip.Addr, timestamp time.Time, sequence uint64, payload, signature []byte) error {
+	if !r.Enabled() {
+		return ErrDisabled
+	}
+	agentID = strings.TrimSpace(agentID)
+	if !validIdentifier(agentID, 96) || timestamp.IsZero() || sequence == 0 {
+		return ErrInvalidControlRequest
+	}
+	now := r.now()
+	if timestamp.Before(now.Add(-r.config.HeartbeatMaxSkew)) || timestamp.After(now.Add(r.config.HeartbeatMaxSkew)) {
+		return ErrInvalidControlRequest
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record, ok := r.state.Agents[agentID]
+	if !ok {
+		return ErrAgentNotFound
+	}
+	if !record.Enabled || !record.RevokedAt.IsZero() {
+		return ErrAgentRevoked
+	}
+	if !sourceMatches(record.ExpectedSourceIP, sourceIP) {
+		return ErrSourceIPMismatch
+	}
+	if record.IdentityPublicKey == "" || record.EnrolledAt.IsZero() {
+		return ErrAgentNotEnrolled
+	}
+	if sequence <= record.LastSequence {
+		return ErrControlReplay
+	}
+	publicKey, err := base64.RawStdEncoding.DecodeString(record.IdentityPublicKey)
+	if err != nil || len(publicKey) != ed25519.PublicKeySize || len(signature) != ed25519.SignatureSize || !ed25519.Verify(ed25519.PublicKey(publicKey), payload, signature) {
+		return ErrInvalidControlRequest
+	}
+	previous := record
+	previousUpdatedAt := r.state.UpdatedAt
+	record.LastSeenAt = now
+	record.LastSequence = sequence
+	record.UpdatedAt = now
+	r.state.Agents[record.AgentID] = record
+	r.state.UpdatedAt = now
+	if err := r.persistLocked(); err != nil {
+		r.state.Agents[record.AgentID] = previous
+		r.state.UpdatedAt = previousUpdatedAt
+		return err
+	}
+	return nil
 }
 
 func (r *Registry) creationResult(record AgentRecord, token string) CreationResult {

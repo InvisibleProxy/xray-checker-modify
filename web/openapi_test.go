@@ -65,6 +65,9 @@ func TestOpenAPISpecDocumentsEveryForkAdminRoute(t *testing.T) {
 		"/api/v1/admin/diagnostic-agents",
 		"/api/v1/admin/diagnostic-agents/reissue",
 		"/api/v1/admin/diagnostic-agents/revoke",
+		"/api/v1/admin/diagnostic-sessions",
+		"/api/v1/admin/diagnostic-sessions/cancel",
+		"/api/v1/admin/diagnostic-sessions/export",
 	}
 	for _, path := range want {
 		if _, ok := paths[path]; !ok {
@@ -79,7 +82,7 @@ func TestOpenAPISpecDocumentsUnauthenticatedProbeAgentRoutes(t *testing.T) {
 		t.Fatalf("parse embedded OpenAPI document: %v", err)
 	}
 	paths := objectValue(t, document, "paths")
-	for _, path := range []string{"/api/v1/agent/enroll", "/api/v1/agent/heartbeat"} {
+	for _, path := range []string{"/api/v1/agent/enroll", "/api/v1/agent/heartbeat", "/api/v1/agent/jobs/next", "/api/v1/agent/observations"} {
 		pathObject := objectValue(t, paths, path)
 		post := objectValue(t, pathObject, "post")
 		security, ok := post["security"].([]any)

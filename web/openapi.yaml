@@ -958,6 +958,81 @@ paths:
         '404':
           description: Agent not found
 
+  /api/v1/admin/diagnostic-sessions:
+    get:
+      summary: List ephemeral remote diagnostic sessions
+      description: Optionally filters by StableID. Returned sessions contain no Xray execution config, credentials or raw transport errors.
+      tags: [Admin]
+      parameters:
+        - in: query
+          name: stableId
+          schema: {type: string}
+      responses:
+        '200':
+          description: Isolated diagnostic sessions
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      summary: Start manual diagnostics through one connected agent
+      description: Creates an in-memory session and queues a generation-bound job without changing authoritative availability state.
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDiagnosticSessionRequest'
+      responses:
+        '200':
+          description: Created diagnostic session
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/admin/diagnostic-sessions/cancel:
+    post:
+      summary: Cancel an active diagnostic session
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sessionId]
+              properties:
+                sessionId: {type: string}
+      responses:
+        '200':
+          description: Session cancelled
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Session not found
+
+  /api/v1/admin/diagnostic-sessions/export:
+    get:
+      summary: Download a sanitized diagnostic session as JSON
+      tags: [Admin]
+      parameters:
+        - in: query
+          name: sessionId
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Sanitized session JSON without execution credentials
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DiagnosticSession'}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Session not found
+
   /api/v1/agent/enroll:
     post:
       summary: Enroll a new outbound-only diagnostic agent
@@ -1010,6 +1085,42 @@ paths:
           description: Heartbeat accepted
         '403':
           description: Agent authentication failed
+
+  /api/v1/agent/jobs/next:
+    post:
+      summary: Poll for the next signed-agent diagnostic job
+      description: Uses the same exact source-IP, Ed25519 identity, timestamp and persisted monotonic sequence checks as heartbeat. Credential-bearing execution config is returned only here and is never placed in session exports.
+      tags: [Probe Agents]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProbeAgentControlRequest'}
+      responses:
+        '200':
+          description: A bounded job assignment or an empty result
+        '403':
+          description: Agent authentication failed
+
+  /api/v1/agent/observations:
+    post:
+      summary: Submit a signed remote diagnostic observation
+      description: Requires both the identity-signed transport request and an observation signature bound to session, job, nonce, StableID, generation, fingerprint and endpoint profile.
+      tags: [Probe Agents]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DiagnosticObservation'}
+      responses:
+        '200':
+          description: Observation accepted into the isolated in-memory session
+        '403':
+          description: Agent authentication failed
+        '409':
+          description: Observation signature, replay, binding, age or generation check failed
 
 components:
   securitySchemes:
@@ -2276,6 +2387,109 @@ components:
           type: string
           writeOnly: true
           description: Personalized Linux Docker Compose containing the one-time enrollment values.
+
+    CreateDiagnosticSessionRequest:
+      type: object
+      required: [stableId, agentId]
+      properties:
+        stableId: {type: string}
+        agentId: {type: string}
+
+    DiagnosticFailureEvidence:
+      type: object
+      properties:
+        code: {type: string}
+        stage: {type: string, enum: [configuration, xray_start, proxy, tcp, ping, direct, endpoint]}
+
+    DiagnosticCheckEvidence:
+      type: object
+      required: [checked, online]
+      properties:
+        checked: {type: boolean}
+        online: {type: boolean}
+        latencyMillis: {type: integer, format: int64, minimum: 0}
+        failureCode: {type: string}
+
+    DiagnosticJob:
+      type: object
+      required: [schemaVersion, jobId, sessionId, agentId, nonce, stableId, configGeneration, configFingerprint, profile, createdAt, expiresAt, state]
+      properties:
+        schemaVersion: {type: integer, enum: [1]}
+        jobId: {type: string}
+        sessionId: {type: string}
+        agentId: {type: string}
+        nonce: {type: string}
+        stableId: {type: string}
+        configGeneration: {type: integer, format: int64}
+        configFingerprint: {type: string}
+        profile:
+          type: object
+          required: [id, method]
+          properties:
+            id: {type: string}
+            method: {type: string, enum: [ip, status, download]}
+            alternativeProfileId: {type: string}
+        createdAt: {type: string, format: date-time}
+        expiresAt: {type: string, format: date-time}
+        state: {type: string, enum: [pending, dispatched, running, completed, expired, cancelled]}
+
+    DiagnosticObservation:
+      type: object
+      required: [schemaVersion, agentId, sessionId, jobId, nonce, stableId, configGeneration, configFingerprint, checkedAt, durationMillis, endpointProfile, status, tcp, ping, directConnectivity, agentVersion, signature]
+      properties:
+        schemaVersion: {type: integer, enum: [1]}
+        agentId: {type: string}
+        sessionId: {type: string}
+        jobId: {type: string}
+        nonce: {type: string}
+        stableId: {type: string}
+        configGeneration: {type: integer, format: int64}
+        configFingerprint: {type: string}
+        checkedAt: {type: string, format: date-time}
+        durationMillis: {type: integer, format: int64, minimum: 0}
+        endpointProfile: {type: string}
+        status: {type: string, enum: [online, proxy_failure, offline]}
+        latencyMillis: {type: integer, format: int64, minimum: 0}
+        failure: {$ref: '#/components/schemas/DiagnosticFailureEvidence'}
+        tcp: {$ref: '#/components/schemas/DiagnosticCheckEvidence'}
+        ping: {$ref: '#/components/schemas/DiagnosticCheckEvidence'}
+        directConnectivity: {$ref: '#/components/schemas/DiagnosticCheckEvidence'}
+        agentVersion: {type: string}
+        signature: {type: string, format: byte, writeOnly: true}
+
+    DiagnosticSession:
+      type: object
+      required: [schemaVersion, sessionId, stableId, trigger, configGeneration, configFingerprint, localResultSnapshot, requestedAgents, jobs, agentObservations, createdAt, expiresAt, state]
+      properties:
+        schemaVersion: {type: integer, enum: [1]}
+        sessionId: {type: string}
+        stableId: {type: string}
+        trigger: {type: string, enum: [manual, auto_proxy_failure, auto_check_endpoint, auto_ambiguous_failure]}
+        configGeneration: {type: integer, format: int64}
+        configFingerprint: {type: string}
+        localResultSnapshot: {type: object}
+        requestedAgents: {type: array, items: {type: string}}
+        jobs: {type: array, items: {$ref: '#/components/schemas/DiagnosticJob'}}
+        agentObservations:
+          type: array
+          items:
+            type: object
+            required: [observation, acceptedAt, reliable]
+            properties:
+              observation: {$ref: '#/components/schemas/DiagnosticObservation'}
+              acceptedAt: {type: string, format: date-time}
+              reliable: {type: boolean}
+        maintenanceDiagnostic: {type: boolean}
+        createdAt: {type: string, format: date-time}
+        expiresAt: {type: string, format: date-time}
+        state: {type: string, enum: [requested, dispatching, running, completed, partial, expired, cancelled]}
+
+    ProbeAgentControlRequest:
+      type: object
+      required: [protocolVersion, agentId]
+      properties:
+        protocolVersion: {type: integer, enum: [1]}
+        agentId: {type: string}
 
     ProbeAgentEnrollRequest:
       type: object

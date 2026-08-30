@@ -218,6 +218,38 @@
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         font-size: 12px;
       }
+      .node-diagnostics {
+        display: grid;
+        gap: 10px;
+        margin-top: 14px;
+        padding: 12px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--panel-2);
+      }
+      .node-diagnostics-head,
+      .node-diagnostics-controls,
+      .diagnostic-session-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .node-diagnostics-controls select {
+        min-width: 220px;
+      }
+      .diagnostic-session {
+        display: grid;
+        gap: 7px;
+        padding: 10px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+      }
+      .diagnostic-evidence {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
       .language-switch {
         display: inline-flex;
         gap: 3px;
@@ -2514,6 +2546,8 @@
         telegram: null,
         diagnosticAgents: null,
         diagnosticAgentCreation: null,
+        diagnosticSessions: { enabled: false, sessions: [] },
+        diagnosticRunningIDs: new Set(),
         selected: new Set(),
         activeTab: "dashboard",
         settingsPane: "run",
@@ -4262,6 +4296,82 @@
         return parts.join('<span class="availability-separator"> · </span>') || escapeHtml(nodeAvailabilityDetails(proxy));
       }
 
+      function connectedDiagnosticAgents() {
+        const snapshot = state.diagnosticAgents || { enabled: false, agents: [] };
+        return (snapshot.agents || []).filter((agent) =>
+          agent.enabled && agent.connected && Array.isArray(agent.capabilities) && agent.capabilities.includes("diagnostic-v1"));
+      }
+
+      function diagnosticAgentLabel(agentId) {
+        const agent = ((state.diagnosticAgents && state.diagnosticAgents.agents) || []).find((candidate) => candidate.agentId === agentId);
+        return agent ? `${agent.displayName}${agent.region ? ` · ${agent.region}` : ""}` : agentId;
+      }
+
+      function diagnosticSessionsFor(stableId) {
+        return ((state.diagnosticSessions && state.diagnosticSessions.sessions) || [])
+          .filter((view) => view.session && view.session.stableId === stableId)
+          .sort((left, right) => new Date(right.session.createdAt) - new Date(left.session.createdAt));
+      }
+
+      function diagnosticEvidenceChip(label, evidence) {
+        if (!evidence || !evidence.checked) return `<span class="chip neutral">${escapeHtml(label)} n/a</span>`;
+        const latency = evidence.latencyMillis > 0 ? ` · ${evidence.latencyMillis} ms` : "";
+        const failure = !evidence.online && evidence.failureCode ? ` · ${evidence.failureCode}` : "";
+        return `<span class="chip ${evidence.online ? "ok" : "error"}">${escapeHtml(label)} ${evidence.online ? "OK" : "failed"}${escapeHtml(latency + failure)}</span>`;
+      }
+
+      function diagnosticSessionHTML(view) {
+        const session = view.session;
+        const observationRecord = Array.isArray(session.agentObservations) && session.agentObservations.length
+          ? session.agentObservations[session.agentObservations.length - 1]
+          : null;
+        const observation = observationRecord && observationRecord.observation;
+        const agentId = Array.isArray(session.requestedAgents) ? session.requestedAgents[0] : "";
+        const active = ["requested", "dispatching", "running"].includes(session.state);
+        const statusClass = session.state === "completed" ? "ok" : active ? "warn" : "neutral";
+        const evidence = observation ? `<div class="diagnostic-evidence">
+          <span class="chip ${observation.status === "online" ? "ok" : observation.status === "proxy_failure" ? "warn" : "error"}">Remote ${escapeHtml(observation.status)}</span>
+          ${diagnosticEvidenceChip("TCP", observation.tcp)}
+          ${diagnosticEvidenceChip("Ping", observation.ping)}
+          ${diagnosticEvidenceChip("Direct", observation.directConnectivity)}
+          <span class="chip ${observationRecord.reliable ? "ok" : "error"}">${observationRecord.reliable ? "Reliable" : "Unreliable"}</span>
+        </div>` : `<div class="muted">Waiting for signed observation</div>`;
+        return `<article class="diagnostic-session">
+          <div class="diagnostic-session-head">
+            <div><strong>${escapeHtml(diagnosticAgentLabel(agentId))}</strong><div class="muted">${escapeHtml(formatTime(session.createdAt))}</div></div>
+            <span class="chip ${statusClass}">${escapeHtml(session.state)}</span>
+          </div>
+          ${evidence}
+          <div>${escapeHtml(view.summary || "No diagnostic summary")}</div>
+          <div class="node-actions">
+            ${active ? `<button class="secondary small" type="button" data-cancel-diagnostic="${escapeHtml(session.sessionId)}">Cancel</button>` : ""}
+            ${!active ? `<button class="secondary small" type="button" data-diagnose-id="${escapeHtml(session.stableId)}">Retry</button>` : ""}
+            <a class="secondary small" href="${api(`/diagnostic-sessions/export?sessionId=${encodeURIComponent(session.sessionId)}`)}" download>Download JSON</a>
+          </div>
+        </article>`;
+      }
+
+      function nodeDiagnosticsHTML(proxy) {
+        const agents = connectedDiagnosticAgents();
+        const sessions = diagnosticSessionsFor(proxy.stableId).slice(0, 3);
+        const running = state.diagnosticRunningIDs.has(proxy.stableId);
+        const enabled = !!(state.diagnosticSessions && state.diagnosticSessions.enabled);
+        const options = agents.map((agent) => `<option value="${escapeHtml(agent.agentId)}">${escapeHtml(diagnosticAgentLabel(agent.agentId))}</option>`).join("");
+        return `<section class="node-diagnostics" data-node-diagnostics="${escapeHtml(proxy.stableId)}">
+          <div class="node-diagnostics-head">
+            <div><strong>Remote Diagnostics</strong><div class="muted">Isolated evidence only; it does not change Availability.</div></div>
+            ${proxy.maintenance ? `<span class="chip warn">Maintenance diagnostic</span>` : ""}
+          </div>
+          <div class="node-diagnostics-controls">
+            <select data-diagnostic-agent-for="${escapeHtml(proxy.stableId)}" ${!enabled || agents.length === 0 ? "disabled" : ""}>
+              ${options || `<option value="">No connected diagnostic agents</option>`}
+            </select>
+            <button class="secondary small" type="button" data-diagnose-id="${escapeHtml(proxy.stableId)}" ${!enabled || agents.length === 0 || running ? "disabled" : ""}>${running ? "Starting…" : "Diagnose"}</button>
+          </div>
+          <div class="agent-list">${sessions.map(diagnosticSessionHTML).join("") || `<div class="muted">No remote diagnostic sessions for this node</div>`}</div>
+        </section>`;
+      }
+
       function nodeDetailHTML(proxy, result, history) {
         const overview = overviewNodeFor(proxy.stableId);
         const availabilityStatus = proxyAvailabilityStatus(proxy);
@@ -4318,6 +4428,7 @@
               <button class="chart-mode ${view === "availability" ? "active" : ""}" type="button" aria-pressed="${view === "availability"}" data-chart-view-select="availability" data-chart-node="${escapeHtml(proxy.stableId)}">Availability</button>
             </div>
           </div>
+          ${nodeDiagnosticsHTML(proxy)}
         </div>`;
       }
 
@@ -4589,6 +4700,8 @@
           renderNodePanel(proxy.stableId);
         } else if (open) {
           updateNodeDetailSummary(card, proxy);
+          const diagnostics = card.querySelector("[data-node-diagnostics]");
+          if (diagnostics) diagnostics.outerHTML = nodeDiagnosticsHTML(proxy);
         }
       }
 
@@ -5419,6 +5532,51 @@
         }
       }
 
+      async function loadDiagnosticSessions() {
+        state.diagnosticSessions = await request("/diagnostic-sessions");
+        renderNodes();
+      }
+
+      async function startDiagnostic(stableId) {
+        stableId = String(stableId || "").trim();
+        if (!stableId || state.diagnosticRunningIDs.has(stableId)) return;
+        const card = nodeCardElement(stableId);
+        const select = card && card.querySelector(`[data-diagnostic-agent-for="${CSS.escape(stableId)}"]`);
+        const agentId = select && select.value;
+        if (!agentId) {
+          $("message").textContent = "Select a connected diagnostic agent";
+          return;
+        }
+        state.diagnosticRunningIDs.add(stableId);
+        renderNodes();
+        try {
+          await request("/diagnostic-sessions", {
+            method: "POST",
+            body: JSON.stringify({ stableId, agentId }),
+          });
+          await loadDiagnosticSessions();
+          $("message").textContent = "Remote diagnostics started";
+        } catch (err) {
+          $("message").textContent = err.message;
+        } finally {
+          state.diagnosticRunningIDs.delete(stableId);
+          renderNodes();
+        }
+      }
+
+      async function cancelDiagnostic(sessionId) {
+        try {
+          await request("/diagnostic-sessions/cancel", {
+            method: "POST",
+            body: JSON.stringify({ sessionId }),
+          });
+          await loadDiagnosticSessions();
+          $("message").textContent = "Remote diagnostics cancelled";
+        } catch (err) {
+          $("message").textContent = err.message;
+        }
+      }
+
       async function createDiagnosticAgent() {
         const button = $("create-diagnostic-agent");
         button.disabled = true;
@@ -5476,16 +5634,20 @@
         if (state.loadRunning) return;
         state.loadRunning = true;
         try {
-          const [proxies, snapshot, telegram, nodesOverview] = await Promise.all([
+          const [proxies, snapshot, telegram, nodesOverview, diagnosticAgents, diagnosticSessions] = await Promise.all([
             request("/proxies"),
             request("/speed-tests"),
             request("/telegram"),
             request("/nodes-overview"),
+            request("/diagnostic-agents"),
+            request("/diagnostic-sessions"),
           ]);
           state.proxies = proxies;
           state.snapshot = snapshot;
           state.telegram = telegram;
           state.nodesOverview = nodesOverview;
+          state.diagnosticAgents = diagnosticAgents;
+          state.diagnosticSessions = diagnosticSessions;
           state.lastUpdatedAt = new Date();
           if (initial) {
             renderFilters();
@@ -5869,6 +6031,16 @@
           runNodes([run.dataset.runId]);
           return;
         }
+        const diagnose = target.closest("[data-diagnose-id]");
+        if (diagnose) {
+          startDiagnostic(diagnose.dataset.diagnoseId);
+          return;
+        }
+        const cancelDiagnosticButton = target.closest("[data-cancel-diagnostic]");
+        if (cancelDiagnosticButton) {
+          cancelDiagnostic(cancelDiagnosticButton.dataset.cancelDiagnostic);
+          return;
+        }
         const chartView = target.closest("[data-chart-view-select]");
         if (chartView) {
           setDashboardView(chartView.dataset.chartNode, chartView.dataset.chartViewSelect);
@@ -6126,6 +6298,11 @@
       });
       setInterval(() => {
         pollSpeedSnapshot().catch(() => {});
+      }, 5000);
+      setInterval(() => {
+        const sessions = (state.diagnosticSessions && state.diagnosticSessions.sessions) || [];
+        const active = sessions.some((view) => view.session && ["requested", "dispatching", "running"].includes(view.session.state));
+        if (!document.hidden && !state.loadRunning && active) loadDiagnosticSessions().catch(() => {});
       }, 5000);
       setInterval(() => {
         if (document.hidden || !state.snapshot) return;

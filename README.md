@@ -80,7 +80,9 @@ docker compose logs -f xray-checker
 
 ### Remote Diagnostics и отдельный Compose probe-agent-а
 
-Первый рабочий этап Remote Diagnostics включает создание агентов из админки, IP-bound enrollment, постоянную Ed25519 identity и подписанный heartbeat. Выполнение diagnostic jobs через Xray пока не подключено: на этом этапе агент подтверждает защищённое соединение с controller-ом, но ещё не проверяет ноды.
+Первый рабочий этап Remote Diagnostics включает создание агентов из админки, IP-bound enrollment, постоянную Ed25519 identity, подписанный heartbeat и ручную диагностику одной ноды через выбранного агента. В раскрытой карточке active-ноды секция `Remote Diagnostics` создаёт эфемерную generation-bound session; agent получает задание через подписанный outbound poll, запускает временный embedded Xray, выполняет настроенный `ip`/`status`/`download` proxy-check, а при ошибке добавляет TCP/ping evidence. Отдельный direct-connectivity control определяет, можно ли считать observation достоверным.
+
+Remote observation никогда не меняет Availability, history, downtime, incidents, Telegram, speedtest или Remnawave. Session хранится только в памяти controller-а, экспортируется отдельным sanitized JSON и исчезает после restart. Automatic trigger, alternative endpoint и multi-agent запуск пока не подключены.
 
 На controller-е включите подсистему и задайте отдельный длинный secret между Caddy и Xray Checker:
 
@@ -90,7 +92,7 @@ PROBE_TRUSTED_PROXY_SECRET=replace-with-output-of-openssl-rand-hex-32
 PROBE_AGENT_IMAGE=registry.example.com/xray-checker-probe-agent:1.0.0
 ```
 
-Один и тот же `PROBE_TRUSTED_PROXY_SECRET` передаётся `xray-checker` и `caddy`; актуальный [`Caddyfile.example`](Caddyfile.example) добавляет его только к `/api/v1/agent/*` и передаёт фактически увиденный `{remote_host}`. Controller игнорирует произвольные forwarded IP headers без правильного proxy secret. При прямом подключении без reverse proxy оставьте secret пустым: тогда проверяется socket peer из `RemoteAddr`.
+Один и тот же `PROBE_TRUSTED_PROXY_SECRET` передаётся `xray-checker` и `caddy`; актуальный [`Caddyfile.example`](Caddyfile.example) публикует только четыре `POST` endpoint: `/enroll`, `/heartbeat`, `/jobs/next` и `/observations`, добавляет proxy secret и передаёт фактически увиденный `{remote_host}`. Controller игнорирует произвольные forwarded IP headers без правильного proxy secret. При прямом подключении без reverse proxy оставьте secret пустым: тогда проверяется socket peer из `RemoteAddr`.
 
 После restart откройте `Settings → Agents` и укажите:
 
@@ -98,7 +100,7 @@ PROBE_AGENT_IMAGE=registry.example.com/xray-checker-probe-agent:1.0.0
 - `Controller URL` — HTTPS URL с корректным TLS-сертификатом;
 - `Controller IP` — точный IP, к которому агенту разрешено открывать control connection.
 
-Кнопка `Create agent` возвращает персональный Compose с одноразовым enrollment token. Controller хранит только SHA-256 токена и принимает enrollment один раз, до истечения TTL, только с ожидаемого source IP. Агент не использует DNS для control connection: TCP всегда открывается на `Controller IP`, а TLS проверяет hostname из `Controller URL`; redirects запрещены.
+Кнопка `Create agent` возвращает персональный Compose с одноразовым enrollment token. Controller хранит только SHA-256 токена и принимает enrollment один раз, до истечения TTL, только с ожидаемого source IP. Агент не использует DNS для control connection: TCP всегда открывается на `Controller IP`, а TLS проверяет hostname из `Controller URL`; redirects запрещены. После появления capability `diagnostic-v1` подключённый agent доступен в selector-е `Remote Diagnostics` раскрытой карточки ноды.
 
 Для сборки образа на Linux-host из checkout-а и запуска через отдельный шаблон:
 
@@ -109,7 +111,9 @@ docker compose --env-file probe-agent.env -f docker-compose.agent.yml build
 docker compose --env-file probe-agent.env -f docker-compose.agent.yml up -d
 ```
 
-Шаблон не открывает inbound-порты, запускает container без root и capabilities, с read-only root filesystem, resource limits и именованным `probe_agent_identity` volume. Приватные identity/observation keys генерируются внутри агента и сохраняются с mode `0600`. После обычного restart одноразовый token больше не нужен: agent продолжает heartbeat с той же identity и persisted sequence. Если identity volume удалён, старый token не сработает — в админке нужно выполнить `Re-enroll`, остановить прежний stack и развернуть новый персональный Compose. Re-enroll Compose получает новый project/volume, поэтому не переиспользует отозванные ключи; старый volume можно удалить после успешного подключения. `Revoke` немедленно блокирует старую identity.
+Шаблон не открывает inbound-порты, запускает container без root и capabilities, с read-only root filesystem, resource limits и именованным `probe_agent_identity` volume. Приватные identity/observation keys генерируются внутри агента и сохраняются с mode `0600`. Временный Xray config создаётся с mode `0600` внутри tmpfs `/run/xray-checker-agent` и удаляется после задания. Endpoint URLs принадлежат конфигурации агента (`PROBE_IP_CHECK_URL`, `PROBE_STATUS_CHECK_URL`, `PROBE_DOWNLOAD_URL`, `PROBE_DIRECT_CHECK_URL`); controller выдаёт только фиксированный profile ID и не может превратить job в произвольный URL fetch.
+
+После обычного restart одноразовый token больше не нужен: agent продолжает heartbeat с той же identity и persisted sequence. Когда агент появился как `Connected`, значение `PROBE_ENROLLMENT_TOKEN` можно очистить или удалить из персонального Compose; `docker-compose.agent.yml` допускает пустое значение. Именованный `probe_agent_identity` volume при этом нужно сохранить. Если identity volume удалён, старый token не сработает — в админке нужно выполнить `Re-enroll`, остановить прежний stack и развернуть новый персональный Compose. Re-enroll Compose получает новый project/volume, поэтому не переиспользует отозванные ключи; старый volume можно удалить после успешного подключения. `Revoke` немедленно блокирует старую identity и её observation public key.
 
 `data/diagnostic_agents.json` привязан к конкретной инсталляции и ожидаемым IP, поэтому намеренно не входит в backup/restore. Не публикуйте персональный Compose: до первого enrollment он содержит действующий одноразовый token.
 

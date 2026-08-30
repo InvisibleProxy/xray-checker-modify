@@ -17,6 +17,7 @@ import (
 	"xray-checker/nodemerge"
 	"xray-checker/probeagent"
 	remnawaveannounce "xray-checker/remnawave"
+	"xray-checker/remoteprobe"
 	"xray-checker/speedtest"
 	"xray-checker/subscription"
 	"xray-checker/telegram"
@@ -171,6 +172,13 @@ func main() {
 		config.CLIConfig.Proxy.DownloadMinSize,
 		config.CLIConfig.Proxy.CheckMethod,
 	)
+	remoteDiagnosticController, err := remoteprobe.NewController(remoteprobe.Config{
+		Enabled:     config.CLIConfig.RemoteDiagnostics.Enabled,
+		CheckMethod: config.CLIConfig.Proxy.CheckMethod,
+	}, probeAgentRegistry, proxyChecker)
+	if err != nil {
+		logger.Fatal("Failed to configure remote diagnostic jobs: %v", err)
+	}
 
 	xrayLifecycle := &sync.RWMutex{}
 	proxyChecker.SetRunGate(xrayLifecycle.RLocker())
@@ -513,6 +521,8 @@ func main() {
 	mux.Handle("/api/v1/public/proxies", web.APIPublicProxiesHandler(proxyChecker))
 	mux.Handle(probeagent.EnrollPath, web.ProbeAgentEnrollHandler(probeAgentRegistry, config.CLIConfig.RemoteDiagnostics.TrustedProxySecret))
 	mux.Handle(probeagent.HeartbeatPath, web.ProbeAgentHeartbeatHandler(probeAgentRegistry, config.CLIConfig.RemoteDiagnostics.TrustedProxySecret))
+	mux.Handle(probeagent.JobPollPath, web.ProbeAgentJobHandler(probeAgentRegistry, remoteDiagnosticController, config.CLIConfig.RemoteDiagnostics.TrustedProxySecret))
+	mux.Handle(probeagent.ObservationPath, web.ProbeAgentObservationHandler(probeAgentRegistry, remoteDiagnosticController, config.CLIConfig.RemoteDiagnostics.TrustedProxySecret))
 
 	web.RegisterConfigEndpoints(*proxyConfigs, proxyChecker, config.CLIConfig.Xray.StartPort)
 
@@ -556,6 +566,9 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/diagnostic-agents/reissue", web.AdminDiagnosticAgentReissueHandler(probeAgentRegistry))
 	protectedHandler.Handle("/api/v1/admin/diagnostic-agents/revoke", web.AdminDiagnosticAgentRevokeHandler(probeAgentRegistry))
 	protectedHandler.Handle("/api/v1/admin/diagnostic-agents", web.AdminDiagnosticAgentsHandler(probeAgentRegistry))
+	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions/cancel", web.AdminDiagnosticSessionCancelHandler(remoteDiagnosticController))
+	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions/export", web.AdminDiagnosticSessionExportHandler(remoteDiagnosticController))
+	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions", web.AdminDiagnosticSessionsHandler(remoteDiagnosticController))
 
 	if config.CLIConfig.Web.Public {
 		mux.Handle("/", web.IndexHandler(version, proxyChecker))

@@ -15,7 +15,11 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
+COPY diagnostics ./diagnostics
+COPY logger ./logger
+COPY models ./models
 COPY probeagent ./probeagent
+COPY xray ./xray
 COPY cmd/probe-agent ./cmd/probe-agent
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \

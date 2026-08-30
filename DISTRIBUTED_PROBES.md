@@ -1,6 +1,6 @@
 # Remote Diagnostics через distributed probe-agent'ов
 
-> Статус: этап 1 реализует защищённый agent control plane: lifecycle из админки, IP-bound enrollment, persistent Ed25519 identity, replay-safe heartbeat, Linux image и отдельный Compose. Diagnostic job transport и Xray executor ещё не подключены.
+> Статус: этап 1 реализует защищённый manual diagnostic workflow с одним агентом: lifecycle из админки, IP-bound enrollment, persistent Ed25519 identity, replay-safe control requests, outbound job polling, временный embedded Xray executor, подписанные observations и изолированное отображение результата в карточке ноды.
 
 ## Текущее состояние реализации
 
@@ -16,11 +16,17 @@
 - persisted controller registry с безопасной v0 → v1 normalization, one-use enrollment token только в виде SHA-256 и exact expected source IP;
 - create/re-enroll/revoke workflow в Admin → Settings → Agents с одноразовым персональным Compose;
 - отдельные Ed25519 identity и observation keys, которые агент генерирует и хранит в persistent named volume;
-- heartbeat с подписью, timestamp window и persisted monotonic sequence против replay после restart обеих сторон;
+- heartbeat, job poll и observation submit с identity-подписью, timestamp window и persisted monotonic sequence против replay после restart обеих сторон;
 - control client, который всегда dial-ит exact controller IP, проверяет TLS hostname из URL, не использует environment proxy и не следует redirects;
 - отдельные `Dockerfile.agent` и `docker-compose.agent.yml` для Linux с outbound-only network model, read-only root filesystem, non-root UID, drop всех capabilities, resource limits и persistent identity volume.
+- manual session из раскрытой карточки active-ноды с выбором одного подключённого агента;
+- ephemeral credential-bearing assignment queue, не входящая в session export или backup;
+- fixed profile ID `default-ip`/`default-status`/`default-download`, agent-owned endpoint URLs и fingerprint validation;
+- временный Xray config с mode `0600` внутри tmpfs, loopback-only SOCKS inbound, embedded Xray lifecycle и обязательное удаление после job;
+- proxy-check, TCP/ping evidence, direct-connectivity control, отдельная observation-подпись и generation/fingerprint recheck перед приёмом;
+- cancel, sanitized JSON export и вероятностная summary без operational side effects.
 
-Manager diagnostic sessions пока не связан с agent endpoints и availability workflow. Агент уже регистрируется и держит защищённый heartbeat, но не получает diagnostic jobs и не запускает Xray. Поэтому текущий код ничего не меняет в status/history/incidents/Telegram/Remnawave/speedtest и ещё не даёт оператору кнопку `Diagnose`.
+Manager diagnostic sessions связан только с отдельным manual admin workflow и agent endpoints. Он намеренно не подключён как consumer или writer к availability workflow: текущий код ничего не меняет в status/history/incidents/Telegram/Remnawave/speedtest. Automatic trigger, alternative endpoint и multi-agent session пока не реализованы.
 
 ## Основная идея
 
@@ -423,11 +429,11 @@ Metadata network condition используется только для выбо
 13. Secrets отсутствуют в logs, metrics, API, session export и backup.
 14. При выключенной подсистеме все существующие workflows работают без изменений.
 
-## Открытые решения перед реализацией
+## Открытые решения следующих этапов
 
-- Формат transport-а: long polling, gRPC stream или WebSocket поверх mTLS.
-- Точная схема подписи observations и lifecycle ключей.
-- Безопасный формат передачи минимальной Xray-конфигурации.
+- Нужно ли заменять короткий подписанный polling на long-held request либо stream после проверки реальной нагрузки.
+- Нужна ли дополнительная controller-подпись job поверх pinned TLS и identity-authenticated poll.
+- Следует ли заменить передаваемый single-node Xray JSON на отдельную минимальную versioned execution schema.
 - Default cooldown и максимальное число параллельных sessions.
 - Какие local failure codes включают automatic trigger кроме `proxy_failure`.
 - Набор direct connectivity и alternative endpoints.

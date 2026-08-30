@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -126,11 +127,6 @@ func ProbeAgentHeartbeatHandler(registry *probeagent.Registry, trustedProxySecre
 			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		sourceIP, err := probeagent.RequestSourceIP(request, trustedProxySecret)
-		if err != nil {
-			writeError(w, "Agent authentication failed", http.StatusForbidden)
-			return
-		}
 		body, err := io.ReadAll(http.MaxBytesReader(w, request.Body, maxProbeAgentRequestBytes))
 		if err != nil {
 			writeError(w, "Invalid JSON body", http.StatusBadRequest)
@@ -141,26 +137,47 @@ func ProbeAgentHeartbeatHandler(registry *probeagent.Registry, trustedProxySecre
 			writeError(w, "Invalid JSON body", http.StatusBadRequest)
 			return
 		}
-		headerAgentID := strings.TrimSpace(request.Header.Get("X-Probe-Agent-ID"))
-		sequence, sequenceErr := strconv.ParseUint(request.Header.Get("X-Probe-Sequence"), 10, 64)
-		timestamp, timestampErr := time.Parse(time.RFC3339Nano, request.Header.Get("X-Probe-Timestamp"))
-		signature, signatureErr := base64.RawStdEncoding.DecodeString(request.Header.Get("X-Probe-Signature"))
-		if headerAgentID == "" || headerAgentID != input.AgentID || sequenceErr != nil || timestampErr != nil || signatureErr != nil {
-			writeError(w, "Agent authentication failed", http.StatusForbidden)
+		authentication, ok := parseProbeControlAuthentication(w, request, trustedProxySecret, body, input.AgentID, probeagent.HeartbeatPath)
+		if !ok {
 			return
 		}
-		payload, err := probeagent.ControlSigningPayload(request.Method, probeagent.HeartbeatPath, headerAgentID, timestamp, sequence, body)
-		if err != nil {
-			writeError(w, "Agent authentication failed", http.StatusForbidden)
-			return
-		}
-		response, err := registry.AcceptHeartbeat(input, sourceIP, timestamp, sequence, payload, signature)
+		response, err := registry.AcceptHeartbeat(input, authentication.sourceIP, authentication.timestamp, authentication.sequence, authentication.payload, authentication.signature)
 		if err != nil {
 			writeError(w, "Agent authentication failed", http.StatusForbidden)
 			return
 		}
 		writeJSON(w, response)
 	}
+}
+
+type probeControlAuthentication struct {
+	sourceIP  netip.Addr
+	timestamp time.Time
+	sequence  uint64
+	payload   []byte
+	signature []byte
+}
+
+func parseProbeControlAuthentication(w http.ResponseWriter, request *http.Request, trustedProxySecret string, body []byte, agentID, path string) (probeControlAuthentication, bool) {
+	sourceIP, err := probeagent.RequestSourceIP(request, trustedProxySecret)
+	if err != nil {
+		writeError(w, "Agent authentication failed", http.StatusForbidden)
+		return probeControlAuthentication{}, false
+	}
+	headerAgentID := strings.TrimSpace(request.Header.Get("X-Probe-Agent-ID"))
+	sequence, sequenceErr := strconv.ParseUint(request.Header.Get("X-Probe-Sequence"), 10, 64)
+	timestamp, timestampErr := time.Parse(time.RFC3339Nano, request.Header.Get("X-Probe-Timestamp"))
+	signature, signatureErr := base64.RawStdEncoding.DecodeString(request.Header.Get("X-Probe-Signature"))
+	if headerAgentID == "" || headerAgentID != strings.TrimSpace(agentID) || sequenceErr != nil || timestampErr != nil || signatureErr != nil {
+		writeError(w, "Agent authentication failed", http.StatusForbidden)
+		return probeControlAuthentication{}, false
+	}
+	payload, err := probeagent.ControlSigningPayload(request.Method, path, headerAgentID, timestamp, sequence, body)
+	if err != nil {
+		writeError(w, "Agent authentication failed", http.StatusForbidden)
+		return probeControlAuthentication{}, false
+	}
+	return probeControlAuthentication{sourceIP: sourceIP, timestamp: timestamp, sequence: sequence, payload: payload, signature: signature}, true
 }
 
 func decodeProbeAgentJSON(w http.ResponseWriter, request *http.Request, target any) bool {

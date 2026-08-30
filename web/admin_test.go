@@ -118,6 +118,12 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`mergedFromStableIds`,
 		`.filter((node) => node.active === true)`,
 		`No active nodes to refresh`,
+		`function nodeDiagnosticsHTML(proxy)`,
+		`data-diagnose-id="${escapeHtml(proxy.stableId)}"`,
+		`request("/diagnostic-sessions"`,
+		`data-cancel-diagnostic`,
+		`/diagnostic-sessions/export?sessionId=`,
+		`it does not change Availability`,
 	} {
 		if !strings.Contains(html, marker) {
 			t.Fatalf("admin template does not contain %q", marker)

@@ -145,6 +145,18 @@ type AvailabilityCheckReport struct {
 	Results []AvailabilityCheckResult
 }
 
+// DiagnosticProxySnapshot is a read-only copy for the isolated remote
+// diagnostics coordinator. It contains the effective proxy configuration only
+// long enough to build an ephemeral agent assignment; callers must never
+// persist or expose Proxy through an admin/session response.
+type DiagnosticProxySnapshot struct {
+	Proxy       *models.ProxyConfig
+	Generation  uint64
+	Maintenance bool
+	Status      ProxyStatusDetails
+	HasStatus   bool
+}
+
 func (r AvailabilityCheckReport) RecoveredStableIDs() []string {
 	stableIDs := make([]string, 0)
 	for _, result := range r.Results {
@@ -1611,6 +1623,51 @@ func (pc *ProxyChecker) GetProxyByStableID(stableID string) (*models.ProxyConfig
 		}
 	}
 	return nil, false
+}
+
+func (pc *ProxyChecker) DiagnosticSnapshot(stableID string) (DiagnosticProxySnapshot, error) {
+	stableID = strings.TrimSpace(stableID)
+	if stableID == "" {
+		return DiagnosticProxySnapshot{}, fmt.Errorf("stableId is required")
+	}
+	pc.mu.RLock()
+	generation := atomic.LoadUint64(&pc.generation)
+	var proxyCopy *models.ProxyConfig
+	for _, proxy := range pc.proxies {
+		if proxy == nil {
+			continue
+		}
+		proxyStableID := proxy.StableID
+		if proxyStableID == "" {
+			proxyStableID = proxy.GenerateStableID()
+		}
+		if proxyStableID != stableID {
+			continue
+		}
+		copyValue := *proxy
+		copyValue.StableID = proxyStableID
+		copyValue.ALPN = append([]string(nil), proxy.ALPN...)
+		if proxy.Settings != nil {
+			copyValue.Settings = make(map[string]string, len(proxy.Settings))
+			for key, value := range proxy.Settings {
+				copyValue.Settings[key] = value
+			}
+		}
+		proxyCopy = &copyValue
+		break
+	}
+	pc.mu.RUnlock()
+	if proxyCopy == nil {
+		return DiagnosticProxySnapshot{}, fmt.Errorf("proxy not found")
+	}
+	status, hasStatus := pc.statusDetailsByStableID(stableID)
+	return DiagnosticProxySnapshot{
+		Proxy:       proxyCopy,
+		Generation:  generation,
+		Maintenance: !pc.MonitoringEnabled(stableID),
+		Status:      status,
+		HasStatus:   hasStatus,
+	}, nil
 }
 
 func (pc *ProxyChecker) GetProxies() []*models.ProxyConfig {

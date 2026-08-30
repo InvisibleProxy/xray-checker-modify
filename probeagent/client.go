@@ -20,12 +20,19 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"xray-checker/diagnostics"
 )
 
 const IdentityVersion = 1
 
-const maxControlResponseBytes = 64 * 1024
+const maxControlResponseBytes = MaxExecutionConfigBytes + 64*1024
+
+type JobExecutor interface {
+	Execute(context.Context, JobAssignment) diagnostics.Observation
+}
 
 type ClientConfig struct {
 	AgentID          string
@@ -37,6 +44,8 @@ type ClientConfig struct {
 	AgentVersion     string
 	Capabilities     []string
 	RequestTimeout   time.Duration
+	JobPollInterval  time.Duration
+	Executor         JobExecutor
 	Now              func() time.Time
 }
 
@@ -54,6 +63,7 @@ type Client struct {
 	httpClient   *http.Client
 	identityPath string
 	identity     IdentityFile
+	requestMu    sync.Mutex
 }
 
 type apiEnvelope[T any] struct {
@@ -77,6 +87,12 @@ func NewClient(config ClientConfig) (*Client, error) {
 	}
 	if config.RequestTimeout < time.Second {
 		return nil, fmt.Errorf("probe agent request timeout is too short")
+	}
+	if config.JobPollInterval == 0 {
+		config.JobPollInterval = 5 * time.Second
+	}
+	if config.JobPollInterval < time.Second {
+		return nil, fmt.Errorf("probe agent job poll interval is too short")
 	}
 	if config.Now == nil {
 		config.Now = time.Now
@@ -147,10 +163,6 @@ func (c *Client) SendHeartbeat(ctx context.Context, health string) (HeartbeatRes
 	if !validHealth(health) {
 		return HeartbeatResponse{}, fmt.Errorf("invalid probe agent health value")
 	}
-	privateKey, _, err := c.privateKeys()
-	if err != nil {
-		return HeartbeatResponse{}, err
-	}
 	request := HeartbeatRequest{
 		ProtocolVersion: ProtocolVersion,
 		AgentID:         c.config.AgentID,
@@ -162,24 +174,8 @@ func (c *Client) SendHeartbeat(ctx context.Context, health string) (HeartbeatRes
 	if err != nil {
 		return HeartbeatResponse{}, err
 	}
-	c.identity.NextSequence++
-	sequence := c.identity.NextSequence
-	if err := c.persistIdentity(); err != nil {
-		return HeartbeatResponse{}, err
-	}
-	timestamp := c.config.Now().UTC()
-	payload, err := ControlSigningPayload(http.MethodPost, HeartbeatPath, c.config.AgentID, timestamp, sequence, body)
-	if err != nil {
-		return HeartbeatResponse{}, err
-	}
-	headers := http.Header{
-		"X-Probe-Agent-ID":  []string{c.config.AgentID},
-		"X-Probe-Timestamp": []string{timestamp.Format(time.RFC3339Nano)},
-		"X-Probe-Sequence":  []string{strconv.FormatUint(sequence, 10)},
-		"X-Probe-Signature": []string{base64.RawStdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))},
-	}
 	var response HeartbeatResponse
-	if err := c.postJSONBytes(ctx, HeartbeatPath, body, headers, &response); err != nil {
+	if err := c.postSignedJSONBytes(ctx, HeartbeatPath, body, &response); err != nil {
 		return HeartbeatResponse{}, err
 	}
 	return response, nil
@@ -193,7 +189,24 @@ func (c *Client) Run(ctx context.Context) error {
 	if _, err := c.SendHeartbeat(ctx, "healthy"); err != nil {
 		return err
 	}
-	ticker := time.NewTicker(time.Duration(intervalSeconds) * time.Second)
+	if c.config.Executor == nil {
+		return c.runHeartbeatLoop(ctx, time.Duration(intervalSeconds)*time.Second)
+	}
+	runContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errorsChannel := make(chan error, 2)
+	go func() { errorsChannel <- c.runHeartbeatLoop(runContext, time.Duration(intervalSeconds)*time.Second) }()
+	go func() { errorsChannel <- c.runJobLoop(runContext) }()
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-errorsChannel:
+		return err
+	}
+}
+
+func (c *Client) runHeartbeatLoop(ctx context.Context, interval time.Duration) error {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -205,6 +218,86 @@ func (c *Client) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (c *Client) runJobLoop(ctx context.Context) error {
+	ticker := time.NewTicker(c.config.JobPollInterval)
+	defer ticker.Stop()
+	for {
+		if err := c.pollAndExecute(ctx); err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
+}
+
+func (c *Client) pollAndExecute(ctx context.Context) error {
+	request := ControlRequest{ProtocolVersion: ProtocolVersion, AgentID: c.config.AgentID}
+	body, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	var response JobPollResponse
+	if err := c.postSignedJSONBytes(ctx, JobPollPath, body, &response); err != nil {
+		return err
+	}
+	if response.Job == nil {
+		return nil
+	}
+	assignment := *response.Job
+	if assignment.Job.AgentID != c.config.AgentID || !assignment.Job.ExpiresAt.After(c.config.Now().UTC()) {
+		return fmt.Errorf("probe controller returned an invalid job binding")
+	}
+	jobContext, cancel := context.WithDeadline(ctx, assignment.Job.ExpiresAt)
+	observation := c.config.Executor.Execute(jobContext, assignment)
+	cancel()
+	observation.AgentID = c.config.AgentID
+	observation.AgentVersion = c.config.AgentVersion
+	_, observationPrivate, err := c.privateKeys()
+	if err != nil {
+		return err
+	}
+	payload, err := diagnostics.ObservationSigningPayload(observation)
+	if err != nil {
+		return err
+	}
+	observation.Signature = ed25519.Sign(observationPrivate, payload)
+	body, err = json.Marshal(observation)
+	if err != nil {
+		return err
+	}
+	var accepted ObservationResponse
+	return c.postSignedJSONBytes(ctx, ObservationPath, body, &accepted)
+}
+
+func (c *Client) postSignedJSONBytes(ctx context.Context, path string, body []byte, output any) error {
+	c.requestMu.Lock()
+	defer c.requestMu.Unlock()
+	privateKey, _, err := c.privateKeys()
+	if err != nil {
+		return err
+	}
+	c.identity.NextSequence++
+	sequence := c.identity.NextSequence
+	if err := c.persistIdentity(); err != nil {
+		return err
+	}
+	timestamp := c.config.Now().UTC()
+	payload, err := ControlSigningPayload(http.MethodPost, path, c.config.AgentID, timestamp, sequence, body)
+	if err != nil {
+		return err
+	}
+	headers := http.Header{
+		"X-Probe-Agent-ID":  []string{c.config.AgentID},
+		"X-Probe-Timestamp": []string{timestamp.Format(time.RFC3339Nano)},
+		"X-Probe-Sequence":  []string{strconv.FormatUint(sequence, 10)},
+		"X-Probe-Signature": []string{base64.RawStdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))},
+	}
+	return c.postJSONBytes(ctx, path, body, headers, output)
 }
 
 func (c *Client) postJSON(ctx context.Context, path string, input any, headers http.Header, output any) error {

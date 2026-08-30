@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -18,6 +19,20 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	executor, err := probeagent.NewExecutor(probeagent.ExecutorConfig{
+		RuntimeDir:      envOrDefault("PROBE_RUNTIME_DIR", probeagent.DefaultAgentRuntimeDir),
+		IPCheckURL:      os.Getenv("PROBE_IP_CHECK_URL"),
+		StatusCheckURL:  os.Getenv("PROBE_STATUS_CHECK_URL"),
+		DownloadURL:     os.Getenv("PROBE_DOWNLOAD_URL"),
+		DirectCheckURL:  os.Getenv("PROBE_DIRECT_CHECK_URL"),
+		ProxyTimeout:    time.Duration(envPositiveInt("PROBE_PROXY_TIMEOUT_SECONDS", 30)) * time.Second,
+		DownloadTimeout: time.Duration(envPositiveInt("PROBE_DOWNLOAD_TIMEOUT_SECONDS", 60)) * time.Second,
+		DownloadMinSize: int64(envPositiveInt("PROBE_DOWNLOAD_MIN_SIZE", 51200)),
+	})
+	if err != nil {
+		log.Fatalf("probe executor configuration failed: %v", err)
+	}
+
 	client, err := probeagent.NewClient(probeagent.ClientConfig{
 		AgentID:          os.Getenv("PROBE_AGENT_ID"),
 		EnrollmentToken:  os.Getenv("PROBE_ENROLLMENT_TOKEN"),
@@ -26,8 +41,10 @@ func main() {
 		ControllerCAFile: os.Getenv("PROBE_CONTROLLER_CA_FILE"),
 		IdentityDir:      envOrDefault("PROBE_IDENTITY_DIR", "/var/lib/xray-checker-agent"),
 		AgentVersion:     version,
-		Capabilities:     []string{"control-v1"},
+		Capabilities:     []string{"control-v1", "diagnostic-v1"},
 		RequestTimeout:   20 * time.Second,
+		JobPollInterval:  time.Duration(envPositiveInt("PROBE_JOB_POLL_INTERVAL_SECONDS", 5)) * time.Second,
+		Executor:         executor,
 	})
 	if err != nil {
 		log.Fatalf("probe agent configuration failed: %v", err)
@@ -59,4 +76,16 @@ func envOrDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envPositiveInt(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 1 {
+		log.Fatalf("%s must be a positive integer", name)
+	}
+	return parsed
 }
