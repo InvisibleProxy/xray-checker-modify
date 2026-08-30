@@ -82,7 +82,7 @@ type CLI struct {
 	RemoteDiagnostics struct {
 		Enabled                  bool   `name:"remote-diagnostics-enabled" help:"Enable remote diagnostic probe-agent enrollment and control endpoints" default:"false" env:"REMOTE_DIAGNOSTICS_ENABLED"`
 		RegistryPath             string `name:"probe-agent-registry" help:"Path to the controller-bound probe-agent registry" default:"data/diagnostic_agents.json" env:"PROBE_AGENT_REGISTRY"`
-		AgentImage               string `name:"probe-agent-image" help:"Probe-agent image written into generated Compose files" default:"xray-checker-probe-agent:local" env:"PROBE_AGENT_IMAGE"`
+		AgentImage               string `name:"probe-agent-image" help:"Probe-agent image written into generated Compose files; pin an immutable digest in production" default:"ghcr.io/invisibleproxy/xray-checker-probe-agent:main" env:"PROBE_AGENT_IMAGE"`
 		EnrollmentTTLMinutes     int    `name:"probe-enrollment-ttl" help:"One-time enrollment token lifetime in minutes" default:"15" env:"PROBE_ENROLLMENT_TTL_MINUTES"`
 		HeartbeatIntervalSeconds int    `name:"probe-heartbeat-interval" help:"Requested probe-agent heartbeat interval in seconds" default:"30" env:"PROBE_HEARTBEAT_INTERVAL_SECONDS"`
 		HeartbeatMaxSkewSeconds  int    `name:"probe-heartbeat-max-skew" help:"Maximum accepted probe-agent heartbeat clock skew in seconds" default:"120" env:"PROBE_HEARTBEAT_MAX_SKEW_SECONDS"`

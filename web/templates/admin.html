@@ -5646,6 +5646,7 @@
             <div class="row">
               <button class="secondary small" type="button" data-agent-reissue="${escapeHtml(agent.agentId)}">Re-enroll</button>
               <button class="secondary small" type="button" data-agent-revoke="${escapeHtml(agent.agentId)}"${statusText === "Revoked" ? " disabled" : ""}>Revoke</button>
+              <button class="secondary danger small" type="button" data-agent-delete="${escapeHtml(agent.agentId)}"${agent.revoked ? "" : " disabled"}>Delete</button>
             </div>
           </article>`;
         }).join("") : `<div class="muted">No diagnostic agents configured</div>`;
@@ -5759,6 +5760,23 @@
         try {
           await request("/diagnostic-agents/revoke", { method: "POST", body: JSON.stringify({ agentId }) });
           await loadDiagnosticAgents();
+        } catch (err) {
+          $("message").textContent = err.message;
+        }
+      }
+
+      async function deleteDiagnosticAgent(agentId) {
+        const confirmed = window.confirm(`${tr("Delete this revoked diagnostic agent permanently?")}\n\n${tr("The saved controller identity and metadata will be removed. This cannot be undone.")}\n\n${tr("The remote Compose stack and identity volume must be removed separately.")}`);
+        if (!confirmed) return;
+        try {
+          await request("/diagnostic-agents/delete", { method: "POST", body: JSON.stringify({ agentId }) });
+          if (state.diagnosticAgentCreation && state.diagnosticAgentCreation.agent && state.diagnosticAgentCreation.agent.agentId === agentId) {
+            state.diagnosticAgentCreation = null;
+            $("diagnostic-agent-compose").value = "";
+            $("diagnostic-agent-created").hidden = true;
+          }
+          await loadDiagnosticAgents();
+          $("message").textContent = "Diagnostic agent deleted";
         } catch (err) {
           $("message").textContent = err.message;
         }
@@ -6261,8 +6279,10 @@
       $("diagnostic-agents-list").addEventListener("click", (event) => {
         const reissue = event.target.closest("[data-agent-reissue]");
         const revoke = event.target.closest("[data-agent-revoke]");
+        const deleteButton = event.target.closest("[data-agent-delete]");
         if (reissue) reissueDiagnosticAgent(reissue.dataset.agentReissue);
         if (revoke) revokeDiagnosticAgent(revoke.dataset.agentRevoke);
+        if (deleteButton) deleteDiagnosticAgent(deleteButton.dataset.agentDelete);
       });
       $("refresh").addEventListener("click", () => load());
       $("refresh-subscription").addEventListener("click", refreshSubscription);

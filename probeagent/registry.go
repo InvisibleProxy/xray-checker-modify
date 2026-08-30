@@ -34,6 +34,7 @@ var (
 	ErrInvalidAgent          = errors.New("invalid probe agent")
 	ErrAgentNotFound         = errors.New("probe agent not found")
 	ErrAgentRevoked          = errors.New("probe agent is revoked")
+	ErrAgentNotRevoked       = errors.New("probe agent must be revoked before deletion")
 	ErrSourceIPMismatch      = errors.New("probe agent source IP mismatch")
 	ErrEnrollmentExpired     = errors.New("probe agent enrollment expired")
 	ErrEnrollmentUsed        = errors.New("probe agent enrollment already used")
@@ -160,7 +161,7 @@ func NewRegistry(config RegistryConfig) (*Registry, error) {
 		config.Random = rand.Reader
 	}
 	if strings.TrimSpace(config.AgentImage) == "" {
-		config.AgentImage = "xray-checker-probe-agent:local"
+		config.AgentImage = "ghcr.io/invisibleproxy/xray-checker-probe-agent:main"
 	}
 	return &Registry{
 		config: config,
@@ -391,6 +392,32 @@ func (r *Registry) Revoke(agentID string) (AgentSnapshot, error) {
 		return AgentSnapshot{}, err
 	}
 	return r.snapshot(record), nil
+}
+
+func (r *Registry) Delete(agentID string) error {
+	if !r.Enabled() {
+		return ErrDisabled
+	}
+	now := r.now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	agentID = strings.TrimSpace(agentID)
+	record, ok := r.state.Agents[agentID]
+	if !ok {
+		return ErrAgentNotFound
+	}
+	if record.Enabled || record.RevokedAt.IsZero() {
+		return ErrAgentNotRevoked
+	}
+	previousUpdatedAt := r.state.UpdatedAt
+	delete(r.state.Agents, agentID)
+	r.state.UpdatedAt = now
+	if err := r.persistLocked(); err != nil {
+		r.state.Agents[agentID] = record
+		r.state.UpdatedAt = previousUpdatedAt
+		return err
+	}
+	return nil
 }
 
 func (r *Registry) Enroll(request EnrollRequest, sourceIP netip.Addr) (EnrollResponse, error) {

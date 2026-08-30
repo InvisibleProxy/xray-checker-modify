@@ -104,6 +104,44 @@ func TestReissueClearsOldIdentityAndRevocationFailsClosed(t *testing.T) {
 	}
 }
 
+func TestDeleteRequiresRevocationAndPersistsRemoval(t *testing.T) {
+	now := time.Date(2026, 8, 30, 1, 2, 3, 0, time.UTC)
+	registry, path := newTestRegistry(t, now)
+	created, err := registry.Create(testCreateRequest())
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	if err := registry.Delete(created.Agent.AgentID); !errors.Is(err, ErrAgentNotRevoked) {
+		t.Fatalf("delete live agent error = %v, want ErrAgentNotRevoked", err)
+	}
+	if _, ok := registry.Agent(created.Agent.AgentID); !ok {
+		t.Fatal("failed live-agent deletion removed the registry record")
+	}
+	if _, err := registry.Revoke(created.Agent.AgentID); err != nil {
+		t.Fatalf("revoke agent: %v", err)
+	}
+	if err := registry.Delete(created.Agent.AgentID); err != nil {
+		t.Fatalf("delete revoked agent: %v", err)
+	}
+	if _, ok := registry.Agent(created.Agent.AgentID); ok {
+		t.Fatal("deleted agent remains in the in-memory registry")
+	}
+
+	restarted, err := NewRegistry(RegistryConfig{Path: path, Enabled: true, AgentImage: "agent:test", Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatalf("new restarted registry: %v", err)
+	}
+	if err := restarted.Load(); err != nil {
+		t.Fatalf("reload registry: %v", err)
+	}
+	if len(restarted.Snapshot()) != 0 {
+		t.Fatalf("deleted agent returned after restart: %+v", restarted.Snapshot())
+	}
+	if err := restarted.Delete(created.Agent.AgentID); !errors.Is(err, ErrAgentNotFound) {
+		t.Fatalf("delete missing agent error = %v, want ErrAgentNotFound", err)
+	}
+}
+
 // encoding/json never omits a struct, so revokedAt is encoded as the Go zero
 // time even for a live agent. Clients must be able to rely on revoked instead.
 func TestSnapshotJSONReportsRevokedIndependentlyOfZeroRevokedAt(t *testing.T) {

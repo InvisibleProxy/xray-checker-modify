@@ -162,6 +162,35 @@ func TestAdminDiagnosticAgentCreationReturnsComposeOnce(t *testing.T) {
 	}
 }
 
+func TestAdminDiagnosticAgentDeleteRequiresRevocation(t *testing.T) {
+	registry := newWebTestAgentRegistry(t, time.Now().UTC())
+	created, err := registry.Create(probeagent.CreateAgentRequest{
+		DisplayName: "EU probe", ExpectedSourceIP: "203.0.113.40",
+		ControllerIP: "198.51.100.10", ControllerURL: "https://checker.example.com",
+	})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	body := []byte(`{"agentId":"` + created.Agent.AgentID + `"}`)
+
+	liveRequest := httptest.NewRequest(http.MethodPost, "/api/v1/admin/diagnostic-agents/delete", bytes.NewReader(body))
+	liveRecorder := httptest.NewRecorder()
+	AdminDiagnosticAgentDeleteHandler(registry).ServeHTTP(liveRecorder, liveRequest)
+	if liveRecorder.Code != http.StatusConflict {
+		t.Fatalf("live agent delete status = %d, want %d: %s", liveRecorder.Code, http.StatusConflict, liveRecorder.Body.String())
+	}
+
+	if _, err := registry.Revoke(created.Agent.AgentID); err != nil {
+		t.Fatalf("revoke agent: %v", err)
+	}
+	deleteRequest := httptest.NewRequest(http.MethodPost, "/api/v1/admin/diagnostic-agents/delete", bytes.NewReader(body))
+	deleteRecorder := httptest.NewRecorder()
+	AdminDiagnosticAgentDeleteHandler(registry).ServeHTTP(deleteRecorder, deleteRequest)
+	if deleteRecorder.Code != http.StatusOK || len(registry.Snapshot()) != 0 {
+		t.Fatalf("revoked agent delete status = %d, agents = %+v, body = %s", deleteRecorder.Code, registry.Snapshot(), deleteRecorder.Body.String())
+	}
+}
+
 func TestAdminDiagnosticSessionDuplicateReturnsConflict(t *testing.T) {
 	service := &fakeDiagnosticSessionService{createErr: remoteprobe.ErrActiveSession}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/diagnostic-sessions", bytes.NewBufferString(`{"stableId":"node-one","agentId":"agent-one"}`))

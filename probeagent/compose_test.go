@@ -35,3 +35,27 @@ func TestRenderComposeProducesStandaloneOutboundOnlyLinuxService(t *testing.T) {
 		t.Fatal("generated outbound-only agent Compose exposes an inbound port")
 	}
 }
+
+// Production controllers pin an immutable digest so a probe cannot pull an
+// agent built against a newer protocol version. The digest carries "@" and ":",
+// which must survive into the generated Compose unchanged.
+func TestRenderComposeAcceptsADigestPinnedImage(t *testing.T) {
+	const image = "ghcr.io/invisibleproxy/xray-checker-probe-agent@sha256:" +
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	record := AgentRecord{
+		AgentID: "agent_pinned", ControllerURL: "https://checker.example.com",
+		ControllerIP: "198.51.100.10",
+	}
+	compose := RenderCompose(record, "enroll_secret", image)
+	var document struct {
+		Services map[string]struct {
+			Image string `yaml:"image"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal([]byte(compose), &document); err != nil {
+		t.Fatalf("parse digest-pinned Compose: %v\n%s", err, compose)
+	}
+	if got := document.Services["probe-agent"].Image; got != image {
+		t.Fatalf("generated image = %q, want %q", got, image)
+	}
+}

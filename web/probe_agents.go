@@ -22,6 +22,7 @@ type AdminDiagnosticAgentService interface {
 	Create(probeagent.CreateAgentRequest) (probeagent.CreationResult, error)
 	Reissue(string) (probeagent.CreationResult, error)
 	Revoke(string) (probeagent.AgentSnapshot, error)
+	Delete(string) error
 }
 
 type diagnosticAgentsSnapshot struct {
@@ -92,6 +93,24 @@ func AdminDiagnosticAgentRevokeHandler(service AdminDiagnosticAgentService) http
 			return
 		}
 		writeJSON(w, result)
+	}
+}
+
+func AdminDiagnosticAgentDeleteHandler(service AdminDiagnosticAgentService) http.HandlerFunc {
+	return func(w http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var input diagnosticAgentActionRequest
+		if !decodeProbeAgentJSON(w, request, &input) {
+			return
+		}
+		if err := service.Delete(input.AgentID); err != nil {
+			writeProbeAgentAdminError(w, err)
+			return
+		}
+		writeJSON(w, map[string]string{"agentId": strings.TrimSpace(input.AgentID)})
 	}
 }
 
@@ -213,7 +232,7 @@ func writeProbeAgentAdminError(w http.ResponseWriter, err error) {
 	code := http.StatusBadRequest
 	if errors.Is(err, probeagent.ErrAgentNotFound) {
 		code = http.StatusNotFound
-	} else if errors.Is(err, probeagent.ErrDisabled) {
+	} else if errors.Is(err, probeagent.ErrDisabled) || errors.Is(err, probeagent.ErrAgentNotRevoked) {
 		code = http.StatusConflict
 	}
 	writeError(w, err.Error(), code)

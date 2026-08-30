@@ -102,7 +102,29 @@ PROBE_AGENT_IMAGE=registry.example.com/xray-checker-probe-agent:1.0.0
 
 Кнопка `Create agent` возвращает персональный Compose с одноразовым enrollment token. Controller хранит только SHA-256 токена и принимает enrollment один раз, до истечения TTL, только с ожидаемого source IP. Агент не использует DNS для control connection: TCP всегда открывается на `Controller IP`, а TLS проверяет hostname из `Controller URL`; redirects запрещены. После появления capability `diagnostic-v1` подключённый agent доступен в selector-е `Remote Diagnostics` раскрытой карточки ноды.
 
-Для сборки образа на Linux-host из checkout-а и запуска через отдельный шаблон:
+Развёртывание пробы не требует checkout-а: `Create agent` возвращает Compose, который ссылается на опубликованный образ. На Linux-host достаточно docker и файла из админки:
+
+```bash
+mkdir -p /opt/xray-checker-probe && cd /opt/xray-checker-probe
+# вставьте Compose из Create agent в docker-compose.yml
+docker compose up -d
+```
+
+Образ `ghcr.io/invisibleproxy/xray-checker-probe-agent` собирается workflow [`probe-agent-image.yml`](.github/workflows/probe-agent-image.yml) для `linux/amd64` и `linux/arm64`: push в `main` даёт теги `main` и `sha-<short>`, тег `probe-agent-vX.Y.Z` — `X.Y.Z` и `latest`. Имя образа в выдаваемом Compose берётся из `PROBE_AGENT_IMAGE` на controller-е.
+
+В production подставляйте digest, а не плавающий тег: `ProtocolVersion` сверяется строго, поэтому агент новее controller-а не пройдёт enrollment. Digest печатается в summary workflow-а или запрашивается так:
+
+```bash
+docker buildx imagetools inspect ghcr.io/invisibleproxy/xray-checker-probe-agent:main --format '{{println .Manifest.Digest}}'
+```
+
+```dotenv
+PROBE_AGENT_IMAGE=ghcr.io/invisibleproxy/xray-checker-probe-agent@sha256:<digest>
+```
+
+Порядок обновления — сначала controller, затем `docker compose pull && docker compose up -d` на каждой пробе с новым digest. Сам по себе `restart: unless-stopped` образ не перетягивает, поэтому работающие агенты не обновятся неожиданно.
+
+Альтернатива для host-а без доступа к GHCR — сборка образа из checkout-а:
 
 ```bash
 cp probe-agent.env.example probe-agent.env
@@ -113,7 +135,7 @@ docker compose --env-file probe-agent.env -f docker-compose.agent.yml up -d
 
 Шаблон не открывает inbound-порты, запускает container без root и capabilities, с read-only root filesystem, resource limits и именованным `probe_agent_identity` volume. Приватные identity/observation keys генерируются внутри агента и сохраняются с mode `0600`. Временный Xray config создаётся с mode `0600` внутри tmpfs `/run/xray-checker-agent` и удаляется после задания. Endpoint URLs принадлежат конфигурации агента (`PROBE_IP_CHECK_URL`, `PROBE_STATUS_CHECK_URL`, `PROBE_DOWNLOAD_URL`, `PROBE_DIRECT_CHECK_URL`); controller выдаёт только фиксированный profile ID и не может превратить job в произвольный URL fetch.
 
-После обычного restart одноразовый token больше не нужен: agent продолжает heartbeat с той же identity и persisted sequence. Когда агент появился как `Connected`, значение `PROBE_ENROLLMENT_TOKEN` можно очистить или удалить из персонального Compose; `docker-compose.agent.yml` допускает пустое значение. Именованный `probe_agent_identity` volume при этом нужно сохранить. Если identity volume удалён, старый token не сработает — в админке нужно выполнить `Re-enroll`, остановить прежний stack и развернуть новый персональный Compose. Re-enroll Compose получает новый project/volume, поэтому не переиспользует отозванные ключи; старый volume можно удалить после успешного подключения. `Revoke` немедленно блокирует старую identity и её observation public key.
+После обычного restart одноразовый token больше не нужен: agent продолжает heartbeat с той же identity и persisted sequence. Когда агент появился как `Connected`, значение `PROBE_ENROLLMENT_TOKEN` можно очистить или удалить из персонального Compose; `docker-compose.agent.yml` допускает пустое значение. Именованный `probe_agent_identity` volume при этом нужно сохранить. Если identity volume удалён, старый token не сработает — в админке нужно выполнить `Re-enroll`, остановить прежний stack и развернуть новый персональный Compose. Re-enroll Compose получает новый project/volume, поэтому не переиспользует отозванные ключи; старый volume можно удалить после успешного подключения. `Revoke` немедленно блокирует старую identity и её observation public key. После отзыва запись можно удалить из controller registry кнопкой `Delete`; удалённый Compose stack и identity volume при этом не удаляются автоматически.
 
 `data/diagnostic_agents.json` привязан к конкретной инсталляции и ожидаемым IP, поэтому намеренно не входит в backup/restore. Не публикуйте персональный Compose: до первого enrollment он содержит действующий одноразовый token.
 

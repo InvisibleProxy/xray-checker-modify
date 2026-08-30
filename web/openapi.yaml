@@ -958,6 +958,29 @@ paths:
         '404':
           description: Agent not found
 
+  /api/v1/admin/diagnostic-agents/delete:
+    post:
+      summary: Delete a revoked diagnostic agent
+      description: Permanently removes the revoked agent record and saved public identities from the controller registry. It does not remove the remote Compose stack or identity volume.
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DiagnosticAgentActionRequest'
+      responses:
+        '200':
+          description: Deleted agent ID
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Agent not found
+        '409':
+          description: Agent must be revoked before deletion
+
   /api/v1/admin/diagnostic-sessions:
     get:
       summary: List ephemeral remote diagnostic sessions

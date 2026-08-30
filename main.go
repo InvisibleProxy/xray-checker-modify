@@ -565,6 +565,7 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/remnawave", web.AdminRemnawaveHandler(remnawaveService))
 	protectedHandler.Handle("/api/v1/admin/diagnostic-agents/reissue", web.AdminDiagnosticAgentReissueHandler(probeAgentRegistry))
 	protectedHandler.Handle("/api/v1/admin/diagnostic-agents/revoke", web.AdminDiagnosticAgentRevokeHandler(probeAgentRegistry))
+	protectedHandler.Handle("/api/v1/admin/diagnostic-agents/delete", web.AdminDiagnosticAgentDeleteHandler(probeAgentRegistry))
 	protectedHandler.Handle("/api/v1/admin/diagnostic-agents", web.AdminDiagnosticAgentsHandler(probeAgentRegistry))
 	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions/cancel", web.AdminDiagnosticSessionCancelHandler(remoteDiagnosticController))
 	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions/export", web.AdminDiagnosticSessionExportHandler(remoteDiagnosticController))
