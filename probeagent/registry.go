@@ -94,9 +94,13 @@ type AgentSnapshot struct {
 	AgentVersion        string    `json:"agentVersion,omitempty"`
 	Capabilities        []string  `json:"capabilities,omitempty"`
 	Health              string    `json:"health,omitempty"`
-	RevokedAt           time.Time `json:"revokedAt,omitempty"`
-	IdentityConfigured  bool      `json:"identityConfigured"`
-	ObservationKeySet   bool      `json:"observationKeySet"`
+	// encoding/json never omits a struct, so RevokedAt is always encoded and a
+	// zero value still reaches clients as "0001-01-01T00:00:00Z". Revoked is the
+	// field consumers must branch on.
+	RevokedAt          time.Time `json:"revokedAt,omitempty"`
+	Revoked            bool      `json:"revoked"`
+	IdentityConfigured bool      `json:"identityConfigured"`
+	ObservationKeySet  bool      `json:"observationKeySet"`
 }
 
 type CreateAgentRequest struct {
@@ -699,8 +703,9 @@ func (r *Registry) snapshot(record AgentRecord) AgentSnapshot {
 		EnrollmentExpiresAt: record.EnrollmentExpiresAt, EnrollmentUsedAt: record.EnrollmentUsedAt,
 		EnrolledAt: record.EnrolledAt, LastSeenAt: record.LastSeenAt, AgentVersion: record.AgentVersion,
 		Capabilities: append([]string(nil), record.Capabilities...), Health: record.Health,
-		RevokedAt: record.RevokedAt, IdentityConfigured: record.IdentityPublicKey != "",
-		ObservationKeySet: record.ObservationPublicKey != "",
+		RevokedAt: record.RevokedAt, Revoked: !record.RevokedAt.IsZero(),
+		IdentityConfigured: record.IdentityPublicKey != "",
+		ObservationKeySet:  record.ObservationPublicKey != "",
 	}
 }
 

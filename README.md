@@ -80,7 +80,7 @@ docker compose logs -f xray-checker
 
 ### Remote Diagnostics и отдельный Compose probe-agent-а
 
-Первый рабочий этап Remote Diagnostics включает создание агентов из админки, IP-bound enrollment, постоянную Ed25519 identity, подписанный heartbeat и ручную диагностику одной ноды через выбранного агента. В раскрытой карточке active-ноды секция `Remote Diagnostics` создаёт эфемерную generation-bound session; agent получает задание через подписанный outbound poll, запускает временный embedded Xray, выполняет настроенный `ip`/`status`/`download` proxy-check, а при ошибке добавляет TCP/ping evidence. Отдельный direct-connectivity control определяет, можно ли считать observation достоверным.
+Первый рабочий этап Remote Diagnostics включает создание агентов из админки, IP-bound enrollment, постоянную Ed25519 identity, подписанный heartbeat и ручную диагностику одной ноды через выбранного агента. В раскрытой карточке active-ноды секция `Remote Diagnostics` создаёт эфемерную generation-bound session; пока session для той же пары `StableID` + agent активна, повторный запуск блокируется. Agent получает задание через подписанный outbound poll, запускает временный embedded Xray, выполняет настроенный `ip`/`status`/`download` proxy-check, а при ошибке добавляет TCP/ping evidence. Отдельный direct-connectivity control определяет, можно ли считать observation достоверным.
 
 Remote observation никогда не меняет Availability, history, downtime, incidents, Telegram, speedtest или Remnawave. Session хранится только в памяти controller-а, экспортируется отдельным sanitized JSON и исчезает после restart. Automatic trigger, alternative endpoint и multi-agent запуск пока не подключены.
 

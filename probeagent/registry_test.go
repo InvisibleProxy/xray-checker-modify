@@ -99,9 +99,47 @@ func TestReissueClearsOldIdentityAndRevocationFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("revoke agent: %v", err)
 	}
-	if revoked.Enabled || revoked.RevokedAt.IsZero() {
+	if revoked.Enabled || revoked.RevokedAt.IsZero() || !revoked.Revoked {
 		t.Fatalf("revoked snapshot is invalid: %+v", revoked)
 	}
+}
+
+// encoding/json never omits a struct, so revokedAt is encoded as the Go zero
+// time even for a live agent. Clients must be able to rely on revoked instead.
+func TestSnapshotJSONReportsRevokedIndependentlyOfZeroRevokedAt(t *testing.T) {
+	now := time.Date(2026, 8, 30, 1, 2, 3, 0, time.UTC)
+	registry, _ := newTestRegistry(t, now)
+	created, err := registry.Create(testCreateRequest())
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	decoded := decodeSnapshotJSON(t, created.Agent)
+	if decoded["revoked"] != false {
+		t.Fatalf("live agent reported revoked = %v, want false", decoded["revoked"])
+	}
+	if decoded["revokedAt"] == nil {
+		t.Fatal("revokedAt is omitted for a live agent; the revoked flag is no longer needed")
+	}
+	revoked, err := registry.Revoke(created.Agent.AgentID)
+	if err != nil {
+		t.Fatalf("revoke agent: %v", err)
+	}
+	if decodeSnapshotJSON(t, revoked)["revoked"] != true {
+		t.Fatal("revoked agent did not report revoked = true")
+	}
+}
+
+func decodeSnapshotJSON(t *testing.T, snapshot AgentSnapshot) map[string]any {
+	t.Helper()
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("encode agent snapshot: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("decode agent snapshot: %v", err)
+	}
+	return decoded
 }
 
 func TestDecodeRegistryMigratesVersionZero(t *testing.T) {

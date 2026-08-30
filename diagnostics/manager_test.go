@@ -158,6 +158,64 @@ func TestManagerRejectsInvalidSignatureWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestManagerRejectsIncoherentOrUnclassifiedConnectivityEvidence(t *testing.T) {
+	tests := []struct {
+		name   string
+		change func(*Observation)
+	}{
+		{
+			name: "unchecked evidence carries a failure",
+			change: func(observation *Observation) {
+				observation.TCP = CheckEvidence{FailureCode: "tcp_timeout"}
+			},
+		},
+		{
+			name: "unchecked evidence claims online",
+			change: func(observation *Observation) {
+				observation.Ping = CheckEvidence{Online: true}
+			},
+		},
+		{
+			name: "online evidence carries a failure",
+			change: func(observation *Observation) {
+				observation.TCP = CheckEvidence{Checked: true, Online: true, FailureCode: "dns"}
+			},
+		},
+		{
+			name: "failed evidence carries an unclassified value",
+			change: func(observation *Observation) {
+				observation.TCP = CheckEvidence{Checked: true, FailureCode: "203.0.113.40:443"}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newManagerFixture(t)
+			observation := fixture.observation(t)
+			test.change(&observation)
+			observation = signObservation(t, observation, fixture.privateKey)
+			if _, err := fixture.manager.AcceptObservation(observation); !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("error = %v, want invalid request", err)
+			}
+		})
+	}
+}
+
+func TestManagerRejectsIncoherentLocalConnectivityEvidence(t *testing.T) {
+	fixture := newManagerFixture(t)
+	_, err := fixture.manager.CreateSession(CreateSessionRequest{
+		StableID:            "stable-node-2",
+		Trigger:             TriggerManual,
+		ConfigGeneration:    8,
+		ConfigFingerprint:   ConfigFingerprint([]byte(`{"effective":"config-v8"}`)),
+		RequestedAgents:     []string{"agent-eu"},
+		LocalResultSnapshot: LocalResultSnapshot{Status: ProbeStatusUnknown, TCP: CheckEvidence{FailureCode: "tcp_timeout"}},
+	})
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("error = %v, want invalid request", err)
+	}
+}
+
 func TestManagerRejectsStaleUnknownAndMismatchedObservations(t *testing.T) {
 	tests := []struct {
 		name   string

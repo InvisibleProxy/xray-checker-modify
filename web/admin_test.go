@@ -74,6 +74,8 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`style="mask-type: alpha"`,
 		`class="chart-area"`,
 		`class="chart-gap-bridge"`,
+		`ordered.forEach((result) => {`,
+		`const singlePointTimes = new Set(successful.length === 1`,
 		`class="chart-error-band"`,
 		`class="chart-last-marker"`,
 		`class="chart-cursor"`,
@@ -119,7 +121,11 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`.filter((node) => node.active === true)`,
 		`No active nodes to refresh`,
 		`function nodeDiagnosticsHTML(proxy)`,
+		`function updateNodeDiagnostics(card, proxy)`,
+		`function diagnosticAgentBusy(stableId, agentId)`,
 		`data-diagnose-id="${escapeHtml(proxy.stableId)}"`,
+		`data-diagnostic-start`,
+		`.node-diagnostics [data-node-diagnostics-maintenance][hidden]`,
 		`request("/diagnostic-sessions"`,
 		`data-cancel-diagnostic`,
 		`/diagnostic-sessions/export?sessionId=`,
@@ -134,6 +140,9 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 	}
 	if strings.Contains(html, `data-maintenance-id=`) {
 		t.Fatal("admin template still exposes maintenance in node card actions")
+	}
+	if strings.Contains(html, `diagnostics.outerHTML = nodeDiagnosticsHTML(proxy)`) {
+		t.Fatal("admin polling still replaces the remote diagnostics controls")
 	}
 }
 

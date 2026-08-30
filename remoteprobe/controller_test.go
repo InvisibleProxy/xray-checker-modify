@@ -119,6 +119,37 @@ func TestManualJobCompletesWithoutOperationalSideEffectsOrCredentialExport(t *te
 	}
 }
 
+func TestCreateManualRejectsConcurrentDuplicateForNodeAndAgent(t *testing.T) {
+	fixture := newControllerFixture(t)
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			_, err := fixture.controller.CreateManual(CreateManualRequest{StableID: "node-one", AgentID: fixture.agentID})
+			results <- err
+		}()
+	}
+	close(start)
+
+	created := 0
+	rejected := 0
+	for range 2 {
+		err := <-results
+		switch {
+		case err == nil:
+			created++
+		case errors.Is(err, ErrActiveSession):
+			rejected++
+		default:
+			t.Fatalf("unexpected create error: %v", err)
+		}
+	}
+	if created != 1 || rejected != 1 {
+		t.Fatalf("created = %d, rejected = %d, want one of each", created, rejected)
+	}
+}
+
 func TestObservationRejectedAfterConfigurationGenerationChanges(t *testing.T) {
 	fixture := newControllerFixture(t)
 	created, err := fixture.controller.CreateManual(CreateManualRequest{StableID: "node-one", AgentID: fixture.agentID})

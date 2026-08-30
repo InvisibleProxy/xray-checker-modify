@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -161,6 +162,18 @@ func TestAdminDiagnosticAgentCreationReturnsComposeOnce(t *testing.T) {
 	}
 }
 
+func TestAdminDiagnosticSessionDuplicateReturnsConflict(t *testing.T) {
+	service := &fakeDiagnosticSessionService{createErr: remoteprobe.ErrActiveSession}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/diagnostic-sessions", bytes.NewBufferString(`{"stableId":"node-one","agentId":"agent-one"}`))
+	recorder := httptest.NewRecorder()
+
+	AdminDiagnosticSessionsHandler(service).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), remoteprobe.ErrActiveSession.Error()) {
+		t.Fatalf("duplicate session status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func newWebTestAgentRegistry(t *testing.T, now time.Time) *probeagent.Registry {
 	t.Helper()
 	registry, err := probeagent.NewRegistry(probeagent.RegistryConfig{
@@ -193,11 +206,12 @@ func signedAgentRequest(t *testing.T, path string, body []byte, agentID string, 
 type fakeDiagnosticSessionService struct {
 	assignment *probeagent.JobAssignment
 	accepted   diagnostics.Observation
+	createErr  error
 }
 
 func (f *fakeDiagnosticSessionService) Enabled() bool { return true }
 func (f *fakeDiagnosticSessionService) CreateManual(remoteprobe.CreateManualRequest) (remoteprobe.SessionView, error) {
-	return remoteprobe.SessionView{}, nil
+	return remoteprobe.SessionView{}, f.createErr
 }
 func (f *fakeDiagnosticSessionService) Sessions(string) []remoteprobe.SessionView { return nil }
 func (f *fakeDiagnosticSessionService) Cancel(string) error                       { return nil }

@@ -25,6 +25,7 @@ const (
 
 var (
 	ErrUnavailableAgent = errors.New("diagnostic agent is not connected")
+	ErrActiveSession    = errors.New("diagnostic session is already active for this node and agent")
 	ErrNoPendingJob     = errors.New("no pending diagnostic job")
 )
 
@@ -74,8 +75,13 @@ func NewController(config Config, registry *probeagent.Registry, proxyChecker *c
 	if registry == nil || proxyChecker == nil || config.JobTTL < 30*time.Second || config.SocksPort < 1024 || config.SocksPort > 65535 {
 		return nil, fmt.Errorf("invalid remote diagnostic controller configuration")
 	}
-	if _, err := profileForMethod(config.CheckMethod); err != nil {
-		return nil, err
+	// The proxy check method is only a diagnostics concern. Rejecting an
+	// unsupported value while remote diagnostics is disabled would refuse to
+	// start over a setting the checker itself tolerates.
+	if config.Enabled {
+		if _, err := profileForMethod(config.CheckMethod); err != nil {
+			return nil, err
+		}
 	}
 	manager, err := diagnostics.NewDiagnosticSessionManager(diagnostics.ManagerConfig{
 		VerifyObservation: diagnostics.NewEd25519Verifier(registry.ObservationPublicKey),
@@ -118,7 +124,17 @@ func (c *Controller) CreateManual(request CreateManualRequest) (SessionView, err
 	if err != nil {
 		return SessionView{}, err
 	}
-	expiresAt := time.Now().UTC().Add(c.config.JobTTL)
+	now := time.Now().UTC()
+	expiresAt := now.Add(c.config.JobTTL)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.removeExpiredAssignmentsLocked(now)
+	for _, queued := range c.assignments {
+		job := queued.assignment.Job
+		if job.StableID == snapshot.Proxy.StableID && job.AgentID == request.AgentID {
+			return SessionView{}, ErrActiveSession
+		}
+	}
 	session, err := c.manager.CreateSession(diagnostics.CreateSessionRequest{
 		StableID:              snapshot.Proxy.StableID,
 		Trigger:               diagnostics.TriggerManual,
@@ -149,10 +165,8 @@ func (c *Controller) CreateManual(request CreateManualRequest) (SessionView, err
 		TargetHost: snapshot.Proxy.Server,
 		TargetPort: snapshot.Proxy.Port,
 	}
-	c.mu.Lock()
 	c.assignments[job.JobID] = &queuedAssignment{assignment: assignment}
 	c.signalAgentLocked(request.AgentID)
-	c.mu.Unlock()
 	updated, _ := c.manager.Session(session.SessionID)
 	return view(updated), nil
 }

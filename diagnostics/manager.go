@@ -570,7 +570,7 @@ func validateLocalResultSnapshot(snapshot LocalResultSnapshot) error {
 		return fmt.Errorf("%w: invalid local probe status", ErrInvalidRequest)
 	}
 	for _, evidence := range []CheckEvidence{snapshot.TCP, snapshot.Ping} {
-		if evidence.LatencyMillis < 0 || (evidence.Checked && !evidence.Online && !validFailureCode(evidence.FailureCode)) {
+		if err := validateCheckEvidence(evidence); err != nil {
 			return fmt.Errorf("%w: invalid local connectivity evidence", ErrInvalidRequest)
 		}
 	}
@@ -610,7 +610,7 @@ func validateObservation(observation Observation) error {
 		return err
 	}
 	for _, evidence := range []CheckEvidence{observation.TCP, observation.Ping, observation.DirectConnectivity} {
-		if evidence.LatencyMillis < 0 || (evidence.Checked && !evidence.Online && !validFailureCode(evidence.FailureCode)) {
+		if err := validateCheckEvidence(evidence); err != nil {
 			return fmt.Errorf("%w: invalid connectivity evidence", ErrInvalidRequest)
 		}
 	}
@@ -622,6 +622,28 @@ func validateObservation(observation Observation) error {
 		if err := validateProbeResult(alternative.Status, alternative.Failure); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateCheckEvidence(evidence CheckEvidence) error {
+	if evidence.LatencyMillis < 0 {
+		return ErrInvalidRequest
+	}
+	if !evidence.Checked {
+		if evidence.Online || evidence.LatencyMillis != 0 || evidence.FailureCode != "" {
+			return ErrInvalidRequest
+		}
+		return nil
+	}
+	if evidence.Online {
+		if evidence.FailureCode != "" {
+			return ErrInvalidRequest
+		}
+		return nil
+	}
+	if !validFailureCode(evidence.FailureCode) {
+		return ErrInvalidRequest
 	}
 	return nil
 }
@@ -714,7 +736,25 @@ func validProfileID(value string) bool {
 }
 
 func validFailureCode(value string) bool {
-	return validSafeValue(value, 64)
+	switch value {
+	case "configuration",
+		"dns",
+		"tcp_refused",
+		"tcp_timeout",
+		"host_unreachable",
+		"network_unreachable",
+		"proxy_handshake",
+		"proxy_timeout",
+		"tls",
+		"http_status",
+		"source_ip_unchanged",
+		"download_incomplete",
+		"check_endpoint",
+		"unknown":
+		return true
+	default:
+		return false
+	}
 }
 
 func validToken(value string) bool {

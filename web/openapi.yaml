@@ -974,7 +974,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
     post:
       summary: Start manual diagnostics through one connected agent
-      description: Creates an in-memory session and queues a generation-bound job without changing authoritative availability state.
+      description: Creates an in-memory session and queues a generation-bound job without changing authoritative availability state. Returns 409 while the same agent already has an active session for the same StableID.
       tags: [Admin]
       requestBody:
         required: true
@@ -2339,7 +2339,7 @@ components:
 
     DiagnosticAgentSnapshot:
       type: object
-      required: [agentId, displayName, expectedSourceIp, controllerIp, controllerUrl, enabled, connected, identityConfigured]
+      required: [agentId, displayName, expectedSourceIp, controllerIp, controllerUrl, enabled, connected, revoked, identityConfigured]
       properties:
         agentId: {type: string}
         displayName: {type: string}
@@ -2361,7 +2361,11 @@ components:
         agentVersion: {type: string}
         capabilities: {type: array, items: {type: string}}
         health: {type: string, enum: [healthy, degraded, unhealthy, starting]}
-        revokedAt: {type: string, format: date-time}
+        revokedAt:
+          type: string
+          format: date-time
+          description: Always present. A never-revoked agent reports the Go zero time 0001-01-01T00:00:00Z, so clients must branch on revoked instead.
+        revoked: {type: boolean}
         identityConfigured: {type: boolean}
         observationKeySet: {type: boolean}
 
@@ -2398,7 +2402,7 @@ components:
     DiagnosticFailureEvidence:
       type: object
       properties:
-        code: {type: string}
+        code: {type: string, enum: [configuration, dns, tcp_refused, tcp_timeout, host_unreachable, network_unreachable, proxy_handshake, proxy_timeout, tls, http_status, source_ip_unchanged, download_incomplete, check_endpoint, unknown]}
         stage: {type: string, enum: [configuration, xray_start, proxy, tcp, ping, direct, endpoint]}
 
     DiagnosticCheckEvidence:
@@ -2408,7 +2412,7 @@ components:
         checked: {type: boolean}
         online: {type: boolean}
         latencyMillis: {type: integer, format: int64, minimum: 0}
-        failureCode: {type: string}
+        failureCode: {type: string, enum: [configuration, dns, tcp_refused, tcp_timeout, host_unreachable, network_unreachable, proxy_handshake, proxy_timeout, tls, http_status, source_ip_unchanged, download_incomplete, check_endpoint, unknown]}
 
     DiagnosticJob:
       type: object

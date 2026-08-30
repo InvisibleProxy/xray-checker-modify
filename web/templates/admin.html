@@ -238,6 +238,9 @@
       .node-diagnostics-controls select {
         min-width: 220px;
       }
+      .node-diagnostics [data-node-diagnostics-maintenance][hidden] {
+        display: none;
+      }
       .diagnostic-session {
         display: grid;
         gap: 7px;
@@ -1054,9 +1057,9 @@
       }
       .chart-gap-bridge {
         fill: none;
-        stroke: rgba(110, 168, 254, 0.3);
-        stroke-width: 1.4;
-        stroke-dasharray: 4 7;
+        stroke: rgba(110, 168, 254, 0.72);
+        stroke-width: 2;
+        stroke-dasharray: 5 5;
         stroke-linecap: round;
       }
       .chart-error-band {
@@ -3489,12 +3492,15 @@
           grid.push(`<text class="chart-axis-label" x="${x}" y="${height - 10}" text-anchor="${anchor}">${escapeHtml(speedChartAxisTime(timestamp, spanMs))}</text>`);
         }
 
-        const intervals = [];
-        for (let index = 1; index < ordered.length; index += 1) {
-          intervals.push(new Date(ordered[index].checkedAt) - new Date(ordered[index - 1].checkedAt));
-        }
-        intervals.sort((a, b) => a - b);
-        const medianInterval = intervals.length ? intervals[Math.floor(intervals.length / 2)] : 0;
+        const medianIntervalOf = (samples) => {
+          const intervals = [];
+          for (let index = 1; index < samples.length; index += 1) {
+            intervals.push(new Date(samples[index].checkedAt) - new Date(samples[index - 1].checkedAt));
+          }
+          intervals.sort((a, b) => a - b);
+          return intervals.length ? intervals[Math.floor(intervals.length / 2)] : 0;
+        };
+        const medianInterval = medianIntervalOf(ordered);
         const gapLimit = medianInterval > 0 ? medianInterval * 2.5 : Number.POSITIVE_INFINITY;
         const runs = [];
         let run = [];
@@ -3555,7 +3561,10 @@
           const next = items[0];
           return `<path class="chart-gap-bridge" d="M ${xOf(previous.checkedAt).toFixed(1)} ${yOf(chartResultValue(previous, view)).toFixed(1)} L ${xOf(next.checkedAt).toFixed(1)} ${yOf(chartResultValue(next, view)).toFixed(1)}" aria-hidden="true" />`;
         }).join("");
-        const singlePointTimes = new Set(runs.filter((items) => items.length === 1).map((items) => items[0].checkedAt));
+        // A single real measurement remains visible. Isolated successes in a
+        // flapping series are represented by dashed gap bridges and error bands,
+        // not by a misleading solid interpolation or a chart full of dots.
+        const singlePointTimes = new Set(successful.length === 1 ? [successful[0].checkedAt] : []);
         const points = successful.map((result) => {
           const low = view === "speedtest" && isLowSpeed(result);
           const color = low ? "var(--yellow)" : "var(--blue)";
@@ -4313,6 +4322,76 @@
           .sort((left, right) => new Date(right.session.createdAt) - new Date(left.session.createdAt));
       }
 
+      function diagnosticSessionActive(view) {
+        return Boolean(view && view.session && ["requested", "dispatching", "running"].includes(view.session.state));
+      }
+
+      function visibleDiagnosticSessions(stableId) {
+        const sessions = diagnosticSessionsFor(stableId);
+        const active = sessions.filter(diagnosticSessionActive);
+        const terminal = sessions.filter((view) => !diagnosticSessionActive(view));
+        return [...active, ...terminal.slice(0, Math.max(0, 3 - active.length))];
+      }
+
+      function diagnosticAgentBusy(stableId, agentId) {
+        if (!agentId) return false;
+        return diagnosticSessionsFor(stableId).some((view) =>
+          diagnosticSessionActive(view)
+          && Array.isArray(view.session.requestedAgents)
+          && view.session.requestedAgents.includes(agentId));
+      }
+
+      function diagnosticAgentSignature(agents) {
+        return JSON.stringify(agents.map((agent) => [agent.agentId, diagnosticAgentLabel(agent.agentId)]));
+      }
+
+      function diagnosticSessionSignature(views) {
+        return JSON.stringify(views.map((view) => {
+          const session = view.session || {};
+          const records = Array.isArray(session.agentObservations) ? session.agentObservations : [];
+          const record = records.length ? records[records.length - 1] : null;
+          const observation = record && record.observation;
+          const requestedAgents = Array.isArray(session.requestedAgents) ? session.requestedAgents : [];
+          return [
+            session.sessionId,
+            session.state,
+            session.createdAt,
+            requestedAgents,
+            requestedAgents.map(diagnosticAgentLabel),
+            view.summary,
+            record && record.acceptedAt,
+            record && record.reliable,
+            observation && observation.status,
+            observation && observation.tcp,
+            observation && observation.ping,
+            observation && observation.directConnectivity,
+          ];
+        }));
+      }
+
+      function diagnosticAgentOptionsHTML(agents, selectedAgentId) {
+        if (!agents.length) return `<option value="">No connected diagnostic agents</option>`;
+        return agents.map((agent) => `<option value="${escapeHtml(agent.agentId)}" ${agent.agentId === selectedAgentId ? "selected" : ""}>${escapeHtml(diagnosticAgentLabel(agent.agentId))}</option>`).join("");
+      }
+
+      function diagnosticNodeControlState(proxy, preferredAgentId = "") {
+        const agents = connectedDiagnosticAgents();
+        const enabled = Boolean(state.diagnosticSessions && state.diagnosticSessions.enabled);
+        const selectedAgent = agents.find((agent) => agent.agentId === preferredAgentId) || agents[0] || null;
+        const agentId = selectedAgent ? selectedAgent.agentId : "";
+        const starting = state.diagnosticRunningIDs.has(proxy.stableId);
+        const busy = diagnosticAgentBusy(proxy.stableId, agentId);
+        return {
+          agents,
+          agentId,
+          enabled,
+          starting,
+          busy,
+          disabled: !enabled || !agentId || starting || busy,
+          label: starting ? "Starting…" : (busy ? "Running…" : "Diagnose"),
+        };
+      }
+
       function diagnosticEvidenceChip(label, evidence) {
         if (!evidence || !evidence.checked) return `<span class="chip neutral">${escapeHtml(label)} n/a</span>`;
         const latency = evidence.latencyMillis > 0 ? ` · ${evidence.latencyMillis} ms` : "";
@@ -4327,7 +4406,7 @@
           : null;
         const observation = observationRecord && observationRecord.observation;
         const agentId = Array.isArray(session.requestedAgents) ? session.requestedAgents[0] : "";
-        const active = ["requested", "dispatching", "running"].includes(session.state);
+        const active = diagnosticSessionActive(view);
         const statusClass = session.state === "completed" ? "ok" : active ? "warn" : "neutral";
         const evidence = observation ? `<div class="diagnostic-evidence">
           <span class="chip ${observation.status === "online" ? "ok" : observation.status === "proxy_failure" ? "warn" : "error"}">Remote ${escapeHtml(observation.status)}</span>
@@ -4352,24 +4431,80 @@
       }
 
       function nodeDiagnosticsHTML(proxy) {
-        const agents = connectedDiagnosticAgents();
-        const sessions = diagnosticSessionsFor(proxy.stableId).slice(0, 3);
-        const running = state.diagnosticRunningIDs.has(proxy.stableId);
-        const enabled = !!(state.diagnosticSessions && state.diagnosticSessions.enabled);
-        const options = agents.map((agent) => `<option value="${escapeHtml(agent.agentId)}">${escapeHtml(diagnosticAgentLabel(agent.agentId))}</option>`).join("");
+        const control = diagnosticNodeControlState(proxy);
+        const sessions = visibleDiagnosticSessions(proxy.stableId);
+        const agentSignature = diagnosticAgentSignature(control.agents);
+        const sessionSignature = diagnosticSessionSignature(sessions);
         return `<section class="node-diagnostics" data-node-diagnostics="${escapeHtml(proxy.stableId)}">
           <div class="node-diagnostics-head">
             <div><strong>Remote Diagnostics</strong><div class="muted">Isolated evidence only; it does not change Availability.</div></div>
-            ${proxy.maintenance ? `<span class="chip warn">Maintenance diagnostic</span>` : ""}
+            <span class="chip warn" data-node-diagnostics-maintenance ${proxy.maintenance ? "" : "hidden"}>Maintenance diagnostic</span>
           </div>
           <div class="node-diagnostics-controls">
-            <select data-diagnostic-agent-for="${escapeHtml(proxy.stableId)}" ${!enabled || agents.length === 0 ? "disabled" : ""}>
-              ${options || `<option value="">No connected diagnostic agents</option>`}
+            <select data-diagnostic-agent-for="${escapeHtml(proxy.stableId)}" data-diagnostic-agents-signature="${escapeHtml(agentSignature)}" ${!control.enabled || !control.agentId ? "disabled" : ""}>
+              ${diagnosticAgentOptionsHTML(control.agents, control.agentId)}
             </select>
-            <button class="secondary small" type="button" data-diagnose-id="${escapeHtml(proxy.stableId)}" ${!enabled || agents.length === 0 || running ? "disabled" : ""}>${running ? "Starting…" : "Diagnose"}</button>
+            <button class="secondary small" type="button" data-diagnose-id="${escapeHtml(proxy.stableId)}" data-diagnostic-start ${control.disabled ? "disabled" : ""}>${control.label}</button>
           </div>
-          <div class="agent-list">${sessions.map(diagnosticSessionHTML).join("") || `<div class="muted">No remote diagnostic sessions for this node</div>`}</div>
+          <div class="agent-list" data-diagnostic-session-list data-diagnostic-sessions-signature="${escapeHtml(sessionSignature)}">${sessions.map(diagnosticSessionHTML).join("") || `<div class="muted">No remote diagnostic sessions for this node</div>`}</div>
         </section>`;
+      }
+
+      function updateNodeDiagnostics(card, proxy) {
+        const section = card && card.querySelector("[data-node-diagnostics]");
+        if (!section) return;
+        const panel = card.querySelector("[data-node-panel]");
+        const previousHeight = panel ? panel.getBoundingClientRect().height : 0;
+        const select = section.querySelector(`[data-diagnostic-agent-for="${CSS.escape(proxy.stableId)}"]`);
+        const preferredAgentId = select ? select.value : "";
+        const control = diagnosticNodeControlState(proxy, preferredAgentId);
+        let changed = false;
+
+        if (select) {
+          const agentSignature = diagnosticAgentSignature(control.agents);
+          if (select.dataset.diagnosticAgentsSignature !== agentSignature) {
+            select.innerHTML = diagnosticAgentOptionsHTML(control.agents, control.agentId);
+            select.dataset.diagnosticAgentsSignature = agentSignature;
+            changed = true;
+          }
+          if (select.value !== control.agentId) select.value = control.agentId;
+          const disabled = !control.enabled || !control.agentId;
+          if (select.disabled !== disabled) {
+            select.disabled = disabled;
+            changed = true;
+          }
+        }
+
+        const button = section.querySelector("[data-diagnostic-start]");
+        if (button) {
+          if (button.disabled !== control.disabled) {
+            button.disabled = control.disabled;
+            changed = true;
+          }
+          if (button.textContent !== control.label) {
+            button.textContent = control.label;
+            changed = true;
+          }
+        }
+
+        const maintenance = section.querySelector("[data-node-diagnostics-maintenance]");
+        if (maintenance && maintenance.hidden !== !proxy.maintenance) {
+          maintenance.hidden = !proxy.maintenance;
+          changed = true;
+        }
+
+        const sessions = visibleDiagnosticSessions(proxy.stableId);
+        const sessionList = section.querySelector("[data-diagnostic-session-list]");
+        const sessionSignature = diagnosticSessionSignature(sessions);
+        if (sessionList && sessionList.dataset.diagnosticSessionsSignature !== sessionSignature) {
+          sessionList.innerHTML = sessions.map(diagnosticSessionHTML).join("") || `<div class="muted">No remote diagnostic sessions for this node</div>`;
+          sessionList.dataset.diagnosticSessionsSignature = sessionSignature;
+          changed = true;
+        }
+
+        if (changed && panel && state.openNodeStableIds.has(proxy.stableId)) {
+          syncNodePanel(proxy.stableId, { fromHeight: previousHeight });
+        }
       }
 
       function nodeDetailHTML(proxy, result, history) {
@@ -4700,8 +4835,7 @@
           renderNodePanel(proxy.stableId);
         } else if (open) {
           updateNodeDetailSummary(card, proxy);
-          const diagnostics = card.querySelector("[data-node-diagnostics]");
-          if (diagnostics) diagnostics.outerHTML = nodeDiagnosticsHTML(proxy);
+          updateNodeDiagnostics(card, proxy);
         }
       }
 
@@ -5479,10 +5613,11 @@
       }
 
       function diagnosticAgentStatus(agent) {
-        if (!agent.enabled || agent.revokedAt) return "Revoked";
+        if (!agent.enabled || agent.revoked) return "Revoked";
         if (agent.connected) return "Connected";
         if (agent.identityConfigured) return "Enrolled";
-        if (agent.enrollmentExpiresAt && new Date(agent.enrollmentExpiresAt) <= new Date()) return "Enrollment expired";
+        const enrollmentExpiresAt = agent.enrollmentExpiresAt;
+        if (enrollmentExpiresAt && !enrollmentExpiresAt.startsWith("0001-") && new Date(enrollmentExpiresAt) <= new Date()) return "Enrollment expired";
         return "Awaiting enrollment";
       }
 
@@ -5510,7 +5645,7 @@
             ${metadata ? `<div class="muted" data-i18n-skip>${escapeHtml(metadata)}</div>` : ""}
             <div class="row">
               <button class="secondary small" type="button" data-agent-reissue="${escapeHtml(agent.agentId)}">Re-enroll</button>
-              <button class="secondary small" type="button" data-agent-revoke="${escapeHtml(agent.agentId)}"${agent.enabled ? "" : " disabled"}>Revoke</button>
+              <button class="secondary small" type="button" data-agent-revoke="${escapeHtml(agent.agentId)}"${statusText === "Revoked" ? " disabled" : ""}>Revoke</button>
             </div>
           </article>`;
         }).join("") : `<div class="muted">No diagnostic agents configured</div>`;
@@ -5545,6 +5680,12 @@
         const agentId = select && select.value;
         if (!agentId) {
           $("message").textContent = "Select a connected diagnostic agent";
+          return;
+        }
+        if (diagnosticAgentBusy(stableId, agentId)) {
+          $("message").textContent = "Remote diagnostics are already running for this node and agent";
+          const proxy = proxyFor(stableId);
+          if (proxy) updateNodeDiagnostics(card, proxy);
           return;
         }
         state.diagnosticRunningIDs.add(stableId);
@@ -5634,11 +5775,15 @@
         if (state.loadRunning) return;
         state.loadRunning = true;
         try {
-          const [proxies, snapshot, telegram, nodesOverview, diagnosticAgents, diagnosticSessions] = await Promise.all([
+          const [proxies, snapshot, telegram, nodesOverview] = await Promise.all([
             request("/proxies"),
             request("/speed-tests"),
             request("/telegram"),
             request("/nodes-overview"),
+          ]);
+          // Remote diagnostics is optional, so a failure there must never keep
+          // the dashboard from rendering availability and speed-test state.
+          const [diagnosticAgents, diagnosticSessions] = await Promise.allSettled([
             request("/diagnostic-agents"),
             request("/diagnostic-sessions"),
           ]);
@@ -5646,8 +5791,8 @@
           state.snapshot = snapshot;
           state.telegram = telegram;
           state.nodesOverview = nodesOverview;
-          state.diagnosticAgents = diagnosticAgents;
-          state.diagnosticSessions = diagnosticSessions;
+          if (diagnosticAgents.status === "fulfilled") state.diagnosticAgents = diagnosticAgents.value;
+          if (diagnosticSessions.status === "fulfilled") state.diagnosticSessions = diagnosticSessions.value;
           state.lastUpdatedAt = new Date();
           if (initial) {
             renderFilters();
@@ -6074,6 +6219,12 @@
           renderSelectionCount();
           return;
         }
+        if (target.matches("[data-diagnostic-agent-for]")) {
+          const proxy = proxyFor(target.dataset.diagnosticAgentFor);
+          const card = nodeCardElement(target.dataset.diagnosticAgentFor);
+          if (proxy && card) updateNodeDiagnostics(card, proxy);
+          return;
+        }
         if (target.matches("[data-node-chart-from]")) {
           setDashboardCustomDate(target.dataset.nodeChartFrom, "from", target.value);
           return;
@@ -6297,7 +6448,9 @@
         $("message").textContent = err.message;
       });
       setInterval(() => {
-        pollSpeedSnapshot().catch(() => {});
+        pollSpeedSnapshot().catch((err) => {
+          $("message").textContent = `Speed-test refresh failed: ${err.message}`;
+        });
       }, 5000);
       setInterval(() => {
         const sessions = (state.diagnosticSessions && state.diagnosticSessions.sessions) || [];

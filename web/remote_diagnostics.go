@@ -162,7 +162,7 @@ func ProbeAgentObservationHandler(registry *probeagent.Registry, service Diagnos
 func writeDiagnosticSessionError(w http.ResponseWriter, err error) {
 	status := http.StatusBadRequest
 	switch {
-	case errors.Is(err, probeagent.ErrDisabled), errors.Is(err, remoteprobe.ErrUnavailableAgent):
+	case errors.Is(err, probeagent.ErrDisabled), errors.Is(err, remoteprobe.ErrUnavailableAgent), errors.Is(err, remoteprobe.ErrActiveSession):
 		status = http.StatusConflict
 	case errors.Is(err, probeagent.ErrAgentNotFound), errors.Is(err, diagnostics.ErrUnknownSession):
 		status = http.StatusNotFound
