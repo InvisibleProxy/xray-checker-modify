@@ -891,6 +891,13 @@
         font-weight: 600;
         overflow-wrap: anywhere;
       }
+      .node-chart-stats {
+        grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(220px, 1.35fr);
+      }
+      .node-chart-stats .node-detail-stat strong {
+        min-height: 2.5em;
+        line-height: 1.25;
+      }
       .node-detail-stat .availability-diagnostic,
       .node-detail-stat .availability-separator {
         display: inline;
@@ -4097,7 +4104,7 @@
       function nodeSpeedStatsHTML(results) {
         const stats = speedStats(results);
         const measurements = measurementStats(results);
-        return `<div class="node-detail-grid">
+        return `<div class="node-detail-grid node-chart-stats">
           <div class="node-detail-stat"><span>Average</span><strong>${stats ? escapeHtml(formatMbps(stats.avg)) : "n/a"}</strong></div>
           <div class="node-detail-stat"><span>Minimum</span><strong>${stats ? escapeHtml(formatMbps(stats.min)) : "n/a"}</strong></div>
           <div class="node-detail-stat"><span>Maximum</span><strong>${stats ? escapeHtml(formatMbps(stats.max)) : "n/a"}</strong></div>
@@ -4116,7 +4123,7 @@
           min: Math.min(...latencies),
           max: Math.max(...latencies),
         } : null;
-        return `<div class="node-detail-grid">
+        return `<div class="node-detail-grid node-chart-stats">
           <div class="node-detail-stat"><span>Average</span><strong>${stats ? escapeHtml(formatLatencyMs(stats.avg)) : "n/a"}</strong></div>
           <div class="node-detail-stat"><span>Minimum</span><strong>${stats ? escapeHtml(formatLatencyMs(stats.min)) : "n/a"}</strong></div>
           <div class="node-detail-stat"><span>Maximum</span><strong>${stats ? escapeHtml(formatLatencyMs(stats.max)) : "n/a"}</strong></div>
