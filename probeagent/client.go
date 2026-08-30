@@ -1,0 +1,383 @@
+package probeagent
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/netip"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const IdentityVersion = 1
+
+const maxControlResponseBytes = 64 * 1024
+
+type ClientConfig struct {
+	AgentID          string
+	EnrollmentToken  string
+	ControllerURL    string
+	ControllerIP     string
+	ControllerCAFile string
+	IdentityDir      string
+	AgentVersion     string
+	Capabilities     []string
+	RequestTimeout   time.Duration
+	Now              func() time.Time
+}
+
+type IdentityFile struct {
+	Version               int    `json:"version"`
+	AgentID               string `json:"agentId"`
+	IdentityPrivateKey    string `json:"identityPrivateKey"`
+	ObservationPrivateKey string `json:"observationPrivateKey"`
+	Enrolled              bool   `json:"enrolled"`
+	NextSequence          uint64 `json:"nextSequence"`
+}
+
+type Client struct {
+	config       ClientConfig
+	httpClient   *http.Client
+	identityPath string
+	identity     IdentityFile
+}
+
+type apiEnvelope[T any] struct {
+	Success bool   `json:"success"`
+	Data    T      `json:"data"`
+	Error   string `json:"error"`
+}
+
+func NewClient(config ClientConfig) (*Client, error) {
+	config.AgentID = strings.TrimSpace(config.AgentID)
+	config.ControllerURL = strings.TrimRight(strings.TrimSpace(config.ControllerURL), "/")
+	config.ControllerIP = normalizeIP(config.ControllerIP)
+	config.IdentityDir = strings.TrimSpace(config.IdentityDir)
+	config.AgentVersion = strings.TrimSpace(config.AgentVersion)
+	config.Capabilities = normalizeCapabilities(config.Capabilities)
+	if !validIdentifier(config.AgentID, 96) || config.IdentityDir == "" || !validShortText(config.AgentVersion, 128) {
+		return nil, fmt.Errorf("invalid probe agent client identity configuration")
+	}
+	if config.RequestTimeout == 0 {
+		config.RequestTimeout = 20 * time.Second
+	}
+	if config.RequestTimeout < time.Second {
+		return nil, fmt.Errorf("probe agent request timeout is too short")
+	}
+	if config.Now == nil {
+		config.Now = time.Now
+	}
+	httpClient, err := newPinnedHTTPClient(config.ControllerURL, config.ControllerIP, config.ControllerCAFile, config.RequestTimeout)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(config.IdentityDir, 0700); err != nil {
+		return nil, fmt.Errorf("create probe agent identity directory: %w", err)
+	}
+	client := &Client{
+		config:       config,
+		httpClient:   httpClient,
+		identityPath: filepath.Join(config.IdentityDir, "identity.json"),
+	}
+	if err := client.loadOrCreateIdentity(); err != nil {
+		return nil, err
+	}
+	return client, nil
+}
+
+func (c *Client) EnsureEnrolled(ctx context.Context) (int, error) {
+	if c.identity.Enrolled {
+		return DefaultHeartbeatIntervalSec, nil
+	}
+	if strings.TrimSpace(c.config.EnrollmentToken) == "" {
+		return 0, fmt.Errorf("probe enrollment token is required until the first successful enrollment")
+	}
+	identityPrivate, observationPrivate, err := c.privateKeys()
+	if err != nil {
+		return 0, err
+	}
+	request := EnrollRequest{
+		ProtocolVersion:      ProtocolVersion,
+		AgentID:              c.config.AgentID,
+		EnrollmentToken:      c.config.EnrollmentToken,
+		IdentityPublicKey:    append([]byte(nil), identityPrivate.Public().(ed25519.PublicKey)...),
+		ObservationPublicKey: append([]byte(nil), observationPrivate.Public().(ed25519.PublicKey)...),
+		AgentVersion:         c.config.AgentVersion,
+		Capabilities:         c.config.Capabilities,
+	}
+	var response EnrollResponse
+	if err := c.postJSON(ctx, EnrollPath, request, nil, &response); err != nil {
+		// If the controller consumed the token but the container restarted before
+		// persisting Enrolled=true, the already persisted identity can recover by
+		// authenticating a heartbeat instead of requiring another token.
+		if _, heartbeatErr := c.SendHeartbeat(ctx, "starting"); heartbeatErr == nil {
+			c.identity.Enrolled = true
+			if persistErr := c.persistIdentity(); persistErr != nil {
+				return 0, persistErr
+			}
+			return DefaultHeartbeatIntervalSec, nil
+		}
+		return 0, err
+	}
+	c.identity.Enrolled = true
+	if err := c.persistIdentity(); err != nil {
+		return 0, err
+	}
+	if response.HeartbeatInterval < 5 {
+		response.HeartbeatInterval = DefaultHeartbeatIntervalSec
+	}
+	return response.HeartbeatInterval, nil
+}
+
+func (c *Client) SendHeartbeat(ctx context.Context, health string) (HeartbeatResponse, error) {
+	if !validHealth(health) {
+		return HeartbeatResponse{}, fmt.Errorf("invalid probe agent health value")
+	}
+	privateKey, _, err := c.privateKeys()
+	if err != nil {
+		return HeartbeatResponse{}, err
+	}
+	request := HeartbeatRequest{
+		ProtocolVersion: ProtocolVersion,
+		AgentID:         c.config.AgentID,
+		AgentVersion:    c.config.AgentVersion,
+		Capabilities:    c.config.Capabilities,
+		Health:          health,
+	}
+	body, err := json.Marshal(request)
+	if err != nil {
+		return HeartbeatResponse{}, err
+	}
+	c.identity.NextSequence++
+	sequence := c.identity.NextSequence
+	if err := c.persistIdentity(); err != nil {
+		return HeartbeatResponse{}, err
+	}
+	timestamp := c.config.Now().UTC()
+	payload, err := ControlSigningPayload(http.MethodPost, HeartbeatPath, c.config.AgentID, timestamp, sequence, body)
+	if err != nil {
+		return HeartbeatResponse{}, err
+	}
+	headers := http.Header{
+		"X-Probe-Agent-ID":  []string{c.config.AgentID},
+		"X-Probe-Timestamp": []string{timestamp.Format(time.RFC3339Nano)},
+		"X-Probe-Sequence":  []string{strconv.FormatUint(sequence, 10)},
+		"X-Probe-Signature": []string{base64.RawStdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))},
+	}
+	var response HeartbeatResponse
+	if err := c.postJSONBytes(ctx, HeartbeatPath, body, headers, &response); err != nil {
+		return HeartbeatResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) Run(ctx context.Context) error {
+	intervalSeconds, err := c.EnsureEnrolled(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := c.SendHeartbeat(ctx, "healthy"); err != nil {
+		return err
+	}
+	ticker := time.NewTicker(time.Duration(intervalSeconds) * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if _, err := c.SendHeartbeat(ctx, "healthy"); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (c *Client) postJSON(ctx context.Context, path string, input any, headers http.Header, output any) error {
+	body, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	return c.postJSONBytes(ctx, path, body, headers, output)
+}
+
+func (c *Client) postJSONBytes(ctx context.Context, path string, body []byte, headers http.Header, output any) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.ControllerURL+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	for key, values := range headers {
+		for _, value := range values {
+			request.Header.Add(key, value)
+		}
+	}
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("probe controller request failed: %w", err)
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxControlResponseBytes))
+	if err != nil {
+		return fmt.Errorf("read probe controller response: %w", err)
+	}
+	var envelope apiEnvelope[json.RawMessage]
+	if err := json.Unmarshal(responseBody, &envelope); err != nil {
+		return fmt.Errorf("invalid probe controller response")
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 || !envelope.Success {
+		if envelope.Error == "" {
+			envelope.Error = http.StatusText(response.StatusCode)
+		}
+		return fmt.Errorf("probe controller rejected request: %s", envelope.Error)
+	}
+	if output != nil && len(envelope.Data) > 0 {
+		if err := json.Unmarshal(envelope.Data, output); err != nil {
+			return fmt.Errorf("decode probe controller response: %w", err)
+		}
+	}
+	return nil
+}
+
+func (c *Client) loadOrCreateIdentity() error {
+	data, err := os.ReadFile(c.identityPath)
+	if err == nil {
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&c.identity); err != nil {
+			return fmt.Errorf("decode probe agent identity: %w", err)
+		}
+		var trailing any
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			return fmt.Errorf("decode probe agent identity: trailing JSON data")
+		}
+		if c.identity.Version != IdentityVersion || c.identity.AgentID != c.config.AgentID {
+			return fmt.Errorf("probe agent identity does not match configured agent ID")
+		}
+		if err := os.Chmod(c.identityPath, 0600); err != nil {
+			return fmt.Errorf("protect probe agent identity: %w", err)
+		}
+		_, _, err := c.privateKeys()
+		return err
+	}
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("read probe agent identity: %w", err)
+	}
+	_, identityPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return fmt.Errorf("generate probe identity key: %w", err)
+	}
+	_, observationPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return fmt.Errorf("generate probe observation key: %w", err)
+	}
+	c.identity = IdentityFile{
+		Version:               IdentityVersion,
+		AgentID:               c.config.AgentID,
+		IdentityPrivateKey:    base64.RawStdEncoding.EncodeToString(identityPrivate),
+		ObservationPrivateKey: base64.RawStdEncoding.EncodeToString(observationPrivate),
+	}
+	return c.persistIdentity()
+}
+
+func (c *Client) privateKeys() (ed25519.PrivateKey, ed25519.PrivateKey, error) {
+	identity, identityErr := base64.RawStdEncoding.DecodeString(c.identity.IdentityPrivateKey)
+	observation, observationErr := base64.RawStdEncoding.DecodeString(c.identity.ObservationPrivateKey)
+	if identityErr != nil || observationErr != nil || len(identity) != ed25519.PrivateKeySize || len(observation) != ed25519.PrivateKeySize || bytes.Equal(identity, observation) {
+		return nil, nil, fmt.Errorf("probe agent identity file contains invalid keys")
+	}
+	return ed25519.PrivateKey(identity), ed25519.PrivateKey(observation), nil
+}
+
+func (c *Client) persistIdentity() error {
+	data, err := json.MarshalIndent(c.identity, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	temporary, err := os.CreateTemp(c.config.IdentityDir, ".identity-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create probe identity temp file: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(data); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, c.identityPath); err != nil {
+		return fmt.Errorf("publish probe identity: %w", err)
+	}
+	return nil
+}
+
+func newPinnedHTTPClient(controllerURL, controllerIP, caFile string, timeout time.Duration) (*http.Client, error) {
+	parsed, err := url.Parse(controllerURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, fmt.Errorf("probe controller URL must be HTTPS without credentials, query or fragment")
+	}
+	pinnedIP, err := netip.ParseAddr(strings.TrimSpace(controllerIP))
+	if err != nil {
+		return nil, fmt.Errorf("probe controller IP must be an exact IPv4 or IPv6 address")
+	}
+	port := parsed.Port()
+	if port == "" {
+		port = "443"
+	}
+	serverName := parsed.Hostname()
+	rootCAs, err := x509.SystemCertPool()
+	if err != nil || rootCAs == nil {
+		rootCAs = x509.NewCertPool()
+	}
+	if strings.TrimSpace(caFile) != "" {
+		certificate, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read probe controller CA: %w", err)
+		}
+		if !rootCAs.AppendCertsFromPEM(certificate) {
+			return nil, errors.New("probe controller CA file contains no certificates")
+		}
+	}
+	dialAddress := net.JoinHostPort(pinnedIP.Unmap().String(), port)
+	dialer := &net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}
+	transport := &http.Transport{
+		Proxy: nil,
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, dialAddress)
+		},
+		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName, RootCAs: rootCAs},
+		ForceAttemptHTTP2: true,
+	}
+	return &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}, nil
+}

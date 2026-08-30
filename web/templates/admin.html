@@ -135,7 +135,7 @@
         gap: 8px;
       }
       .global-settings-nav {
-        grid-template-columns: repeat(4, minmax(0, 1fr));
+        grid-template-columns: repeat(5, minmax(0, 1fr));
       }
       .settings-panel {
         width: min(100%, 920px);
@@ -165,6 +165,9 @@
         padding-top: 0;
         border-top: 0;
       }
+      .control-group[hidden] {
+        display: none;
+      }
       .group-title {
         display: flex;
         align-items: center;
@@ -190,6 +193,30 @@
         border-color: var(--blue);
         background: var(--blue-soft);
         color: var(--text);
+      }
+      .agent-list {
+        display: grid;
+        gap: 10px;
+      }
+      .agent-card {
+        display: grid;
+        gap: 8px;
+        padding: 12px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--panel-2);
+      }
+      .agent-card-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 10px;
+      }
+      .agent-compose {
+        min-height: 280px;
+        resize: vertical;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
       }
       .language-switch {
         display: inline-flex;
@@ -1642,6 +1669,7 @@
             <button id="global-settings-tab-subscription" class="settings-tab active" type="button">Subscription</button>
             <button id="global-settings-tab-history" class="settings-tab" type="button">History</button>
             <button id="global-settings-tab-telegram" class="settings-tab" type="button">Telegram</button>
+            <button id="global-settings-tab-agents" class="settings-tab" type="button">Agents</button>
             <button id="global-settings-tab-backup" class="settings-tab" type="button">Backup</button>
           </nav>
 
@@ -1773,6 +1801,68 @@
             <div class="row">
               <button id="save-telegram" class="secondary" type="button">Save Telegram</button>
               <button id="test-telegram" class="secondary" type="button">Test</button>
+            </div>
+          </section>
+
+          <section id="global-settings-pane-agents" class="settings-pane stack" hidden>
+            <div class="control-group">
+              <div class="group-title">
+                <h3>Diagnostic agents</h3>
+                <span id="diagnostic-agents-state" class="pill">Loading</span>
+              </div>
+              <div class="hint">The agent opens only outbound HTTPS control connections to the exact controller IP. The controller accepts enrollment and heartbeat only from the configured exact source IP.</div>
+              <div class="split">
+                <label>
+                  Display name
+                  <input id="diagnostic-agent-name" type="text" maxlength="80" placeholder="EU probe 1" />
+                </label>
+                <label>
+                  Expected source IP
+                  <input id="diagnostic-agent-source-ip" type="text" placeholder="203.0.113.40" />
+                </label>
+              </div>
+              <div class="split">
+                <label>
+                  Controller URL
+                  <input id="diagnostic-agent-controller-url" type="url" placeholder="https://checker.example.com" />
+                </label>
+                <label>
+                  Controller IP
+                  <input id="diagnostic-agent-controller-ip" type="text" placeholder="198.51.100.10" />
+                </label>
+              </div>
+              <div class="split">
+                <label>
+                  Region
+                  <input id="diagnostic-agent-region" type="text" maxlength="80" placeholder="DE" />
+                </label>
+                <label>
+                  Provider
+                  <input id="diagnostic-agent-provider" type="text" maxlength="80" placeholder="example-hosting" />
+                </label>
+              </div>
+              <label>
+                Network group
+                <input id="diagnostic-agent-network-group" type="text" maxlength="80" placeholder="eu-hosting" />
+              </label>
+              <button id="create-diagnostic-agent" class="secondary" type="button">Create agent</button>
+            </div>
+
+            <div id="diagnostic-agent-created" class="control-group" hidden>
+              <div class="group-title">
+                <h3>One-time agent Compose</h3>
+                <button id="copy-diagnostic-agent-compose" class="secondary small" type="button">Copy Compose</button>
+              </div>
+              <div class="hint">Save and start this Compose before the enrollment token expires. The token is shown only now; container restarts use the identity stored in the named volume.</div>
+              <textarea id="diagnostic-agent-compose" class="agent-compose" readonly spellcheck="false" data-i18n-skip></textarea>
+            </div>
+
+            <div class="control-group">
+              <div class="group-title">
+                <h3>Configured agents</h3>
+                <button id="refresh-diagnostic-agents" class="secondary small" type="button">Refresh agents</button>
+              </div>
+              <div id="diagnostic-agents-list" class="agent-list"></div>
             </div>
           </section>
 
@@ -2422,6 +2512,8 @@
         proxies: [],
         snapshot: null,
         telegram: null,
+        diagnosticAgents: null,
+        diagnosticAgentCreation: null,
         selected: new Set(),
         activeTab: "dashboard",
         settingsPane: "run",
@@ -5266,10 +5358,111 @@
 
       function switchGlobalSettingsPane(pane) {
         state.globalSettingsPane = pane;
-        ["subscription", "history", "telegram", "backup"].forEach((name) => {
+        ["subscription", "history", "telegram", "agents", "backup"].forEach((name) => {
           $(`global-settings-pane-${name}`).hidden = name !== pane;
           $(`global-settings-tab-${name}`).classList.toggle("active", name === pane);
         });
+        if (pane === "agents") loadDiagnosticAgents();
+      }
+
+      function diagnosticAgentStatus(agent) {
+        if (!agent.enabled || agent.revokedAt) return "Revoked";
+        if (agent.connected) return "Connected";
+        if (agent.identityConfigured) return "Enrolled";
+        if (agent.enrollmentExpiresAt && new Date(agent.enrollmentExpiresAt) <= new Date()) return "Enrollment expired";
+        return "Awaiting enrollment";
+      }
+
+      function renderDiagnosticAgents() {
+        const snapshot = state.diagnosticAgents || { enabled: false, agents: [] };
+        const status = $("diagnostic-agents-state");
+        status.textContent = snapshot.enabled ? "Enabled" : "Disabled by environment";
+        status.className = `pill ${snapshot.enabled ? "ok" : "warn"}`;
+        $("create-diagnostic-agent").disabled = !snapshot.enabled;
+        const agents = Array.isArray(snapshot.agents) ? snapshot.agents : [];
+        $("diagnostic-agents-list").innerHTML = agents.length ? agents.map((agent) => {
+          const statusText = diagnosticAgentStatus(agent);
+          const metadata = [agent.region, agent.provider, agent.networkGroup].filter(Boolean).join(" · ");
+          return `<article class="agent-card">
+            <div class="agent-card-head">
+              <div><strong>${escapeHtml(agent.displayName)}</strong><div class="muted mono" data-i18n-skip>${escapeHtml(agent.agentId)}</div></div>
+              <span class="chip ${statusText === "Connected" ? "ok" : (statusText === "Revoked" ? "error" : "warn")}">${escapeHtml(statusText)}</span>
+            </div>
+            <div class="config-status">
+              <div><span>Expected source IP</span><strong class="mono" data-i18n-skip>${escapeHtml(agent.expectedSourceIp)}</strong></div>
+              <div><span>Controller IP</span><strong class="mono" data-i18n-skip>${escapeHtml(agent.controllerIp)}</strong></div>
+              <div><span>Last seen</span><strong>${escapeHtml(formatTime(agent.lastSeenAt) || "Never")}</strong></div>
+              <div><span>Health</span><strong>${escapeHtml(agent.health || "Unknown")}</strong></div>
+            </div>
+            ${metadata ? `<div class="muted" data-i18n-skip>${escapeHtml(metadata)}</div>` : ""}
+            <div class="row">
+              <button class="secondary small" type="button" data-agent-reissue="${escapeHtml(agent.agentId)}">Re-enroll</button>
+              <button class="secondary small" type="button" data-agent-revoke="${escapeHtml(agent.agentId)}"${agent.enabled ? "" : " disabled"}>Revoke</button>
+            </div>
+          </article>`;
+        }).join("") : `<div class="muted">No diagnostic agents configured</div>`;
+      }
+
+      function showDiagnosticAgentCreation(result) {
+        state.diagnosticAgentCreation = result;
+        $("diagnostic-agent-compose").value = result.compose || "";
+        $("diagnostic-agent-created").hidden = false;
+      }
+
+      async function loadDiagnosticAgents() {
+        try {
+          state.diagnosticAgents = await request("/diagnostic-agents");
+          renderDiagnosticAgents();
+        } catch (err) {
+          $("diagnostic-agents-state").textContent = err.message;
+          $("diagnostic-agents-state").className = "pill error";
+        }
+      }
+
+      async function createDiagnosticAgent() {
+        const button = $("create-diagnostic-agent");
+        button.disabled = true;
+        try {
+          const result = await request("/diagnostic-agents", {
+            method: "POST",
+            body: JSON.stringify({
+              displayName: $("diagnostic-agent-name").value.trim(),
+              expectedSourceIp: $("diagnostic-agent-source-ip").value.trim(),
+              controllerUrl: $("diagnostic-agent-controller-url").value.trim(),
+              controllerIp: $("diagnostic-agent-controller-ip").value.trim(),
+              region: $("diagnostic-agent-region").value.trim(),
+              provider: $("diagnostic-agent-provider").value.trim(),
+              networkGroup: $("diagnostic-agent-network-group").value.trim(),
+            }),
+          });
+          showDiagnosticAgentCreation(result);
+          await loadDiagnosticAgents();
+        } catch (err) {
+          $("message").textContent = err.message;
+        } finally {
+          button.disabled = !(state.diagnosticAgents && state.diagnosticAgents.enabled);
+        }
+      }
+
+      async function reissueDiagnosticAgent(agentId) {
+        if (!window.confirm(tr("Replace this agent identity and issue a new one-time token?"))) return;
+        try {
+          const result = await request("/diagnostic-agents/reissue", { method: "POST", body: JSON.stringify({ agentId }) });
+          showDiagnosticAgentCreation(result);
+          await loadDiagnosticAgents();
+        } catch (err) {
+          $("message").textContent = err.message;
+        }
+      }
+
+      async function revokeDiagnosticAgent(agentId) {
+        if (!window.confirm(tr("Revoke this diagnostic agent?"))) return;
+        try {
+          await request("/diagnostic-agents/revoke", { method: "POST", body: JSON.stringify({ agentId }) });
+          await loadDiagnosticAgents();
+        } catch (err) {
+          $("message").textContent = err.message;
+        }
       }
 
       async function openSelectedHistory() {
@@ -5733,8 +5926,20 @@
       ["run", "filters", "schedule"].forEach((pane) => {
         $(`settings-tab-${pane}`).addEventListener("click", () => switchSettingsPane(pane));
       });
-      ["subscription", "history", "telegram", "backup"].forEach((pane) => {
+      ["subscription", "history", "telegram", "agents", "backup"].forEach((pane) => {
         $(`global-settings-tab-${pane}`).addEventListener("click", () => switchGlobalSettingsPane(pane));
+      });
+      $("create-diagnostic-agent").addEventListener("click", createDiagnosticAgent);
+      $("refresh-diagnostic-agents").addEventListener("click", loadDiagnosticAgents);
+      $("copy-diagnostic-agent-compose").addEventListener("click", async () => {
+        await copyToClipboard($("diagnostic-agent-compose").value);
+        showCopyToast();
+      });
+      $("diagnostic-agents-list").addEventListener("click", (event) => {
+        const reissue = event.target.closest("[data-agent-reissue]");
+        const revoke = event.target.closest("[data-agent-revoke]");
+        if (reissue) reissueDiagnosticAgent(reissue.dataset.agentReissue);
+        if (revoke) revokeDiagnosticAgent(revoke.dataset.agentRevoke);
       });
       $("refresh").addEventListener("click", () => load());
       $("refresh-subscription").addEventListener("click", refreshSubscription);

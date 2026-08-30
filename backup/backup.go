@@ -31,6 +31,7 @@ var excludedData = []string{
 	"xray_config.json",
 	"Telegram credentials and administrator IDs",
 	"Remnawave API token and announce ownership runtime",
+	"diagnostic agent registry, enrollment state and controller-bound public identities",
 }
 
 type FileInfo struct {

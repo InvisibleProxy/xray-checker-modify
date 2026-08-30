@@ -79,6 +79,16 @@ type CLI struct {
 		TopologyIntervalSeconds  int    `name:"remnawave-topology-interval" help:"Remnawave hosts and squads refresh interval in seconds" default:"300" env:"REMNAWAVE_TOPOLOGY_INTERVAL_SECONDS"`
 	} `embed:"" prefix:""`
 
+	RemoteDiagnostics struct {
+		Enabled                  bool   `name:"remote-diagnostics-enabled" help:"Enable remote diagnostic probe-agent enrollment and control endpoints" default:"false" env:"REMOTE_DIAGNOSTICS_ENABLED"`
+		RegistryPath             string `name:"probe-agent-registry" help:"Path to the controller-bound probe-agent registry" default:"data/diagnostic_agents.json" env:"PROBE_AGENT_REGISTRY"`
+		AgentImage               string `name:"probe-agent-image" help:"Probe-agent image written into generated Compose files" default:"xray-checker-probe-agent:local" env:"PROBE_AGENT_IMAGE"`
+		EnrollmentTTLMinutes     int    `name:"probe-enrollment-ttl" help:"One-time enrollment token lifetime in minutes" default:"15" env:"PROBE_ENROLLMENT_TTL_MINUTES"`
+		HeartbeatIntervalSeconds int    `name:"probe-heartbeat-interval" help:"Requested probe-agent heartbeat interval in seconds" default:"30" env:"PROBE_HEARTBEAT_INTERVAL_SECONDS"`
+		HeartbeatMaxSkewSeconds  int    `name:"probe-heartbeat-max-skew" help:"Maximum accepted probe-agent heartbeat clock skew in seconds" default:"120" env:"PROBE_HEARTBEAT_MAX_SKEW_SECONDS"`
+		TrustedProxySecret       string `name:"probe-trusted-proxy-secret" help:"Secret required before trusting the Caddy-provided probe-agent source IP header" default:"" env:"PROBE_TRUSTED_PROXY_SECRET"`
+	} `embed:"" prefix:""`
+
 	Version  VersionFlag `name:"version" help:"Print version information and quit"`
 	RunOnce  bool        `name:"run-once" help:"Run one check cycle and exit" default:"false" env:"RUN_ONCE"`
 	LogLevel string      `name:"log-level" help:"Log level (debug|info|warn|error|none)" default:"info" env:"LOG_LEVEL"`
@@ -105,6 +115,17 @@ func (c *CLI) Validate() error {
 		}
 		if c.Remnawave.TimeoutSeconds < 1 || c.Remnawave.ReconcileIntervalSeconds < 10 || c.Remnawave.TopologyIntervalSeconds < 30 {
 			return fmt.Errorf("Remnawave timeout must be positive, reconcile interval at least 10 seconds, and topology interval at least 30 seconds")
+		}
+	}
+	if c.RemoteDiagnostics.Enabled {
+		if strings.TrimSpace(c.RemoteDiagnostics.RegistryPath) == "" || strings.TrimSpace(c.RemoteDiagnostics.AgentImage) == "" {
+			return fmt.Errorf("probe-agent registry path and image are required when remote diagnostics is enabled")
+		}
+		if c.RemoteDiagnostics.EnrollmentTTLMinutes < 1 || c.RemoteDiagnostics.HeartbeatIntervalSeconds < 5 || c.RemoteDiagnostics.HeartbeatMaxSkewSeconds < 1 {
+			return fmt.Errorf("probe enrollment TTL must be positive, heartbeat interval at least 5 seconds, and heartbeat clock skew positive")
+		}
+		if secret := c.RemoteDiagnostics.TrustedProxySecret; secret != "" && len(secret) < 32 {
+			return fmt.Errorf("probe trusted-proxy secret must contain at least 32 bytes when configured")
 		}
 	}
 	return nil

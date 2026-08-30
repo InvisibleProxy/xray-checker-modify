@@ -62,10 +62,29 @@ func TestOpenAPISpecDocumentsEveryForkAdminRoute(t *testing.T) {
 		"/api/v1/admin/telegram/test",
 		"/api/v1/admin/remnawave",
 		"/api/v1/admin/remnawave/sync",
+		"/api/v1/admin/diagnostic-agents",
+		"/api/v1/admin/diagnostic-agents/reissue",
+		"/api/v1/admin/diagnostic-agents/revoke",
 	}
 	for _, path := range want {
 		if _, ok := paths[path]; !ok {
 			t.Errorf("OpenAPI document is missing %s", path)
+		}
+	}
+}
+
+func TestOpenAPISpecDocumentsUnauthenticatedProbeAgentRoutes(t *testing.T) {
+	var document map[string]any
+	if err := yaml.Unmarshal(openAPISpec, &document); err != nil {
+		t.Fatalf("parse embedded OpenAPI document: %v", err)
+	}
+	paths := objectValue(t, document, "paths")
+	for _, path := range []string{"/api/v1/agent/enroll", "/api/v1/agent/heartbeat"} {
+		pathObject := objectValue(t, paths, path)
+		post := objectValue(t, pathObject, "post")
+		security, ok := post["security"].([]any)
+		if !ok || len(security) != 0 {
+			t.Errorf("%s must explicitly use an empty OpenAPI security list", path)
 		}
 	}
 }

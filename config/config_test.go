@@ -102,3 +102,30 @@ func TestValidateRemnawaveAnnounceConfiguration(t *testing.T) {
 		t.Fatal("credentialed Remnawave API URL was accepted")
 	}
 }
+
+func TestValidateRemoteDiagnosticsConfiguration(t *testing.T) {
+	var cfg CLI
+	cfg.RunOnce = true
+	cfg.RemoteDiagnostics.Enabled = true
+	cfg.RemoteDiagnostics.RegistryPath = "data/diagnostic_agents.json"
+	cfg.RemoteDiagnostics.AgentImage = "xray-checker-probe-agent:local"
+	cfg.RemoteDiagnostics.EnrollmentTTLMinutes = 15
+	cfg.RemoteDiagnostics.HeartbeatIntervalSeconds = 30
+	cfg.RemoteDiagnostics.HeartbeatMaxSkewSeconds = 120
+	cfg.RemoteDiagnostics.TrustedProxySecret = "0123456789abcdef0123456789abcdef"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid remote diagnostics config rejected: %v", err)
+	}
+
+	invalidInterval := cfg
+	invalidInterval.RemoteDiagnostics.HeartbeatIntervalSeconds = 4
+	if err := invalidInterval.Validate(); err == nil {
+		t.Fatal("too-short probe heartbeat interval was accepted")
+	}
+
+	weakSecret := cfg
+	weakSecret.RemoteDiagnostics.TrustedProxySecret = "too-short"
+	if err := weakSecret.Validate(); err == nil {
+		t.Fatal("weak trusted-proxy secret was accepted")
+	}
+}

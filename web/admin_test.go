@@ -182,6 +182,9 @@ func TestAdminTemplateSeparatesGlobalSettingsFromNodeControls(t *testing.T) {
 		`id="history-retention-days"`,
 		`id="global-settings-pane-telegram"`,
 		`id="telegram-enabled"`,
+		`id="global-settings-pane-agents"`,
+		`id="create-diagnostic-agent"`,
+		`id="diagnostic-agents-list"`,
 		`id="global-settings-pane-backup"`,
 		`id="download-backup"`,
 	} {

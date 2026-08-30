@@ -19,6 +19,12 @@
 		@sensitive path /admin* /metrics /health /api/v1/admin* /api/v1/proxies* /api/v1/config /api/v1/status /api/v1/system* /api/v1/docs /api/v1/openapi.yaml
 		respond @sensitive 404
 
+		@probe_agent path /api/v1/agent/*
+		reverse_proxy @probe_agent xray-checker:2112 {
+			header_up X-Xray-Checker-Proxy-Secret {$PROBE_TRUSTED_PROXY_SECRET}
+			header_up X-Xray-Checker-Client-IP {remote_host}
+		}
+
 		@public path / /static/* /config/* /api/v1/public/proxies
 		reverse_proxy @public xray-checker:2112
 

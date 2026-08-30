@@ -1,0 +1,37 @@
+name: xray-checker-probe-agent
+
+services:
+  probe-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+      args:
+        GIT_TAG: ${PROBE_AGENT_VERSION:-local}
+    image: ${PROBE_AGENT_IMAGE:-xray-checker-probe-agent:local}
+    restart: unless-stopped
+    init: true
+    user: "${PROBE_AGENT_UID_GID:-10001:10001}"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: ${PROBE_AGENT_PIDS_LIMIT:-128}
+    mem_limit: ${PROBE_AGENT_MEMORY_LIMIT:-512m}
+    cpus: ${PROBE_AGENT_CPU_LIMIT:-1.0}
+    stop_grace_period: 15s
+    environment:
+      PROBE_AGENT_ID: ${PROBE_AGENT_ID:?set PROBE_AGENT_ID}
+      PROBE_ENROLLMENT_TOKEN: ${PROBE_ENROLLMENT_TOKEN:?set PROBE_ENROLLMENT_TOKEN for first enrollment}
+      PROBE_CONTROLLER_URL: ${PROBE_CONTROLLER_URL:?set PROBE_CONTROLLER_URL}
+      PROBE_CONTROLLER_IP: ${PROBE_CONTROLLER_IP:?set exact PROBE_CONTROLLER_IP}
+      PROBE_CONTROLLER_CA_FILE: ${PROBE_CONTROLLER_CA_FILE:-}
+      PROBE_IDENTITY_DIR: /var/lib/xray-checker-agent
+    volumes:
+      - probe_agent_identity:/var/lib/xray-checker-agent
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${PROBE_AGENT_TMPFS_LIMIT:-128m},mode=0700,uid=10001,gid=10001
+      - /run/xray-checker-agent:rw,noexec,nosuid,nodev,size=${PROBE_AGENT_RUNTIME_LIMIT:-64m},mode=0700,uid=10001,gid=10001
+
+volumes:
+  probe_agent_identity:

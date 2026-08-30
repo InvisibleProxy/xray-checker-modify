@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1.7
+
+ARG GO_VERSION=1.25
+ARG ALPINE_VERSION=3.21
+
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
+
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+ARG GIT_TAG=unknown
+
+ENV CGO_ENABLED=0
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+
+COPY probeagent ./probeagent
+COPY cmd/probe-agent ./cmd/probe-agent
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w -X main.version=${GIT_TAG}" -o /usr/bin/xray-checker-probe-agent ./cmd/probe-agent
+
+FROM alpine:${ALPINE_VERSION}
+
+RUN apk add --no-cache ca-certificates tzdata && \
+    addgroup -g 10001 probe-agent && \
+    adduser -D -H -u 10001 -G probe-agent probe-agent && \
+    mkdir -p /var/lib/xray-checker-agent && \
+    chown probe-agent:probe-agent /var/lib/xray-checker-agent
+
+COPY --from=builder /usr/bin/xray-checker-probe-agent /usr/bin/xray-checker-probe-agent
+
+USER 10001:10001
+ENTRYPOINT ["/usr/bin/xray-checker-probe-agent"]

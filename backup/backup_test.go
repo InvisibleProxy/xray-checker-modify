@@ -139,6 +139,30 @@ func TestCreatorIncludesRemnawaveSettingsButExcludesOwnershipRuntime(t *testing.
 	}
 }
 
+func TestCreatorExcludesDiagnosticAgentRegistry(t *testing.T) {
+	dataDir := t.TempDir()
+	writeTestFile(t, filepath.Join(dataDir, "diagnostic_agents.json"), []byte(`{"version":1,"agents":{"agent":{"enrollmentTokenHash":"secret-hash","identityPublicKey":"public-key"}}}`))
+
+	var archive bytes.Buffer
+	result, err := NewCreator(dataDir, "test").Create(&archive)
+	if err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+	entries := readArchive(t, archive.Bytes())
+	if _, ok := entries["data/diagnostic_agents.json"]; ok {
+		t.Fatal("diagnostic agent registry was included in backup")
+	}
+	foundExclusion := false
+	for _, exclusion := range result.Manifest.Excluded {
+		if strings.Contains(exclusion, "diagnostic agent registry") {
+			foundExclusion = true
+		}
+	}
+	if !foundExclusion {
+		t.Fatalf("manifest does not explain diagnostic-agent exclusion: %+v", result.Manifest.Excluded)
+	}
+}
+
 func TestCreatorRejectsInvalidJSON(t *testing.T) {
 	dataDir := t.TempDir()
 	writeTestFile(t, filepath.Join(dataDir, "speedtest_results.json"), []byte(`{"broken"`))

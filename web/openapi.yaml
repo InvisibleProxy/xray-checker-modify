@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Xray Checker API
   description: API for monitoring Xray proxies. Every `/api/v1/admin/*` operation requires explicitly configured HTTP Basic Auth credentials.
-  version: "1.3"
+  version: "1.4"
 servers:
   - url: /
 security:
@@ -15,6 +15,7 @@ tags:
   - name: Config
   - name: System
   - name: Admin
+  - name: Probe Agents
 
 paths:
   /api/v1/public/proxies:
@@ -861,6 +862,154 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '409':
           $ref: '#/components/responses/Conflict'
+
+  /api/v1/admin/diagnostic-agents:
+    get:
+      summary: List configured diagnostic agents
+      description: Returns sanitized agent state. Enrollment tokens, private keys and generated Compose are never returned by this list operation.
+      tags: [Admin]
+      responses:
+        '200':
+          description: Remote diagnostics state and configured agents
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/DiagnosticAgentsSnapshot'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      summary: Create a diagnostic agent enrollment
+      description: Creates an IP-bound agent and returns its one-time enrollment token and personalized Compose exactly in this response. The controller persists only a SHA-256 token hash.
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDiagnosticAgentRequest'
+      responses:
+        '200':
+          description: One-time agent enrollment material
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/DiagnosticAgentCreation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/diagnostic-agents/reissue:
+    post:
+      summary: Replace an agent identity with a new one-time enrollment
+      description: Invalidates the previous enrolled identity and returns new one-time Compose material. Use after loss of the persistent identity volume.
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DiagnosticAgentActionRequest'
+      responses:
+        '200':
+          description: Replacement enrollment material
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/DiagnosticAgentCreation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Agent not found
+
+  /api/v1/admin/diagnostic-agents/revoke:
+    post:
+      summary: Revoke a diagnostic agent
+      description: Immediately rejects future enrollment and heartbeat requests from this agent.
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DiagnosticAgentActionRequest'
+      responses:
+        '200':
+          description: Revoked sanitized agent state
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Agent not found
+
+  /api/v1/agent/enroll:
+    post:
+      summary: Enroll a new outbound-only diagnostic agent
+      description: Requires the exact configured source IP and an unexpired one-time token. Registers distinct Ed25519 identity and observation public keys.
+      tags: [Probe Agents]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProbeAgentEnrollRequest'
+      responses:
+        '200':
+          description: Enrollment accepted
+        '403':
+          description: Agent authentication failed
+
+  /api/v1/agent/heartbeat:
+    post:
+      summary: Submit a signed diagnostic-agent heartbeat
+      description: Requires exact source IP, Ed25519 signature, bounded timestamp skew and a persisted monotonically increasing sequence number.
+      tags: [Probe Agents]
+      security: []
+      parameters:
+        - in: header
+          name: X-Probe-Agent-ID
+          required: true
+          schema: {type: string}
+        - in: header
+          name: X-Probe-Timestamp
+          required: true
+          schema: {type: string, format: date-time}
+        - in: header
+          name: X-Probe-Sequence
+          required: true
+          schema: {type: integer, format: int64, minimum: 1}
+        - in: header
+          name: X-Probe-Signature
+          required: true
+          schema: {type: string, format: byte}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProbeAgentHeartbeatRequest'
+      responses:
+        '200':
+          description: Heartbeat accepted
+        '403':
+          description: Agent authentication failed
 
 components:
   securitySchemes:
@@ -2054,6 +2203,101 @@ components:
                     description: The original single-line rwEncodeBase64 announce is preserved as the first line
                   message:
                     type: string
+
+    CreateDiagnosticAgentRequest:
+      type: object
+      required: [displayName, expectedSourceIp, controllerIp, controllerUrl]
+      properties:
+        displayName: {type: string, maxLength: 80}
+        expectedSourceIp:
+          type: string
+          description: Exact public IPv4 or IPv6 source address expected by the controller.
+        controllerIp:
+          type: string
+          description: Exact controller IPv4 or IPv6 address pinned by the agent control client.
+        controllerUrl: {type: string, format: uri}
+        region: {type: string, maxLength: 80}
+        provider: {type: string, maxLength: 80}
+        networkGroup: {type: string, maxLength: 80}
+
+    DiagnosticAgentActionRequest:
+      type: object
+      required: [agentId]
+      properties:
+        agentId: {type: string}
+
+    DiagnosticAgentSnapshot:
+      type: object
+      required: [agentId, displayName, expectedSourceIp, controllerIp, controllerUrl, enabled, connected, identityConfigured]
+      properties:
+        agentId: {type: string}
+        displayName: {type: string}
+        expectedSourceIp: {type: string}
+        controllerIp: {type: string}
+        controllerUrl: {type: string, format: uri}
+        region: {type: string}
+        provider: {type: string}
+        networkGroup: {type: string}
+        enabled: {type: boolean}
+        connected:
+          type: boolean
+          description: True after a recent accepted signed heartbeat, using a three-interval grace window of at least 90 seconds.
+        createdAt: {type: string, format: date-time}
+        enrollmentExpiresAt: {type: string, format: date-time}
+        enrollmentUsedAt: {type: string, format: date-time}
+        enrolledAt: {type: string, format: date-time}
+        lastSeenAt: {type: string, format: date-time}
+        agentVersion: {type: string}
+        capabilities: {type: array, items: {type: string}}
+        health: {type: string, enum: [healthy, degraded, unhealthy, starting]}
+        revokedAt: {type: string, format: date-time}
+        identityConfigured: {type: boolean}
+        observationKeySet: {type: boolean}
+
+    DiagnosticAgentsSnapshot:
+      type: object
+      required: [enabled, agents]
+      properties:
+        enabled: {type: boolean}
+        agents:
+          type: array
+          items: {$ref: '#/components/schemas/DiagnosticAgentSnapshot'}
+
+    DiagnosticAgentCreation:
+      type: object
+      required: [agent, enrollmentToken, compose]
+      properties:
+        agent: {$ref: '#/components/schemas/DiagnosticAgentSnapshot'}
+        enrollmentToken:
+          type: string
+          writeOnly: true
+          description: One-time secret returned only by create or reissue.
+        compose:
+          type: string
+          writeOnly: true
+          description: Personalized Linux Docker Compose containing the one-time enrollment values.
+
+    ProbeAgentEnrollRequest:
+      type: object
+      required: [protocolVersion, agentId, enrollmentToken, identityPublicKey, observationPublicKey, agentVersion, capabilities]
+      properties:
+        protocolVersion: {type: integer, enum: [1]}
+        agentId: {type: string}
+        enrollmentToken: {type: string, writeOnly: true}
+        identityPublicKey: {type: string, format: byte}
+        observationPublicKey: {type: string, format: byte}
+        agentVersion: {type: string}
+        capabilities: {type: array, items: {type: string}}
+
+    ProbeAgentHeartbeatRequest:
+      type: object
+      required: [protocolVersion, agentId, agentVersion, capabilities, health]
+      properties:
+        protocolVersion: {type: integer, enum: [1]}
+        agentId: {type: string}
+        agentVersion: {type: string}
+        capabilities: {type: array, items: {type: string}}
+        health: {type: string, enum: [healthy, degraded, unhealthy, starting]}
 
   responses:
     Unauthorized:

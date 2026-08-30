@@ -1,0 +1,158 @@
+package probeagent
+
+import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/json"
+	"errors"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestRegistryEnrollmentIsIPBoundOneUseAndPersistsOnlyTokenHash(t *testing.T) {
+	now := time.Date(2026, 8, 30, 1, 2, 3, 0, time.UTC)
+	registry, path := newTestRegistry(t, now)
+	created, err := registry.Create(testCreateRequest())
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read registry: %v", err)
+	}
+	if strings.Contains(string(data), created.EnrollmentToken) {
+		t.Fatal("one-time enrollment token was persisted in plaintext")
+	}
+	if !strings.Contains(created.Compose, created.EnrollmentToken) {
+		t.Fatal("generated Compose does not contain the one-time enrollment token")
+	}
+
+	identityPublic, _, _ := ed25519.GenerateKey(rand.Reader)
+	observationPublic, _, _ := ed25519.GenerateKey(rand.Reader)
+	request := EnrollRequest{
+		ProtocolVersion: ProtocolVersion, AgentID: created.Agent.AgentID,
+		EnrollmentToken: created.EnrollmentToken, IdentityPublicKey: identityPublic,
+		ObservationPublicKey: observationPublic, AgentVersion: "test", Capabilities: []string{"control-v1"},
+	}
+	if _, err := registry.Enroll(request, netip.MustParseAddr("203.0.113.41")); !errors.Is(err, ErrSourceIPMismatch) {
+		t.Fatalf("wrong source IP error = %v, want ErrSourceIPMismatch", err)
+	}
+	if _, err := registry.Enroll(request, netip.MustParseAddr("203.0.113.40")); err != nil {
+		t.Fatalf("enroll from expected IP: %v", err)
+	}
+	if _, err := registry.Enroll(request, netip.MustParseAddr("203.0.113.40")); !errors.Is(err, ErrEnrollmentUsed) {
+		t.Fatalf("reused token error = %v, want ErrEnrollmentUsed", err)
+	}
+	snapshot := registry.Snapshot()[0]
+	if !snapshot.IdentityConfigured || !snapshot.ObservationKeySet || snapshot.EnrolledAt.IsZero() {
+		t.Fatalf("enrolled snapshot is incomplete: %+v", snapshot)
+	}
+}
+
+func TestHeartbeatSignatureSequenceAndReplaySurviveRegistryRestart(t *testing.T) {
+	now := time.Date(2026, 8, 30, 1, 2, 3, 0, time.UTC)
+	registry, path := newTestRegistry(t, now)
+	created, identityPrivate := enrollTestAgent(t, registry)
+	request := HeartbeatRequest{ProtocolVersion: ProtocolVersion, AgentID: created.Agent.AgentID, AgentVersion: "test", Capabilities: []string{"control-v1"}, Health: "healthy"}
+	body, _ := json.Marshal(request)
+	payload, _ := ControlSigningPayload("POST", HeartbeatPath, request.AgentID, now, 1, body)
+	signature := ed25519.Sign(identityPrivate, payload)
+	if _, err := registry.AcceptHeartbeat(request, netip.MustParseAddr("203.0.113.40"), now, 1, payload, signature); err != nil {
+		t.Fatalf("accept heartbeat: %v", err)
+	}
+
+	restarted, err := NewRegistry(RegistryConfig{Path: path, Enabled: true, AgentImage: "agent:test", Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.Load(); err != nil {
+		t.Fatalf("reload registry: %v", err)
+	}
+	if _, err := restarted.AcceptHeartbeat(request, netip.MustParseAddr("203.0.113.40"), now, 1, payload, signature); !errors.Is(err, ErrControlReplay) {
+		t.Fatalf("replayed heartbeat error = %v, want ErrControlReplay", err)
+	}
+	payload2, _ := ControlSigningPayload("POST", HeartbeatPath, request.AgentID, now, 2, body)
+	if _, err := restarted.AcceptHeartbeat(request, netip.MustParseAddr("203.0.113.41"), now, 2, payload2, ed25519.Sign(identityPrivate, payload2)); !errors.Is(err, ErrSourceIPMismatch) {
+		t.Fatalf("wrong heartbeat source error = %v, want ErrSourceIPMismatch", err)
+	}
+}
+
+func TestReissueClearsOldIdentityAndRevocationFailsClosed(t *testing.T) {
+	now := time.Date(2026, 8, 30, 1, 2, 3, 0, time.UTC)
+	registry, _ := newTestRegistry(t, now)
+	created, _ := enrollTestAgent(t, registry)
+	reissued, err := registry.Reissue(created.Agent.AgentID)
+	if err != nil {
+		t.Fatalf("reissue enrollment: %v", err)
+	}
+	if reissued.EnrollmentToken == created.EnrollmentToken || reissued.Agent.IdentityConfigured || !reissued.Agent.EnrolledAt.IsZero() {
+		t.Fatalf("reissued agent retained old identity: %+v", reissued.Agent)
+	}
+	if strings.SplitN(reissued.Compose, "\n", 2)[0] == strings.SplitN(created.Compose, "\n", 2)[0] {
+		t.Fatal("reissued Compose reused the old project and identity volume")
+	}
+	revoked, err := registry.Revoke(created.Agent.AgentID)
+	if err != nil {
+		t.Fatalf("revoke agent: %v", err)
+	}
+	if revoked.Enabled || revoked.RevokedAt.IsZero() {
+		t.Fatalf("revoked snapshot is invalid: %+v", revoked)
+	}
+}
+
+func TestDecodeRegistryMigratesVersionZero(t *testing.T) {
+	now := time.Date(2026, 8, 30, 1, 2, 3, 0, time.UTC)
+	data := []byte(`{"version":0,"updatedAt":"2026-08-30T01:02:03Z","agents":{"agent_legacy":{"displayName":"Legacy","expectedSourceIp":"203.0.113.40","controllerIp":"198.51.100.10","controllerUrl":"https://checker.example.com","enabled":true,"createdAt":"2026-08-30T01:02:03Z","updatedAt":"2026-08-30T01:02:03Z"}}}`)
+	state, err := DecodeRegistry(data)
+	if err != nil {
+		t.Fatalf("decode v0 registry: %v", err)
+	}
+	if state.Version != RegistryVersion || state.UpdatedAt != now || state.Agents["agent_legacy"].AgentID != "agent_legacy" {
+		t.Fatalf("unexpected migrated state: %+v", state)
+	}
+}
+
+func newTestRegistry(t *testing.T, now time.Time) (*Registry, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "diagnostic_agents.json")
+	registry, err := NewRegistry(RegistryConfig{
+		Path: path, Enabled: true, AgentImage: "agent:test",
+		EnrollmentTTL: 15 * time.Minute, HeartbeatMaxSkew: 2 * time.Minute,
+		HeartbeatIntervalSec: 30, Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return registry, path
+}
+
+func testCreateRequest() CreateAgentRequest {
+	return CreateAgentRequest{
+		DisplayName: "EU probe 1", ExpectedSourceIP: "203.0.113.40",
+		ControllerIP: "198.51.100.10", ControllerURL: "https://checker.example.com",
+		Region: "DE", Provider: "example", NetworkGroup: "eu",
+	}
+}
+
+func enrollTestAgent(t *testing.T, registry *Registry) (CreationResult, ed25519.PrivateKey) {
+	t.Helper()
+	created, err := registry.Create(testCreateRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityPublic, identityPrivate, _ := ed25519.GenerateKey(rand.Reader)
+	observationPublic, _, _ := ed25519.GenerateKey(rand.Reader)
+	_, err = registry.Enroll(EnrollRequest{
+		ProtocolVersion: ProtocolVersion, AgentID: created.Agent.AgentID,
+		EnrollmentToken: created.EnrollmentToken, IdentityPublicKey: identityPublic,
+		ObservationPublicKey: observationPublic, AgentVersion: "test", Capabilities: []string{"control-v1"},
+	}, netip.MustParseAddr("203.0.113.40"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return created, identityPrivate
+}

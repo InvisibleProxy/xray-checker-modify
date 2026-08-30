@@ -78,6 +78,41 @@ docker compose logs -f xray-checker
 
 В примере Caddy публикует только status page и публичные endpoints. Админка, метрики и приватный API снаружи возвращают `404` и остаются доступны через локальный порт `127.0.0.1:2112`.
 
+### Remote Diagnostics и отдельный Compose probe-agent-а
+
+Первый рабочий этап Remote Diagnostics включает создание агентов из админки, IP-bound enrollment, постоянную Ed25519 identity и подписанный heartbeat. Выполнение diagnostic jobs через Xray пока не подключено: на этом этапе агент подтверждает защищённое соединение с controller-ом, но ещё не проверяет ноды.
+
+На controller-е включите подсистему и задайте отдельный длинный secret между Caddy и Xray Checker:
+
+```dotenv
+REMOTE_DIAGNOSTICS_ENABLED=true
+PROBE_TRUSTED_PROXY_SECRET=replace-with-output-of-openssl-rand-hex-32
+PROBE_AGENT_IMAGE=registry.example.com/xray-checker-probe-agent:1.0.0
+```
+
+Один и тот же `PROBE_TRUSTED_PROXY_SECRET` передаётся `xray-checker` и `caddy`; актуальный [`Caddyfile.example`](Caddyfile.example) добавляет его только к `/api/v1/agent/*` и передаёт фактически увиденный `{remote_host}`. Controller игнорирует произвольные forwarded IP headers без правильного proxy secret. При прямом подключении без reverse proxy оставьте secret пустым: тогда проверяется socket peer из `RemoteAddr`.
+
+После restart откройте `Settings → Agents` и укажите:
+
+- `Expected source IP` — точный публичный IPv4/IPv6, с которого controller увидит исходящее соединение агента после NAT;
+- `Controller URL` — HTTPS URL с корректным TLS-сертификатом;
+- `Controller IP` — точный IP, к которому агенту разрешено открывать control connection.
+
+Кнопка `Create agent` возвращает персональный Compose с одноразовым enrollment token. Controller хранит только SHA-256 токена и принимает enrollment один раз, до истечения TTL, только с ожидаемого source IP. Агент не использует DNS для control connection: TCP всегда открывается на `Controller IP`, а TLS проверяет hostname из `Controller URL`; redirects запрещены.
+
+Для сборки образа на Linux-host из checkout-а и запуска через отдельный шаблон:
+
+```bash
+cp probe-agent.env.example probe-agent.env
+# перенесите PROBE_AGENT_ID, PROBE_ENROLLMENT_TOKEN, URL и IP из результата Create agent
+docker compose --env-file probe-agent.env -f docker-compose.agent.yml build
+docker compose --env-file probe-agent.env -f docker-compose.agent.yml up -d
+```
+
+Шаблон не открывает inbound-порты, запускает container без root и capabilities, с read-only root filesystem, resource limits и именованным `probe_agent_identity` volume. Приватные identity/observation keys генерируются внутри агента и сохраняются с mode `0600`. После обычного restart одноразовый token больше не нужен: agent продолжает heartbeat с той же identity и persisted sequence. Если identity volume удалён, старый token не сработает — в админке нужно выполнить `Re-enroll`, остановить прежний stack и развернуть новый персональный Compose. Re-enroll Compose получает новый project/volume, поэтому не переиспользует отозванные ключи; старый volume можно удалить после успешного подключения. `Revoke` немедленно блокирует старую identity.
+
+`data/diagnostic_agents.json` привязан к конкретной инсталляции и ожидаемым IP, поэтому намеренно не входит в backup/restore. Не публикуйте персональный Compose: до первого enrollment он содержит действующий одноразовый token.
+
 ### Запуск из исходников
 
 ```powershell

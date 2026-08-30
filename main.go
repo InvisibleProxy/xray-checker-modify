@@ -15,6 +15,7 @@ import (
 	"xray-checker/models"
 	"xray-checker/nodearchive"
 	"xray-checker/nodemerge"
+	"xray-checker/probeagent"
 	remnawaveannounce "xray-checker/remnawave"
 	"xray-checker/speedtest"
 	"xray-checker/subscription"
@@ -141,6 +142,23 @@ func main() {
 	registry.MustRegister(metrics.GetProxyLatencyMetric())
 	backupCreator := backup.NewCreator("data", version)
 	backupRestorer := backup.NewRestorer("data")
+	probeAgentRegistry, err := probeagent.NewRegistry(probeagent.RegistryConfig{
+		Path:                 config.CLIConfig.RemoteDiagnostics.RegistryPath,
+		Enabled:              config.CLIConfig.RemoteDiagnostics.Enabled,
+		AgentImage:           config.CLIConfig.RemoteDiagnostics.AgentImage,
+		EnrollmentTTL:        time.Duration(config.CLIConfig.RemoteDiagnostics.EnrollmentTTLMinutes) * time.Minute,
+		HeartbeatMaxSkew:     time.Duration(config.CLIConfig.RemoteDiagnostics.HeartbeatMaxSkewSeconds) * time.Second,
+		HeartbeatIntervalSec: config.CLIConfig.RemoteDiagnostics.HeartbeatIntervalSeconds,
+	})
+	if err != nil {
+		logger.Fatal("Failed to configure diagnostic agent registry: %v", err)
+	}
+	if err := probeAgentRegistry.Load(); err != nil {
+		if config.CLIConfig.RemoteDiagnostics.Enabled {
+			logger.Fatal("Failed to load diagnostic agent registry: %v", err)
+		}
+		logger.Warn("Failed to load disabled diagnostic agent registry: %v", err)
+	}
 
 	proxyChecker := checker.NewProxyChecker(
 		*proxyConfigs,
@@ -493,6 +511,8 @@ func main() {
 	mux.Handle("/health", web.HealthHandler())
 	mux.Handle("/static/", web.StaticHandler())
 	mux.Handle("/api/v1/public/proxies", web.APIPublicProxiesHandler(proxyChecker))
+	mux.Handle(probeagent.EnrollPath, web.ProbeAgentEnrollHandler(probeAgentRegistry, config.CLIConfig.RemoteDiagnostics.TrustedProxySecret))
+	mux.Handle(probeagent.HeartbeatPath, web.ProbeAgentHeartbeatHandler(probeAgentRegistry, config.CLIConfig.RemoteDiagnostics.TrustedProxySecret))
 
 	web.RegisterConfigEndpoints(*proxyConfigs, proxyChecker, config.CLIConfig.Xray.StartPort)
 
@@ -533,6 +553,9 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/telegram", web.AdminTelegramHandler(telegramService))
 	protectedHandler.Handle("/api/v1/admin/remnawave/sync", web.AdminRemnawaveSyncHandler(remnawaveService))
 	protectedHandler.Handle("/api/v1/admin/remnawave", web.AdminRemnawaveHandler(remnawaveService))
+	protectedHandler.Handle("/api/v1/admin/diagnostic-agents/reissue", web.AdminDiagnosticAgentReissueHandler(probeAgentRegistry))
+	protectedHandler.Handle("/api/v1/admin/diagnostic-agents/revoke", web.AdminDiagnosticAgentRevokeHandler(probeAgentRegistry))
+	protectedHandler.Handle("/api/v1/admin/diagnostic-agents", web.AdminDiagnosticAgentsHandler(probeAgentRegistry))
 
 	if config.CLIConfig.Web.Public {
 		mux.Handle("/", web.IndexHandler(version, proxyChecker))

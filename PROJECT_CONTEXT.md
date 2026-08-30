@@ -18,6 +18,8 @@
 | `models/` | модель proxy-конфигурации и генерация `StableID` |
 | `xray/` | генерация runtime-конфига и встроенный экземпляр Xray Core |
 | `checker/` | проверки доступности, latency, host/ping diagnostics, классификация причин и текущее состояние нод |
+| `diagnostics/` | изолированные versioned schemas и in-memory lifecycle Remote Diagnostics; не владеет operational status и не зависит от monitoring-компонентов |
+| `probeagent/` | persisted controller registry, IP-bound enrollment, signed heartbeat, pinned HTTPS client и Linux Compose rendering для удалённых агентов |
 | `metrics/` | Prometheus-метрики и Pushgateway |
 | `speedtest/` | ручные и плановые тесты скорости, Test URL нод и temporal retention |
 | `nodearchive/` | долгоживущий реестр активных/выбывших нод, downtime, persisted incident journal, GeoIP активных нод и speedtest summary |
@@ -59,6 +61,22 @@ Frontend встроен в Go-бинарник через `embed`. `docs/` — �
 Уже недоступные ноды попадают в отдельный recovery-loop с периодом `PROXY_RECOVERY_INTERVAL` (default 15 секунд, `0` отключает). В одной ограниченной worker-pool итерации TCP и ping выполняются параллельно. Если TCP недоступен, proxy-check пропускается; после `TCP OK` полноценный настроенный proxy-check запускается немедленно. Ping никогда не является gate. Полный обход остаётся независимой контрольной проверкой и предотвращает постоянную блокировку recovery из-за ошибочной TCP-диагностики.
 
 Полные, recovery и ручные availability-checks сериализованы и удерживают Xray lifecycle read-lock; refresh получает write-lock. Быстрые проверки не вызывают обычный Telegram alert-pass, поэтому не увеличивают `FailCount` и не сдвигают reminders. Успешный переход любого issue-состояния в `online` закрывает downtime либо proxy-failure интервал и передаётся в отдельный immediate-recovery путь Telegram. Ручная проверка `StableID` доступна через admin API, в строке ноды и как групповое действие для выбранных строк, а также в карточке ноды Telegram; для уже недоступной ноды она использует тот же TCP-гейт. Speedtest-кнопка `Run` в admin UI также имеет строковый и групповой варианты.
+
+### Remote Diagnostics (этап 1: control plane)
+
+Remote Diagnostics спроектированы как отдельная диагностическая плоскость: результат удалённого probe-agent-а является observation, а не authoritative status ноды. Пакет `diagnostics/` содержит schemas v1 для session/job/observation и ограниченный in-memory `DiagnosticSessionManager`. Manager связывает observation с `SessionID`, `JobID`, одноразовым nonce, `StableID`, generation, SHA-256 fingerprint и server-owned test profile; проверяет временное окно и подпись через fail-closed verifier.
+
+Session export не содержит execution proxy config, credentials, raw transport errors или произвольные URL. Test profile передаётся как короткий ID и метод `ip`/`status`/`download`; реальный endpoint должен разрешаться только из controller/agent-owned configuration. Failed direct-connectivity control не отклоняет подписанное observation, но controller помечает его `reliable=false`.
+
+Изоляция является исполняемым инвариантом: core-пакет не импортирует другие пакеты проекта и не получает callbacks владельцев availability, node archive, incidents, Telegram, speedtest, Remnawave, subscription или backup. Поэтому accepted/completed/expired/cancelled session меняет только собственное ephemeral state.
+
+Control plane этапа 1 находится в `probeagent/`. Controller хранит versioned `data/diagnostic_agents.json`: metadata, точный ожидаемый source IP, controller URL/IP, enrollment token только в виде SHA-256, public identity keys и последний heartbeat sequence. Create/Re-enroll возвращают token и персональный Compose только в текущем admin response. Enrollment одноразовый и связывает отдельные Ed25519 identity/observation public keys с агентом; heartbeat проверяет source IP, подпись, timestamp skew и монотонный sequence, причём sequence сохраняется на обеих сторонах и переживает restart.
+
+За Caddy forwarded source IP доверяется только при exact совпадении `X-Xray-Checker-Proxy-Secret` с env `PROBE_TRUSTED_PROXY_SECRET`; без него controller использует socket `RemoteAddr` и игнорирует forwarding headers. Agent client отключает redirects, не использует proxy из environment и подменяет dial target на exact `PROBE_CONTROLLER_IP`, продолжая обычную TLS hostname verification по `PROBE_CONTROLLER_URL`.
+
+Linux image собирается через `Dockerfile.agent`; отдельный `docker-compose.agent.yml` запускает его без inbound ports, root/capabilities и writable root filesystem. Persistent named volume хранит сгенерированные private keys и sequence, поэтому restart не переиспользует enrollment token. Потеря volume требует явного Re-enroll, который сбрасывает прежнюю identity. Registry является instance/IP-bound security state и исключён из backup.
+
+Граница текущего этапа: session manager ещё не подключён к control endpoints, agent не получает jobs и не запускает временный Xray. Admin UI уже управляет agent lifecycle и показывает heartbeat, но кнопки диагностики нод появятся только после job transport/executor. Существующие operational workflows по-прежнему не читают remote state.
 
 ### Remnawave subscription announce
 
