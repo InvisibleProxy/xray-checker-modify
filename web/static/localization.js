@@ -277,6 +277,7 @@
     [/^Error: (.+)$/u, "Ошибка: $1"],
     [/^Latest: (.+)$/u, "Последнее: $1"],
     [/^Latest availability check: (.+)$/u, "Последняя availability-проверка: $1"],
+    [/^Peaks above (\d+) ms are pinned to the top$/u, "Пики выше $1 ms отмечены у верхней границы"],
     [/^(\d+) of (\d+) availability checks succeeded$/u, "$1 из $2 availability checks успешны"],
     [/^(\d+) compatible active node\. Name and port may differ; compare the selected target in the next step\.$/u, "$1 совместимая active-нода. Name и port могут отличаться; на следующем шаге сравните выбранный target."],
     [/^(\d+) compatible active nodes\. Name and port may differ; compare the selected target in the next step\.$/u, "$1 совместимых active-нод. Name и port могут отличаться; на следующем шаге сравните выбранный target."],

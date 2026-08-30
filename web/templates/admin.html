@@ -1020,6 +1020,12 @@
       .chart-point.single {
         opacity: 0.9;
       }
+      .chart-outlier-marker {
+        fill: var(--yellow);
+        stroke: var(--panel-3);
+        stroke-width: 1.4;
+        opacity: 0.95;
+      }
       .chart-last-marker {
         stroke: rgba(207, 216, 226, 0.78);
         stroke-width: 1.5;
@@ -1143,6 +1149,13 @@
       }
       .legend-dot.warn { background: var(--yellow); }
       .legend-dot.error { background: var(--red); }
+      .legend-peak {
+        width: 0;
+        height: 0;
+        border-right: 5px solid transparent;
+        border-bottom: 8px solid var(--yellow);
+        border-left: 5px solid transparent;
+      }
       .table-meta {
         color: var(--muted);
         font-size: 12px;
@@ -3245,6 +3258,21 @@
         return step * exponent;
       }
 
+      function niceLatencyMax(value) {
+        const max = Math.max(1, Number(value || 0));
+        const exponent = 10 ** Math.floor(Math.log10(max));
+        const normalized = max / exponent;
+        const step = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 3 ? 3 : normalized <= 5 ? 5 : 10;
+        return step * exponent;
+      }
+
+      function chartPercentile(values, percentile) {
+        if (!values.length) return 0;
+        const sorted = [...values].sort((a, b) => a - b);
+        const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * percentile) - 1));
+        return sorted[index];
+      }
+
       function chartResultSuccessful(result, view) {
         return view === "availability" ? availabilitySampleStatus(result) === "online" : isSuccessfulResult(result);
       }
@@ -3255,6 +3283,23 @@
 
       function formatLatencyMs(value) {
         return `${Math.max(0, Math.round(Number(value) || 0))} ms`;
+      }
+
+      function availabilityChartScale(results) {
+        const latencies = (results || [])
+          .filter((result) => chartResultSuccessful(result, "availability"))
+          .map((result) => Number(result.latencyMs || 0))
+          .filter((value) => Number.isFinite(value) && value > 0);
+        if (latencies.length === 0) return { yMax: 1, clippedCount: 0 };
+
+        const observedMax = Math.max(...latencies);
+        const percentile90 = latencies.length >= 20 ? chartPercentile(latencies, 0.90) : observedMax;
+        const yMax = niceLatencyMax(percentile90);
+        const clippedCount = latencies.filter((value) => value > yMax).length;
+        return {
+          yMax: clippedCount > 0 ? yMax : niceLatencyMax(observedMax),
+          clippedCount,
+        };
       }
 
       function renderNodeMetricChart(results, stableId, history, view) {
@@ -3279,7 +3324,9 @@
         const successful = ordered.filter((result) => chartResultSuccessful(result, view));
         const threshold = view === "speedtest" ? lowSpeedThreshold() : 0;
         const observedMax = successful.reduce((max, result) => Math.max(max, chartResultValue(result, view)), 0);
-        const yMax = niceSpeedMax(Math.max(observedMax, threshold));
+        const availabilityScale = view === "availability" ? availabilityChartScale(ordered) : null;
+        const yMax = availabilityScale ? availabilityScale.yMax : niceSpeedMax(Math.max(observedMax, threshold));
+        const hasClippedPeaks = Boolean(availabilityScale && availabilityScale.clippedCount > 0);
         const width = 960;
         const height = 250;
         const left = 18;
@@ -3298,7 +3345,8 @@
         [0, 0.5, 1].forEach((ratio) => {
           const y = top + plotHeight - ratio * plotHeight;
           grid.push(`<line class="chart-grid-line" x1="${left}" y1="${y}" x2="${width - right}" y2="${y}" />`);
-          grid.push(`<text class="chart-axis-label" x="${width - 8}" y="${y + 4}" text-anchor="end">${Math.round(yMax * ratio)}</text>`);
+          const label = ratio === 1 && hasClippedPeaks ? `${Math.round(yMax)}+` : Math.round(yMax * ratio);
+          grid.push(`<text class="chart-axis-label" x="${width - 8}" y="${y + 4}" text-anchor="end">${label}</text>`);
         });
         for (let index = 0; index < 5; index += 1) {
           const ratio = index / 4;
@@ -3384,6 +3432,13 @@
           const singleClass = singlePointTimes.has(result.checkedAt) ? " single" : "";
           return `<circle class="chart-point${singleClass}" cx="${xOf(result.checkedAt).toFixed(1)}" cy="${yOf(chartResultValue(result, view)).toFixed(1)}" r="5" fill="${color}" tabindex="0"><title>${escapeHtml(detail)}</title></circle>`;
         }).join("");
+        const outlierMarkers = view === "availability" && hasClippedPeaks
+          ? successful.filter((result) => chartResultValue(result, view) > yMax).map((result) => {
+            const x = xOf(result.checkedAt);
+            const detail = `${formatTime(result.checkedAt)} · ${formatLatencyMs(result.latencyMs)} · Peak above ${formatLatencyMs(yMax)} chart scale`;
+            return `<path class="chart-outlier-marker" d="M ${(x - 5).toFixed(1)} ${top + 10} L ${x.toFixed(1)} ${top + 2} L ${(x + 5).toFixed(1)} ${top + 10} Z" tabindex="0" aria-label="${escapeHtml(detail)}"><title>${escapeHtml(detail)}</title></path>`;
+          }).join("")
+          : "";
         const errorBandWidth = Math.max(3, Math.min(34, medianInterval > 0 ? (medianInterval / spanMs) * plotWidth : 8));
         const errors = ordered.filter((result) => !chartResultSuccessful(result, view)).map((result) => {
           const x = xOf(result.checkedAt);
@@ -3416,7 +3471,7 @@
             ${areaMasks.join("")}
           </defs>
           ${grid.join("")}
-          <g clip-path="url(#${clipID})">${areas}${errors}${thresholdLine}${gapBridges}${lines}${latestMarker}${cursor}${points}</g>
+          <g clip-path="url(#${clipID})">${areas}${errors}${thresholdLine}${gapBridges}${lines}${latestMarker}${cursor}${points}${outlierMarkers}</g>
           <text class="chart-axis-label" x="${left}" y="13">${unit}</text>
         </svg>`;
       }
@@ -4130,10 +4185,15 @@
             ? formatLatencyMs(latestAvailability.latencyMs)
             : (latestAvailabilityState === "proxy_failure" ? "Proxy failure" : latestAvailability.failureSummary || "Offline"))
           : "No availability checks";
+        const availabilityScale = view === "availability" ? availabilityChartScale(dataset.results) : null;
+        const availabilityScaleLegend = availabilityScale && availabilityScale.clippedCount > 0
+          ? `<span><i class="legend-peak"></i>Peaks above ${escapeHtml(formatLatencyMs(availabilityScale.yMax))} are pinned to the top</span>`
+          : "";
         const legend = view === "availability"
           ? `<span><i class="legend-dot"></i>Available</span>
              <span><i class="legend-dot warn"></i>Proxy failure</span>
              <span><i class="legend-dot error"></i>Offline</span>
+             ${availabilityScaleLegend}
              <span>Latest: ${escapeHtml(latestAvailabilityStatus)} · ${escapeHtml(latestAvailability ? formatTime(latestAvailability.checkedAt) : "n/a")}</span>`
           : `<span><i class="legend-dot"></i>Normal speed</span>
              <span><i class="legend-dot warn"></i>Below configured threshold</span>

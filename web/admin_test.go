@@ -77,6 +77,11 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`class="chart-error-band"`,
 		`class="chart-last-marker"`,
 		`class="chart-cursor"`,
+		`function availabilityChartScale(results)`,
+		`chartPercentile(latencies, 0.90)`,
+		`class="chart-outlier-marker"`,
+		`class="legend-peak"`,
+		`Peaks above ${escapeHtml(formatLatencyMs(availabilityScale.yMax))} are pinned to the top`,
 		`id="node-speed-tooltip"`,
 		`function bindMetricChartInteractions(root = $("nodes"))`,
 		`function animateNodePanelClose(stableId)`,
@@ -304,6 +309,7 @@ func TestWebTemplatesExposeSharedEnglishRussianLocalization(t *testing.T) {
 		`"Announce locations": "Локации Announce"`,
 		`"Loading speed-test history…": "Загрузка speedtest history…"`,
 		`"Loading availability history…": "Загрузка availability history…"`,
+		`Пики выше $1 ms отмечены у верхней границы`,
 		`"IP / server copied!": "IP / сервер скопирован!"`,
 	} {
 		if !strings.Contains(localization, marker) {
