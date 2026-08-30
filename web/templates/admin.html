@@ -134,6 +134,12 @@
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 8px;
       }
+      .global-settings-nav {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+      .settings-panel {
+        width: min(100%, 920px);
+      }
       button.settings-tab {
         background: transparent;
         color: var(--muted);
@@ -144,6 +150,9 @@
         color: var(--text);
       }
       .settings-pane[hidden] {
+        display: none;
+      }
+      #message:empty {
         display: none;
       }
       .control-group {
@@ -1383,34 +1392,26 @@
         <button id="tab-incidents" class="tab" type="button">Incidents</button>
         <button id="tab-remnawave" class="tab" type="button">Remnawave</button>
         <button id="tab-history" class="tab" type="button">Speed History</button>
+        <button id="tab-settings" class="tab" type="button">Settings</button>
       </nav>
+      <div id="message" class="muted" role="status" aria-live="polite"></div>
 
       <section id="dashboard-view" class="view dashboard-grid">
       <aside class="panel stack control-panel">
         <div class="panel-header">
           <div>
             <h2>Controls</h2>
-            <div class="muted">Actions and settings</div>
+            <div class="muted">Actions for selected nodes</div>
           </div>
-          <span id="subscription-state" class="pill"></span>
         </div>
 
-        <nav class="settings-nav" aria-label="Dashboard controls">
+        <nav class="settings-nav" aria-label="Node controls">
           <button id="settings-tab-run" class="settings-tab active" type="button">Actions</button>
           <button id="settings-tab-filters" class="settings-tab" type="button">Filters</button>
           <button id="settings-tab-schedule" class="settings-tab" type="button">Schedule</button>
-          <button id="settings-tab-telegram" class="settings-tab" type="button">Telegram</button>
-          <button id="settings-tab-backup" class="settings-tab" type="button">Backup</button>
         </nav>
 
         <section id="settings-pane-run" class="settings-pane stack">
-          <div class="control-group">
-            <div class="group-title">
-              <h3>Subscription</h3>
-            </div>
-            <button id="refresh-subscription" class="secondary" type="button">Update Subscription</button>
-          </div>
-
           <div class="control-group">
             <div class="group-title">
               <h3>Speed Test</h3>
@@ -1456,6 +1457,25 @@
               <span id="maintenance-node-state" class="muted">Select one node</span>
             </div>
             <button id="toggle-maintenance" class="secondary" type="button" disabled>Maintenance</button>
+          </div>
+
+          <div class="control-group">
+            <div class="group-title">
+              <h3>Telegram Notifications</h3>
+              <span id="telegram-muted-state" class="muted">0 muted</span>
+            </div>
+            <label>
+              Scope
+              <select id="mute-scope">
+                <option value="all">All Telegram</option>
+                <option value="alerts">Availability alerts</option>
+                <option value="speed">Speed reports</option>
+              </select>
+            </label>
+            <div class="row">
+              <button id="mute-selected" class="secondary" type="button" disabled>Mute Selected</button>
+              <button id="unmute-selected" class="secondary" type="button" disabled>Unmute Selected</button>
+            </div>
           </div>
 
           <button id="run" class="primary" type="button">Run Check</button>
@@ -1514,180 +1534,10 @@
               Interval minutes
               <input id="schedule-minutes" type="number" min="1" step="1" />
             </label>
-            <label>
-              History retention days
-              <input id="history-retention-days" type="number" min="1" max="3650" step="1" />
-            </label>
+            <div class="hint">The schedule applies to the selected nodes, current filters and Speed Test parameters.</div>
             <button id="save-schedule" class="secondary" type="button">Save Schedule</button>
           </div>
         </section>
-
-        <section id="settings-pane-telegram" class="settings-pane stack" hidden>
-          <div class="control-group">
-            <div class="group-title">
-              <h3>Telegram</h3>
-            </div>
-            <label class="row">
-              <input id="telegram-enabled" type="checkbox" />
-              Enabled
-            </label>
-            <div class="config-status">
-              <div>
-                <span>Bot token</span>
-                <strong id="telegram-token-state">Not set</strong>
-              </div>
-              <div>
-                <span>Chat</span>
-                <strong id="telegram-chat-state">Not set</strong>
-              </div>
-              <div>
-                <span>Topic</span>
-                <strong id="telegram-topic-state">Not set</strong>
-              </div>
-              <div>
-                <span>Admins</span>
-                <strong id="telegram-admin-state">0 users</strong>
-              </div>
-            </div>
-            <div class="hint">Sensitive Telegram values are read from environment variables only.</div>
-          </div>
-
-          <div class="control-group">
-            <div class="group-title">
-              <h3>Reports</h3>
-            </div>
-            <label class="row">
-              <input id="telegram-commands" type="checkbox" />
-              Bot commands
-            </label>
-            <label class="row">
-              <input id="telegram-speed-reports" type="checkbox" />
-              Speed reports
-            </label>
-            <div class="split">
-              <label>
-                Report mode
-                <select id="telegram-report-mode">
-                  <option value="always">Always</option>
-                  <option value="issues">Only issues</option>
-                  <option value="disabled">Disabled</option>
-                </select>
-              </label>
-              <label>
-                Low Mbps
-                <input id="telegram-low-speed" type="number" min="0" step="0.1" />
-              </label>
-            </div>
-            <label>
-              Report rows
-              <input id="telegram-report-limit" type="number" min="1" max="50" step="1" />
-            </label>
-          </div>
-
-          <div class="control-group">
-            <div class="group-title">
-              <h3>Alerts</h3>
-            </div>
-            <label class="row">
-              <input id="telegram-node-alerts" type="checkbox" />
-              Node down alerts
-            </label>
-            <label>
-              Availability check min
-              <input id="telegram-alert-check" type="number" min="1" step="1" />
-            </label>
-            <div class="split">
-              <label>
-                Failed checks
-                <input id="telegram-alert-failures" type="number" min="2" step="1" />
-              </label>
-              <label>
-                Diagnostics refresh min
-                <input id="telegram-alert-diagnostics" type="number" min="1" step="1" />
-              </label>
-            </div>
-            <label>
-              Reminder schedule min
-              <input id="telegram-alert-schedule" type="text" placeholder="15,60,180,360,720" />
-            </label>
-            <label>
-              Max reminder min
-              <input id="telegram-alert-max" type="number" min="1" step="1" />
-            </label>
-            <label class="row">
-              <input id="telegram-alert-group" type="checkbox" />
-              Group offline reminders
-            </label>
-            <label class="row">
-              <input id="telegram-recovery" type="checkbox" />
-              Recovery alerts
-            </label>
-          </div>
-
-          <div class="control-group">
-            <div class="group-title">
-              <h3>Muted</h3>
-              <span id="telegram-muted-state" class="muted">0 muted</span>
-            </div>
-            <label>
-              Scope
-              <select id="mute-scope">
-                <option value="all">All Telegram</option>
-                <option value="alerts">Availability alerts</option>
-                <option value="speed">Speed reports</option>
-              </select>
-            </label>
-            <div class="row">
-              <button id="mute-selected" class="secondary" type="button" disabled>Mute Selected</button>
-              <button id="unmute-selected" class="secondary" type="button" disabled>Unmute Selected</button>
-            </div>
-            <div class="row">
-              <button id="save-telegram" class="secondary" type="button">Save Telegram</button>
-              <button id="test-telegram" class="secondary" type="button">Test</button>
-            </div>
-          </div>
-        </section>
-
-        <section id="settings-pane-backup" class="settings-pane stack" hidden>
-          <div class="control-group">
-            <div class="group-title">
-              <h3>Download Backup</h3>
-            </div>
-            <div class="hint">
-              Download persisted settings, node statistics and speed-test history as a ZIP archive.
-              Environment variables, generated Xray configuration, geo files and Telegram credentials are excluded.
-            </div>
-            <button id="download-backup" class="secondary" type="button">Download Backup</button>
-          </div>
-
-          <div class="control-group">
-            <div class="group-title">
-              <h3>Automatic Backups</h3>
-            </div>
-            <div class="hint">
-              One archive is created per UTC day in <code>data/backups</code>.
-              Archives older than 7 days and files beyond the newest 7 are removed automatically.
-            </div>
-          </div>
-
-          <div class="control-group">
-            <div class="group-title">
-              <h3>Restore</h3>
-            </div>
-            <div class="hint">
-              Upload an Xray Checker backup. It will be verified and applied on the next application restart.
-              Files missing from the archive will be removed during restoration.
-            </div>
-            <div class="file-picker-row">
-              <label class="file-picker" for="restore-backup-file">Choose Backup ZIP</label>
-              <span id="restore-backup-filename" class="file-picker-name muted" data-i18n-skip></span>
-            </div>
-            <input id="restore-backup-file" class="visually-hidden" type="file" accept=".zip,application/zip" />
-            <button id="restore-backup" class="secondary" type="button" disabled>Restore on Restart</button>
-          </div>
-        </section>
-
-        <div id="message" class="muted"></div>
       </aside>
 
       <section class="stack">
@@ -1756,6 +1606,195 @@
           </div>
         </section>
       </section>
+      </section>
+
+      <section id="settings-view" class="view stack" hidden>
+        <section class="panel stack settings-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Settings</h2>
+              <div class="muted">Global configuration and data management</div>
+            </div>
+            <span id="subscription-state" class="pill"></span>
+          </div>
+
+          <nav class="settings-nav global-settings-nav" aria-label="Global settings">
+            <button id="global-settings-tab-subscription" class="settings-tab active" type="button">Subscription</button>
+            <button id="global-settings-tab-history" class="settings-tab" type="button">History</button>
+            <button id="global-settings-tab-telegram" class="settings-tab" type="button">Telegram</button>
+            <button id="global-settings-tab-backup" class="settings-tab" type="button">Backup</button>
+          </nav>
+
+          <section id="global-settings-pane-subscription" class="settings-pane stack">
+            <div class="control-group">
+              <div class="group-title">
+                <h3>Subscription</h3>
+              </div>
+              <button id="refresh-subscription" class="secondary" type="button">Update Subscription</button>
+            </div>
+          </section>
+
+          <section id="global-settings-pane-history" class="settings-pane stack" hidden>
+            <div class="control-group">
+              <div class="group-title">
+                <h3>History retention</h3>
+              </div>
+              <label>
+                History retention days
+                <input id="history-retention-days" type="number" min="1" max="3650" step="1" />
+              </label>
+              <div class="hint">The same retention period applies to Speedtest and Availability history for every node.</div>
+              <button id="save-history-retention" class="secondary" type="button">Save History Settings</button>
+            </div>
+          </section>
+
+          <section id="global-settings-pane-telegram" class="settings-pane stack" hidden>
+            <div class="control-group">
+              <div class="group-title">
+                <h3>Telegram</h3>
+              </div>
+              <label class="row">
+                <input id="telegram-enabled" type="checkbox" />
+                Enabled
+              </label>
+              <div class="config-status">
+                <div>
+                  <span>Bot token</span>
+                  <strong id="telegram-token-state">Not set</strong>
+                </div>
+                <div>
+                  <span>Chat</span>
+                  <strong id="telegram-chat-state">Not set</strong>
+                </div>
+                <div>
+                  <span>Topic</span>
+                  <strong id="telegram-topic-state">Not set</strong>
+                </div>
+                <div>
+                  <span>Admins</span>
+                  <strong id="telegram-admin-state">0 users</strong>
+                </div>
+              </div>
+              <div class="hint">Sensitive Telegram values are read from environment variables only.</div>
+            </div>
+
+            <div class="control-group">
+              <div class="group-title">
+                <h3>Reports</h3>
+              </div>
+              <label class="row">
+                <input id="telegram-commands" type="checkbox" />
+                Bot commands
+              </label>
+              <label class="row">
+                <input id="telegram-speed-reports" type="checkbox" />
+                Speed reports
+              </label>
+              <div class="split">
+                <label>
+                  Report mode
+                  <select id="telegram-report-mode">
+                    <option value="always">Always</option>
+                    <option value="issues">Only issues</option>
+                    <option value="disabled">Disabled</option>
+                  </select>
+                </label>
+                <label>
+                  Low Mbps
+                  <input id="telegram-low-speed" type="number" min="0" step="0.1" />
+                </label>
+              </div>
+              <label>
+                Report rows
+                <input id="telegram-report-limit" type="number" min="1" max="50" step="1" />
+              </label>
+            </div>
+
+            <div class="control-group">
+              <div class="group-title">
+                <h3>Alerts</h3>
+              </div>
+              <label class="row">
+                <input id="telegram-node-alerts" type="checkbox" />
+                Node down alerts
+              </label>
+              <label>
+                Availability check min
+                <input id="telegram-alert-check" type="number" min="1" step="1" />
+              </label>
+              <div class="split">
+                <label>
+                  Failed checks
+                  <input id="telegram-alert-failures" type="number" min="2" step="1" />
+                </label>
+                <label>
+                  Diagnostics refresh min
+                  <input id="telegram-alert-diagnostics" type="number" min="1" step="1" />
+                </label>
+              </div>
+              <label>
+                Reminder schedule min
+                <input id="telegram-alert-schedule" type="text" placeholder="15,60,180,360,720" />
+              </label>
+              <label>
+                Max reminder min
+                <input id="telegram-alert-max" type="number" min="1" step="1" />
+              </label>
+              <label class="row">
+                <input id="telegram-alert-group" type="checkbox" />
+                Group offline reminders
+              </label>
+              <label class="row">
+                <input id="telegram-recovery" type="checkbox" />
+                Recovery alerts
+              </label>
+            </div>
+
+            <div class="row">
+              <button id="save-telegram" class="secondary" type="button">Save Telegram</button>
+              <button id="test-telegram" class="secondary" type="button">Test</button>
+            </div>
+          </section>
+
+          <section id="global-settings-pane-backup" class="settings-pane stack" hidden>
+            <div class="control-group">
+              <div class="group-title">
+                <h3>Download Backup</h3>
+              </div>
+              <div class="hint">
+                Download persisted settings, node statistics and speed-test history as a ZIP archive.
+                Environment variables, generated Xray configuration, geo files and Telegram credentials are excluded.
+              </div>
+              <button id="download-backup" class="secondary" type="button">Download Backup</button>
+            </div>
+
+            <div class="control-group">
+              <div class="group-title">
+                <h3>Automatic Backups</h3>
+              </div>
+              <div class="hint">
+                One archive is created per UTC day in <code>data/backups</code>.
+                Archives older than 7 days and files beyond the newest 7 are removed automatically.
+              </div>
+            </div>
+
+            <div class="control-group">
+              <div class="group-title">
+                <h3>Restore</h3>
+              </div>
+              <div class="hint">
+                Upload an Xray Checker backup. It will be verified and applied on the next application restart.
+                Files missing from the archive will be removed during restoration.
+              </div>
+              <div class="file-picker-row">
+                <label class="file-picker" for="restore-backup-file">Choose Backup ZIP</label>
+                <span id="restore-backup-filename" class="file-picker-name muted" data-i18n-skip></span>
+              </div>
+              <input id="restore-backup-file" class="visually-hidden" type="file" accept=".zip,application/zip" />
+              <button id="restore-backup" class="secondary" type="button" disabled>Restore on Restart</button>
+            </div>
+          </section>
+        </section>
       </section>
 
       <section id="nodes-overview-view" class="view stack" hidden>
@@ -2366,6 +2405,7 @@
         selected: new Set(),
         activeTab: "dashboard",
         settingsPane: "run",
+        globalSettingsPane: "subscription",
         lastUpdatedAt: null,
         historyStableId: "",
         historyResults: [],
@@ -5123,11 +5163,13 @@
         $("incidents-view").hidden = tab !== "incidents";
         $("remnawave-view").hidden = tab !== "remnawave";
         $("history-view").hidden = tab !== "history";
+        $("settings-view").hidden = tab !== "settings";
         $("tab-dashboard").classList.toggle("active", tab === "dashboard");
         $("tab-nodes-overview").classList.toggle("active", tab === "nodes-overview");
         $("tab-incidents").classList.toggle("active", tab === "incidents");
         $("tab-remnawave").classList.toggle("active", tab === "remnawave");
         $("tab-history").classList.toggle("active", tab === "history");
+        $("tab-settings").classList.toggle("active", tab === "settings");
 
         if (tab === "history") {
           const ids = selectedIDs();
@@ -5149,9 +5191,17 @@
 
       function switchSettingsPane(pane) {
         state.settingsPane = pane;
-        ["run", "filters", "schedule", "telegram", "backup"].forEach((name) => {
+        ["run", "filters", "schedule"].forEach((name) => {
           $(`settings-pane-${name}`).hidden = name !== pane;
           $(`settings-tab-${name}`).classList.toggle("active", name === pane);
+        });
+      }
+
+      function switchGlobalSettingsPane(pane) {
+        state.globalSettingsPane = pane;
+        ["subscription", "history", "telegram", "backup"].forEach((name) => {
+          $(`global-settings-pane-${name}`).hidden = name !== pane;
+          $(`global-settings-tab-${name}`).classList.toggle("active", name === pane);
         });
       }
 
@@ -5374,6 +5424,31 @@
         }
       }
 
+      async function saveHistoryRetention() {
+        $("message").textContent = "";
+        try {
+          const schedule = (state.snapshot && state.snapshot.schedule) || {};
+          const defaults = (state.snapshot && state.snapshot.defaults) || configFromForm();
+          await request("/schedules", {
+            method: "PUT",
+            body: JSON.stringify({
+              enabled: !!schedule.enabled,
+              intervalSec: Number(schedule.intervalSec || 3600),
+              proxyIds: Array.isArray(schedule.proxyIds) ? schedule.proxyIds : [],
+              onlyOnline: !!schedule.onlyOnline,
+              subName: schedule.subName || "",
+              protocol: schedule.protocol || "",
+              historyRetentionDays: historyRetentionDaysFromForm(),
+              config: schedule.config || defaults,
+            }),
+          });
+          $("message").textContent = "History settings saved";
+          await load();
+        } catch (err) {
+          $("message").textContent = err.message;
+        }
+      }
+
       async function saveTelegram() {
         $("message").textContent = "";
         try {
@@ -5587,8 +5662,12 @@
       $("tab-incidents").addEventListener("click", () => switchTab("incidents"));
       $("tab-remnawave").addEventListener("click", () => switchTab("remnawave"));
       $("tab-history").addEventListener("click", () => switchTab("history"));
-      ["run", "filters", "schedule", "telegram", "backup"].forEach((pane) => {
+      $("tab-settings").addEventListener("click", () => switchTab("settings"));
+      ["run", "filters", "schedule"].forEach((pane) => {
         $(`settings-tab-${pane}`).addEventListener("click", () => switchSettingsPane(pane));
+      });
+      ["subscription", "history", "telegram", "backup"].forEach((pane) => {
+        $(`global-settings-tab-${pane}`).addEventListener("click", () => switchGlobalSettingsPane(pane));
       });
       $("refresh").addEventListener("click", () => load());
       $("refresh-subscription").addEventListener("click", refreshSubscription);
@@ -5700,6 +5779,7 @@
         renderNodeURLForm();
       });
       $("save-schedule").addEventListener("click", saveSchedule);
+      $("save-history-retention").addEventListener("click", saveHistoryRetention);
       $("save-telegram").addEventListener("click", saveTelegram);
       $("download-backup").addEventListener("click", downloadBackup);
       $("restore-backup-file").addEventListener("change", updateRestoreBackupButton);
@@ -5768,6 +5848,7 @@
       }, true);
 
       switchSettingsPane(state.settingsPane);
+      switchGlobalSettingsPane(state.globalSettingsPane);
       load(true).catch((err) => {
         $("message").textContent = err.message;
       });

@@ -121,6 +121,79 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 	}
 }
 
+func TestAdminTemplateSeparatesGlobalSettingsFromNodeControls(t *testing.T) {
+	var rendered bytes.Buffer
+	if err := RenderAdmin(&rendered); err != nil {
+		t.Fatalf("RenderAdmin() error = %v", err)
+	}
+	html := rendered.String()
+	dashboardStart := strings.Index(html, `id="dashboard-view"`)
+	settingsStart := strings.Index(html, `id="settings-view"`)
+	nodesOverviewStart := strings.Index(html, `id="nodes-overview-view"`)
+	if dashboardStart < 0 || settingsStart <= dashboardStart || nodesOverviewStart <= settingsStart {
+		t.Fatalf("admin views are missing or out of order: dashboard=%d settings=%d nodes=%d", dashboardStart, settingsStart, nodesOverviewStart)
+	}
+
+	dashboard := html[dashboardStart:settingsStart]
+	for _, marker := range []string{
+		`aria-label="Node controls"`,
+		`id="settings-tab-run"`,
+		`id="settings-tab-filters"`,
+		`id="settings-tab-schedule"`,
+		`id="node-url"`,
+		`id="toggle-maintenance"`,
+		`id="mute-scope"`,
+		`id="run"`,
+	} {
+		if !strings.Contains(dashboard, marker) {
+			t.Errorf("dashboard node controls do not contain %q", marker)
+		}
+	}
+	for _, marker := range []string{
+		`id="refresh-subscription"`,
+		`id="history-retention-days"`,
+		`id="telegram-enabled"`,
+		`id="download-backup"`,
+	} {
+		if strings.Contains(dashboard, marker) {
+			t.Errorf("dashboard node controls still contain global setting %q", marker)
+		}
+	}
+
+	settings := html[settingsStart:nodesOverviewStart]
+	if !strings.Contains(html[:dashboardStart], `id="tab-settings"`) {
+		t.Error("admin section navigation does not contain the Settings tab")
+	}
+	for _, marker := range []string{
+		`aria-label="Global settings"`,
+		`id="global-settings-pane-subscription"`,
+		`id="refresh-subscription"`,
+		`id="global-settings-pane-history"`,
+		`id="history-retention-days"`,
+		`id="global-settings-pane-telegram"`,
+		`id="telegram-enabled"`,
+		`id="global-settings-pane-backup"`,
+		`id="download-backup"`,
+	} {
+		if !strings.Contains(settings, marker) {
+			t.Errorf("global settings view does not contain %q", marker)
+		}
+	}
+	if strings.Contains(settings, `id="mute-scope"`) {
+		t.Error("global Telegram settings still contain selected-node mute controls")
+	}
+	for _, marker := range []string{
+		`function switchGlobalSettingsPane(pane)`,
+		`$("settings-view").hidden = tab !== "settings"`,
+		`$("save-history-retention").addEventListener("click", saveHistoryRetention)`,
+		`proxyIds: Array.isArray(schedule.proxyIds) ? schedule.proxyIds : []`,
+	} {
+		if !strings.Contains(html, marker) {
+			t.Errorf("admin template does not contain global settings behavior %q", marker)
+		}
+	}
+}
+
 func TestAdminTemplateColorsAvailabilityDiagnosticsIndependently(t *testing.T) {
 	var rendered bytes.Buffer
 	if err := RenderAdmin(&rendered); err != nil {
