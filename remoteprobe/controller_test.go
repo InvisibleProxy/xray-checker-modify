@@ -294,3 +294,51 @@ func TestProfilesMarkTheControllerDefault(t *testing.T) {
 		t.Fatalf("marked %d defaults, want exactly one", defaults)
 	}
 }
+
+// Deleting a session must also drop its queued assignment: an agent still
+// holding that job would run a probe whose result can never be accepted.
+func TestDeleteRemovesTheSessionAndItsQueuedAssignment(t *testing.T) {
+	fixture := newControllerFixture(t)
+	created, err := fixture.controller.CreateManual(CreateManualRequest{StableID: "node-one", AgentID: fixture.agentID})
+	if err != nil {
+		t.Fatalf("create manual diagnostics: %v", err)
+	}
+	if err := fixture.controller.Delete(created.Session.SessionID); err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+	if len(fixture.controller.Sessions("")) != 0 {
+		t.Fatalf("session survived deletion: %+v", fixture.controller.Sessions(""))
+	}
+	// claimNow rather than Claim: the public path long-polls for 15s when the
+	// queue is empty, which is exactly the state under test.
+	assignment, _, err := fixture.controller.claimNow(fixture.agentID)
+	if err != nil || assignment != nil {
+		t.Fatalf("claim after deletion returned %+v (%v), want no pending job", assignment, err)
+	}
+	if err := fixture.controller.Delete(created.Session.SessionID); !errors.Is(err, diagnostics.ErrUnknownSession) {
+		t.Fatalf("second delete = %v, want ErrUnknownSession", err)
+	}
+}
+
+func TestClearRemovesOnlyTheRequestedNode(t *testing.T) {
+	fixture := newControllerFixture(t)
+	if _, err := fixture.controller.CreateManual(CreateManualRequest{StableID: "node-one", AgentID: fixture.agentID}); err != nil {
+		t.Fatalf("create manual diagnostics: %v", err)
+	}
+	if removed := fixture.controller.Clear("node-two"); removed != 0 {
+		t.Fatalf("clearing another node removed %d sessions", removed)
+	}
+	if len(fixture.controller.Sessions("")) != 1 {
+		t.Fatal("clearing another node discarded this node's session")
+	}
+	if removed := fixture.controller.Clear("node-one"); removed != 1 {
+		t.Fatalf("cleared %d sessions, want 1", removed)
+	}
+	if len(fixture.controller.Sessions("")) != 0 {
+		t.Fatal("session survived the clear")
+	}
+	// An empty StableID is the deliberate "everything" case.
+	if removed := fixture.controller.Clear(""); removed != 0 {
+		t.Fatalf("clearing an empty store removed %d sessions", removed)
+	}
+}

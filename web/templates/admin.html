@@ -4631,6 +4631,7 @@
             ${active ? `<button class="secondary small" type="button" data-cancel-diagnostic="${escapeHtml(session.sessionId)}">Cancel</button>` : ""}
             ${!active ? `<button class="secondary small" type="button" data-diagnose-id="${escapeHtml(session.stableId)}">Retry</button>` : ""}
             <a class="secondary small" href="${api(`/diagnostic-sessions/export?sessionId=${encodeURIComponent(session.sessionId)}`)}" download>Download JSON</a>
+            <button class="secondary small" type="button" data-delete-diagnostic="${escapeHtml(session.sessionId)}">Delete</button>
           </div>
         </article>`;
       }
@@ -4643,7 +4644,10 @@
         return `<section class="node-diagnostics" data-node-diagnostics="${escapeHtml(proxy.stableId)}">
           <div class="node-diagnostics-head">
             <div><strong>Remote Diagnostics</strong><div class="muted">Isolated evidence only; it does not change Availability.</div></div>
-            <span class="chip warn" data-node-diagnostics-maintenance ${proxy.maintenance ? "" : "hidden"}>Maintenance diagnostic</span>
+            <div class="row">
+              <span class="chip warn" data-node-diagnostics-maintenance ${proxy.maintenance ? "" : "hidden"}>Maintenance diagnostic</span>
+              <button class="secondary small" type="button" data-clear-diagnostics="${escapeHtml(proxy.stableId)}" ${sessions.length === 0 ? "disabled" : ""}>Clear all</button>
+            </div>
           </div>
           <div class="node-diagnostics-controls">
             <select data-diagnostic-agent-for="${escapeHtml(proxy.stableId)}" data-diagnostic-agents-signature="${escapeHtml(agentSignature)}" ${!control.enabled || !control.agentId ? "disabled" : ""}>
@@ -4721,6 +4725,11 @@
         }
 
         const sessions = visibleDiagnosticSessions(proxy.stableId);
+        const clear = section.querySelector("[data-clear-diagnostics]");
+        if (clear && clear.disabled !== (sessions.length === 0)) {
+          clear.disabled = sessions.length === 0;
+          changed = true;
+        }
         const sessionList = section.querySelector("[data-diagnostic-session-list]");
         const sessionSignature = diagnosticSessionSignature(sessions);
         if (sessionList && sessionList.dataset.diagnosticSessionsSignature !== sessionSignature) {
@@ -6011,6 +6020,37 @@
         }
       }
 
+      async function deleteDiagnostic(sessionId) {
+        try {
+          await request("/diagnostic-sessions/delete", {
+            method: "POST",
+            body: JSON.stringify({ sessionId }),
+          });
+          await loadDiagnosticSessions();
+          $("message").textContent = "Diagnostic session removed";
+        } catch (err) {
+          $("message").textContent = err.message;
+        }
+      }
+
+      // Sessions live only in controller memory and are the operator's own
+      // record of an investigation, so clearing them is confirmed first.
+      async function clearDiagnostics(stableId) {
+        const proxy = proxyFor(stableId);
+        if (!window.confirm(tr("Remove every remote diagnostic session for this node?"))) return;
+        try {
+          const result = await request("/diagnostic-sessions/clear", {
+            method: "POST",
+            body: JSON.stringify({ stableId }),
+          });
+          await loadDiagnosticSessions();
+          const removed = Number(result && result.removed) || 0;
+          $("message").textContent = `Removed ${removed} diagnostic sessions for ${proxy ? proxy.name : stableId}`;
+        } catch (err) {
+          $("message").textContent = err.message;
+        }
+      }
+
       async function createDiagnosticAgent() {
         const button = $("create-diagnostic-agent");
         button.disabled = true;
@@ -6512,6 +6552,16 @@
         const cancelDiagnosticButton = target.closest("[data-cancel-diagnostic]");
         if (cancelDiagnosticButton) {
           cancelDiagnostic(cancelDiagnosticButton.dataset.cancelDiagnostic);
+          return;
+        }
+        const deleteDiagnosticButton = target.closest("[data-delete-diagnostic]");
+        if (deleteDiagnosticButton) {
+          deleteDiagnostic(deleteDiagnosticButton.dataset.deleteDiagnostic);
+          return;
+        }
+        const clearDiagnosticsButton = target.closest("[data-clear-diagnostics]");
+        if (clearDiagnosticsButton) {
+          clearDiagnostics(clearDiagnosticsButton.dataset.clearDiagnostics);
           return;
         }
         const chartView = target.closest("[data-chart-view-select]");

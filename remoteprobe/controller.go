@@ -245,6 +245,41 @@ func (c *Controller) Cancel(sessionID string) error {
 	return nil
 }
 
+// Delete removes one session together with any queued assignment. Dropping the
+// assignment matters: an agent holding a job for a session that no longer exists
+// would run a probe whose result can never be accepted.
+func (c *Controller) Delete(sessionID string) error {
+	sessionID = strings.TrimSpace(sessionID)
+	if err := c.manager.DeleteSession(sessionID); err != nil {
+		return err
+	}
+	c.dropAssignmentsFor(func(assignment probeagent.JobAssignment) bool {
+		return assignment.Job.SessionID == sessionID
+	})
+	return nil
+}
+
+// Clear removes every session for one node, or all of them when stableID is
+// empty, and reports how many were removed.
+func (c *Controller) Clear(stableID string) int {
+	stableID = strings.TrimSpace(stableID)
+	removed := c.manager.DeleteSessions(stableID)
+	c.dropAssignmentsFor(func(assignment probeagent.JobAssignment) bool {
+		return stableID == "" || assignment.Job.StableID == stableID
+	})
+	return removed
+}
+
+func (c *Controller) dropAssignmentsFor(match func(probeagent.JobAssignment) bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for jobID, queued := range c.assignments {
+		if match(queued.assignment) {
+			delete(c.assignments, jobID)
+		}
+	}
+}
+
 func (c *Controller) Export(sessionID string) ([]byte, error) {
 	return c.manager.ExportSession(sessionID)
 }

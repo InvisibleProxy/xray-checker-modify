@@ -19,6 +19,8 @@ type DiagnosticSessionService interface {
 	CreateManual(remoteprobe.CreateManualRequest) (remoteprobe.SessionView, error)
 	Sessions(string) []remoteprobe.SessionView
 	Cancel(string) error
+	Delete(string) error
+	Clear(string) int
 	Export(string) ([]byte, error)
 	Claim(context.Context, string) (*probeagent.JobAssignment, error)
 	AcceptObservation(diagnostics.Observation) (diagnostics.AcceptedObservation, error)
@@ -77,6 +79,42 @@ func AdminDiagnosticSessionCancelHandler(service DiagnosticSessionService) http.
 			return
 		}
 		writeJSON(w, map[string]string{"sessionId": strings.TrimSpace(input.SessionID)})
+	}
+}
+
+func AdminDiagnosticSessionDeleteHandler(service DiagnosticSessionService) http.HandlerFunc {
+	return func(w http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var input diagnosticSessionActionRequest
+		if !decodeProbeAgentJSON(w, request, &input) {
+			return
+		}
+		if err := service.Delete(input.SessionID); err != nil {
+			writeDiagnosticSessionError(w, err)
+			return
+		}
+		writeJSON(w, map[string]string{"sessionId": strings.TrimSpace(input.SessionID)})
+	}
+}
+
+// An empty stableId clears every node's history, which is why the caller has to
+// send the field explicitly rather than getting it by omission.
+func AdminDiagnosticSessionsClearHandler(service DiagnosticSessionService) http.HandlerFunc {
+	return func(w http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var input struct {
+			StableID string `json:"stableId"`
+		}
+		if !decodeProbeAgentJSON(w, request, &input) {
+			return
+		}
+		writeJSON(w, map[string]int{"removed": service.Clear(input.StableID)})
 	}
 }
 

@@ -335,6 +335,38 @@ func (m *DiagnosticSessionManager) AcceptObservation(observation Observation) (A
 	return cloneAcceptedObservation(record), nil
 }
 
+// DeleteSession discards one session and everything bound to it. Cancelling only
+// stops a session; the evidence stays on screen until it ages out, which is why
+// an operator needs a way to clear a finished run explicitly.
+func (m *DiagnosticSessionManager) DeleteSession(sessionID string) error {
+	sessionID = strings.TrimSpace(sessionID)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.sessions[sessionID]; !ok {
+		return ErrUnknownSession
+	}
+	m.removeSessionLocked(sessionID)
+	return nil
+}
+
+// DeleteSessions discards every session for one node, or all of them when
+// stableID is empty. It returns how many were removed.
+func (m *DiagnosticSessionManager) DeleteSessions(stableID string) int {
+	stableID = strings.TrimSpace(stableID)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	doomed := make([]string, 0, len(m.sessions))
+	for sessionID, session := range m.sessions {
+		if stableID == "" || session.StableID == stableID {
+			doomed = append(doomed, sessionID)
+		}
+	}
+	for _, sessionID := range doomed {
+		m.removeSessionLocked(sessionID)
+	}
+	return len(doomed)
+}
+
 func (m *DiagnosticSessionManager) CancelSession(sessionID string) error {
 	now := m.now()
 	m.mu.Lock()

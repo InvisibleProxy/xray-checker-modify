@@ -582,6 +582,8 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/diagnostic-agents/delete", web.AdminDiagnosticAgentDeleteHandler(probeAgentRegistry))
 	protectedHandler.Handle("/api/v1/admin/diagnostic-agents", web.AdminDiagnosticAgentsHandler(probeAgentRegistry))
 	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions/cancel", web.AdminDiagnosticSessionCancelHandler(remoteDiagnosticController))
+	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions/delete", web.AdminDiagnosticSessionDeleteHandler(remoteDiagnosticController))
+	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions/clear", web.AdminDiagnosticSessionsClearHandler(remoteDiagnosticController))
 	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions/export", web.AdminDiagnosticSessionExportHandler(remoteDiagnosticController))
 	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions", web.AdminDiagnosticSessionsHandler(remoteDiagnosticController))
 

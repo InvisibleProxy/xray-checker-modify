@@ -250,6 +250,8 @@ func (f *fakeDiagnosticSessionService) CreateManual(remoteprobe.CreateManualRequ
 }
 func (f *fakeDiagnosticSessionService) Sessions(string) []remoteprobe.SessionView { return nil }
 func (f *fakeDiagnosticSessionService) Cancel(string) error                       { return nil }
+func (f *fakeDiagnosticSessionService) Delete(string) error                       { return nil }
+func (f *fakeDiagnosticSessionService) Clear(string) int                          { return 0 }
 func (f *fakeDiagnosticSessionService) Export(string) ([]byte, error)             { return []byte(`{}`), nil }
 func (f *fakeDiagnosticSessionService) Claim(context.Context, string) (*probeagent.JobAssignment, error) {
 	return f.assignment, nil

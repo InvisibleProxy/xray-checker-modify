@@ -1045,6 +1045,55 @@ paths:
         '404':
           description: Session not found
 
+  /api/v1/admin/diagnostic-sessions/delete:
+    post:
+      summary: Remove one diagnostic session
+      description: Discards the session and any queued assignment for it, so an agent cannot keep running a job whose result would no longer be accepted. Cancelling only stops a session; this removes it.
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sessionId]
+              properties:
+                sessionId: {type: string}
+      responses:
+        '200':
+          description: Session removed
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Session not found
+
+  /api/v1/admin/diagnostic-sessions/clear:
+    post:
+      summary: Remove every diagnostic session for a node
+      description: An empty stableId clears every node, which is why the field must be sent explicitly rather than omitted.
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stableId]
+              properties:
+                stableId: {type: string}
+      responses:
+        '200':
+          description: Sessions removed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [removed]
+                properties:
+                  removed: {type: integer, minimum: 0}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /api/v1/admin/diagnostic-sessions/export:
     get:
       summary: Download a sanitized diagnostic session as JSON
