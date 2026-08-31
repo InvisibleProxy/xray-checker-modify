@@ -320,10 +320,18 @@ func (c *Controller) executionSnapshot(stableID string) (checker.DiagnosticProxy
 	if err != nil {
 		return checker.DiagnosticProxySnapshot{}, nil, "", fmt.Errorf("generate diagnostic Xray config: %w", err)
 	}
-	if len(configJSON) == 0 || len(configJSON) > probeagent.MaxExecutionConfigBytes {
+	// GenerateConfig indents its output, but encoding/json compacts a
+	// json.RawMessage on the way to the agent. Hashing the indented bytes would
+	// make the agent recompute a different fingerprint and reject every job, so
+	// canonicalise through the same encoder the transport uses.
+	canonicalConfig, err := json.Marshal(json.RawMessage(configJSON))
+	if err != nil {
+		return checker.DiagnosticProxySnapshot{}, nil, "", fmt.Errorf("canonicalise diagnostic Xray config: %w", err)
+	}
+	if len(canonicalConfig) == 0 || len(canonicalConfig) > probeagent.MaxExecutionConfigBytes {
 		return checker.DiagnosticProxySnapshot{}, nil, "", fmt.Errorf("diagnostic Xray config exceeds delivery limit")
 	}
-	return snapshot, configJSON, diagnostics.ConfigFingerprint(configJSON), nil
+	return snapshot, canonicalConfig, diagnostics.ConfigFingerprint(canonicalConfig), nil
 }
 
 func profileForMethod(method string) (diagnostics.TestProfile, error) {
@@ -394,11 +402,18 @@ func summarize(session diagnostics.DiagnosticSession) string {
 		return "Remote diagnostics are running."
 	}
 	observation := session.AgentObservations[len(session.AgentObservations)-1]
-	if !observation.Reliable {
-		return "The agent network failed direct connectivity control; this result is unreliable."
-	}
 	remote := observation.Observation
 	local := session.LocalResultSnapshot
+	if !observation.Reliable {
+		// An unreliable result has two very different causes: the agent refused
+		// the job before probing anything, or it probed and its own network
+		// failed the control. Reporting both as a network failure sends
+		// troubleshooting to the wrong place.
+		if !remote.DirectConnectivity.Checked {
+			return "The agent rejected the job before probing; no remote evidence was collected."
+		}
+		return "The agent network failed direct connectivity control; this result is unreliable."
+	}
 	if local.Status != diagnostics.ProbeStatusOnline && remote.Status == diagnostics.ProbeStatusOnline {
 		return "The problem was not reproduced from another network; a local ISP, route, DNS or DPI issue is likely."
 	}

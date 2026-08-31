@@ -193,3 +193,31 @@ func TestClaimRedeliversSameBoundJobAfterLostResponse(t *testing.T) {
 		t.Fatalf("redelivered job binding changed: first=%+v second=%+v", first.Job, second.Job)
 	}
 }
+
+// The agent recomputes the fingerprint from the bytes it received, so the
+// controller must hash exactly what the transport delivers. encoding/json
+// compacts a json.RawMessage, which silently invalidated every job while the
+// controller hashed the indented generator output instead.
+func TestJobFingerprintSurvivesTheAgentTransport(t *testing.T) {
+	fixture := newControllerFixture(t)
+	if _, err := fixture.controller.CreateManual(CreateManualRequest{StableID: "node-one", AgentID: fixture.agentID}); err != nil {
+		t.Fatalf("create manual diagnostics: %v", err)
+	}
+	assignment, err := fixture.controller.Claim(context.Background(), fixture.agentID)
+	if err != nil {
+		t.Fatalf("claim job: %v", err)
+	}
+	wire, err := json.Marshal(probeagent.JobPollResponse{Job: assignment})
+	if err != nil {
+		t.Fatalf("encode job response: %v", err)
+	}
+	var delivered probeagent.JobPollResponse
+	if err := json.Unmarshal(wire, &delivered); err != nil {
+		t.Fatalf("decode job response: %v", err)
+	}
+	received := diagnostics.ConfigFingerprint(delivered.Job.XrayConfig)
+	if received != assignment.Job.ConfigFingerprint {
+		t.Fatalf("fingerprint changed in transport: job=%s agent-side=%s (%d bytes sent, %d received)",
+			assignment.Job.ConfigFingerprint, received, len(assignment.XrayConfig), len(delivered.Job.XrayConfig))
+	}
+}

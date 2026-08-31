@@ -47,6 +47,7 @@
     "Remote diagnostics cancelled": "Удалённая диагностика отменена",
     "No remote observations are available.": "Удалённых результатов нет.", "Remote diagnostics are running.": "Диагностика выполняется.",
     "The agent network failed direct connectivity control; this result is unreliable.": "Сеть агента не прошла direct connectivity control; результат недостоверен.",
+    "The agent rejected the job before probing; no remote evidence was collected.": "Агент отклонил задание до проверки; удалённые свидетельства не собраны.",
     "The problem was not reproduced from another network; a local ISP, route, DNS or DPI issue is likely.": "Проблема не воспроизведена из другой сети; вероятна локальная проблема ISP, маршрута, DNS или DPI.",
     "The error was reproduced from another network; a shared configuration, server or port availability issue is likely.": "Ошибка воспроизведена в другой сети; вероятна общая проблема конфигурации, сервера или доступности порта.",
     "The outage was reproduced; the server, port, firewall or hosting network may be involved.": "Недоступность воспроизведена; возможна проблема сервера, порта, firewall или сети хостинга.",

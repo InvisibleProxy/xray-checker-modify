@@ -86,18 +86,21 @@ func NewExecutor(config ExecutorConfig) (*Executor, error) {
 func (e *Executor) Execute(ctx context.Context, assignment JobAssignment) (observation diagnostics.Observation) {
 	startedAt := time.Now().UTC()
 	observation = diagnostics.Observation{
-		SchemaVersion:      diagnostics.ObservationSchemaVersion,
-		AgentID:            assignment.Job.AgentID,
-		SessionID:          assignment.Job.SessionID,
-		JobID:              assignment.Job.JobID,
-		Nonce:              assignment.Job.Nonce,
-		StableID:           assignment.Job.StableID,
-		ConfigGeneration:   assignment.Job.ConfigGeneration,
-		ConfigFingerprint:  assignment.Job.ConfigFingerprint,
-		CheckedAt:          startedAt,
-		EndpointProfile:    assignment.Job.Profile.ID,
-		Status:             diagnostics.ProbeStatusProxyFailure,
-		DirectConnectivity: diagnostics.CheckEvidence{Checked: true, FailureCode: "check_endpoint"},
+		SchemaVersion:     diagnostics.ObservationSchemaVersion,
+		AgentID:           assignment.Job.AgentID,
+		SessionID:         assignment.Job.SessionID,
+		JobID:             assignment.Job.JobID,
+		Nonce:             assignment.Job.Nonce,
+		StableID:          assignment.Job.StableID,
+		ConfigGeneration:  assignment.Job.ConfigGeneration,
+		ConfigFingerprint: assignment.Job.ConfigFingerprint,
+		CheckedAt:         startedAt,
+		EndpointProfile:   assignment.Job.Profile.ID,
+		Status:            diagnostics.ProbeStatusProxyFailure,
+		// Left unchecked on purpose. Claiming Checked before directConnectivity
+		// actually runs would sign evidence for a control that never happened,
+		// and every early rejection below would be reported as a network failure.
+		DirectConnectivity: diagnostics.CheckEvidence{},
 	}
 	defer func() {
 		observation.DurationMillis = maxInt64(0, time.Since(startedAt).Milliseconds())
