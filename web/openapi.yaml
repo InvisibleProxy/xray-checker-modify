@@ -887,6 +887,44 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /api/v1/admin/remnawave/locations/suggest:
+    get:
+      summary: Propose announce locations from Remnawave host tags
+      description: >-
+        Groups the current checker nodes by the tags of the hosts they run on, pairing each node to a host
+        by address and port. Nothing is saved: the operator picks which tags are locations and submits them
+        through PUT /api/v1/admin/remnawave like any hand-made card.
+      tags: [Admin]
+      responses:
+        '200':
+          description: Candidate locations and the nodes that matched no host
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          candidates:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                tag:
+                                  type: string
+                                  example: BALANCER_NL
+                                members:
+                                  type: array
+                                  items:
+                                    $ref: '#/components/schemas/RemnawaveCandidateMember'
+                          unmatched:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/RemnawaveCandidateMember'
+
   /api/v1/admin/remnawave/sync:
     post:
       summary: Refresh Remnawave topology and reconcile managed announce headers
@@ -2386,6 +2424,23 @@ components:
         uuid:
           type: string
         name:
+          type: string
+
+    RemnawaveCandidateMember:
+      type: object
+      description: A checker node and the Remnawave Host it was paired with by address and port.
+      properties:
+        stableId:
+          type: string
+        nodeName:
+          type: string
+        endpoint:
+          type: string
+          example: 144.31.86.63:8443
+        hostUuid:
+          type: string
+          description: Empty when the node matched no host.
+        hostRemark:
           type: string
 
     RemnawaveSnapshot:

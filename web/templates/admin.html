@@ -2430,8 +2430,12 @@
               <h2>Announce locations</h2>
               <div class="muted">The persisted identity is the location key. Servers are replaceable members of that location.</div>
             </div>
-            <button id="remnawave-add-location" class="secondary" type="button">Add location</button>
+            <div class="row">
+              <button id="remnawave-suggest-locations" class="secondary" type="button">Suggest from host tags</button>
+              <button id="remnawave-add-location" class="secondary" type="button">Add location</button>
+            </div>
           </div>
+          <div id="remnawave-suggestions"></div>
           <div id="remnawave-locations" class="remnawave-location-list"></div>
           <div class="hint">
             Each member connects a checker StableID to the Remnawave Host used for audience filtering. A healthy
@@ -2900,7 +2904,7 @@
         $("remnawave-locations").innerHTML = rows.map((location, locationIndex) => {
           const members = Array.isArray(location.members) ? location.members : [];
           const memberRows = members.map((member, memberIndex) => {
-            const hostOptions = remnawaveOptions(hosts, member.hostUuid || "", "Select Remnawave Host", (host) => {
+            const hostOptions = remnawaveOptions(hosts, member.hostUuid || "", "Auto · match by address:port", (host) => {
               const flags = [host.isDisabled ? "disabled" : "", host.isHidden ? "hidden" : ""].filter(Boolean);
               const suffix = flags.length ? ` [${flags.join(", ")}]` : "";
               return `${host.remark || host.uuid} · ${host.address || "n/a"}:${host.port || "n/a"}${suffix}`;
@@ -3020,7 +3024,9 @@
             const stableId = member.stableId.trim();
             const hostUuid = member.hostUuid.trim();
             if (!stableId && !hostUuid) return;
-            if (!stableId || !hostUuid) throw new Error("Each server member requires both a checker node and a Remnawave Host");
+            // An empty Host is not an omission: the checker pairs the member by
+            // address and port at sync time, which also survives a StableID change.
+            if (!stableId) throw new Error("Each server member requires a checker node");
             const foldedStableID = stableId.toLowerCase();
             if (stableIDs.has(foldedStableID)) throw new Error("A checker StableID can belong to only one Announce location");
             stableIDs.add(foldedStableID);
@@ -3083,6 +3089,69 @@
           $("remnawave-state").textContent = err.message;
           $("remnawave-state").className = "error";
         }
+      }
+
+      // The panel already groups hosts with tags, so the checker reports those
+      // groupings rather than asking for every node to be paired by hand. It never
+      // decides which tags are locations: the operator adds the ones that are.
+      async function suggestRemnawaveLocations() {
+        const button = $("remnawave-suggest-locations");
+        const target = $("remnawave-suggestions");
+        button.disabled = true;
+        target.innerHTML = `<div class="muted">Reading host tags…</div>`;
+        try {
+          const suggestion = await request("/remnawave/locations/suggest");
+          state.remnawaveSuggestion = suggestion;
+          renderRemnawaveSuggestions();
+        } catch (err) {
+          target.innerHTML = `<div class="error">${escapeHtml(err.message)}</div>`;
+        } finally {
+          button.disabled = false;
+        }
+      }
+
+      function renderRemnawaveSuggestions() {
+        const target = $("remnawave-suggestions");
+        const suggestion = state.remnawaveSuggestion;
+        if (!suggestion) {
+          target.innerHTML = "";
+          return;
+        }
+        const candidates = Array.isArray(suggestion.candidates) ? suggestion.candidates : [];
+        const unmatched = Array.isArray(suggestion.unmatched) ? suggestion.unmatched : [];
+        const taken = new Set(remnawaveLocationRowsFromForm().map((location) => (location.key || "").trim().toLowerCase()));
+
+        const rows = candidates.map((candidate, index) => {
+          const names = candidate.members.map((member) => member.nodeName || member.stableId);
+          const already = taken.has(candidate.tag.toLowerCase());
+          return `
+            <tr>
+              <td><code>${escapeHtml(candidate.tag)}</code></td>
+              <td>${candidate.members.length}</td>
+              <td class="muted">${escapeHtml(names.join(", "))}</td>
+              <td>
+                <button class="secondary small" type="button" data-remnawave-use-candidate="${index}" ${already ? "disabled" : ""}>
+                  ${already ? "Already a location" : "Add as location"}
+                </button>
+              </td>
+            </tr>
+          `;
+        }).join("") || `<tr><td colspan="4" class="muted">No tagged hosts matched the current nodes</td></tr>`;
+
+        const unmatchedNote = unmatched.length
+          ? `<div class="hint">${unmatched.length} node(s) matched no tagged host and cannot be suggested: ${escapeHtml(unmatched.map((member) => member.nodeName || member.stableId).join(", "))}</div>`
+          : "";
+
+        target.innerHTML = `
+          <div class="table-wrap">
+            <table class="remnawave-table">
+              <thead><tr><th>Host tag</th><th>Nodes</th><th>Members</th><th>Action</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+          ${unmatchedNote}
+          <div class="hint">Members are added without a fixed Host: the checker pairs them by address and port on every sync.</div>
+        `;
       }
 
       async function syncRemnawave() {
@@ -6770,6 +6839,23 @@
         const locations = remnawaveLocationRowsFromForm();
         locations.push({ key: "", publicLabel: "", members: [{ stableId: "", hostUuid: "" }] });
         renderRemnawaveLocations(locations);
+      });
+      $("remnawave-suggest-locations").addEventListener("click", suggestRemnawaveLocations);
+      $("remnawave-suggestions").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-remnawave-use-candidate]");
+        if (!button) return;
+        const suggestion = state.remnawaveSuggestion;
+        const candidate = suggestion && suggestion.candidates[Number(button.dataset.remnawaveUseCandidate)];
+        if (!candidate) return;
+        const locations = remnawaveLocationRowsFromForm();
+        locations.push({
+          key: candidate.tag.toLowerCase(),
+          publicLabel: "",
+          // No Host is pinned: pairing is derived on every sync from address:port.
+          members: candidate.members.map((member) => ({ stableId: member.stableId, hostUuid: "" })),
+        });
+        renderRemnawaveLocations(locations);
+        renderRemnawaveSuggestions();
       });
       $("remnawave-locations").addEventListener("click", (event) => {
         const removeLocation = event.target.closest("[data-remnawave-remove-location]");
