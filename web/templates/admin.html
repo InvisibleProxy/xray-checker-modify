@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="robots" content="noindex, nofollow" />
     <title>Xray Checker Admin</title>
-    <script src="/static/localization.js?v=1"></script>
+    <script src="/static/localization.js?v=2"></script>
     <style>
       :root {
         color-scheme: dark;
@@ -684,6 +684,34 @@
         gap: 12px;
         flex-wrap: wrap;
       }
+      .nodes-order-controls {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin-left: auto;
+        flex-wrap: wrap;
+      }
+      .nodes-sort-field {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .nodes-sort-field select {
+        width: auto;
+        min-width: 150px;
+        padding: 6px 28px 6px 8px;
+        color: var(--text);
+        font-size: 12px;
+      }
+      button.nodes-sort-direction {
+        width: 32px;
+        min-width: 32px;
+        padding: 5px 0;
+        font-size: 16px;
+        line-height: 1;
+      }
       .remnawave-policy-grid {
         display: grid;
         grid-template-columns: repeat(4, minmax(150px, 1fr));
@@ -843,6 +871,15 @@
         box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
         transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
       }
+      .node-card.dragging {
+        opacity: 0.52;
+      }
+      .node-card.drag-before {
+        box-shadow: 0 -3px 0 var(--blue);
+      }
+      .node-card.drag-after {
+        box-shadow: 0 3px 0 var(--blue);
+      }
       .node-card.entering {
         animation: node-card-enter 0.34s ease both;
         animation-delay: calc(var(--node-card-index, 0) * 40ms);
@@ -885,6 +922,35 @@
       .node-select {
         display: flex;
         align-items: center;
+      }
+      .node-leading-actions {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+      }
+      .node-drag-handle {
+        display: inline-flex;
+        width: 24px;
+        height: 32px;
+        padding: 0;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--muted);
+        cursor: grab;
+        touch-action: none;
+      }
+      .node-drag-handle:active {
+        cursor: grabbing;
+      }
+      .node-drag-handle:hover {
+        border-color: var(--border);
+        color: var(--text);
+      }
+      .node-drag-handle[hidden] {
+        display: none;
       }
       .node-identity,
       .node-current,
@@ -1729,6 +1795,23 @@
               <h2>Nodes</h2>
             </div>
             <span id="nodes-summary" class="table-meta">0 nodes</span>
+            <div class="nodes-order-controls" role="group" aria-label="Node ordering">
+              <label class="nodes-sort-field" for="nodes-sort">
+                <span>Sort</span>
+                <select id="nodes-sort">
+                  <option value="source">Default order</option>
+                  <option value="manual">Manual order</option>
+                  <option value="name">Name</option>
+                  <option value="status">Status</option>
+                  <option value="location">Location</option>
+                  <option value="latency">Latency</option>
+                  <option value="speed">Speed</option>
+                  <option value="subscription">Subscription</option>
+                </select>
+              </label>
+              <button id="nodes-sort-direction" class="secondary small nodes-sort-direction" type="button" title="Ascending" aria-label="Ascending">↑</button>
+              <button id="nodes-reset-order" class="secondary small" type="button" hidden>Reset manual order</button>
+            </div>
             <div id="selection-action-bar" class="action-bar" hidden>
               <span id="selection-count" class="muted">0 selected</span>
               <button id="selection-check" class="secondary" type="button">Check</button>
@@ -2643,6 +2726,10 @@
         remnawave: null,
         nodesOverviewSort: "avgMbps",
         nodesOverviewSortDir: "desc",
+        dashboardSort: "source",
+        dashboardSortDirection: "asc",
+        dashboardManualOrder: [],
+        dashboardPointerDrag: null,
         speedPollRunning: false,
         loadRunning: false,
         speedRunStarting: false,
@@ -2671,7 +2758,9 @@
       const maxHistoryRetentionDays = 3650;
       const speedDraftKey = "xray-checker-admin-speed-test";
       const filterStateKey = "xray-checker-admin-filters";
+      const dashboardOrderStateKey = "xray-checker-admin-node-order";
       const pendingNodeMergeKey = "xray-checker-admin-pending-node-merge";
+      const dashboardSortModes = new Set(["source", "manual", "name", "status", "location", "latency", "speed", "subscription"]);
 
       function escapeHtml(value) {
         return String(value || "")
@@ -3356,6 +3445,174 @@
           });
       }
 
+      function restoreDashboardOrderState() {
+        let stored = null;
+        try {
+          stored = JSON.parse(localStorage.getItem(dashboardOrderStateKey) || "null");
+        } catch {
+        }
+        if (!stored || typeof stored !== "object") return;
+        if (dashboardSortModes.has(stored.sort)) state.dashboardSort = stored.sort;
+        if (["asc", "desc"].includes(stored.direction)) state.dashboardSortDirection = stored.direction;
+        if (Array.isArray(stored.manualOrder)) {
+          const seen = new Set();
+          state.dashboardManualOrder = stored.manualOrder
+            .map((stableId) => String(stableId || "").trim())
+            .filter((stableId) => stableId && !seen.has(stableId) && seen.add(stableId));
+        }
+      }
+
+      function saveDashboardOrderState() {
+        try {
+          localStorage.setItem(dashboardOrderStateKey, JSON.stringify({
+            version: 1,
+            sort: state.dashboardSort,
+            direction: state.dashboardSortDirection,
+            manualOrder: state.dashboardManualOrder,
+          }));
+        } catch {
+        }
+      }
+
+      function normalizeDashboardManualOrder() {
+        const activeIDs = state.proxies.map((proxy) => proxy.stableId);
+        const activeSet = new Set(activeIDs);
+        const seen = new Set();
+        const normalized = [];
+        state.dashboardManualOrder.forEach((stableId) => {
+          if (!activeSet.has(stableId) || seen.has(stableId)) return;
+          seen.add(stableId);
+          normalized.push(stableId);
+        });
+        activeIDs.forEach((stableId) => {
+          if (seen.has(stableId)) return;
+          seen.add(stableId);
+          normalized.push(stableId);
+        });
+        const changed = normalized.length !== state.dashboardManualOrder.length
+          || normalized.some((stableId, index) => stableId !== state.dashboardManualOrder[index]);
+        state.dashboardManualOrder = normalized;
+        return changed;
+      }
+
+      function compareDashboardText(left, right) {
+        return String(left || "").localeCompare(String(right || ""), undefined, { numeric: true, sensitivity: "base" });
+      }
+
+      function dashboardStatusRank(proxy) {
+        if (state.projectMaintenance?.enabled || proxy.maintenance) return 2;
+        const status = proxyAvailabilityStatus(proxy);
+        if (status === "offline") return 0;
+        if (status === "proxy_failure") return 1;
+        if (status === "online") return 3;
+        return 2;
+      }
+
+      function dashboardLocation(proxy) {
+        const overview = overviewNodeFor(proxy.stableId);
+        return String((overview && overview.claimedCountryCode) || "").trim().toUpperCase();
+      }
+
+      function sortDashboardProxies(proxies) {
+        const sourceIndex = new Map(state.proxies.map((proxy, index) => [proxy.stableId, index]));
+        const manualIndex = new Map(state.dashboardManualOrder.map((stableId, index) => [stableId, index]));
+        const direction = state.dashboardSortDirection === "desc" ? -1 : 1;
+        const compareOptional = (left, right, compare) => {
+          const leftMissing = left == null || left === "";
+          const rightMissing = right == null || right === "";
+          if (leftMissing || rightMissing) return leftMissing === rightMissing ? 0 : (leftMissing ? 1 : -1);
+          return direction * compare(left, right);
+        };
+        return [...proxies].sort((left, right) => {
+          let compared = 0;
+          if (state.dashboardSort === "source") {
+            compared = (sourceIndex.get(left.stableId) ?? Number.MAX_SAFE_INTEGER) - (sourceIndex.get(right.stableId) ?? Number.MAX_SAFE_INTEGER);
+          } else if (state.dashboardSort === "manual") {
+            compared = (manualIndex.get(left.stableId) ?? Number.MAX_SAFE_INTEGER) - (manualIndex.get(right.stableId) ?? Number.MAX_SAFE_INTEGER);
+          } else if (state.dashboardSort === "name") {
+            compared = direction * compareDashboardText(left.name, right.name);
+          } else if (state.dashboardSort === "status") {
+            compared = direction * (dashboardStatusRank(left) - dashboardStatusRank(right));
+          } else if (state.dashboardSort === "location") {
+            compared = compareOptional(dashboardLocation(left), dashboardLocation(right), compareDashboardText);
+          } else if (state.dashboardSort === "latency") {
+            const leftLatency = proxyAvailabilityStatus(left) === "online" && Number(left.latencyMs || 0) > 0 ? Number(left.latencyMs) : null;
+            const rightLatency = proxyAvailabilityStatus(right) === "online" && Number(right.latencyMs || 0) > 0 ? Number(right.latencyMs) : null;
+            compared = compareOptional(leftLatency, rightLatency, (a, b) => a - b);
+          } else if (state.dashboardSort === "speed") {
+            const leftResult = resultFor(left.stableId);
+            const rightResult = resultFor(right.stableId);
+            const leftSpeed = isSuccessfulResult(leftResult) ? Number(leftResult.mbps) : null;
+            const rightSpeed = isSuccessfulResult(rightResult) ? Number(rightResult.mbps) : null;
+            compared = compareOptional(leftSpeed, rightSpeed, (a, b) => a - b);
+          } else if (state.dashboardSort === "subscription") {
+            compared = compareOptional(left.subName, right.subName, compareDashboardText);
+          }
+          if (compared !== 0) return compared;
+          return compareDashboardText(left.name, right.name)
+            || ((sourceIndex.get(left.stableId) ?? Number.MAX_SAFE_INTEGER) - (sourceIndex.get(right.stableId) ?? Number.MAX_SAFE_INTEGER));
+        });
+      }
+
+      function syncDashboardOrderControls() {
+        const select = $("nodes-sort");
+        const direction = $("nodes-sort-direction");
+        const reset = $("nodes-reset-order");
+        if (!select || !direction || !reset) return;
+        select.value = state.dashboardSort;
+        direction.textContent = state.dashboardSortDirection === "desc" ? "↓" : "↑";
+        direction.disabled = ["source", "manual"].includes(state.dashboardSort);
+        const directionLabel = state.dashboardSort === "status"
+          ? (state.dashboardSortDirection === "desc" ? "Healthy first" : "Problems first")
+          : (state.dashboardSortDirection === "desc" ? "Descending" : "Ascending");
+        direction.title = directionLabel;
+        direction.setAttribute("aria-label", directionLabel);
+        reset.hidden = state.dashboardSort !== "manual";
+      }
+
+      function clearDashboardDragState() {
+        state.dashboardPointerDrag = null;
+        $("nodes").querySelectorAll(".dragging, .drag-before, .drag-after").forEach((card) => {
+          card.classList.remove("dragging", "drag-before", "drag-after");
+        });
+      }
+
+      function commitDashboardVisibleOrder(visibleIDs) {
+        normalizeDashboardManualOrder();
+        const visibleSet = new Set(visibleIDs);
+        if (visibleSet.size !== visibleIDs.length) return false;
+        const currentVisible = filteredProxies().map((proxy) => proxy.stableId);
+        if (currentVisible.length !== visibleIDs.length || currentVisible.some((stableId) => !visibleSet.has(stableId))) return false;
+        const queue = [...visibleIDs];
+        state.dashboardManualOrder = state.dashboardManualOrder.map((stableId) => visibleSet.has(stableId) ? queue.shift() : stableId);
+        saveDashboardOrderState();
+        clearDashboardDragState();
+        renderNodes();
+        return true;
+      }
+
+      function moveDashboardVisibleNode(stableId, offset) {
+        if (state.dashboardSort !== "manual") return false;
+        const visibleIDs = filteredProxies().map((proxy) => proxy.stableId);
+        const index = visibleIDs.indexOf(stableId);
+        const nextIndex = index + offset;
+        if (index < 0 || nextIndex < 0 || nextIndex >= visibleIDs.length) return false;
+        [visibleIDs[index], visibleIDs[nextIndex]] = [visibleIDs[nextIndex], visibleIDs[index]];
+        return commitDashboardVisibleOrder(visibleIDs);
+      }
+
+      function dropDashboardVisibleNode(stableId, targetStableId, placeAfter) {
+        if (state.dashboardSort !== "manual" || stableId === targetStableId) return false;
+        const visibleIDs = filteredProxies().map((proxy) => proxy.stableId);
+        if (!visibleIDs.includes(stableId) || !visibleIDs.includes(targetStableId)) return false;
+        const reordered = visibleIDs.filter((id) => id !== stableId);
+        let targetIndex = reordered.indexOf(targetStableId);
+        if (targetIndex < 0) return false;
+        if (placeAfter) targetIndex += 1;
+        reordered.splice(targetIndex, 0, stableId);
+        return commitDashboardVisibleOrder(reordered);
+      }
+
       function proxyAvailabilityStatus(proxy) {
 		if (state.projectMaintenance?.enabled) return "unknown";
         if (["online", "proxy_failure", "offline"].includes(proxy && proxy.status)) return proxy.status;
@@ -3369,7 +3626,7 @@
 
       function filteredProxies() {
         const filters = currentFilters();
-        return state.proxies.filter((proxy) => {
+        const filtered = state.proxies.filter((proxy) => {
           const availabilityStatus = proxyAvailabilityStatus(proxy);
           if (filters.status === "online" && (proxy.maintenance || availabilityStatus !== "online")) return false;
           if (filters.status === "proxy_failure" && (proxy.maintenance || availabilityStatus !== "proxy_failure")) return false;
@@ -3383,6 +3640,7 @@
           }
           return true;
         });
+        return sortDashboardProxies(filtered);
       }
 
       function resultFor(stableId) {
@@ -5228,14 +5486,20 @@
       function nodeCardHTML(proxy, index, animateCards) {
         const view = nodeCardPresentation(proxy);
         const open = state.openNodeStableIds.has(proxy.stableId);
+        const manualOrder = state.dashboardSort === "manual";
         const panelID = `node-card-panel-${chartDOMToken(proxy.stableId)}`;
         const history = open ? dashboardHistoryFor(proxy.stableId) : null;
         return `
           <article class="node-card ${view.rowClass} ${open ? "open" : ""} ${animateCards ? "entering" : ""}" data-node-card="${escapeHtml(proxy.stableId)}"${animateCards ? ` style="--node-card-index: ${Math.min(index, 12)}"` : ""}>
             <div class="node-card-head" data-node-toggle-area="${escapeHtml(proxy.stableId)}" tabindex="0" aria-expanded="${open}" aria-controls="${panelID}">
-              <label class="node-select">
-                <input type="checkbox" data-id="${escapeHtml(proxy.stableId)}" aria-label="Select ${escapeHtml(proxy.name || "node")}" ${state.selected.has(proxy.stableId) ? "checked" : ""}>
-              </label>
+              <div class="node-leading-actions">
+                <span class="node-drag-handle" role="button" tabindex="0" data-node-drag-handle="${escapeHtml(proxy.stableId)}" title="Drag to reorder. Use arrow keys to move." aria-label="Move ${escapeHtml(proxy.name || "node")}"${manualOrder ? "" : " hidden"}>
+                  <svg width="12" height="18" viewBox="0 0 12 18" fill="currentColor" aria-hidden="true"><circle cx="3" cy="3" r="1.3"/><circle cx="9" cy="3" r="1.3"/><circle cx="3" cy="9" r="1.3"/><circle cx="9" cy="9" r="1.3"/><circle cx="3" cy="15" r="1.3"/><circle cx="9" cy="15" r="1.3"/></svg>
+                </span>
+                <label class="node-select">
+                  <input type="checkbox" data-id="${escapeHtml(proxy.stableId)}" aria-label="Select ${escapeHtml(proxy.name || "node")}" ${state.selected.has(proxy.stableId) ? "checked" : ""}>
+                </label>
+              </div>
               <div class="node-identity">
                 <div class="node-title"><span data-node-country>${nodeCountryMarker(proxy.stableId)}</span><span class="dot ${state.projectMaintenance?.enabled || proxy.maintenance ? "maintenance" : (proxyAvailabilityStatus(proxy) === "online" ? "online" : (proxyAvailabilityStatus(proxy) === "proxy_failure" ? "proxy-failure" : "offline"))}" data-node-dot></span><span class="node-title-text" data-node-name>${escapeHtml(proxy.name || "Unnamed")}</span></div>
                 <div class="node-subline" data-node-subline>${nodeSublineHTML(proxy)}</div>
@@ -5295,6 +5559,10 @@
         // On the input itself: a label wrapper carrying aria-label does not give
         // the control an accessible name, so the row read as a bare "checkbox".
         checkbox.setAttribute("aria-label", `Select ${proxy.name || "node"}`);
+        const dragHandle = card.querySelector("[data-node-drag-handle]");
+        const manualOrder = state.dashboardSort === "manual";
+        dragHandle.hidden = !manualOrder;
+        dragHandle.setAttribute("aria-label", `Move ${proxy.name || "node"}`);
         const country = card.querySelector("[data-node-country]");
         const countryHTML = nodeCountryMarker(proxy.stableId);
         if (country.innerHTML !== countryHTML) country.innerHTML = countryHTML;
@@ -5331,14 +5599,25 @@
 
       function renderNodes() {
         const container = $("nodes");
+        syncDashboardOrderControls();
         const proxies = filteredProxies();
         const renderedCards = [...container.children].filter((element) => element.dataset.nodeCard);
+        const renderedByID = new Map(renderedCards.map((card) => [card.dataset.nodeCard, card]));
         const sameOrder = proxies.length > 0
           && renderedCards.length === proxies.length
           && renderedCards.every((card, index) => card.dataset.nodeCard === proxies[index].stableId);
+        const sameCards = proxies.length > 0
+          && renderedCards.length === proxies.length
+          && proxies.every((proxy) => renderedByID.has(proxy.stableId));
 
         if (sameOrder) {
           renderedCards.forEach((card, index) => applyNodeCard(card, proxies[index]));
+        } else if (sameCards) {
+          proxies.forEach((proxy) => {
+            const card = renderedByID.get(proxy.stableId);
+            applyNodeCard(card, proxy);
+            container.appendChild(card);
+          });
         } else {
           hideSpeedChartTooltip();
           const animateCards = !state.dashboardCardsAnimated && proxies.length > 0;
@@ -6392,6 +6671,7 @@
           state.telegram = telegram;
           state.nodesOverview = nodesOverview;
           state.projectMaintenance = projectMaintenance || { enabled: false, since: "" };
+          if (normalizeDashboardManualOrder()) saveDashboardOrderState();
           if (diagnosticAgents.status === "fulfilled") state.diagnosticAgents = diagnosticAgents.value;
           if (diagnosticSessions.status === "fulfilled") state.diagnosticSessions = diagnosticSessions.value;
           state.lastUpdatedAt = new Date();
@@ -6803,6 +7083,55 @@
         }
       }
 
+      $("nodes").addEventListener("pointerdown", (event) => {
+        const handle = event.target instanceof Element ? event.target.closest("[data-node-drag-handle]") : null;
+        if (!handle || state.dashboardSort !== "manual" || (event.button != null && event.button !== 0)) return;
+        const stableId = handle.dataset.nodeDragHandle;
+        const card = nodeCardElement(stableId);
+        if (!stableId || !card) return;
+        state.dashboardPointerDrag = {
+          pointerId: event.pointerId,
+          stableId,
+          startX: event.clientX,
+          startY: event.clientY,
+          dragging: false,
+          targetStableId: "",
+          placeAfter: false,
+        };
+        handle.focus();
+        if (handle.setPointerCapture) handle.setPointerCapture(event.pointerId);
+        event.preventDefault();
+      });
+      $("nodes").addEventListener("pointermove", (event) => {
+        const drag = state.dashboardPointerDrag;
+        if (!drag || drag.pointerId !== event.pointerId || state.dashboardSort !== "manual") return;
+        if (!drag.dragging && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 5) return;
+        drag.dragging = true;
+        const draggedCard = nodeCardElement(drag.stableId);
+        if (draggedCard) draggedCard.classList.add("dragging");
+        const target = document.elementFromPoint(event.clientX, event.clientY);
+        const targetCard = target instanceof Element ? target.closest("[data-node-card]") : null;
+        $("nodes").querySelectorAll(".drag-before, .drag-after").forEach((card) => card.classList.remove("drag-before", "drag-after"));
+        drag.targetStableId = "";
+        if (targetCard && targetCard.dataset.nodeCard !== drag.stableId) {
+          const bounds = targetCard.getBoundingClientRect();
+          drag.targetStableId = targetCard.dataset.nodeCard;
+          drag.placeAfter = event.clientY >= bounds.top + bounds.height / 2;
+          targetCard.classList.add(drag.placeAfter ? "drag-after" : "drag-before");
+        }
+        event.preventDefault();
+      });
+      $("nodes").addEventListener("pointerup", (event) => {
+        const drag = state.dashboardPointerDrag;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        event.preventDefault();
+        const changed = drag.dragging && drag.targetStableId
+          ? dropDashboardVisibleNode(drag.stableId, drag.targetStableId, drag.placeAfter)
+          : false;
+        if (!changed) clearDashboardDragState();
+      });
+      $("nodes").addEventListener("pointercancel", clearDashboardDragState);
+
       $("nodes").addEventListener("click", (event) => {
         const target = event.target instanceof Element ? event.target : null;
         if (!target) return;
@@ -6858,7 +7187,7 @@
           return;
         }
         const head = target.closest("[data-node-toggle-area]");
-        if (!head || target.closest("button, input, label, a, select, textarea")) return;
+        if (!head || target.closest("button, input, label, a, select, textarea, [data-node-drag-handle]")) return;
         toggleNodeDetails(head.dataset.nodeToggleArea);
       });
       $("nodes").addEventListener("change", (event) => {
@@ -6885,6 +7214,13 @@
         }
       });
       $("nodes").addEventListener("keydown", (event) => {
+        const handle = event.target instanceof Element ? event.target.closest("[data-node-drag-handle]") : null;
+        if (handle && ["ArrowUp", "ArrowDown"].includes(event.key)) {
+          event.preventDefault();
+          moveDashboardVisibleNode(handle.dataset.nodeDragHandle, event.key === "ArrowUp" ? -1 : 1);
+          handle.focus();
+          return;
+        }
         const head = event.target instanceof Element ? event.target.closest("[data-node-toggle-area]") : null;
         if (!head || event.target !== head || !["Enter", " "].includes(event.key)) return;
         event.preventDefault();
@@ -7095,6 +7431,26 @@
         state.selected.clear();
         renderNodes();
       });
+      $("nodes-sort").addEventListener("change", () => {
+        const sort = $("nodes-sort").value;
+        if (!dashboardSortModes.has(sort)) return;
+        state.dashboardSort = sort;
+        normalizeDashboardManualOrder();
+        clearDashboardDragState();
+        saveDashboardOrderState();
+        renderNodes();
+      });
+      $("nodes-sort-direction").addEventListener("click", () => {
+        if (["source", "manual"].includes(state.dashboardSort)) return;
+        state.dashboardSortDirection = state.dashboardSortDirection === "asc" ? "desc" : "asc";
+        saveDashboardOrderState();
+        renderNodes();
+      });
+      $("nodes-reset-order").addEventListener("click", () => {
+        state.dashboardManualOrder = state.proxies.map((proxy) => proxy.stableId);
+        saveDashboardOrderState();
+        renderNodes();
+      });
       ["search", "status-filter", "protocol-filter", "sub-filter"].forEach((id) => {
         $(id).addEventListener("input", renderNodes);
         $(id).addEventListener("change", () => {
@@ -7138,6 +7494,8 @@
         });
       }, true);
 
+      restoreDashboardOrderState();
+      syncDashboardOrderControls();
       switchSettingsPane(state.settingsPane);
       switchGlobalSettingsPane(state.globalSettingsPane);
       load(true).catch((err) => {
