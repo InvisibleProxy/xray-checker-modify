@@ -111,6 +111,15 @@
       .control-panel {
         position: sticky;
         top: 20px;
+        /* The panel is taller than a laptop viewport. Without its own scroll a
+           sticky element pins its top and pushes the rest below the fold, so the
+           lower controls stay unreachable until the whole node list is scrolled
+           past. */
+        max-height: calc(100vh - 40px);
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-width: thin;
+        scrollbar-color: var(--border) transparent;
       }
       .panel-header {
         display: flex;
@@ -184,6 +193,17 @@
         gap: 8px;
         border-bottom: 1px solid var(--border);
         padding-bottom: 10px;
+        /* Six tabs exceed a phone viewport. Scrolling the bar keeps the page
+           itself from widening, which would otherwise push every panel sideways
+           and cut off the last tab. */
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+      .tabs::-webkit-scrollbar {
+        display: none;
+      }
+      .tabs button.tab {
+        flex: 0 0 auto;
       }
       button.tab {
         background: transparent;
@@ -289,6 +309,18 @@
         color: var(--text);
         padding: 9px 10px;
         font: inherit;
+      }
+      /* One focus ring for every control. Browser defaults differ per engine and
+         none of them match this palette, which made keyboard position hard to
+         follow on a dark background. */
+      a:focus-visible,
+      input:focus-visible,
+      select:focus-visible,
+      textarea:focus-visible,
+      button:focus-visible,
+      [tabindex]:focus-visible {
+        outline: 2px solid var(--blue);
+        outline-offset: 2px;
       }
       input:not([type="checkbox"]),
       select,
@@ -1399,6 +1431,16 @@
         padding: 14px;
         background: var(--green-soft);
       }
+      /* A 1366x768 laptop is the common operator screen: the sidebar still fits
+         beside the list, but at its full width it leaves the node rows cramped. */
+      @media (max-width: 1400px) {
+        .dashboard-grid {
+          grid-template-columns: minmax(280px, 310px) minmax(0, 1fr);
+        }
+        .overview-grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+      }
       @media (max-width: 960px) {
         .dashboard-grid {
           grid-template-columns: 1fr;
@@ -1422,6 +1464,10 @@
         }
         .control-panel {
           position: static;
+          /* Stacked layout scrolls with the page, so an inner scroll here would
+             trap the controls in a short box instead of freeing them. */
+          max-height: none;
+          overflow-y: visible;
         }
         .remnawave-policy-grid {
           grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1616,7 +1662,11 @@
               Interval minutes
               <input id="schedule-minutes" type="number" min="1" step="1" />
             </label>
-            <div class="hint">The schedule applies to the selected nodes, current filters and Speed Test parameters.</div>
+            <div class="hint">Saving stores the nodes selected right now, the current filters and the Speed Test parameters.</div>
+            <div class="group-title">
+              <span id="schedule-scope" class="muted">Saved scope: none</span>
+              <button id="load-schedule-scope" class="secondary small" type="button">Restore saved scope</button>
+            </div>
             <button id="save-schedule" class="secondary" type="button">Save Schedule</button>
           </div>
         </section>
@@ -2590,6 +2640,7 @@
       const defaultHistoryRetentionDays = 60;
       const maxHistoryRetentionDays = 3650;
       const speedDraftKey = "xray-checker-admin-speed-test";
+      const filterStateKey = "xray-checker-admin-filters";
       const pendingNodeMergeKey = "xray-checker-admin-pending-node-merge";
 
       function escapeHtml(value) {
@@ -3108,6 +3159,64 @@
           subName: $("sub-filter").value,
           search: $("search").value.trim().toLowerCase(),
         };
+      }
+
+      // Shows what a saved schedule actually covers. The dashboard no longer
+      // adopts that scope on load, so it has to be legible somewhere.
+      function renderScheduleScope() {
+        const label = $("schedule-scope");
+        const button = $("load-schedule-scope");
+        if (!label || !button) return;
+        const schedule = (state.snapshot && state.snapshot.schedule) || {};
+        const scheduled = Array.isArray(schedule.proxyIds) ? schedule.proxyIds : [];
+        const parts = [];
+        if (schedule.onlyOnline) parts.push("online only");
+        if (schedule.protocol) parts.push(schedule.protocol);
+        if (schedule.subName) parts.push(schedule.subName);
+        label.textContent = scheduled.length === 0
+          ? `Saved scope: all nodes matching filters${parts.length ? ` (${parts.join(" · ")})` : ""}`
+          : `Saved scope: ${scheduled.length} nodes${parts.length ? ` (${parts.join(" · ")})` : ""}`;
+        button.disabled = scheduled.length === 0;
+      }
+
+      function applyScheduleScope() {
+        const schedule = (state.snapshot && state.snapshot.schedule) || {};
+        const scheduled = Array.isArray(schedule.proxyIds) ? schedule.proxyIds : [];
+        if (scheduled.length === 0) return;
+        const known = new Set(state.proxies.map((proxy) => proxy.stableId));
+        state.selected = new Set(scheduled.filter((stableId) => known.has(stableId)));
+        renderNodes();
+        $("message").textContent = `Selected ${state.selected.size} scheduled nodes`;
+      }
+
+      // Filters persist per browser, like the language and the speed-test draft.
+      // The search box is deliberately left out: a forgotten search term would
+      // silently hide nodes on the next visit.
+      function saveFilterState() {
+        try {
+          const filters = currentFilters();
+          localStorage.setItem(filterStateKey, JSON.stringify({
+            status: filters.status, protocol: filters.protocol, subName: filters.subName,
+          }));
+        } catch {
+        }
+      }
+
+      function restoreFilterState() {
+        let stored = null;
+        try {
+          stored = JSON.parse(localStorage.getItem(filterStateKey) || "null");
+        } catch {
+        }
+        if (!stored || typeof stored !== "object") return;
+        // Options are rebuilt from live data, so a stored value that no longer
+        // exists is dropped rather than leaving an empty list behind.
+        [["status-filter", stored.status], ["protocol-filter", stored.protocol], ["sub-filter", stored.subName]]
+          .forEach(([id, value]) => {
+            const select = $(id);
+            if (!select || typeof value !== "string") return;
+            if ([...select.options].some((option) => option.value === value)) select.value = value;
+          });
       }
 
       function proxyAvailabilityStatus(proxy) {
@@ -4872,8 +4981,8 @@
         return `
           <article class="node-card ${view.rowClass} ${open ? "open" : ""} ${animateCards ? "entering" : ""}" data-node-card="${escapeHtml(proxy.stableId)}"${animateCards ? ` style="--node-card-index: ${Math.min(index, 12)}"` : ""}>
             <div class="node-card-head" data-node-toggle-area="${escapeHtml(proxy.stableId)}" tabindex="0" aria-expanded="${open}" aria-controls="${panelID}">
-              <label class="node-select" aria-label="Select ${escapeHtml(proxy.name || "node")}">
-                <input type="checkbox" data-id="${escapeHtml(proxy.stableId)}" ${state.selected.has(proxy.stableId) ? "checked" : ""}>
+              <label class="node-select">
+                <input type="checkbox" data-id="${escapeHtml(proxy.stableId)}" aria-label="Select ${escapeHtml(proxy.name || "node")}" ${state.selected.has(proxy.stableId) ? "checked" : ""}>
               </label>
               <div class="node-identity">
                 <div class="node-title"><span data-node-country>${nodeCountryMarker(proxy.stableId)}</span><span class="dot ${proxy.maintenance ? "maintenance" : (proxyAvailabilityStatus(proxy) === "online" ? "online" : (proxyAvailabilityStatus(proxy) === "proxy_failure" ? "proxy-failure" : "offline"))}" data-node-dot></span><span class="node-title-text" data-node-name>${escapeHtml(proxy.name || "Unnamed")}</span></div>
@@ -4885,7 +4994,7 @@
               </div>
               <div class="node-speed-summary">
                 <strong class="${view.speedClass}" data-node-speed>${escapeHtml(view.speedText)}</strong>
-                <div class="node-summary-label" data-node-speed-checked>${escapeHtml(view.speedChecked)}</div>
+                <div class="node-summary-label">Speed test<span data-node-speed-checked> · ${escapeHtml(view.speedChecked)}</span></div>
               </div>
               <div class="node-card-actions">
                 <button class="secondary small" type="button" data-check-id="${escapeHtml(proxy.stableId)}" ${view.checkDisabled ? "disabled" : ""}>${view.checking ? "Checking…" : "Check"}</button>
@@ -4929,7 +5038,9 @@
         card.classList.toggle("row-warn", view.rowClass === "row-warn");
         const checkbox = card.querySelector("input[data-id]");
         checkbox.checked = state.selected.has(proxy.stableId);
-        checkbox.closest("label")?.setAttribute("aria-label", `Select ${proxy.name || "node"}`);
+        // On the input itself: a label wrapper carrying aria-label does not give
+        // the control an accessible name, so the row read as a bare "checkbox".
+        checkbox.setAttribute("aria-label", `Select ${proxy.name || "node"}`);
         const country = card.querySelector("[data-node-country]");
         const countryHTML = nodeCountryMarker(proxy.stableId);
         if (country.innerHTML !== countryHTML) country.innerHTML = countryHTML;
@@ -4947,7 +5058,7 @@
         const speed = card.querySelector("[data-node-speed]");
         speed.className = view.speedClass;
         speed.textContent = view.speedText;
-        card.querySelector("[data-node-speed-checked]").textContent = view.speedChecked;
+        card.querySelector("[data-node-speed-checked]").textContent = ` · ${view.speedChecked}`;
         const check = card.querySelector("[data-check-id]");
         check.disabled = view.checkDisabled;
         check.textContent = view.checking ? "Checking…" : "Check";
@@ -5109,7 +5220,16 @@
         $("selection-count").textContent = `${count} selected`;
         $("selection-action-bar").hidden = count === 0;
         $("nodes-summary").hidden = count > 0;
-        $("nodes-summary").textContent = `${filteredProxies().length} shown · ${state.proxies.length} total`;
+        // Naming the hidden nodes and their state stops a filter from reading as
+        // "this node no longer exists" when it is only filtered out.
+        const visibleSet = new Set(visibleIDs);
+        const hidden = state.proxies.length - visibleIDs.length;
+        const hiddenIssues = state.proxies.filter((proxy) => !visibleSet.has(proxy.stableId)
+          && (proxy.maintenance || proxyAvailabilityStatus(proxy) !== "online")).length;
+        $("nodes-summary").textContent = hidden > 0
+          ? `${visibleIDs.length} shown · ${hidden} hidden by filters${hiddenIssues > 0 ? ` · ${hiddenIssues} with issues` : ""}`
+          : `${visibleIDs.length} shown · ${state.proxies.length} total`;
+        $("nodes-summary").className = hiddenIssues > 0 ? "table-meta warn" : "table-meta";
         $("selection-check").textContent = state.availabilityCheckRunning ? "Checking…" : "Check";
         $("selection-check").disabled = count === 0 || state.availabilityCheckRunning;
         $("selection-run").textContent = state.speedRunStarting ? "Starting…" : ((run && run.running) ? "Running…" : "Run");
@@ -5194,12 +5314,13 @@
           maxHistoryRetentionDays,
           Math.max(1, Number(schedule.historyRetentionDays || defaultHistoryRetentionDays)),
         );
-        $("status-filter").value = schedule.onlyOnline ? "online" : "";
-        $("protocol-filter").value = schedule.protocol || "";
-        $("sub-filter").value = schedule.subName || "";
-        if (Array.isArray(schedule.proxyIds)) {
-          state.selected = new Set(schedule.proxyIds);
-        }
+        // Filters and selection belong to the operator, not to the schedule.
+        // Seeding them from schedule.onlyOnline hid exactly the failing nodes the
+        // dashboard exists to surface, and pre-ticked rows that the group Run,
+        // Check and Mute actions then operated on. The saved scope stays visible
+        // and restorable from the Schedule pane instead.
+        restoreFilterState();
+        renderScheduleScope();
         if (schedule.enabled && schedule.config && schedule.config.url) {
           applySpeedConfig(schedule.config);
         }
@@ -5262,6 +5383,7 @@
         renderNodesOverview();
         renderHistoryNodeOptions();
         renderHistoryResults();
+        renderScheduleScope();
       }
 
       function pruneSelection() {
@@ -5301,6 +5423,8 @@
 
       async function setDashboardRange(stableId, range) {
         const history = dashboardHistoryFor(stableId);
+        // An explicit pick is final: auto-fitting must not undo it on the next load.
+        history.rangeChosen = true;
         history.range = ["1d", "3d", "7d", "14d", "30d", "custom"].includes(range) ? range : "7d";
         if (history.range === "custom" && (!history.from || !history.to)) {
           const today = new Date();
@@ -5333,6 +5457,25 @@
         }
       }
 
+      // Shrinks the preset range to the smallest one that still covers the data,
+      // and only while the range is still the untouched default.
+      function narrowRangeToCoverage(history, results) {
+        if (history.rangeChosen || history.rangeAutoFitted || history.range === "custom") return false;
+        history.rangeAutoFitted = true;
+        const timestamps = (results || [])
+          .map((result) => Date.parse(result.checkedAt))
+          .filter((value) => Number.isFinite(value));
+        if (timestamps.length < 2) return false;
+        const spanDays = (Date.now() - Math.min(...timestamps)) / 86400000;
+        const presets = [["1d", 1], ["3d", 3], ["7d", 7], ["14d", 14], ["30d", 30]];
+        const current = presets.findIndex(([id]) => id === history.range);
+        if (current < 0) return false;
+        const fitted = presets.findIndex(([, days]) => days >= spanDays);
+        if (fitted < 0 || fitted >= current) return false;
+        history.range = presets[fitted][0];
+        return true;
+      }
+
       async function loadDashboardHistory(stableId) {
         if (!stableId || !state.openNodeStableIds.has(stableId)) return;
         const history = dashboardHistoryFor(stableId);
@@ -5363,6 +5506,14 @@
           if (requestID !== dataset.request || !state.openNodeStableIds.has(stableId)) return;
           dataset.results = results;
           dataset.loaded = true;
+          if (narrowRangeToCoverage(history, results)) {
+            // The default window is wider than a young node's history, which
+            // squeezed every point into a sliver at the right edge. Narrowing
+            // once, before the operator has chosen a range, keeps the first look
+            // readable without overriding a later choice.
+            loadDashboardHistory(stableId);
+            return;
+          }
         } catch (err) {
           if (requestID !== dataset.request || !state.openNodeStableIds.has(stableId)) return;
           dataset.error = err.message;
@@ -6553,6 +6704,7 @@
         renderNodeURLForm();
       });
       $("save-schedule").addEventListener("click", saveSchedule);
+      $("load-schedule-scope").addEventListener("click", applyScheduleScope);
       $("save-history-retention").addEventListener("click", saveHistoryRetention);
       $("save-telegram").addEventListener("click", saveTelegram);
       $("download-backup").addEventListener("click", downloadBackup);
@@ -6583,7 +6735,10 @@
       });
       ["search", "status-filter", "protocol-filter", "sub-filter"].forEach((id) => {
         $(id).addEventListener("input", renderNodes);
-        $(id).addEventListener("change", renderNodes);
+        $(id).addEventListener("change", () => {
+          saveFilterState();
+          renderNodes();
+        });
       });
       ["nodes-overview-search", "nodes-overview-status", "nodes-overview-country", "nodes-overview-sub", "nodes-overview-geo", "nodes-overview-sort"].forEach((id) => {
         $(id).addEventListener("input", renderNodesOverview);
