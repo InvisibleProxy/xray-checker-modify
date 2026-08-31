@@ -58,6 +58,11 @@ func main() {
 		RequestTimeout:  20 * time.Second,
 		JobPollInterval: time.Duration(envPositiveInt("PROBE_JOB_POLL_INTERVAL_SECONDS", 5)) * time.Second,
 		Executor:        executor,
+		// A refused job is worth reporting but not worth dropping the control
+		// connection for, so it is logged here instead of ending Run.
+		LogJobRejection: func(err error) {
+			log.Printf("diagnostic job refused by controller; control connection stays up: %v", err)
+		},
 	})
 	if err != nil {
 		log.Fatalf("probe agent configuration failed: %v", err)

@@ -34,6 +34,29 @@ type JobExecutor interface {
 	Execute(context.Context, JobAssignment) diagnostics.Observation
 }
 
+// ControllerRejection is a controller response the agent understood. Keeping the
+// status code lets the caller separate "this job was refused" from "this agent
+// is no longer allowed to talk to the controller", which need opposite reactions.
+type ControllerRejection struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *ControllerRejection) Error() string {
+	return fmt.Sprintf("probe controller rejected request: %s", e.Message)
+}
+
+// JobScoped reports a refusal that concerns one job only. A stale generation, a
+// schema the controller no longer accepts or a duplicate observation all mean
+// this job is dead; the control connection behind it is still healthy, and
+// tearing it down would stop the heartbeat that reports the agent as alive.
+func (e *ControllerRejection) JobScoped() bool {
+	if e.StatusCode == http.StatusUnauthorized || e.StatusCode == http.StatusForbidden {
+		return false
+	}
+	return e.StatusCode >= 400 && e.StatusCode < 500
+}
+
 type ClientConfig struct {
 	AgentID          string
 	EnrollmentToken  string
@@ -47,6 +70,9 @@ type ClientConfig struct {
 	JobPollInterval  time.Duration
 	Executor         JobExecutor
 	Now              func() time.Time
+	// LogJobRejection reports a refused job without ending the control
+	// connection. Optional: nil silently drops the notice.
+	LogJobRejection func(error)
 }
 
 type IdentityFile struct {
@@ -64,6 +90,11 @@ type Client struct {
 	identityPath string
 	identity     IdentityFile
 	requestMu    sync.Mutex
+	refusedMu    sync.Mutex
+	// The controller redelivers a job until it expires, so a job whose
+	// observation was refused would otherwise be re-executed on every poll:
+	// a full Xray start and probe every few seconds, for nothing.
+	refusedJobs map[string]struct{}
 }
 
 type apiEnvelope[T any] struct {
@@ -225,7 +256,16 @@ func (c *Client) runJobLoop(ctx context.Context) error {
 	defer ticker.Stop()
 	for {
 		if err := c.pollAndExecute(ctx); err != nil {
-			return err
+			// A refused job used to tear down the whole control connection, so
+			// one rejected observation stopped the heartbeat for the length of
+			// the reconnect backoff and reported a healthy agent as offline.
+			var rejection *ControllerRejection
+			if !errors.As(err, &rejection) || !rejection.JobScoped() {
+				return err
+			}
+			if c.config.LogJobRejection != nil {
+				c.config.LogJobRejection(err)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -252,6 +292,9 @@ func (c *Client) pollAndExecute(ctx context.Context) error {
 	if assignment.Job.AgentID != c.config.AgentID || !assignment.Job.ExpiresAt.After(c.config.Now().UTC()) {
 		return fmt.Errorf("probe controller returned an invalid job binding")
 	}
+	if c.jobRefused(assignment.Job.JobID) {
+		return nil
+	}
 	jobContext, cancel := context.WithDeadline(ctx, assignment.Job.ExpiresAt)
 	observation := c.config.Executor.Execute(jobContext, assignment)
 	cancel()
@@ -271,7 +314,36 @@ func (c *Client) pollAndExecute(ctx context.Context) error {
 		return err
 	}
 	var accepted ObservationResponse
-	return c.postSignedJSONBytes(ctx, ObservationPath, body, &accepted)
+	if err := c.postSignedJSONBytes(ctx, ObservationPath, body, &accepted); err != nil {
+		var rejection *ControllerRejection
+		if errors.As(err, &rejection) && rejection.JobScoped() {
+			c.markJobRefused(assignment.Job.JobID)
+		}
+		return err
+	}
+	return nil
+}
+
+func (c *Client) jobRefused(jobID string) bool {
+	c.refusedMu.Lock()
+	defer c.refusedMu.Unlock()
+	_, refused := c.refusedJobs[jobID]
+	return refused
+}
+
+func (c *Client) markJobRefused(jobID string) {
+	c.refusedMu.Lock()
+	defer c.refusedMu.Unlock()
+	if c.refusedJobs == nil {
+		c.refusedJobs = make(map[string]struct{})
+	}
+	// Jobs expire on the controller within minutes, so this set only has to
+	// outlive the redelivery window. Clearing it wholesale keeps the agent from
+	// accumulating state it can never prune on its own.
+	if len(c.refusedJobs) >= 256 {
+		c.refusedJobs = make(map[string]struct{})
+	}
+	c.refusedJobs[jobID] = struct{}{}
 }
 
 func (c *Client) postSignedJSONBytes(ctx context.Context, path string, body []byte, output any) error {
@@ -336,7 +408,7 @@ func (c *Client) postJSONBytes(ctx context.Context, path string, body []byte, he
 		if envelope.Error == "" {
 			envelope.Error = http.StatusText(response.StatusCode)
 		}
-		return fmt.Errorf("probe controller rejected request: %s", envelope.Error)
+		return &ControllerRejection{StatusCode: response.StatusCode, Message: envelope.Error}
 	}
 	if output != nil && len(envelope.Data) > 0 {
 		if err := json.Unmarshal(envelope.Data, output); err != nil {

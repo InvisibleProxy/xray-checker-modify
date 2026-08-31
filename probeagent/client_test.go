@@ -1,8 +1,10 @@
 package probeagent
 
 import (
+	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"xray-checker/diagnostics"
 )
 
 func TestClientIdentitySurvivesContainerStyleRestart(t *testing.T) {
@@ -73,4 +77,110 @@ func TestPinnedHTTPClientUsesPinnedAddressAndRefusesRedirects(t *testing.T) {
 	if response.StatusCode != http.StatusFound || targetHits.Load() != 0 {
 		t.Fatalf("redirect status = %d, target hits = %d", response.StatusCode, targetHits.Load())
 	}
+}
+
+func TestControllerRejectionSeparatesJobFailuresFromAccessFailures(t *testing.T) {
+	for _, testCase := range []struct {
+		status    int
+		jobScoped bool
+	}{
+		{status: http.StatusConflict, jobScoped: true},
+		{status: http.StatusBadRequest, jobScoped: true},
+		{status: http.StatusNotFound, jobScoped: true},
+		{status: http.StatusUnauthorized, jobScoped: false},
+		{status: http.StatusForbidden, jobScoped: false},
+		{status: http.StatusInternalServerError, jobScoped: false},
+	} {
+		rejection := &ControllerRejection{StatusCode: testCase.status, Message: "rejected"}
+		if rejection.JobScoped() != testCase.jobScoped {
+			t.Errorf("status %d JobScoped = %v, want %v", testCase.status, rejection.JobScoped(), testCase.jobScoped)
+		}
+	}
+}
+
+// A single refused observation used to end Run, which stopped the heartbeat for
+// the whole reconnect backoff and reported a live agent as disconnected.
+func TestRefusedObservationKeepsTheControlConnectionAndIsNotRetriedForever(t *testing.T) {
+	var polls, observations, executions atomic.Int64
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case JobPollPath:
+			polls.Add(1)
+			// The controller redelivers the same job until it expires.
+			_, _ = w.Write([]byte(`{"success":true,"data":{"job":{"job":{"schemaVersion":1,"jobId":"job-1","sessionId":"s","agentId":"agent_test","nonce":"n","stableId":"node-1","configFingerprint":"sha256:x","profile":{"id":"default-status","method":"status"},"expiresAt":"2099-01-01T00:00:00Z","state":"running"},"xrayConfig":{"ok":true},"socksPort":18080,"targetHost":"node.example.com","targetPort":443}}}`))
+		case ObservationPath:
+			observations.Add(1)
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"success":false,"error":"Observation rejected"}`))
+		default:
+			_, _ = w.Write([]byte(`{"success":true,"data":{}}`))
+		}
+	}))
+	defer server.Close()
+
+	client := newRejectionTestClient(t, server, &executions)
+	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
+	defer cancel()
+	err := client.runJobLoop(ctx)
+
+	// The loop may end on the context deadline; what it must never do is end
+	// because the controller refused a job.
+	var rejection *ControllerRejection
+	if errors.As(err, &rejection) {
+		t.Fatalf("a refused job ended the control loop: %v", err)
+	}
+	if polls.Load() < 2 {
+		t.Fatalf("loop polled %d times, want it to keep polling after the refusal", polls.Load())
+	}
+	// The job is remembered as refused, so it is neither re-executed nor
+	// re-submitted while the controller keeps redelivering it.
+	if observations.Load() != 1 {
+		t.Errorf("submitted %d observations, want exactly one", observations.Load())
+	}
+	if executions.Load() != 1 {
+		t.Errorf("executed the job %d times, want exactly one", executions.Load())
+	}
+}
+
+func TestAccessDeniedStillEndsTheControlLoop(t *testing.T) {
+	var executions atomic.Int64
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"success":false,"error":"Agent authentication failed"}`))
+	}))
+	defer server.Close()
+
+	client := newRejectionTestClient(t, server, &executions)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.runJobLoop(ctx); err == nil {
+		t.Fatal("a revoked or unauthenticated agent kept polling instead of reconnecting")
+	}
+}
+
+type stubExecutor struct{ executions *atomic.Int64 }
+
+func (s stubExecutor) Execute(_ context.Context, assignment JobAssignment) diagnostics.Observation {
+	s.executions.Add(1)
+	return diagnostics.Observation{SchemaVersion: diagnostics.ObservationSchemaVersion, JobID: assignment.Job.JobID}
+}
+
+func newRejectionTestClient(t *testing.T, server *httptest.Server, executions *atomic.Int64) *Client {
+	t.Helper()
+	client, err := NewClient(ClientConfig{
+		AgentID: "agent_test", ControllerURL: server.URL, ControllerIP: "127.0.0.1",
+		IdentityDir: t.TempDir(), AgentVersion: "test", Capabilities: []string{"control-v1"},
+		Executor: stubExecutor{executions: executions},
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	client.identity.Enrolled = true
+	client.httpClient = server.Client()
+	// Below the constructor floor on purpose: the loop behaviour under test is
+	// about repetition, not about timing.
+	client.config.JobPollInterval = 50 * time.Millisecond
+	return client
 }
