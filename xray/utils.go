@@ -100,6 +100,45 @@ func PrepareProxyConfigs(proxies []*models.ProxyConfig) {
 	}
 }
 
+// DeduplicateByStableID drops repeated nodes, keeping the first occurrence of each
+// identity, and reports how many copies it removed.
+//
+// A panel may legitimately list the same host several times: a Remnawave XRAY_JSON
+// feed injects a host into every balancer group it belongs to, and resolving one
+// domain per subscription entry can land two entries on the same IP. Every copy is
+// the same node to the checker, so keeping one is right — while letting duplicates
+// through would make ValidateStableIDs reject the whole subscription.
+//
+// Nil entries are passed through untouched so ValidateStableIDs still reports them.
+func DeduplicateByStableID(proxies []*models.ProxyConfig) ([]*models.ProxyConfig, int) {
+	seen := make(map[string]bool, len(proxies))
+	unique := make([]*models.ProxyConfig, 0, len(proxies))
+	dropped := 0
+
+	for _, proxy := range proxies {
+		if proxy == nil {
+			unique = append(unique, proxy)
+			continue
+		}
+
+		stableID := strings.TrimSpace(proxy.StableID)
+		if stableID == "" {
+			stableID = proxy.GenerateStableID()
+		}
+
+		identityKey := strings.ToLower(stableID)
+		if seen[identityKey] {
+			dropped++
+			continue
+		}
+
+		seen[identityKey] = true
+		unique = append(unique, proxy)
+	}
+
+	return unique, dropped
+}
+
 // ValidateStableIDs rejects ambiguous node identity before StableID-keyed
 // status, history, archive, and Telegram maps can silently overwrite data.
 func ValidateStableIDs(proxies []*models.ProxyConfig) error {

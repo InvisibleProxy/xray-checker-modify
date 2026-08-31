@@ -169,3 +169,66 @@ func testProxy(name, subName, server string, port int) *models.ProxyConfig {
 		Type:     "tcp",
 	}
 }
+
+func TestDeduplicateByStableIDKeepsFirstOccurrence(t *testing.T) {
+	// A Remnawave XRAY_JSON feed injects the same host into every balancer group it
+	// belongs to, so one node arrives once per group under different group names.
+	first := testProxy("NL core", "Sub", "144.31.86.63", 8443)
+	first.GroupName = "NL"
+	repeat := testProxy("NL core", "Sub", "144.31.86.63", 8443)
+	repeat.GroupName = "Auto"
+	other := testProxy("DE core", "Sub", "83.219.249.142", 4443)
+
+	unique, dropped := DeduplicateByStableID([]*models.ProxyConfig{first, repeat, other})
+
+	if dropped != 1 {
+		t.Fatalf("dropped = %d, want 1", dropped)
+	}
+	if len(unique) != 2 {
+		t.Fatalf("unique = %d, want 2", len(unique))
+	}
+	if unique[0] != first || unique[1] != other {
+		t.Fatalf("unique = %v, want the first occurrence of each identity", unique)
+	}
+	if unique[0].GroupName != "NL" {
+		t.Errorf("GroupName = %q, want the first occurrence's group %q", unique[0].GroupName, "NL")
+	}
+	if err := ValidateStableIDs(unique); err != nil {
+		t.Fatalf("ValidateStableIDs() error = %v", err)
+	}
+}
+
+func TestDeduplicateByStableIDHonoursExplicitIDsAndPassesNilThrough(t *testing.T) {
+	explicit := testProxy("One", "Sub", "one.example.com", 443)
+	explicit.StableID = "  Shared-ID  "
+	folded := testProxy("Two", "Sub", "two.example.com", 443)
+	folded.StableID = "shared-id"
+
+	unique, dropped := DeduplicateByStableID([]*models.ProxyConfig{explicit, folded, nil})
+
+	if dropped != 1 {
+		t.Fatalf("dropped = %d, want 1", dropped)
+	}
+	if len(unique) != 2 || unique[0] != explicit || unique[1] != nil {
+		t.Fatalf("unique = %v, want the first proxy and the untouched nil", unique)
+	}
+	if err := ValidateStableIDs(unique); err == nil {
+		t.Fatal("nil proxy must still be rejected after deduplication")
+	}
+}
+
+func TestDeduplicateByStableIDLeavesUniqueInputUntouched(t *testing.T) {
+	proxies := []*models.ProxyConfig{
+		testProxy("One", "Sub", "one.example.com", 443),
+		testProxy("Two", "Sub", "two.example.com", 443),
+	}
+
+	unique, dropped := DeduplicateByStableID(proxies)
+
+	if dropped != 0 {
+		t.Fatalf("dropped = %d, want 0", dropped)
+	}
+	if len(unique) != len(proxies) {
+		t.Fatalf("unique = %d, want %d", len(unique), len(proxies))
+	}
+}

@@ -50,6 +50,11 @@ func InitializeConfiguration(configFile string, version string) (*[]*models.Prox
 		}
 	}
 
+	if deduplicated, dropped := xray.DeduplicateByStableID(proxyConfigs); dropped > 0 {
+		logger.Info("Dropped %d duplicate node(s) listed more than once by the subscription", dropped)
+		proxyConfigs = deduplicated
+	}
+
 	xray.PrepareProxyConfigs(proxyConfigs)
 	if err := xray.ValidateStableIDs(proxyConfigs); err != nil {
 		return nil, fmt.Errorf("invalid proxy identity: %w", err)
