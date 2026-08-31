@@ -124,6 +124,7 @@ type AdminRemnawaveService interface {
 	Snapshot() remnawave.Snapshot
 	UpdateSettings(remnawave.Settings) (remnawave.Snapshot, error)
 	SyncNow(context.Context) (remnawave.Snapshot, error)
+	SuggestLocations() remnawave.LocationSuggestion
 }
 
 func AdminHandler() http.HandlerFunc {
@@ -169,6 +170,19 @@ func AdminRemnawaveHandler(service AdminRemnawaveService) http.HandlerFunc {
 		default:
 			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
+	}
+}
+
+// AdminRemnawaveSuggestLocationsHandler reports the groupings the panel's own host
+// tags already describe. It only proposes: nothing is saved until the operator
+// picks which tags are locations and submits them like any hand-made card.
+func AdminRemnawaveSuggestLocationsHandler(service AdminRemnawaveService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSON(w, service.SuggestLocations())
 	}
 }
 

@@ -12,9 +12,10 @@ import (
 )
 
 type fakeAdminRemnawaveService struct {
-	snapshot remnawave.Snapshot
-	updated  remnawave.Settings
-	syncs    int
+	snapshot   remnawave.Snapshot
+	suggestion remnawave.LocationSuggestion
+	updated    remnawave.Settings
+	syncs      int
 }
 
 func (f *fakeAdminRemnawaveService) Snapshot() remnawave.Snapshot {
@@ -30,6 +31,10 @@ func (f *fakeAdminRemnawaveService) UpdateSettings(settings remnawave.Settings) 
 func (f *fakeAdminRemnawaveService) SyncNow(context.Context) (remnawave.Snapshot, error) {
 	f.syncs++
 	return f.snapshot, nil
+}
+
+func (f *fakeAdminRemnawaveService) SuggestLocations() remnawave.LocationSuggestion {
+	return f.suggestion
 }
 
 func TestAdminRemnawaveHandlerGetsAndUpdatesSanitizedSettings(t *testing.T) {

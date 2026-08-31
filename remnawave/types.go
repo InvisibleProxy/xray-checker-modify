@@ -130,6 +130,10 @@ type Host struct {
 	IsHidden               bool        `json:"isHidden"`
 	Inbound                HostInbound `json:"inbound"`
 	ExcludedInternalSquads []string    `json:"excludedInternalSquads"`
+	// Tags are the panel's own grouping of hosts (BALANCER_NL and the like). They
+	// are never shown to subscribers, which makes them a stable key for deriving
+	// announce locations from topology instead of pairing nodes by hand.
+	Tags []string `json:"tags"`
 }
 
 type InternalInbound struct {
@@ -396,8 +400,10 @@ func validateConfig(config ConfigFile) error {
 				return fmt.Errorf("StableID %s belongs to more than one announce location", stableID)
 			}
 			stableIDs[foldedStableID] = stableID
-			if hostUUID == "" || invalidIdentifier(hostUUID) {
-				return fmt.Errorf("locations[%s].members[%s] requires a valid host UUID", locationKey, stableID)
+			// An empty host UUID asks the checker to pair the member by address and
+			// port at sync time; anything present must still be a real identifier.
+			if hostUUID != "" && invalidIdentifier(hostUUID) {
+				return fmt.Errorf("locations[%s].members[%s] has an invalid host UUID", locationKey, stableID)
 			}
 		}
 	}

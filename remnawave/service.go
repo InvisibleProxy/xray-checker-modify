@@ -728,6 +728,14 @@ func computeDesiredAnnouncements(
 		}
 	}
 
+	locations, err := effectiveLocations(config)
+	if err != nil {
+		return nil, recoverySince, err
+	}
+	// Pairing is topology-derived, so it is resolved once per sync rather than
+	// stored against StableIDs that change whenever a host is reconfigured.
+	locations = resolveMemberHosts(locations, proxyByStableID, topology.Hosts)
+
 	nextRecovery := make(map[string]time.Time)
 	for _, pair := range config.SquadPairs {
 		if pair.MonitoringOnly {
@@ -741,10 +749,6 @@ func computeDesiredAnnouncements(
 			return nil, recoverySince, fmt.Errorf("configured external squad %s no longer exists", pair.ExternalSquadUUID)
 		}
 		visibleHosts := visibleHostSet(internal, topology.Hosts)
-		locations, err := effectiveLocations(config)
-		if err != nil {
-			return nil, recoverySince, err
-		}
 		groups := evaluateLocations(
 			locations,
 			config.Policy,
@@ -908,7 +912,6 @@ func evaluateLocations(
 	now time.Time,
 ) map[string]groupEvaluation {
 	type aggregate struct {
-		label           string
 		hasHealthy      bool
 		hasPending      bool
 		hasAmbiguous    bool
@@ -916,15 +919,48 @@ func evaluateLocations(
 		down            int
 		maintenanceDown int
 	}
+	// stateOf collapses one aggregate into the state it reports. It is applied
+	// twice: once per server over its transports, then once per location over its
+	// servers, so both levels follow exactly the same rules.
+	stateOf := func(item aggregate) string {
+		switch {
+		case item.hasHealthy && item.down > 0:
+			return groupPartial
+		case item.hasHealthy:
+			return groupHealthy
+		case item.hasAmbiguous:
+			return groupAmbiguous
+		case item.hasPending || item.down < item.members:
+			return groupPending
+		case item.maintenanceDown == item.members:
+			return groupMaintenance
+		}
+		return groupDown
+	}
+
 	result := make(map[string]groupEvaluation, len(locations))
 	for key, location := range locations {
-		item := &aggregate{label: publicLocationLabel(location, key)}
+		servers := make(map[string]*aggregate, len(location.Members))
 		for stableID, hostUUID := range location.Members {
-			if !visibleHosts[hostUUID] || proxyByStableID[stableID] == nil {
+			proxy := proxyByStableID[stableID]
+			if !visibleHosts[hostUUID] || proxy == nil {
 				continue
 			}
 			if _, ok := hostByUUID[hostUUID]; !ok {
 				continue
+			}
+			// One physical server usually appears as several members, one per
+			// transport. Fold them by address so losing a single transport is not
+			// mistaken for losing the server. A node without an address cannot be
+			// folded and stands alone.
+			serverKey := strings.ToLower(strings.TrimSpace(proxy.Server))
+			if serverKey == "" {
+				serverKey = "stable:" + stableID
+			}
+			item, known := servers[serverKey]
+			if !known {
+				item = &aggregate{}
+				servers[serverKey] = item
 			}
 			item.members++
 			if checkEndpointIDs[stableID] {
@@ -950,23 +986,35 @@ func evaluateLocations(
 				item.maintenanceDown++
 			}
 		}
-		if item.members == 0 {
+		if len(servers) == 0 {
 			continue
 		}
-		state := groupDown
-		switch {
-		case item.hasHealthy && item.down > 0:
-			state = groupPartial
-		case item.hasHealthy:
-			state = groupHealthy
-		case item.hasAmbiguous:
-			state = groupAmbiguous
-		case item.hasPending || item.down < item.members:
-			state = groupPending
-		case item.maintenanceDown == item.members:
-			state = groupMaintenance
+
+		// A server that still answers on any transport is reachable, so it counts
+		// as healthy for the location even while one of its transports is down.
+		var overall aggregate
+		for _, server := range servers {
+			overall.members++
+			switch stateOf(*server) {
+			case groupHealthy, groupPartial:
+				overall.hasHealthy = true
+			case groupAmbiguous:
+				overall.hasAmbiguous = true
+			case groupPending:
+				overall.hasPending = true
+			case groupMaintenance:
+				overall.down++
+				overall.maintenanceDown++
+			default:
+				overall.down++
+			}
 		}
-		result[key] = groupEvaluation{Key: key, Label: item.label, State: state}
+
+		result[key] = groupEvaluation{
+			Key:   key,
+			Label: publicLocationLabel(location, key),
+			State: stateOf(overall),
+		}
 	}
 	return result
 }
@@ -1005,6 +1053,64 @@ func canonicalSettingsLocations(settings Settings) (map[string]AnnounceLocation,
 		return nil, fmt.Errorf("locations and deprecated nodeMappings describe different announce locations")
 	}
 	return locations, nil
+}
+
+// endpointKey identifies the network endpoint a node and a Remnawave Host share.
+func endpointKey(address string, port int) string {
+	address = strings.ToLower(strings.TrimSpace(address))
+	if address == "" || port <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s:%d", address, port)
+}
+
+// resolveMemberHosts fills in members left without a Remnawave Host UUID by
+// matching the node's address and port against the topology.
+//
+// For a subscription served by the panel these are the same values by
+// construction, so the pairing an operator would otherwise type in is derivable
+// - and unlike a stored pair it re-derives itself when a node's StableID
+// changes, which is exactly what happens when a host's config is edited.
+//
+// A member that cannot be paired keeps its empty UUID and is skipped by the
+// evaluation, so an unmatched node never silently props a location up.
+func resolveMemberHosts(
+	locations map[string]AnnounceLocation,
+	proxyByStableID map[string]*models.ProxyConfig,
+	hosts []Host,
+) map[string]AnnounceLocation {
+	byEndpoint := make(map[string]string, len(hosts))
+	ambiguous := make(map[string]bool)
+	for _, host := range hosts {
+		key := endpointKey(host.Address, host.Port)
+		if key == "" {
+			continue
+		}
+		if _, seen := byEndpoint[key]; seen {
+			// Two hosts on one endpoint cannot be told apart from the node alone.
+			ambiguous[key] = true
+			continue
+		}
+		byEndpoint[key] = host.UUID
+	}
+
+	resolved := make(map[string]AnnounceLocation, len(locations))
+	for key, location := range locations {
+		members := make(map[string]string, len(location.Members))
+		for stableID, hostUUID := range location.Members {
+			if hostUUID == "" {
+				if proxy := proxyByStableID[stableID]; proxy != nil {
+					if endpoint := endpointKey(proxy.Server, proxy.Port); !ambiguous[endpoint] {
+						hostUUID = byEndpoint[endpoint]
+					}
+				}
+			}
+			members[stableID] = hostUUID
+		}
+		location.Members = members
+		resolved[key] = location
+	}
+	return resolved
 }
 
 func effectiveLocations(config ConfigFile) (map[string]AnnounceLocation, error) {
@@ -1197,4 +1303,101 @@ func announcementStatuses(external []ExternalSquad, managed map[string]ManagedAn
 		return strings.ToLower(result[i].ExternalSquadName) < strings.ToLower(result[j].ExternalSquadName)
 	})
 	return result
+}
+
+// LocationCandidate is one grouping the topology already contains: a host tag and
+// the checker nodes sitting on hosts that carry it.
+type LocationCandidate struct {
+	Tag     string            `json:"tag"`
+	Members []CandidateMember `json:"members"`
+}
+
+// CandidateMember describes a node and the Remnawave Host it was paired with, so
+// the admin can show what a proposed location would actually cover.
+type CandidateMember struct {
+	StableID   string `json:"stableId"`
+	NodeName   string `json:"nodeName"`
+	Endpoint   string `json:"endpoint"`
+	HostUUID   string `json:"hostUuid"`
+	HostRemark string `json:"hostRemark"`
+}
+
+// LocationSuggestion offers announce locations derived from the panel's own host
+// tags instead of asking an operator to pair every node by hand.
+//
+// Nothing here is applied on its own. The checker cannot know which tags are
+// locations - BALANCER_NL usually is, EU usually is not - so it reports every tag
+// it can see with the nodes behind it, and the operator picks.
+type LocationSuggestion struct {
+	Candidates []LocationCandidate `json:"candidates"`
+	// Unmatched lists nodes whose address and port match no host, which usually
+	// means the node comes from a different subscription than this panel.
+	Unmatched []CandidateMember `json:"unmatched"`
+}
+
+// SuggestLocations groups the current nodes by the tags of the hosts they run on.
+func (s *Service) SuggestLocations() LocationSuggestion {
+	s.mu.RLock()
+	topology := cloneTopology(s.topology)
+	s.mu.RUnlock()
+
+	byEndpoint := make(map[string]Host, len(topology.Hosts))
+	ambiguous := make(map[string]bool)
+	for _, host := range topology.Hosts {
+		key := endpointKey(host.Address, host.Port)
+		if key == "" {
+			continue
+		}
+		if _, seen := byEndpoint[key]; seen {
+			ambiguous[key] = true
+			continue
+		}
+		byEndpoint[key] = host
+	}
+
+	byTag := map[string][]CandidateMember{}
+	suggestion := LocationSuggestion{}
+	for _, proxy := range s.proxySource.GetProxies() {
+		if proxy == nil || proxy.StableID == "" {
+			continue
+		}
+		endpoint := endpointKey(proxy.Server, proxy.Port)
+		member := CandidateMember{
+			StableID: proxy.StableID,
+			NodeName: proxy.Name,
+			Endpoint: endpoint,
+		}
+		host, matched := byEndpoint[endpoint]
+		if !matched || ambiguous[endpoint] {
+			suggestion.Unmatched = append(suggestion.Unmatched, member)
+			continue
+		}
+		member.HostUUID = host.UUID
+		member.HostRemark = host.Remark
+		if len(host.Tags) == 0 {
+			suggestion.Unmatched = append(suggestion.Unmatched, member)
+			continue
+		}
+		for _, tag := range host.Tags {
+			tag = strings.TrimSpace(tag)
+			if tag == "" {
+				continue
+			}
+			byTag[tag] = append(byTag[tag], member)
+		}
+	}
+
+	for tag, members := range byTag {
+		sort.Slice(members, func(left, right int) bool {
+			return members[left].StableID < members[right].StableID
+		})
+		suggestion.Candidates = append(suggestion.Candidates, LocationCandidate{Tag: tag, Members: members})
+	}
+	sort.Slice(suggestion.Candidates, func(left, right int) bool {
+		return suggestion.Candidates[left].Tag < suggestion.Candidates[right].Tag
+	})
+	sort.Slice(suggestion.Unmatched, func(left, right int) bool {
+		return suggestion.Unmatched[left].StableID < suggestion.Unmatched[right].StableID
+	})
+	return suggestion
 }
