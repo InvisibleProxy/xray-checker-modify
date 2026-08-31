@@ -25,12 +25,15 @@ import (
 )
 
 type AdminProxyInfo struct {
-	StableID           string `json:"stableId"`
-	Name               string `json:"name"`
-	SubName            string `json:"subName"`
-	Server             string `json:"server"`
-	Port               int    `json:"port"`
-	Protocol           string `json:"protocol"`
+	StableID string `json:"stableId"`
+	Name     string `json:"name"`
+	SubName  string `json:"subName"`
+	Server   string `json:"server"`
+	Port     int    `json:"port"`
+	Protocol string `json:"protocol"`
+	// Transport is what tells two nodes on one server apart: a host published
+	// over both TCP and xHTTP differs only by this and by the port.
+	Transport          string `json:"transport,omitempty"`
 	ProxyPort          int    `json:"proxyPort"`
 	Online             bool   `json:"online"`
 	Status             string `json:"status"`
@@ -850,6 +853,7 @@ func adminProxyInfo(proxy *models.ProxyConfig, details checker.ProxyStatusDetail
 		Server:             proxy.Server,
 		Port:               proxy.Port,
 		Protocol:           proxy.Protocol,
+		Transport:          proxy.Type,
 		ProxyPort:          startPort + proxy.Index,
 		Online:             !details.IsOffline(),
 		Status:             string(details.EffectiveStatus()),
