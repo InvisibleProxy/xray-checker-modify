@@ -23,31 +23,33 @@ import (
 	"xray-checker/logger"
 	"xray-checker/metrics"
 	"xray-checker/models"
+	"xray-checker/projectmaintenance"
 )
 
 type ProxyChecker struct {
-	proxies         []*models.ProxyConfig
-	startPort       int
-	ipCheck         string
-	currentIP       string
-	httpClient      *http.Client
-	currentMetrics  sync.Map
-	latencyMetrics  sync.Map
-	statusDetails   sync.Map
-	maintenance     sync.Map
-	statusMu        sync.Mutex
-	ipInitialized   bool
-	ipCheckTimeout  int
-	genMethodURL    string
-	downloadURL     string
-	downloadTimeout int
-	downloadMinSize int64
-	checkMethod     string
-	mu              sync.RWMutex
-	checkMu         sync.Mutex
-	currentIPMu     sync.Mutex
-	runGate         sync.Locker
-	generation      uint64
+	proxies            []*models.ProxyConfig
+	startPort          int
+	ipCheck            string
+	currentIP          string
+	httpClient         *http.Client
+	currentMetrics     sync.Map
+	latencyMetrics     sync.Map
+	statusDetails      sync.Map
+	maintenance        sync.Map
+	statusMu           sync.Mutex
+	ipInitialized      bool
+	ipCheckTimeout     int
+	genMethodURL       string
+	downloadURL        string
+	downloadTimeout    int
+	downloadMinSize    int64
+	checkMethod        string
+	mu                 sync.RWMutex
+	checkMu            sync.Mutex
+	currentIPMu        sync.Mutex
+	runGate            sync.Locker
+	generation         uint64
+	projectMaintenance atomic.Bool
 
 	checkProxyFunc      func(*models.ProxyConfig, uint64, bool, bool)
 	hostDiagnosticsFunc func(*models.ProxyConfig) (HostCheckDetails, PingCheckDetails)
@@ -194,6 +196,14 @@ func (pc *ProxyChecker) SetRunGate(gate sync.Locker) {
 	pc.runGate = gate
 }
 
+func (pc *ProxyChecker) SetProjectMaintenance(enabled bool) {
+	pc.projectMaintenance.Store(enabled)
+}
+
+func (pc *ProxyChecker) ProjectMaintenanceEnabled() bool {
+	return pc.projectMaintenance.Load()
+}
+
 // MonitoringEnabled reports whether a StableID participates in regular
 // monitoring workflows. Explicit admin probes may opt into a maintenance node;
 // the state remains separate from the subscription-owned proxy list so pausing
@@ -291,6 +301,27 @@ func (pc *ProxyChecker) clearProxyMonitoringState(stableID string) {
 	})
 }
 
+// ClearProjectMonitoringState drops live status and Prometheus series without
+// changing per-node maintenance flags or persisted history. It is called on
+// both sides of a project-wide maintenance window so Resume never reuses a
+// maintenance probe as authoritative monitoring state.
+func (pc *ProxyChecker) ClearProjectMonitoringState() {
+	pc.checkMu.Lock()
+	defer pc.checkMu.Unlock()
+	for _, proxy := range pc.GetProxies() {
+		if proxy == nil {
+			continue
+		}
+		stableID := proxy.StableID
+		if stableID == "" {
+			stableID = proxy.GenerateStableID()
+		}
+		if stableID != "" {
+			pc.clearProxyMonitoringState(stableID)
+		}
+	}
+}
+
 func (pc *ProxyChecker) GetCurrentIP() (string, error) {
 	pc.currentIPMu.Lock()
 	defer pc.currentIPMu.Unlock()
@@ -316,34 +347,38 @@ func (pc *ProxyChecker) GetCurrentIP() (string, error) {
 }
 
 func (pc *ProxyChecker) CheckProxy(proxy *models.ProxyConfig) {
-	pc.withCheckRun(func() {
+	_ = pc.withCheckRun(false, func() error {
 		if proxy == nil {
-			return
+			return nil
 		}
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
 		if !pc.MonitoringEnabled(proxy.StableID) {
-			return
+			return nil
 		}
 		if pc.checkMethod == "ip" {
 			if _, err := pc.GetCurrentIP(); err != nil {
 				logger.Warn("Error getting current IP: %v", err)
-				return
+				return nil
 			}
 		}
 		pc.runProxyCheck(proxy, 0, false, false, false)
+		return nil
 	})
 }
 
-func (pc *ProxyChecker) withCheckRun(run func()) {
+func (pc *ProxyChecker) withCheckRun(allowProjectMaintenance bool, run func() error) error {
 	if pc.runGate != nil {
 		pc.runGate.Lock()
 		defer pc.runGate.Unlock()
 	}
+	if !allowProjectMaintenance && pc.ProjectMaintenanceEnabled() {
+		return projectmaintenance.ErrEnabled
+	}
 	pc.checkMu.Lock()
 	defer pc.checkMu.Unlock()
-	run()
+	return run()
 }
 
 func (pc *ProxyChecker) runProxyCheck(proxy *models.ProxyConfig, expectedGeneration uint64, checkGeneration bool, quiet bool, allowMaintenance bool) {
@@ -1218,11 +1253,9 @@ func (pc *ProxyChecker) RestoreProxyFailureStatus(stableID string, failureSince 
 }
 
 func (pc *ProxyChecker) CheckAllProxies() error {
-	var checkErr error
-	pc.withCheckRun(func() {
-		checkErr = pc.checkAllProxies()
+	return pc.withCheckRun(false, func() error {
+		return pc.checkAllProxies()
 	})
-	return checkErr
 }
 
 func (pc *ProxyChecker) checkAllProxies() error {
@@ -1259,14 +1292,13 @@ func (pc *ProxyChecker) checkAllProxies() error {
 
 func (pc *ProxyChecker) CheckUnavailableProxies() (AvailabilityCheckReport, error) {
 	var report AvailabilityCheckReport
-	var checkErr error
-	pc.withCheckRun(func() {
+	checkErr := pc.withCheckRun(false, func() error {
 		candidates, generation, err := pc.availabilityCheckCandidates(nil, true, false)
 		if err != nil {
-			checkErr = err
-			return
+			return err
 		}
-		report, checkErr = pc.checkAvailabilityCandidates(candidates, generation, true)
+		report, err = pc.checkAvailabilityCandidates(candidates, generation, true)
+		return err
 	})
 	return report, checkErr
 }
@@ -1283,14 +1315,13 @@ func (pc *ProxyChecker) CheckProxiesByStableIDsIncludingMaintenance(stableIDs []
 
 func (pc *ProxyChecker) checkProxiesByStableIDs(stableIDs []string, allowMaintenance bool) (AvailabilityCheckReport, error) {
 	var report AvailabilityCheckReport
-	var checkErr error
-	pc.withCheckRun(func() {
+	checkErr := pc.withCheckRun(allowMaintenance, func() error {
 		candidates, generation, err := pc.availabilityCheckCandidates(stableIDs, false, allowMaintenance)
 		if err != nil {
-			checkErr = err
-			return
+			return err
 		}
-		report, checkErr = pc.checkAvailabilityCandidates(candidates, generation, false)
+		report, err = pc.checkAvailabilityCandidates(candidates, generation, false)
+		return err
 	})
 	return report, checkErr
 }

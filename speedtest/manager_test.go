@@ -13,6 +13,7 @@ import (
 
 	"xray-checker/checker"
 	"xray-checker/models"
+	"xray-checker/projectmaintenance"
 )
 
 type reportRecorder chan RunReport
@@ -145,6 +146,40 @@ func TestManualMaintenanceProbeIsVisibleButNotAddedToHistory(t *testing.T) {
 	manager.ClearMaintenanceProbe(paused.StableID)
 	if results := manager.Snapshot().Results; len(results) != 0 {
 		t.Fatalf("cleared maintenance probe is still visible: %+v", results)
+	}
+}
+
+func TestProjectMaintenanceAllowsOnlyEphemeralAdminSpeedProbe(t *testing.T) {
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "Node one"}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "", "", 1, 0, "status")
+	manager := NewManager(proxyChecker, 10000, filepath.Join(t.TempDir(), "speedtest_schedule.json"), TestConfig{})
+	manager.SetProjectMaintenance(true)
+	manager.testAttempt = func(proxy *models.ProxyConfig, cfg TestConfig, source string) Result {
+		return Result{StableID: proxy.StableID, Name: proxy.Name, Mbps: 42, CheckedAt: time.Now(), Source: source}
+	}
+
+	if err := manager.Run(RunRequest{ProxyIDs: []string{proxy.StableID}}, ScheduleSource); !errors.Is(err, projectmaintenance.ErrEnabled) {
+		t.Fatalf("scheduled run error = %v, want project maintenance", err)
+	}
+	reports := make(reportRecorder, 1)
+	manager.SetReporter(reports)
+	if err := manager.Run(RunRequest{ProxyIDs: []string{proxy.StableID}}, ManualSource); err != nil {
+		t.Fatalf("manual project maintenance probe: %v", err)
+	}
+	select {
+	case report := <-reports:
+		if len(report.Results) != 1 || !report.Results[0].MaintenanceProbe || !report.Results[0].ProjectMaintenanceProbe {
+			t.Fatalf("project maintenance report = %+v", report.Results)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("project maintenance probe did not finish")
+	}
+	if history := manager.ResultHistory(proxy.StableID); len(history) != 0 {
+		t.Fatalf("project maintenance probe polluted history: %+v", history)
+	}
+	manager.ClearProjectMaintenanceProbes()
+	if results := manager.Snapshot().Results; len(results) != 0 {
+		t.Fatalf("project maintenance probe remained after boundary: %+v", results)
 	}
 }
 

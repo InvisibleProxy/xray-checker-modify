@@ -19,6 +19,7 @@ const formatVersion = 1
 var dataFileNames = []string{
 	"node_alert_state.json",
 	"node_registry.json",
+	"project_state.json",
 	"remnawave_announce_config.json",
 	"speedtest_results.json",
 	"speedtest_schedule.json",

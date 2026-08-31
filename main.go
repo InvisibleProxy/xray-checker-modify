@@ -16,6 +16,7 @@ import (
 	"xray-checker/nodearchive"
 	"xray-checker/nodemerge"
 	"xray-checker/probeagent"
+	"xray-checker/projectmaintenance"
 	remnawaveannounce "xray-checker/remnawave"
 	"xray-checker/remoteprobe"
 	"xray-checker/speedtest"
@@ -81,6 +82,8 @@ func main() {
 		}
 		logger.Fatal("Restored %s state was rejected and rolled back; restart the application: %v", owner, loadErr)
 	}
+	projectMaintenance := projectmaintenance.NewManager("data/project_state.json")
+	handleStateLoadError("project maintenance", projectMaintenance.Load())
 
 	if err := web.InitAssetLoader(config.CLIConfig.Web.CustomAssetsPath); err != nil {
 		logger.Fatal("Failed to initialize custom assets: %v", err)
@@ -141,6 +144,8 @@ func main() {
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(metrics.GetProxyStatusMetric())
 	registry.MustRegister(metrics.GetProxyLatencyMetric())
+	registry.MustRegister(metrics.GetProjectMaintenanceMetric())
+	metrics.RecordProjectMaintenance(projectMaintenance.Enabled())
 	backupCreator := backup.NewCreator("data", version)
 	backupRestorer := backup.NewRestorer("data")
 	probeAgentRegistry, err := probeagent.NewRegistry(probeagent.RegistryConfig{
@@ -172,6 +177,7 @@ func main() {
 		config.CLIConfig.Proxy.DownloadMinSize,
 		config.CLIConfig.Proxy.CheckMethod,
 	)
+	proxyChecker.SetProjectMaintenance(projectMaintenance.Enabled())
 	remoteDiagnosticController, err := remoteprobe.NewController(remoteprobe.Config{
 		Enabled:     config.CLIConfig.RemoteDiagnostics.Enabled,
 		CheckMethod: config.CLIConfig.Proxy.CheckMethod,
@@ -188,6 +194,7 @@ func main() {
 		"data/speedtest_schedule.json",
 		speedtest.TestConfig{URL: config.CLIConfig.SpeedTest.URL},
 	)
+	speedTestManager.SetProjectMaintenance(projectMaintenance.Enabled())
 	speedTestManager.ConfigureCountryFallbacks(
 		"data/country-test-urls.yaml",
 		"data/speedtest_url_health.json",
@@ -238,6 +245,7 @@ func main() {
 		ReconcileInterval:  time.Duration(config.CLIConfig.Remnawave.ReconcileIntervalSeconds) * time.Second,
 		TopologyInterval:   time.Duration(config.CLIConfig.Remnawave.TopologyIntervalSeconds) * time.Second,
 	})
+	remnawaveService.SetProjectMaintenance(projectMaintenance.Enabled())
 	if err := remnawaveService.LoadConfig(); err != nil {
 		if restoreApplied {
 			handleStateLoadError("Remnawave announce config", err)
@@ -255,7 +263,13 @@ func main() {
 		speedTestManager,
 		config.CLIConfig.Xray.StartPort,
 	)
+	telegramService.SetProjectMaintenance(projectMaintenance.Enabled())
 	handleStateLoadError("Telegram", telegramService.Load())
+	if projectMaintenance.Enabled() {
+		if err := telegramService.ClearAllMonitoringState(); err != nil {
+			logger.Warn("Failed to clear Telegram monitoring state for project maintenance: %v", err)
+		}
+	}
 	if mergeApplied {
 		if err := nodemerge.ConfirmApplied("data"); err != nil {
 			logger.Fatal("Failed to confirm applied node merge: %v", err)
@@ -267,7 +281,13 @@ func main() {
 		}
 		logger.Startup("Confirmed restored persisted state")
 	}
-	if err := nodeArchive.ReconcileAvailabilityState(); err != nil {
+	if projectMaintenance.Enabled() {
+		proxyChecker.ClearProjectMonitoringState()
+		speedTestManager.ClearProjectMaintenanceProbes()
+		if err := nodeArchive.PauseProjectMonitoring(); err != nil {
+			logger.Warn("Failed to close restored monitoring accounting for project maintenance: %v", err)
+		}
+	} else if err := nodeArchive.ReconcileAvailabilityState(); err != nil {
 		logger.Warn("Failed to record restored node availability: %v", err)
 	}
 	remnawaveService.Start()
@@ -285,6 +305,7 @@ func main() {
 	// A failed check produced no fresh status, so archive, announce and recovery
 	// notifications must be skipped rather than fed the previous iteration's data.
 	runAvailabilityCheck := func(stableIDs []string, allowMaintenance bool) error {
+		projectProbe := projectMaintenance.Enabled()
 		var recovered []string
 		var checkErr error
 		var completed bool
@@ -307,7 +328,8 @@ func main() {
 				recovered = report.RecoveredStableIDs()
 			}
 		}
-		if completed {
+		projectProbe = projectProbe || projectMaintenance.Enabled()
+		if completed && !projectProbe {
 			if err := nodeArchive.RecordAvailability(); err != nil {
 				logger.Warn("Failed to record node availability after manual check: %v", err)
 			}
@@ -348,6 +370,37 @@ func main() {
 		remnawaveService.Trigger()
 		return record, nil
 	}
+	setProjectMaintenance := func(enabled bool) (projectmaintenance.Snapshot, error) {
+		xrayLifecycle.Lock()
+		defer xrayLifecycle.Unlock()
+		current := projectMaintenance.Snapshot()
+		if current.Enabled == enabled {
+			return current, nil
+		}
+		snapshot, err := projectMaintenance.Set(enabled)
+		if err != nil {
+			return current, err
+		}
+		proxyChecker.SetProjectMaintenance(enabled)
+		speedTestManager.SetProjectMaintenance(enabled)
+		telegramService.SetProjectMaintenance(enabled)
+		remnawaveService.SetProjectMaintenance(enabled)
+		metrics.RecordProjectMaintenance(enabled)
+		proxyChecker.ClearProjectMonitoringState()
+		speedTestManager.ClearProjectMaintenanceProbes()
+		if enabled {
+			if err := nodeArchive.PauseProjectMonitoring(); err != nil {
+				logger.Warn("Failed to close monitoring accounting for project maintenance: %v", err)
+			}
+			if err := telegramService.ClearAllMonitoringState(); err != nil {
+				logger.Warn("Failed to clear Telegram monitoring state for project maintenance: %v", err)
+			}
+			logger.Info("Project maintenance enabled")
+		} else {
+			logger.Info("Project maintenance disabled; monitoring will resume from fresh checks")
+		}
+		return snapshot, nil
+	}
 
 	speedTestManager.SetReporter(telegramService)
 	telegramService.Start()
@@ -357,10 +410,18 @@ func main() {
 	defer telegramService.Stop()
 
 	runCheckIteration := func() {
+		if projectMaintenance.Enabled() {
+			return
+		}
 		logger.Info("Starting proxy check iteration")
+		projectProbe := projectMaintenance.Enabled()
 		unavailableBefore := unavailableStableIDSet(proxyChecker)
 		if err := proxyChecker.CheckAllProxies(); err != nil {
 			logger.Warn("Proxy check iteration skipped: %v", err)
+			return
+		}
+		projectProbe = projectProbe || projectMaintenance.Enabled()
+		if projectProbe {
 			return
 		}
 		recovered := recoveredStableIDs(proxyChecker, unavailableBefore)
@@ -412,6 +473,9 @@ func main() {
 			for {
 				select {
 				case <-ticker.C:
+					if projectMaintenance.Enabled() {
+						continue
+					}
 					report, err := proxyChecker.CheckUnavailableProxies()
 					if len(report.Results) > 0 {
 						if archiveErr := nodeArchive.RecordAvailability(); archiveErr != nil {
@@ -440,6 +504,9 @@ func main() {
 
 	subscriptionRefreshLock := make(chan struct{}, 1)
 	refreshSubscription := func(source string, force bool, confirmationToken string) (web.AdminSubscriptionRefreshResult, error) {
+		if source != "manual" && projectMaintenance.Enabled() {
+			return web.AdminSubscriptionRefreshResult{}, projectmaintenance.ErrEnabled
+		}
 		select {
 		case subscriptionRefreshLock <- struct{}{}:
 			defer func() { <-subscriptionRefreshLock }()
@@ -496,6 +563,10 @@ func main() {
 		}
 
 		xrayLifecycle.Lock()
+		if source != "manual" && projectMaintenance.Enabled() {
+			xrayLifecycle.Unlock()
+			return web.AdminSubscriptionRefreshResult{}, projectmaintenance.ErrEnabled
+		}
 		err = updateConfiguration(newConfigs, proxyConfigs, xrayRunner, proxyChecker)
 		if err != nil {
 			xrayLifecycle.Unlock()
@@ -519,6 +590,9 @@ func main() {
 	if config.CLIConfig.Subscription.Update {
 		updateScheduler := gocron.NewScheduler(time.UTC)
 		updateScheduler.Every(config.CLIConfig.Subscription.UpdateInterval).Seconds().WaitForSchedule().Do(func() {
+			if projectMaintenance.Enabled() {
+				return
+			}
 			if _, err := refreshSubscription("scheduled", false, ""); err != nil {
 				logger.Error("Error updating subscriptions: %v", err)
 			}
@@ -542,11 +616,11 @@ func main() {
 
 	protectedHandler := http.NewServeMux()
 	protectedHandler.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
-	protectedHandler.Handle("/config/", web.ConfigStatusHandler(proxyChecker))
+	protectedHandler.Handle("/config/", web.ConfigStatusHandler(proxyChecker, projectMaintenance))
 	protectedHandler.Handle("/api/v1/proxies/", web.APIProxyHandler(proxyChecker, config.CLIConfig.Xray.StartPort))
 	protectedHandler.Handle("/api/v1/proxies", web.APIProxiesHandler(proxyChecker, config.CLIConfig.Xray.StartPort))
 	protectedHandler.Handle("/api/v1/config", web.APIConfigHandler(proxyChecker))
-	protectedHandler.Handle("/api/v1/status", web.APIStatusHandler(proxyChecker))
+	protectedHandler.Handle("/api/v1/status", web.APIStatusHandler(proxyChecker, projectMaintenance))
 	protectedHandler.Handle("/api/v1/system/info", web.APISystemInfoHandler(version, startTime))
 	protectedHandler.Handle("/api/v1/system/ip", web.APISystemIPHandler(proxyChecker))
 	protectedHandler.Handle("/api/v1/docs", web.APIDocsHandler())
@@ -558,6 +632,7 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/subscription/refresh", web.AdminSubscriptionRefreshHandler(func(request web.AdminSubscriptionRefreshRequest) (web.AdminSubscriptionRefreshResult, error) {
 		return refreshSubscription("manual", request.Force, request.ConfirmationToken)
 	}))
+	protectedHandler.Handle("/api/v1/admin/project-maintenance", web.AdminProjectMaintenanceHandler(projectMaintenance.Snapshot, setProjectMaintenance))
 	protectedHandler.Handle("/api/v1/admin/backup", web.AdminBackupHandler(backupCreator))
 	protectedHandler.Handle("/api/v1/admin/backup/restore", web.AdminBackupRestoreHandler(backupRestorer, nodeMergeCoordinator.AcquireRestoreGuard))
 	protectedHandler.Handle("/api/v1/admin/speed-tests/run", web.AdminSpeedTestRunHandler(speedTestManager, runAdminAvailabilityCheck))
@@ -588,8 +663,8 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions", web.AdminDiagnosticSessionsHandler(remoteDiagnosticController))
 
 	if config.CLIConfig.Web.Public {
-		mux.Handle("/", web.IndexHandler(version, proxyChecker))
-		mux.Handle("/config/", web.ConfigStatusHandler(proxyChecker))
+		mux.Handle("/", web.IndexHandler(version, proxyChecker, projectMaintenance))
+		mux.Handle("/config/", web.ConfigStatusHandler(proxyChecker, projectMaintenance))
 		middlewareHandler := web.BasicAuthMiddleware(
 			config.CLIConfig.Metrics.Username,
 			config.CLIConfig.Metrics.Password,
@@ -599,14 +674,14 @@ func main() {
 		mux.Handle("/metrics", middlewareHandler)
 		mux.Handle("/api/", middlewareHandler)
 	} else if config.CLIConfig.Metrics.Protected {
-		protectedHandler.Handle("/", web.IndexHandler(version, proxyChecker))
+		protectedHandler.Handle("/", web.IndexHandler(version, proxyChecker, projectMaintenance))
 		middlewareHandler := web.BasicAuthMiddleware(
 			config.CLIConfig.Metrics.Username,
 			config.CLIConfig.Metrics.Password,
 		)(protectedHandler)
 		mux.Handle("/", middlewareHandler)
 	} else {
-		protectedHandler.Handle("/", web.IndexHandler(version, proxyChecker))
+		protectedHandler.Handle("/", web.IndexHandler(version, proxyChecker, projectMaintenance))
 		adminHandler := web.BasicAuthMiddleware(
 			config.CLIConfig.Metrics.Username,
 			config.CLIConfig.Metrics.Password,

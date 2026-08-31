@@ -139,6 +139,21 @@ func TestCreatorIncludesRemnawaveSettingsButExcludesOwnershipRuntime(t *testing.
 	}
 }
 
+func TestCreatorIncludesProjectMaintenanceState(t *testing.T) {
+	dataDir := t.TempDir()
+	state := []byte(`{"version":1,"updatedAt":"2026-08-31T10:00:00Z","enabled":true,"since":"2026-08-31T10:00:00Z"}`)
+	writeTestFile(t, filepath.Join(dataDir, "project_state.json"), state)
+
+	var archive bytes.Buffer
+	if _, err := NewCreator(dataDir, "test").Create(&archive); err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+	entries := readArchive(t, archive.Bytes())
+	if !bytes.Equal(entries["data/project_state.json"], state) {
+		t.Fatalf("project state changed in backup: %s", entries["data/project_state.json"])
+	}
+}
+
 func TestCreatorExcludesDiagnosticAgentRegistry(t *testing.T) {
 	dataDir := t.TempDir()
 	writeTestFile(t, filepath.Join(dataDir, "diagnostic_agents.json"), []byte(`{"version":1,"agents":{"agent":{"enrollmentTokenHash":"secret-hash","identityPublicKey":"public-key"}}}`))

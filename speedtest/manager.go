@@ -18,6 +18,7 @@ import (
 	"xray-checker/checker"
 	"xray-checker/logger"
 	"xray-checker/models"
+	"xray-checker/projectmaintenance"
 )
 
 const (
@@ -116,6 +117,7 @@ type Result struct {
 	FallbackCountryCode     string                    `json:"fallbackCountryCode,omitempty"`
 	TelegramAlertSuppressed bool                      `json:"telegramAlertSuppressed,omitempty"`
 	MaintenanceProbe        bool                      `json:"maintenanceProbe,omitempty"`
+	ProjectMaintenanceProbe bool                      `json:"projectMaintenanceProbe,omitempty"`
 	StatusCode              int                       `json:"statusCode"`
 	DownloadedBytes         int64                     `json:"downloadedBytes"`
 	DurationMs              int64                     `json:"durationMs"`
@@ -179,16 +181,17 @@ type Manager struct {
 	resultPath   string
 	defaults     TestConfig
 
-	mu           sync.RWMutex
-	running      bool
-	lastRun      RunInfo
-	results      map[string]Result
-	probeResults map[string]Result
-	history      map[string][]Result
-	schedule     ScheduleConfig
-	nextRun      time.Time
-	reporter     Reporter
-	runGate      sync.Locker
+	mu                 sync.RWMutex
+	running            bool
+	lastRun            RunInfo
+	results            map[string]Result
+	probeResults       map[string]Result
+	history            map[string][]Result
+	schedule           ScheduleConfig
+	nextRun            time.Time
+	reporter           Reporter
+	runGate            sync.Locker
+	projectMaintenance bool
 
 	resultPersistMu        sync.Mutex
 	schedulePersistMu      sync.Mutex
@@ -203,23 +206,25 @@ type Manager struct {
 	lowSpeedThresholdMbps  float64
 	testAttempt            func(proxy *models.ProxyConfig, cfg TestConfig, source string) Result
 
-	stopCh     chan struct{}
-	scheduleCh chan struct{}
+	stopCh               chan struct{}
+	scheduleCh           chan struct{}
+	projectMaintenanceCh chan struct{}
 }
 
 func NewManager(proxyChecker *checker.ProxyChecker, startPort int, statePath string, defaults TestConfig) *Manager {
 	defaults = normalizeConfig(defaults)
 	return &Manager{
-		proxyChecker: proxyChecker,
-		startPort:    startPort,
-		statePath:    statePath,
-		resultPath:   resultStatePath(statePath),
-		defaults:     defaults,
-		results:      make(map[string]Result),
-		probeResults: make(map[string]Result),
-		history:      make(map[string][]Result),
-		stopCh:       make(chan struct{}),
-		scheduleCh:   make(chan struct{}, 1),
+		proxyChecker:         proxyChecker,
+		startPort:            startPort,
+		statePath:            statePath,
+		resultPath:           resultStatePath(statePath),
+		defaults:             defaults,
+		results:              make(map[string]Result),
+		probeResults:         make(map[string]Result),
+		history:              make(map[string][]Result),
+		stopCh:               make(chan struct{}),
+		scheduleCh:           make(chan struct{}, 1),
+		projectMaintenanceCh: make(chan struct{}, 1),
 	}
 }
 
@@ -227,6 +232,35 @@ func (m *Manager) SetReporter(reporter Reporter) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.reporter = reporter
+}
+
+func (m *Manager) SetProjectMaintenance(enabled bool) {
+	m.mu.Lock()
+	changed := m.projectMaintenance != enabled
+	m.projectMaintenance = enabled
+	m.mu.Unlock()
+	if changed {
+		select {
+		case m.projectMaintenanceCh <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (m *Manager) ProjectMaintenanceEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.projectMaintenance
+}
+
+func (m *Manager) ClearProjectMaintenanceProbes() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for stableID, result := range m.probeResults {
+		if result.ProjectMaintenanceProbe {
+			delete(m.probeResults, stableID)
+		}
+	}
 }
 
 // SetRunGate coordinates speed tests with Xray lifecycle changes. The gate is
@@ -644,6 +678,10 @@ func (m *Manager) Run(req RunRequest, source string) error {
 			runGate.Unlock()
 		}
 	}()
+	projectMaintenanceProbe := m.ProjectMaintenanceEnabled()
+	if projectMaintenanceProbe && source != ManualSource {
+		return projectmaintenance.ErrEnabled
+	}
 
 	proxies := m.selectProxies(req, source == ManualSource)
 	if len(proxies) == 0 {
@@ -685,6 +723,7 @@ func (m *Manager) Run(req RunRequest, source string) error {
 		append([]string(nil), req.ProxyIDs...),
 		req.ReportTarget,
 		runGate,
+		projectMaintenanceProbe,
 	)
 	gateHeld = false
 	return nil
@@ -692,6 +731,16 @@ func (m *Manager) Run(req RunRequest, source string) error {
 
 func (m *Manager) schedulerLoop() {
 	for {
+		if m.ProjectMaintenanceEnabled() {
+			select {
+			case <-m.projectMaintenanceCh:
+				continue
+			case <-m.scheduleCh:
+				continue
+			case <-m.stopCh:
+				return
+			}
+		}
 		schedule, nextRun := m.ensureSchedulerDeadline(time.Now())
 		if !schedule.Enabled {
 			select {
@@ -726,6 +775,8 @@ func (m *Manager) schedulerLoop() {
 				logger.Warn("Scheduled speed test skipped: %v", err)
 			}
 		case <-m.scheduleCh:
+			timer.Stop()
+		case <-m.projectMaintenanceCh:
 			timer.Stop()
 		case <-m.stopCh:
 			timer.Stop()
@@ -817,6 +868,7 @@ func (m *Manager) run(
 	requestedStableIDs []string,
 	reportTarget ReportTarget,
 	runGate sync.Locker,
+	projectMaintenanceProbe bool,
 ) {
 	if runGate != nil {
 		defer runGate.Unlock()
@@ -825,11 +877,12 @@ func (m *Manager) run(
 	runResults := make([]Result, 0, len(proxies))
 	maintenanceProbes := make(map[string]bool, len(proxies))
 	for _, proxy := range proxies {
-		maintenanceProbes[proxy.StableID] = !m.proxyChecker.MonitoringEnabled(proxy.StableID)
+		maintenanceProbes[proxy.StableID] = projectMaintenanceProbe || !m.proxyChecker.MonitoringEnabled(proxy.StableID)
 	}
 
 	recordResult := func(result Result) {
 		result.MaintenanceProbe = maintenanceProbes[result.StableID]
+		result.ProjectMaintenanceProbe = projectMaintenanceProbe
 		runResults = append(runResults, result)
 
 		m.mu.Lock()

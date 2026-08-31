@@ -2,6 +2,7 @@ package remnawave
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"xray-checker/checker"
 	"xray-checker/models"
 	"xray-checker/nodearchive"
+	"xray-checker/projectmaintenance"
 )
 
 type fakeAPI struct {
@@ -92,6 +94,18 @@ func (f *fakeProxySource) setOnline(stableIDs ...string) {
 	defer f.mu.Unlock()
 	for _, stableID := range stableIDs {
 		f.statuses[stableID] = checker.ProxyStatusDetails{Online: true}
+	}
+}
+
+func TestProjectMaintenanceBlocksRemnawaveWrites(t *testing.T) {
+	api := &fakeAPI{}
+	service := NewService(Options{MasterEnabled: true, API: api})
+	service.SetProjectMaintenance(true)
+	if _, err := service.SyncNow(context.Background()); !errors.Is(err, projectmaintenance.ErrEnabled) {
+		t.Fatalf("SyncNow() error = %v, want project maintenance", err)
+	}
+	if len(api.updates) != 0 {
+		t.Fatalf("project maintenance wrote %d remote updates", len(api.updates))
 	}
 }
 

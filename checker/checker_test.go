@@ -11,6 +11,7 @@ import (
 	"golang.org/x/net/ipv4"
 
 	"xray-checker/models"
+	"xray-checker/projectmaintenance"
 )
 
 func TestGetProxyStatusByStableIDFallsBackToStatusDetails(t *testing.T) {
@@ -453,6 +454,32 @@ func TestMaintenanceModeKeepsProbeChecksAndClearsMonitoringStatus(t *testing.T) 
 	proxyChecker.CheckAllProxies()
 	if checks != 3 {
 		t.Fatalf("checks after resume = %d, want 3 including maintenance probes", checks)
+	}
+}
+
+func TestProjectMaintenanceBlocksAutomaticChecksButAllowsAdminProbe(t *testing.T) {
+	proxy := testProxy("node-1", "Node one")
+	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{proxy})
+	checks := 0
+	proxyChecker.checkProxyFunc = func(*models.ProxyConfig, uint64, bool, bool) {
+		checks++
+	}
+	proxyChecker.SetProjectMaintenance(true)
+
+	if err := proxyChecker.CheckAllProxies(); !errors.Is(err, projectmaintenance.ErrEnabled) {
+		t.Fatalf("CheckAllProxies() error = %v, want project maintenance", err)
+	}
+	if _, err := proxyChecker.CheckUnavailableProxies(); !errors.Is(err, projectmaintenance.ErrEnabled) {
+		t.Fatalf("CheckUnavailableProxies() error = %v, want project maintenance", err)
+	}
+	if _, err := proxyChecker.CheckProxiesByStableIDs([]string{proxy.StableID}); !errors.Is(err, projectmaintenance.ErrEnabled) {
+		t.Fatalf("non-admin check error = %v, want project maintenance", err)
+	}
+	if _, err := proxyChecker.CheckProxiesByStableIDsIncludingMaintenance([]string{proxy.StableID}); err != nil {
+		t.Fatalf("admin project maintenance probe error = %v", err)
+	}
+	if checks != 1 {
+		t.Fatalf("checks = %d, want only the explicit admin probe", checks)
 	}
 }
 

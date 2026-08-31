@@ -42,12 +42,16 @@ type PublicProxyInfo struct {
 }
 
 type StatusResponse struct {
-	Total         int   `json:"total"`
-	Online        int   `json:"online"`
-	ProxyFailures int   `json:"proxyFailures"`
-	Offline       int   `json:"offline"`
-	Maintenance   int   `json:"maintenance"`
-	AvgLatencyMs  int64 `json:"avgLatencyMs"`
+	Status                  string    `json:"status"`
+	Total                   int       `json:"total"`
+	Online                  int       `json:"online"`
+	ProxyFailures           int       `json:"proxyFailures"`
+	Offline                 int       `json:"offline"`
+	Unknown                 int       `json:"unknown"`
+	Maintenance             int       `json:"maintenance"`
+	AvgLatencyMs            int64     `json:"avgLatencyMs"`
+	ProjectMaintenance      bool      `json:"projectMaintenance"`
+	ProjectMaintenanceSince time.Time `json:"projectMaintenanceSince,omitempty"`
 }
 
 type ConfigResponse struct {
@@ -213,11 +217,12 @@ func APIProxyHandler(proxyChecker *checker.ProxyChecker, startPort int) http.Han
 // @Produce json
 // @Success 200 {object} StatusResponse
 // @Router /api/v1/status [get]
-func APIStatusHandler(proxyChecker *checker.ProxyChecker) http.HandlerFunc {
+func APIStatusHandler(proxyChecker *checker.ProxyChecker, projectSources ...ProjectMaintenanceSource) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		proxies := proxyChecker.GetProxies()
+		projectState := projectMaintenanceSnapshot(projectSources)
 
-		var online, proxyFailures, offline, maintenance int
+		var online, proxyFailures, offline, unknown, maintenance int
 		var totalLatency int64
 		var latencyCount int
 
@@ -229,7 +234,11 @@ func APIStatusHandler(proxyChecker *checker.ProxyChecker) http.HandlerFunc {
 				maintenance++
 				continue
 			}
-			details, _ := proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+			details, err := proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+			if err != nil {
+				unknown++
+				continue
+			}
 			switch details.EffectiveStatus() {
 			case checker.AvailabilityStateOnline:
 				online++
@@ -239,8 +248,10 @@ func APIStatusHandler(proxyChecker *checker.ProxyChecker) http.HandlerFunc {
 				}
 			case checker.AvailabilityStateProxyFailure:
 				proxyFailures++
-			default:
+			case checker.AvailabilityStateOffline:
 				offline++
+			default:
+				unknown++
 			}
 		}
 
@@ -249,13 +260,29 @@ func APIStatusHandler(proxyChecker *checker.ProxyChecker) http.HandlerFunc {
 			avgLatency = totalLatency / int64(latencyCount)
 		}
 
+		status := "operational"
+		if projectState.Enabled {
+			status = "maintenance"
+			online = 0
+			proxyFailures = 0
+			offline = 0
+			unknown = len(proxies) - maintenance
+		} else if offline > 0 || proxyFailures > 0 {
+			status = "degraded"
+		} else if unknown > 0 {
+			status = "unknown"
+		}
 		writeJSON(w, StatusResponse{
-			Total:         len(proxies),
-			Online:        online,
-			ProxyFailures: proxyFailures,
-			Offline:       offline,
-			Maintenance:   maintenance,
-			AvgLatencyMs:  avgLatency,
+			Status:                  status,
+			Total:                   len(proxies),
+			Online:                  online,
+			ProxyFailures:           proxyFailures,
+			Offline:                 offline,
+			Unknown:                 unknown,
+			Maintenance:             maintenance,
+			AvgLatencyMs:            avgLatency,
+			ProjectMaintenance:      projectState.Enabled,
+			ProjectMaintenanceSince: projectState.Since,
 		})
 	}
 }

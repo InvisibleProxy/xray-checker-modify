@@ -10,6 +10,7 @@
 - ручной и плановый speedtest с отдельным Test URL для каждой ноды;
 - Nodes Overview с downtime, историей speedtest, GeoIP-сверкой и безопасным merge retired-ноды после смены ключа;
 - persisted-журнал одиночных и массовых инцидентов с диагностическими кодами причин;
+- режим обслуживания всего проекта: фоновый мониторинг и уведомления на паузе, трафик и ручные действия работают;
 - общий настраиваемый срок хранения историй speedtest и Availability, по умолчанию 60 дней;
 - структурированные Telegram-команды, отчёты и уведомления о недоступности;
 - ручные и автоматические резервные копии;
@@ -255,6 +256,18 @@ Remnawave location membership в node merge намеренно не перено
 
 Быстрые попытки не увеличивают Telegram `Failed checks` и не сдвигают расписание напоминаний. Когда настоящий proxy-check подтверждает восстановление, downtime закрывается сразу, а pending recovery передаётся Telegram без ожидания следующего alert-цикла. В админке `Check` доступен и в строке конкретной ноды, и как групповое действие для выбранных нод; в карточке ноды Telegram для администратора доступна кнопка «Проверить доступность». Все ручные точки используют тот же каскадный workflow и обновляют TCP/ping.
 
+### Обслуживание проекта
+
+Когда работы затрагивают весь стенд, а не отдельную ноду, включите режим в `Settings → Project` кнопкой `Enable Project Maintenance`. Включение запрашивает подтверждение, выход выполняется кнопкой `Resume Project` там же или прямо в баннере. То же доступно через `GET`/`PUT /api/v1/admin/project-maintenance` с телом `{"enabled": true}`.
+
+Пока режим включён, приостановлены плановый обход доступности и быстрый recovery-loop, плановый speedtest и 30-минутные confirmation retry, Telegram-алерты, напоминания и отчёты, автоматическое обновление подписки и operational-запись в Remnawave. Продолжают работать Xray и пользовательский трафик, HTTP-сервер, `/health`, админка и API, автоматические бэкапы, heartbeat диагностических агентов, а также ручные `Check`, `Run`, backup и удалённая диагностика. Ручной speedtest в этом режиме считается разовой пробой: результат виден в текущем snapshot, но не попадает в историю, KPI и Telegram.
+
+Включение закрывает текущие downtime, интервалы `proxy_failure` и активные инциденты, а также очищает счётчики Telegram-алертов и отложенные confirmation retry. История, накопленный downtime, журнал инцидентов, настройки, mute и персональные Test URL сохраняются. Отдельный per-node `Maintenance` живёт независимо: нода, поставленная на паузу до включения глобального режима, останется на паузе после выхода.
+
+Состояние видно снаружи явно, без подмены статусов нод: `/config/<StableID>` отвечает `200 Project Maintenance`, `/api/v1/status` возвращает `status: maintenance`, dashboard и публичная status page показывают баннер, а Prometheus — метрику `xray_checker_project_maintenance`.
+
+После `Resume` ноды не становятся `online` автоматически: сначала выполняется реальная проверка. Пропущенные за время работ расписания не выстраиваются в очередь догоняющих запусков — следующий плановый speedtest отсчитывается от момента выхода. Состояние хранится в `data/project_state.json`, переживает рестарт и входит в backup, поэтому восстановление архива, снятого во время работ, вернёт и включённый режим.
+
 ### Remnawave subscription announce
 
 Интеграция меняет только header `announce` у выбранных External Squads. Имена Hosts, конфигурации нод, пользователи и состав сквадов не редактируются. Для отдельного API token в Remnawave нужны минимальные scopes:
@@ -380,6 +393,7 @@ Recovery-уведомление хранится как pending до подтв�
 | `data/node_alert_state.json` | состояние Telegram-уведомлений, причины и pending 30-минутные speedtest confirmation retries |
 | `data/remnawave_announce_config.json` | policy, пары Internal/External Squads и location members (`location key → StableID → Host UUID`); входит в backup |
 | `data/remnawave_announce_state.json` | runtime ownership управляемых `announce`; не входит в backup |
+| `data/project_state.json` | глобальный режим обслуживания проекта и момент включения; входит в backup |
 | `data/backups/` | автоматические ZIP-архивы |
 | `data/.node-merge-*` | временные staging/rollback-каталоги node merge; очищаются после подтверждённого startup |
 | `geo/` | загруженные GeoIP/GeoSite-файлы |

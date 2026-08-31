@@ -19,6 +19,7 @@ import (
 	"xray-checker/models"
 	"xray-checker/nodearchive"
 	"xray-checker/nodemerge"
+	"xray-checker/projectmaintenance"
 	"xray-checker/speedtest"
 )
 
@@ -187,7 +188,6 @@ func TestAdminTemplateSeparatesGlobalSettingsFromNodeControls(t *testing.T) {
 		}
 	}
 	for _, marker := range []string{
-		`id="refresh-subscription"`,
 		`id="history-retention-days"`,
 		`id="telegram-enabled"`,
 		`id="download-backup"`,
@@ -198,13 +198,16 @@ func TestAdminTemplateSeparatesGlobalSettingsFromNodeControls(t *testing.T) {
 	}
 
 	settings := html[settingsStart:nodesOverviewStart]
+	if !strings.Contains(dashboard, `id="refresh-subscription"`) || strings.Count(html, `id="refresh-subscription"`) != 1 {
+		t.Error("manual subscription refresh is not exposed exactly once on the dashboard")
+	}
 	if !strings.Contains(html[:dashboardStart], `id="tab-settings"`) {
 		t.Error("admin section navigation does not contain the Settings tab")
 	}
 	for _, marker := range []string{
 		`aria-label="Global settings"`,
-		`id="global-settings-pane-subscription"`,
-		`id="refresh-subscription"`,
+		`id="global-settings-pane-project"`,
+		`id="toggle-project-maintenance"`,
 		`id="global-settings-pane-history"`,
 		`id="history-retention-days"`,
 		`id="global-settings-pane-telegram"`,
@@ -735,6 +738,27 @@ func TestAdminSubscriptionRefreshHandlerReportsRunningRefresh(t *testing.T) {
 	}
 }
 
+func TestAdminProjectMaintenanceHandlerReadsAndUpdatesState(t *testing.T) {
+	current := projectmaintenance.Snapshot{}
+	handler := AdminProjectMaintenanceHandler(func() projectmaintenance.Snapshot {
+		return current
+	}, func(enabled bool) (projectmaintenance.Snapshot, error) {
+		current = projectmaintenance.Snapshot{Enabled: enabled, Since: time.Date(2026, 8, 31, 10, 0, 0, 0, time.UTC)}
+		return current, nil
+	})
+
+	put := httptest.NewRecorder()
+	handler.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/api/v1/admin/project-maintenance", strings.NewReader(`{"enabled":true}`)))
+	if put.Code != http.StatusOK || !strings.Contains(put.Body.String(), `"enabled":true`) {
+		t.Fatalf("PUT response %d: %s", put.Code, put.Body.String())
+	}
+	get := httptest.NewRecorder()
+	handler.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/api/v1/admin/project-maintenance", nil))
+	if get.Code != http.StatusOK || !strings.Contains(get.Body.String(), `"enabled":true`) {
+		t.Fatalf("GET response %d: %s", get.Code, get.Body.String())
+	}
+}
+
 func TestAdminBackupHandlerDownloadsArchive(t *testing.T) {
 	dataDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dataDir, "node_registry.json"), []byte(`{"version":1,"nodes":{}}`), 0600); err != nil {
@@ -1001,6 +1025,27 @@ func TestConfigStatusHandlerReturnsOKDuringMaintenance(t *testing.T) {
 	}
 	if rec.Header().Get("X-Xray-Checker-Status") != "maintenance" {
 		t.Fatalf("maintenance response header = %q", rec.Header().Get("X-Xray-Checker-Status"))
+	}
+}
+
+func TestProjectMaintenanceIsExplicitInConfigAndStatusAPI(t *testing.T) {
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "Node one"}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "", "", 1, 0, "status")
+	project := projectmaintenance.NewManager(filepath.Join(t.TempDir(), "project_state.json"))
+	if _, err := project.Set(true); err != nil {
+		t.Fatal(err)
+	}
+
+	configRec := httptest.NewRecorder()
+	ConfigStatusHandler(proxyChecker, project).ServeHTTP(configRec, httptest.NewRequest(http.MethodGet, "/config/node-1", nil))
+	if configRec.Code != http.StatusOK || strings.TrimSpace(configRec.Body.String()) != "Project Maintenance" || configRec.Header().Get("X-Xray-Checker-Status") != "project-maintenance" {
+		t.Fatalf("project config response = %d %q header=%q", configRec.Code, configRec.Body.String(), configRec.Header().Get("X-Xray-Checker-Status"))
+	}
+
+	statusRec := httptest.NewRecorder()
+	APIStatusHandler(proxyChecker, project).ServeHTTP(statusRec, httptest.NewRequest(http.MethodGet, "/api/v1/status", nil))
+	if statusRec.Code != http.StatusOK || !strings.Contains(statusRec.Body.String(), `"status":"maintenance"`) || !strings.Contains(statusRec.Body.String(), `"unknown":1`) || !strings.Contains(statusRec.Body.String(), `"offline":0`) {
+		t.Fatalf("project status response = %d %s", statusRec.Code, statusRec.Body.String())
 	}
 }
 

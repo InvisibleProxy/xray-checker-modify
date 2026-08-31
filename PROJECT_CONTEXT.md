@@ -20,6 +20,7 @@
 | `checker/` | проверки доступности, latency, host/ping diagnostics, классификация причин и текущее состояние нод |
 | `diagnostics/` | изолированные versioned schemas и in-memory lifecycle Remote Diagnostics; не владеет operational status и не зависит от monitoring-компонентов |
 | `probeagent/` | persisted controller registry, IP-bound enrollment, signed heartbeat, pinned HTTPS client и Linux Compose rendering для удалённых агентов |
+| `projectmaintenance/` | persisted глобальный режим обслуживания; владеет только состоянием и не знает о компонентах, которые на него смотрят |
 | `metrics/` | Prometheus-метрики и Pushgateway |
 | `speedtest/` | ручные и плановые тесты скорости, Test URL нод и temporal retention |
 | `nodearchive/` | долгоживущий реестр активных/выбывших нод, downtime, persisted incident journal, GeoIP активных нод и speedtest summary |
@@ -61,6 +62,16 @@ Frontend встроен в Go-бинарник через `embed`. `docs/` — �
 Уже недоступные ноды попадают в отдельный recovery-loop с периодом `PROXY_RECOVERY_INTERVAL` (default 15 секунд, `0` отключает). В одной ограниченной worker-pool итерации TCP и ping выполняются параллельно. Если TCP недоступен, proxy-check пропускается; после `TCP OK` полноценный настроенный proxy-check запускается немедленно. Ping никогда не является gate. Полный обход остаётся независимой контрольной проверкой и предотвращает постоянную блокировку recovery из-за ошибочной TCP-диагностики.
 
 Полные, recovery и ручные availability-checks сериализованы и удерживают Xray lifecycle read-lock; refresh получает write-lock. Быстрые проверки не вызывают обычный Telegram alert-pass, поэтому не увеличивают `FailCount` и не сдвигают reminders. Успешный переход любого issue-состояния в `online` закрывает downtime либо proxy-failure интервал и передаётся в отдельный immediate-recovery путь Telegram. Ручная проверка `StableID` доступна через admin API, в строке ноды и как групповое действие для выбранных строк, а также в карточке ноды Telegram; для уже недоступной ноды она использует тот же TCP-гейт. Speedtest-кнопка `Run` в admin UI также имеет строковый и групповой варианты.
+
+### Project maintenance
+
+Глобальный режим обслуживания живёт в `data/project_state.json` и полностью независим от per-node maintenance: нода, поставленная на паузу до включения, останется на паузе после выхода. Отсутствие файла означает выключенный режим, поэтому существующие инсталляции обновляются без миграции. Переключение выполняется под Xray lifecycle write-lock, а проверка режима внутри `withCheckRun` стоит после взятия run-gate — уже начатый availability-check или speedtest досчитывается, новый не стартует.
+
+Приостанавливаются плановый availability-check и быстрый recovery-loop, плановый speedtest и confirmation retry, Telegram alerts/reminders/reports, автоматический subscription refresh и operational Remnawave reconcile/write. Продолжают работать Xray и пользовательский прокси-трафик, HTTP-сервер с `/health`, админка и API, автоматические backup, heartbeat удалённых diagnostic agents и явные административные `Check`, `Run`, backup и диагностика. Ручной speedtest во время режима помечается как probe и не попадает в persisted history, KPI и Telegram — тем же механизмом, что и ручной замер maintenance-ноды.
+
+Включение закрывает текущие downtime, proxy-failure интервалы и активные incidents, очищает live-статусы checker, Telegram alert counters и pending confirmation retries. История, cumulative downtime, incident journal, настройки, mute и per-node Test URL сохраняются. Выход из режима также очищает live-статусы: ноды остаются без статуса до первого реального check, а планировщик speedtest пересчитывает deadline от текущего момента и не выполняет серию catch-up запусков.
+
+Наружу режим виден явно, а не подделкой состояния нод: `/config/<StableID>` отвечает `200 Project Maintenance` раньше per-node проверки, `/api/v1/status` возвращает `status: maintenance` с обнулёнными счётчиками и остальными нодами в `unknown`, dashboard и публичная status page показывают баннер, Prometheus получает gauge `xray_checker_project_maintenance`. Сам по себе режим ничего не публикует пользователям Remnawave; planned-maintenance announce остаётся отдельным поведением, которое при необходимости добавляется явно.
 
 ### Remote Diagnostics (этап 1: manual job workflow)
 
@@ -214,6 +225,7 @@ Recovery alert хранит `RecoveryPending`, время и latency до усп
 | `data/node_alert_state.json` | `telegram` | состояние последовательностей алертов, диагностические причины и pending 30-минутные speedtest confirmation retries |
 | `data/remnawave_announce_config.json` | `remnawave` | versioned policy, Internal/External pairs и location-first members (`location key → StableID → Host UUID`); входит в backup |
 | `data/remnawave_announce_state.json` | `remnawave` | последнее exact managed value и announced locations; не входит в backup |
+| `data/project_state.json` | `projectmaintenance` | глобальный режим обслуживания и момент его включения; отсутствие файла означает выключенный режим; входит в backup |
 | `data/backups/*.zip` | `backup` | до 7 автоматических архивов за последние 7 суток |
 | `data/.node-merge-{pending,applied,rollback}` | `nodemerge` | временная crash-safe транзакция переноса identity/history |
 

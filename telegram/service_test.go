@@ -776,6 +776,38 @@ func TestRequestedTelegramSpeedReportUsesOriginEvenWhenAutomatedReportsAreDisabl
 	}
 }
 
+func TestProjectMaintenanceSuppressesTelegramReportsAndClearsPendingState(t *testing.T) {
+	dir := t.TempDir()
+	service := NewService(filepath.Join(dir, "telegram_config.json"), nil, nil, 10000)
+	service.setConfig(Config{Enabled: true, ChatID: "alerts-chat", SpeedReportsEnabled: true, SpeedReportMode: "always"})
+	service.alerts["node-1"] = nodeAlertState{WasDown: true, FailCount: 2}
+	service.speedRetryPending[speedRetryKey{Kind: speedRetryKindConfirmation, StableID: "node-1"}] = true
+	service.speedRetryEntries[1] = pendingSpeedRetry{Kind: speedRetryKindConfirmation, StableIDs: []string{"node-1"}, DueAt: time.Now().Add(time.Hour)}
+	sent := 0
+	service.speedReportSendFunc = func(string, int, formattedMessage) { sent++ }
+	service.SetProjectMaintenance(true)
+
+	service.NotifySpeedTest(speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{{StableID: "node-1", Mbps: 50}}})
+	if sent != 0 {
+		t.Fatalf("project maintenance sent %d Telegram reports", sent)
+	}
+	if err := service.ClearAllMonitoringState(); err != nil {
+		t.Fatal(err)
+	}
+	if len(service.alerts) != 0 || len(service.speedRetryPending) != 0 || len(service.speedRetryEntries) != 0 {
+		t.Fatalf("monitoring state was not cleared: alerts=%d pending=%d entries=%d", len(service.alerts), len(service.speedRetryPending), len(service.speedRetryEntries))
+	}
+	// An empty state removes the file instead of leaving an empty one behind, so
+	// absence is the strongest form of "nothing stale was persisted".
+	persisted, err := os.ReadFile(filepath.Join(dir, "node_alert_state.json"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err == nil && strings.Contains(string(persisted), "node-1") {
+		t.Fatalf("stale project maintenance state persisted:\n%s", persisted)
+	}
+}
+
 func TestSuccessfulFallbackSuppressesAutomatedTelegramReport(t *testing.T) {
 	service := NewService("", nil, nil, 10000)
 	defer service.Stop()

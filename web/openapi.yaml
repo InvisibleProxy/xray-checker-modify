@@ -255,6 +255,52 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
+  /api/v1/admin/project-maintenance:
+    get:
+      summary: Read project-wide maintenance state
+      tags: [Admin]
+      responses:
+        '200':
+          description: Current project maintenance state
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ProjectMaintenanceState'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      summary: Enable or disable project-wide maintenance
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectMaintenanceRequest'
+      responses:
+        '200':
+          description: Updated project maintenance state
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ProjectMaintenanceState'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
   /api/v1/admin/backup:
     get:
       summary: Download a persisted-state backup
@@ -1333,6 +1379,9 @@ components:
     StatusResponse:
       type: object
       properties:
+        status:
+          type: string
+          enum: [operational, degraded, unknown, maintenance]
         total:
           type: integer
           example: 10
@@ -1342,6 +1391,9 @@ components:
         offline:
           type: integer
           example: 2
+        unknown:
+          type: integer
+          description: Nodes without a current authoritative availability result.
         proxyFailures:
           type: integer
           description: Reachable nodes whose real proxy check failed.
@@ -1353,6 +1405,12 @@ components:
           type: integer
           format: int64
           example: 200
+        projectMaintenance:
+          type: boolean
+          description: True while project-wide automatic operational workflows are paused.
+        projectMaintenanceSince:
+          type: string
+          format: date-time
 
     ConfigResponse:
       type: object
@@ -1459,6 +1517,23 @@ components:
               type: string
             failureDetail:
               type: string
+
+    ProjectMaintenanceRequest:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+
+    ProjectMaintenanceState:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+        since:
+          type: string
+          format: date-time
 
     SubscriptionRefreshRequest:
       type: object
@@ -1652,7 +1727,10 @@ components:
           description: Fallback result at or above the configured low-speed threshold is omitted from automated Telegram reports and alerts.
         maintenanceProbe:
           type: boolean
-          description: One-off admin speed probe for a maintenance node. It may be shown in the current admin snapshot but is not persisted in speed history or used by Telegram/statistics.
+          description: One-off admin speed probe during node or project maintenance. It may be shown in the current admin snapshot but is not persisted in speed history or used by Telegram/statistics.
+        projectMaintenanceProbe:
+          type: boolean
+          description: True when the ephemeral admin probe was run during project-wide maintenance.
         statusCode:
           type: integer
         downloadedBytes:

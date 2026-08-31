@@ -385,6 +385,46 @@ func TestSetMaintenancePersistsAndClosesActiveDowntime(t *testing.T) {
 	}
 }
 
+func TestPauseProjectMonitoringClosesAccountingWithoutChangingNodeMaintenance(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "node_registry.json")
+	store := NewStore(path, nil)
+	startedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	store.nodes["node-1"] = NodeRecord{
+		StableID:                 "node-1",
+		Active:                   true,
+		CurrentDownSince:         startedAt,
+		CurrentProxyFailureSince: startedAt,
+	}
+	store.incidents = []IncidentRecord{
+		{ID: "node", Kind: incidentKindNode, Status: incidentStatusActive, Scope: "node:node-1", StartedAt: startedAt},
+		{ID: "mass", Kind: incidentKindMass, Status: incidentStatusActive, Scope: "global", StartedAt: startedAt},
+	}
+
+	if err := store.PauseProjectMonitoring(); err != nil {
+		t.Fatal(err)
+	}
+	record := store.nodes["node-1"]
+	if record.Maintenance || !record.MaintenanceSince.IsZero() {
+		t.Fatalf("project pause changed per-node maintenance: %+v", record)
+	}
+	if !record.CurrentDownSince.IsZero() || !record.CurrentProxyFailureSince.IsZero() || record.TotalDowntimeSec <= 0 || record.TotalProxyFailureSec <= 0 {
+		t.Fatalf("project pause did not close accounting: %+v", record)
+	}
+	for _, incident := range store.incidents {
+		if incident.Status != incidentStatusResolved || incident.ResolvedAt.IsZero() {
+			t.Fatalf("incident was not resolved: %+v", incident)
+		}
+	}
+
+	reloaded := NewStore(path, nil)
+	if err := reloaded.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.nodes["node-1"]; got.Maintenance || !got.CurrentDownSince.IsZero() {
+		t.Fatalf("persisted project pause state = %+v", got)
+	}
+}
+
 func TestRecordAvailabilityPersistsIncidentJournal(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "node_registry.json")
 	proxy := &models.ProxyConfig{StableID: "node-1", Name: "Node 1", Protocol: "vless", Server: "node.example", Port: 443}

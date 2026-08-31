@@ -501,7 +501,7 @@
         <div class="badge-card" :class="badgeClasses" :style="badgeStyle">
           <div
             class="badge-status"
-            :class="badgeProxy.maintenance ? 'status-maintenance' : (badgeProxy.availabilityStatus === 'online' ? 'status-online pulse' : (badgeProxy.availabilityStatus === 'proxy_failure' ? 'status-proxy-failure' : 'status-offline'))"
+            :class="projectMaintenance || badgeProxy.maintenance ? 'status-maintenance' : (badgeProxy.availabilityStatus === 'online' ? 'status-online pulse' : (badgeProxy.availabilityStatus === 'proxy_failure' ? 'status-proxy-failure' : 'status-offline'))"
           ></div>
           <span
             x-show="badgeShowName"
@@ -512,7 +512,7 @@
             x-show="badgeShowLatency"
             class="badge-latency"
             :class="badgeProxy.latencyMs === 0 ? 'text-muted' : badgeProxy.latencyMs < 500 ? 'latency-good' : badgeProxy.latencyMs < 1000 ? 'latency-medium' : 'latency-bad'"
-            x-text="badgeProxy.maintenance ? 'Maintenance' : (badgeProxy.availabilityStatus === 'proxy_failure' ? 'Proxy failure' : badgeProxy.latency)"
+            x-text="projectMaintenance ? 'Project maintenance' : (badgeProxy.maintenance ? 'Maintenance' : (badgeProxy.availabilityStatus === 'proxy_failure' ? 'Proxy failure' : badgeProxy.latency))"
           ></span>
         </div>
       </div>
@@ -652,6 +652,18 @@
           </button>
         </div>
       </header>
+
+      {{ if .ProjectMaintenance }}
+      <section class="card rounded-lg px-4 py-3 mb-6 border-yellow-500" role="status">
+        <div class="flex items-center gap-3">
+          <span class="status-maintenance w-3 h-3 rounded-full"></span>
+          <div>
+            <strong class="text-primary">Project maintenance</strong>
+            <p class="text-xs text-muted">Automatic monitoring is temporarily paused. Proxy traffic and service health remain available.</p>
+          </div>
+        </div>
+      </section>
+      {{ end }}
 
       <!-- Stats -->
       <div x-show="showStats" class="grid grid-cols-5 gap-2 sm:gap-3 mb-6">
@@ -1109,6 +1121,7 @@
           sort: localStorage.getItem('sort') || 'default',
           toasts: [],
           initialLoad: true,
+          projectMaintenance: {{ .ProjectMaintenance }},
 
           // URL-controlled visibility
           showHeader: !getUrlParam('hideHeader'),

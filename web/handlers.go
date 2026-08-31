@@ -10,6 +10,7 @@ import (
 	"xray-checker/config"
 	"xray-checker/metrics"
 	"xray-checker/models"
+	"xray-checker/projectmaintenance"
 	"xray-checker/subscription"
 )
 
@@ -34,7 +35,18 @@ type EndpointInfo struct {
 	StableID           string
 }
 
-func IndexHandler(version string, proxyChecker *checker.ProxyChecker) http.HandlerFunc {
+type ProjectMaintenanceSource interface {
+	Snapshot() projectmaintenance.Snapshot
+}
+
+func projectMaintenanceSnapshot(sources []ProjectMaintenanceSource) projectmaintenance.Snapshot {
+	if len(sources) == 0 || sources[0] == nil {
+		return projectmaintenance.Snapshot{}
+	}
+	return sources[0].Snapshot()
+}
+
+func IndexHandler(version string, proxyChecker *checker.ProxyChecker, projectSources ...ProjectMaintenanceSource) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -71,6 +83,7 @@ func IndexHandler(version string, proxyChecker *checker.ProxyChecker) http.Handl
 			}
 		}
 
+		projectState := projectMaintenanceSnapshot(projectSources)
 		data := PageData{
 			Version:                    version,
 			Host:                       config.CLIConfig.Metrics.Host,
@@ -91,6 +104,8 @@ func IndexHandler(version string, proxyChecker *checker.ProxyChecker) http.Handl
 			ShowServerDetails:          showServerDetails,
 			IsPublic:                   isPublic,
 			SubscriptionName:           subscription.GetSubscriptionName(),
+			ProjectMaintenance:         projectState.Enabled,
+			ProjectMaintenanceSince:    projectState.Since,
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -123,7 +138,7 @@ func BasicAuthMiddleware(username, password string) func(http.Handler) http.Hand
 	}
 }
 
-func ConfigStatusHandler(proxyChecker *checker.ProxyChecker) http.HandlerFunc {
+func ConfigStatusHandler(proxyChecker *checker.ProxyChecker, projectSources ...ProjectMaintenanceSource) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path[len("/config/"):]
 		if path == "" {
@@ -134,6 +149,13 @@ func ConfigStatusHandler(proxyChecker *checker.ProxyChecker) http.HandlerFunc {
 		found, exists := proxyChecker.GetProxyByStableID(path)
 		if !exists {
 			http.Error(w, "Config not found", http.StatusNotFound)
+			return
+		}
+		if projectMaintenanceSnapshot(projectSources).Enabled {
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("X-Xray-Checker-Status", "project-maintenance")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("Project Maintenance"))
 			return
 		}
 

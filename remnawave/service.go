@@ -6,12 +6,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"xray-checker/checker"
 	"xray-checker/logger"
 	"xray-checker/models"
 	"xray-checker/nodearchive"
+	"xray-checker/projectmaintenance"
 )
 
 type ProxySource interface {
@@ -63,11 +65,12 @@ type Service struct {
 	recoverySince       map[string]time.Time
 	now                 func() time.Time
 
-	startStopMu sync.Mutex
-	started     bool
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
-	trigger     chan struct{}
+	startStopMu        sync.Mutex
+	started            bool
+	cancel             context.CancelFunc
+	wg                 sync.WaitGroup
+	trigger            chan struct{}
+	projectMaintenance atomic.Bool
 }
 
 type desiredAnnouncement struct {
@@ -166,6 +169,18 @@ func (s *Service) Start() {
 	go s.loop(ctx)
 }
 
+func (s *Service) SetProjectMaintenance(enabled bool) {
+	if enabled {
+		s.operationMu.Lock()
+		defer s.operationMu.Unlock()
+	}
+	s.projectMaintenance.Store(enabled)
+}
+
+func (s *Service) ProjectMaintenanceEnabled() bool {
+	return s.projectMaintenance.Load()
+}
+
 func (s *Service) Stop() {
 	s.startStopMu.Lock()
 	if !s.started {
@@ -184,8 +199,10 @@ func (s *Service) Stop() {
 
 func (s *Service) loop(ctx context.Context) {
 	defer s.wg.Done()
-	if _, err := s.SyncNow(ctx); err != nil {
-		logger.Warn("Initial Remnawave announce sync failed: %v", err)
+	if !s.ProjectMaintenanceEnabled() {
+		if _, err := s.SyncNow(ctx); err != nil {
+			logger.Warn("Initial Remnawave announce sync failed: %v", err)
+		}
 	}
 	reconcileTicker := time.NewTicker(s.reconcileInterval)
 	topologyTicker := time.NewTicker(s.topologyInterval)
@@ -196,14 +213,23 @@ func (s *Service) loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-s.trigger:
+			if s.ProjectMaintenanceEnabled() {
+				continue
+			}
 			if _, err := s.ReconcileNow(ctx); err != nil {
 				logger.Warn("Remnawave announce reconcile failed: %v", err)
 			}
 		case <-reconcileTicker.C:
+			if s.ProjectMaintenanceEnabled() {
+				continue
+			}
 			if _, err := s.ReconcileNow(ctx); err != nil {
 				logger.Warn("Remnawave announce reconcile failed: %v", err)
 			}
 		case <-topologyTicker.C:
+			if s.ProjectMaintenanceEnabled() {
+				continue
+			}
 			if _, err := s.SyncNow(ctx); err != nil {
 				logger.Warn("Remnawave announce topology sync failed: %v", err)
 			}
@@ -212,7 +238,7 @@ func (s *Service) loop(ctx context.Context) {
 }
 
 func (s *Service) Trigger() {
-	if !s.masterEnabled {
+	if !s.masterEnabled || s.ProjectMaintenanceEnabled() {
 		return
 	}
 	select {
@@ -225,7 +251,7 @@ func (s *Service) Trigger() {
 // recovery and one-off manual checks deliberately do not increment the
 // confirmation counter, so a single result cannot publish an announce.
 func (s *Service) ObserveFullCheck() {
-	if s.proxySource == nil {
+	if s.proxySource == nil || s.ProjectMaintenanceEnabled() {
 		return
 	}
 	proxies := s.proxySource.GetProxies()
@@ -330,6 +356,9 @@ func (s *Service) UpdateSettings(settings Settings) (Snapshot, error) {
 }
 
 func (s *Service) SyncNow(ctx context.Context) (Snapshot, error) {
+	if s.ProjectMaintenanceEnabled() {
+		return s.Snapshot(), projectmaintenance.ErrEnabled
+	}
 	if err := s.readyForAPI(); err != nil {
 		s.setLastError(err)
 		return s.Snapshot(), err
@@ -348,6 +377,9 @@ func (s *Service) SyncNow(ctx context.Context) (Snapshot, error) {
 }
 
 func (s *Service) ReconcileNow(ctx context.Context) (Snapshot, error) {
+	if s.ProjectMaintenanceEnabled() {
+		return s.Snapshot(), projectmaintenance.ErrEnabled
+	}
 	if err := s.readyForAPI(); err != nil {
 		s.setLastError(err)
 		return s.Snapshot(), err

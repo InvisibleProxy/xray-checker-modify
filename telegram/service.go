@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -202,6 +203,7 @@ type Service struct {
 	speedReportSendFunc func(string, int, formattedMessage)
 	availabilityCheck   func([]string) error
 	nodeAlertSendFunc   func(Config, formattedMessage) error
+	projectMaintenance  atomic.Bool
 }
 
 type nodeAlertState struct {
@@ -409,6 +411,14 @@ func (s *Service) SetAvailabilityCheckFunc(check func([]string) error) {
 	s.availabilityCheck = check
 }
 
+func (s *Service) SetProjectMaintenance(enabled bool) {
+	s.projectMaintenance.Store(enabled)
+}
+
+func (s *Service) ProjectMaintenanceEnabled() bool {
+	return s.projectMaintenance.Load()
+}
+
 func (s *Service) Load() error {
 	cfg := DefaultConfig()
 	if s.statePath == "" {
@@ -578,6 +588,28 @@ func (s *Service) ClearMonitoringState(stableID string) error {
 	return s.saveAlertState()
 }
 
+// ClearAllMonitoringState closes the project maintenance boundary. Telegram
+// configuration and mute preferences remain intact, while alert counters and
+// persisted confirmation retries are discarded as stale operational state.
+func (s *Service) ClearAllMonitoringState() error {
+	s.mu.Lock()
+	s.alerts = make(map[string]nodeAlertState)
+	s.lastAlertRun = time.Time{}
+	s.mu.Unlock()
+
+	s.speedRetryMu.Lock()
+	for _, timer := range s.speedRetryTimers {
+		if timer.Stop() {
+			s.speedRetryWG.Done()
+		}
+	}
+	s.speedRetryPending = make(map[speedRetryKey]bool)
+	s.speedRetryTimers = make(map[uint64]*time.Timer)
+	s.speedRetryEntries = make(map[uint64]pendingSpeedRetry)
+	s.speedRetryMu.Unlock()
+	return s.saveAlertState()
+}
+
 func (s *Service) UpdateConfig(cfg Config) error {
 	cfg.Normalize()
 	if cfg.Enabled && cfg.BotToken == "" {
@@ -633,6 +665,9 @@ func (s *Service) SendTestMessage() error {
 }
 
 func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
+	if s.ProjectMaintenanceEnabled() {
+		return
+	}
 	cfg := s.Config()
 	if report.Source == "manual" {
 		report = s.excludeMaintenanceSpeedResults(report)
@@ -1071,6 +1106,9 @@ func speedReportDecision(report speedtest.RunReport, cfg Config) (failed int, sl
 }
 
 func (s *Service) NotifyNodeStatuses() bool {
+	if s.ProjectMaintenanceEnabled() {
+		return false
+	}
 	s.nodeNotifyMu.Lock()
 	defer s.nodeNotifyMu.Unlock()
 
@@ -1227,6 +1265,9 @@ func (s *Service) NotifyNodeStatuses() bool {
 			stateChanged = true
 		}
 	}
+	if s.ProjectMaintenanceEnabled() {
+		return false
+	}
 
 	downAlerts := make([]nodeDownAlert, 0, len(dueAlertProxies))
 	for _, proxy := range dueAlertProxies {
@@ -1276,7 +1317,7 @@ func (s *Service) NotifyNodeStatuses() bool {
 }
 
 func (s *Service) NotifyNodeRecoveries(stableIDs []string) {
-	if len(stableIDs) == 0 {
+	if len(stableIDs) == 0 || s.ProjectMaintenanceEnabled() {
 		return
 	}
 
@@ -1315,6 +1356,9 @@ func (s *Service) NotifyNodeRecoveries(stableIDs []string) {
 		if changed {
 			stateChanged = true
 		}
+	}
+	if s.ProjectMaintenanceEnabled() {
+		return
 	}
 
 	for _, alert := range recoveryAlerts {
@@ -3425,13 +3469,18 @@ func (s *Service) saveAlertState() error {
 		return nil
 	}
 
+	// A nil checker is a supported state for this service, as the guards in
+	// NotifySpeedTest and the status formatter already assume. Without one there
+	// is no active set to filter against, so nothing is persisted.
 	active := make(map[string]bool)
-	for _, proxy := range s.proxyChecker.GetProxies() {
-		if proxy.StableID == "" {
-			proxy.StableID = proxy.GenerateStableID()
-		}
-		if s.proxyChecker.MonitoringEnabled(proxy.StableID) {
-			active[proxy.StableID] = true
+	if s.proxyChecker != nil {
+		for _, proxy := range s.proxyChecker.GetProxies() {
+			if proxy.StableID == "" {
+				proxy.StableID = proxy.GenerateStableID()
+			}
+			if s.proxyChecker.MonitoringEnabled(proxy.StableID) {
+				active[proxy.StableID] = true
+			}
 		}
 	}
 

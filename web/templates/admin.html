@@ -1328,6 +1328,18 @@
         margin-top: 3px;
         color: var(--muted);
       }
+      .project-maintenance-banner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 14px 16px;
+        border: 1px solid rgba(242, 184, 75, 0.55);
+        border-radius: 14px;
+        background: var(--yellow-soft);
+      }
+      .project-maintenance-banner[hidden] { display: none; }
+      .project-maintenance-banner strong { color: var(--yellow); }
       .merge-lineage {
         display: flex;
         align-items: center;
@@ -1523,6 +1535,13 @@
         <button id="tab-settings" class="tab" type="button">Settings</button>
       </nav>
       <div id="message" class="muted" role="status" aria-live="polite"></div>
+      <section id="project-maintenance-banner" class="project-maintenance-banner" role="status" aria-live="polite" hidden>
+        <div>
+          <strong>Project maintenance active</strong>
+          <div id="project-maintenance-banner-detail" class="muted">Automatic monitoring, alerts, scheduled updates and Remnawave writes are paused.</div>
+        </div>
+        <button id="resume-project-maintenance" class="secondary" type="button">Resume Project</button>
+      </section>
 
       <section id="dashboard-view" class="view dashboard-grid">
       <aside class="panel stack control-panel">
@@ -1677,6 +1696,10 @@
           <div class="panel-actions">
             <h2>Overview</h2>
             <span id="overview-state" class="table-meta"></span>
+            <div class="row">
+              <span id="subscription-state" class="pill"></span>
+              <button id="refresh-subscription" class="secondary small" type="button">Update Subscription</button>
+            </div>
           </div>
           <div class="overview-grid">
             <div class="kpi-card ok">
@@ -1747,23 +1770,24 @@
               <h2>Settings</h2>
               <div class="muted">Global configuration and data management</div>
             </div>
-            <span id="subscription-state" class="pill"></span>
           </div>
 
           <nav class="settings-nav global-settings-nav" aria-label="Global settings">
-            <button id="global-settings-tab-subscription" class="settings-tab active" type="button">Subscription</button>
+            <button id="global-settings-tab-project" class="settings-tab active" type="button">Project</button>
             <button id="global-settings-tab-history" class="settings-tab" type="button">History</button>
             <button id="global-settings-tab-telegram" class="settings-tab" type="button">Telegram</button>
             <button id="global-settings-tab-agents" class="settings-tab" type="button">Agents</button>
             <button id="global-settings-tab-backup" class="settings-tab" type="button">Backup</button>
           </nav>
 
-          <section id="global-settings-pane-subscription" class="settings-pane stack">
+          <section id="global-settings-pane-project" class="settings-pane stack">
             <div class="control-group">
               <div class="group-title">
-                <h3>Subscription</h3>
+                <h3>Project maintenance</h3>
+                <span id="project-maintenance-state" class="muted">Monitoring active</span>
               </div>
-              <button id="refresh-subscription" class="secondary" type="button">Update Subscription</button>
+              <div class="hint">Pauses automatic monitoring, alerts, scheduled speed tests and subscription updates, without stopping Xray traffic or admin probes.</div>
+              <button id="toggle-project-maintenance" class="secondary" type="button">Enable Project Maintenance</button>
             </div>
           </section>
 
@@ -2600,11 +2624,13 @@
         diagnosticAgents: null,
         diagnosticAgentCreation: null,
         diagnosticSessions: { enabled: false, sessions: [] },
+        projectMaintenance: { enabled: false, since: "" },
+        projectMaintenanceUpdating: false,
         diagnosticRunningIDs: new Set(),
         selected: new Set(),
         activeTab: "dashboard",
         settingsPane: "run",
-        globalSettingsPane: "subscription",
+        globalSettingsPane: "project",
         lastUpdatedAt: null,
         historyStableId: "",
         historyResults: [],
@@ -3220,6 +3246,7 @@
       }
 
       function proxyAvailabilityStatus(proxy) {
+		if (state.projectMaintenance?.enabled) return "unknown";
         if (["online", "proxy_failure", "offline"].includes(proxy && proxy.status)) return proxy.status;
         return proxy && proxy.online ? "online" : "offline";
       }
@@ -4208,7 +4235,9 @@
         const active = (state.nodesOverview || []).filter((node) => node.active).length;
         const maintenance = (state.nodesOverview || []).filter((node) => node.active && node.maintenance).length;
         const retired = (state.nodesOverview || []).length - active;
-        $("nodes-overview-summary").textContent = `${rows.length} shown · ${active - maintenance} monitored · ${maintenance} maintenance · ${retired} retired`;
+        $("nodes-overview-summary").textContent = state.projectMaintenance?.enabled
+          ? `${rows.length} shown · ${active - maintenance} project-paused · ${maintenance} node maintenance · ${retired} retired`
+          : `${rows.length} shown · ${active - maintenance} monitored · ${maintenance} maintenance · ${retired} retired`;
         $("nodes-overview").innerHTML = rows.map((node) => {
           const ipLink = copyIPButton(node.server);
           const ipDetailsLink = node.ipInfoUrl
@@ -4273,6 +4302,7 @@
       }
 
       function nodeRowClass(proxy, result, muted) {
+		if (state.projectMaintenance?.enabled) return "row-warn";
         if (proxy.maintenance) return "row-warn";
         if (proxyAvailabilityStatus(proxy) === "offline" || (result && (result.offline || result.error))) return "row-error";
         if (proxyAvailabilityStatus(proxy) === "proxy_failure") return "row-warn";
@@ -4287,7 +4317,9 @@
           ? `<span class="chip ok">Online</span>`
           : (availabilityStatus === "proxy_failure"
             ? `<span class="chip warn">Proxy failure</span>`
-            : `<span class="chip error">Offline</span>`);
+            : (availabilityStatus === "unknown"
+              ? `<span class="chip warn">Project maintenance</span>`
+              : `<span class="chip error">Offline</span>`));
         const chips = [proxy.maintenance ? `<span class="chip warn">Maintenance</span>` : availabilityChip];
         if (muted.all) {
           chips.push(`<span class="chip warn">Muted all</span>`);
@@ -4384,6 +4416,7 @@
       }
 
       function nodeAvailabilityDetails(proxy) {
+		if (state.projectMaintenance?.enabled) return "Project monitoring paused";
         if (proxy.maintenance) return "Monitoring paused";
         const availabilityStatus = proxyAvailabilityStatus(proxy);
         if (availabilityStatus === "online") {
@@ -4746,11 +4779,13 @@
       function nodeDetailHTML(proxy, result, history) {
         const overview = overviewNodeFor(proxy.stableId);
         const availabilityStatus = proxyAvailabilityStatus(proxy);
-        const statusSince = proxy.maintenance
+        const statusSince = state.projectMaintenance?.enabled
+          ? `Project paused ${formatTime(state.projectMaintenance.since) || "now"}`
+          : (proxy.maintenance
           ? `Paused ${formatTime(overview && overview.maintenanceSince) || "now"}`
           : (availabilityStatus === "proxy_failure"
             ? (proxy.proxyFailureSince ? `${formatTime(proxy.proxyFailureSince)} · ${formatDurationSec(proxy.proxyFailureSec)}` : "Proxy failure active")
-            : (proxy.downSince ? `${formatTime(proxy.downSince)} · ${formatDurationSec(proxy.downtimeSec)}` : "No active issue"));
+            : (proxy.downSince ? `${formatTime(proxy.downSince)} · ${formatDurationSec(proxy.downtimeSec)}` : "No active issue")));
         const failure = proxy.failureSummary
           ? `${proxy.failureSummary}${proxy.failureCode ? ` · ${proxy.failureCode}` : ""}`
           : "No current failure";
@@ -4819,21 +4854,48 @@
         const latest = latestResult();
         const nextRun = nextScheduledRunAt();
 
-        $("kpi-online").textContent = `${online} / ${monitored}`;
-        $("kpi-online-detail").textContent = `${percent(online, monitored)} proxy healthy · ${proxyFailures} proxy failure · ${offline} offline · ${maintenance} maintenance · ${muted} muted`;
+        $("kpi-online").textContent = state.projectMaintenance?.enabled ? `— / ${monitored}` : `${online} / ${monitored}`;
+        $("kpi-online-detail").textContent = state.projectMaintenance?.enabled
+          ? `${monitored} project-paused · ${maintenance} node maintenance · ${muted} muted`
+          : `${percent(online, monitored)} proxy healthy · ${proxyFailures} proxy failure · ${offline} offline · ${maintenance} maintenance · ${muted} muted`;
         $("kpi-avg-speed").textContent = successful.length ? formatMbps(avgMbps) : "n/a";
         $("kpi-last-check").textContent = latest ? formatShortTime(latest.checkedAt) : "n/a";
         $("kpi-last-source").textContent = latest ? (latest.source || "speed-test") : "no results";
-        $("overall-status").textContent = monitored > 0 && proxyFailures === 0 && offline === 0
-          ? "All monitored systems operational"
-          : `${proxyFailures} proxy failure · ${offline} offline`;
-        $("overall-status").className = `chip ${monitored > 0 && proxyFailures === 0 && offline === 0 ? "ok" : offline > 0 ? "error" : proxyFailures > 0 ? "warn" : "neutral"}`;
-        $("overview-state").textContent = nextRun
-          ? `${results.length} latest results · next test ${formatTimeUntil(nextRun)}`
-          : `${results.length} latest results`;
+        if (state.projectMaintenance?.enabled) {
+          $("overall-status").textContent = "Project maintenance";
+          $("overall-status").className = "chip warn";
+          $("overview-state").textContent = `${results.length} latest results · automatic workflows paused`;
+        } else {
+          $("overall-status").textContent = monitored > 0 && proxyFailures === 0 && offline === 0
+            ? "All monitored systems operational"
+            : `${proxyFailures} proxy failure · ${offline} offline`;
+          $("overall-status").className = `chip ${monitored > 0 && proxyFailures === 0 && offline === 0 ? "ok" : offline > 0 ? "error" : proxyFailures > 0 ? "warn" : "neutral"}`;
+          $("overview-state").textContent = nextRun
+            ? `${results.length} latest results · next test ${formatTimeUntil(nextRun)}`
+            : `${results.length} latest results`;
+        }
         $("last-updated").textContent = state.lastUpdatedAt
           ? `Last updated: ${state.lastUpdatedAt.toLocaleTimeString()}`
           : "Last updated: n/a";
+      }
+
+      function renderProjectMaintenance() {
+        const snapshot = state.projectMaintenance || { enabled: false, since: "" };
+        const enabled = snapshot.enabled === true;
+        const banner = $("project-maintenance-banner");
+        banner.hidden = !enabled;
+        $("project-maintenance-banner-detail").textContent = enabled
+          ? `Automatic monitoring, alerts, scheduled updates and Remnawave writes are paused${snapshot.since ? ` since ${formatTime(snapshot.since)}` : ""}.`
+          : "";
+        $("project-maintenance-state").textContent = enabled
+          ? `Paused since ${formatTime(snapshot.since) || "now"}`
+          : "Monitoring active";
+        const toggle = $("toggle-project-maintenance");
+        toggle.dataset.projectMaintenanceEnabled = enabled ? "false" : "true";
+        toggle.textContent = state.projectMaintenanceUpdating ? "Saving…" : (enabled ? "Resume Project" : "Enable Project Maintenance");
+        toggle.className = enabled ? "primary" : "secondary";
+        toggle.disabled = state.projectMaintenanceUpdating;
+        $("resume-project-maintenance").disabled = !enabled || state.projectMaintenanceUpdating;
       }
 
       function prefersReducedMotion() {
@@ -4950,14 +5012,16 @@
           maintenanceUpdating,
           checkDisabled: state.availabilityCheckRunning || maintenanceUpdating,
           runDisabled: state.speedRunStarting || Boolean(run && run.running) || maintenanceUpdating,
-          availabilityClass: proxy.maintenance || availabilityStatus === "proxy_failure" ? "warn" : (availabilityStatus === "online" ? "ok" : "error"),
-          availabilityText: proxy.maintenance
+          availabilityClass: state.projectMaintenance?.enabled || proxy.maintenance || availabilityStatus === "proxy_failure" ? "warn" : (availabilityStatus === "online" ? "ok" : "error"),
+          availabilityText: state.projectMaintenance?.enabled
+            ? "Project maintenance"
+            : (proxy.maintenance
             ? "Maintenance"
             : (availabilityStatus === "online"
             ? (proxy.latencyMs > 0 ? `${proxy.latencyMs} ms` : "Online")
             : (availabilityStatus === "proxy_failure"
               ? `Proxy failure${proxy.proxyFailureSince ? ` · ${formatDurationSec(proxy.proxyFailureSec)}` : ""}`
-              : (proxy.downSince ? `Offline · ${formatDurationSec(proxy.downtimeSec)}` : "Offline"))),
+              : (proxy.downSince ? `Offline · ${formatDurationSec(proxy.downtimeSec)}` : "Offline")))),
           speedClass: result ? speedStatusClass(result) : "",
           speedText: result ? formatSpeedStatus(result) : "No result",
           speedChecked: result ? formatShortTime(result.checkedAt) : "Last speed test",
@@ -4994,7 +5058,7 @@
                 <input type="checkbox" data-id="${escapeHtml(proxy.stableId)}" aria-label="Select ${escapeHtml(proxy.name || "node")}" ${state.selected.has(proxy.stableId) ? "checked" : ""}>
               </label>
               <div class="node-identity">
-                <div class="node-title"><span data-node-country>${nodeCountryMarker(proxy.stableId)}</span><span class="dot ${proxy.maintenance ? "maintenance" : (proxyAvailabilityStatus(proxy) === "online" ? "online" : (proxyAvailabilityStatus(proxy) === "proxy_failure" ? "proxy-failure" : "offline"))}" data-node-dot></span><span class="node-title-text" data-node-name>${escapeHtml(proxy.name || "Unnamed")}</span></div>
+                <div class="node-title"><span data-node-country>${nodeCountryMarker(proxy.stableId)}</span><span class="dot ${state.projectMaintenance?.enabled || proxy.maintenance ? "maintenance" : (proxyAvailabilityStatus(proxy) === "online" ? "online" : (proxyAvailabilityStatus(proxy) === "proxy_failure" ? "proxy-failure" : "offline"))}" data-node-dot></span><span class="node-title-text" data-node-name>${escapeHtml(proxy.name || "Unnamed")}</span></div>
                 <div class="node-subline" data-node-subline>${nodeSublineHTML(proxy)}</div>
               </div>
               <div class="node-current">
@@ -5028,13 +5092,15 @@
         card.querySelector("[data-node-detail-port]").textContent = proxy.port;
         availability.innerHTML = nodeAvailabilityDetailsHTML(proxy);
         const availabilityStatus = proxyAvailabilityStatus(proxy);
-        availability.className = proxy.maintenance || availabilityStatus === "proxy_failure" ? "warn" : (availabilityStatus === "online" ? "ok" : "error");
+        availability.className = state.projectMaintenance?.enabled || proxy.maintenance || availabilityStatus === "proxy_failure" ? "warn" : (availabilityStatus === "online" ? "ok" : "error");
         const overview = overviewNodeFor(proxy.stableId);
-        down.textContent = proxy.maintenance
+        down.textContent = state.projectMaintenance?.enabled
+          ? `Project paused ${formatTime(state.projectMaintenance.since) || "now"}`
+          : (proxy.maintenance
           ? `Paused ${formatTime(overview && overview.maintenanceSince) || "now"}`
           : (availabilityStatus === "proxy_failure"
             ? (proxy.proxyFailureSince ? `${formatTime(proxy.proxyFailureSince)} · ${formatDurationSec(proxy.proxyFailureSec)}` : "Proxy failure active")
-            : (proxy.downSince ? `${formatTime(proxy.downSince)} · ${formatDurationSec(proxy.downtimeSec)}` : "No active issue"));
+            : (proxy.downSince ? `${formatTime(proxy.downSince)} · ${formatDurationSec(proxy.downtimeSec)}` : "No active issue")));
         failure.textContent = proxy.failureSummary
           ? `${proxy.failureSummary}${proxy.failureCode ? ` · ${proxy.failureCode}` : ""}`
           : "No current failure";
@@ -5055,10 +5121,10 @@
         if (country.innerHTML !== countryHTML) country.innerHTML = countryHTML;
         const dot = card.querySelector("[data-node-dot]");
         const availabilityStatus = proxyAvailabilityStatus(proxy);
-        dot.classList.toggle("online", !proxy.maintenance && availabilityStatus === "online");
-        dot.classList.toggle("proxy-failure", !proxy.maintenance && availabilityStatus === "proxy_failure");
-        dot.classList.toggle("offline", !proxy.maintenance && availabilityStatus === "offline");
-        dot.classList.toggle("maintenance", proxy.maintenance);
+        dot.classList.toggle("online", !state.projectMaintenance?.enabled && !proxy.maintenance && availabilityStatus === "online");
+        dot.classList.toggle("proxy-failure", !state.projectMaintenance?.enabled && !proxy.maintenance && availabilityStatus === "proxy_failure");
+        dot.classList.toggle("offline", !state.projectMaintenance?.enabled && !proxy.maintenance && availabilityStatus === "offline");
+        dot.classList.toggle("maintenance", state.projectMaintenance?.enabled || proxy.maintenance);
         card.querySelector("[data-node-name]").textContent = proxy.name || "Unnamed";
         card.querySelector("[data-node-subline]").innerHTML = nodeSublineHTML(proxy);
         const availability = card.querySelector("[data-node-availability]");
@@ -5385,6 +5451,7 @@
       }
 
       function renderAll() {
+        renderProjectMaintenance();
         renderRunState();
         renderOverview();
         renderNodes();
@@ -5900,7 +5967,7 @@
 
       function switchGlobalSettingsPane(pane) {
         state.globalSettingsPane = pane;
-        ["subscription", "history", "telegram", "agents", "backup"].forEach((name) => {
+        ["project", "history", "telegram", "agents", "backup"].forEach((name) => {
           $(`global-settings-pane-${name}`).hidden = name !== pane;
           $(`global-settings-tab-${name}`).classList.toggle("active", name === pane);
         });
@@ -6125,11 +6192,12 @@
         if (state.loadRunning) return;
         state.loadRunning = true;
         try {
-          const [proxies, snapshot, telegram, nodesOverview] = await Promise.all([
+          const [proxies, snapshot, telegram, nodesOverview, projectMaintenance] = await Promise.all([
             request("/proxies"),
             request("/speed-tests"),
             request("/telegram"),
             request("/nodes-overview"),
+            request("/project-maintenance"),
           ]);
           // Remote diagnostics is optional, so a failure there must never keep
           // the dashboard from rendering availability and speed-test state.
@@ -6144,6 +6212,7 @@
           }
           state.telegram = telegram;
           state.nodesOverview = nodesOverview;
+          state.projectMaintenance = projectMaintenance || { enabled: false, since: "" };
           if (diagnosticAgents.status === "fulfilled") state.diagnosticAgents = diagnosticAgents.value;
           if (diagnosticSessions.status === "fulfilled") state.diagnosticSessions = diagnosticSessions.value;
           state.lastUpdatedAt = new Date();
@@ -6230,6 +6299,30 @@
           $("message").textContent = err.message;
         } finally {
           $("refresh-subscription").disabled = false;
+        }
+      }
+
+      async function updateProjectMaintenance(enabled) {
+        if (state.projectMaintenanceUpdating) return;
+        if (enabled && !window.confirm(tr("Enable project maintenance? Automatic monitoring, alerts, scheduled updates and Remnawave writes will be paused."))) {
+          return;
+        }
+        state.projectMaintenanceUpdating = true;
+        $("message").textContent = enabled ? "Enabling project maintenance" : "Resuming project monitoring";
+        renderProjectMaintenance();
+        try {
+          state.projectMaintenance = await request("/project-maintenance", {
+            method: "PUT",
+            body: JSON.stringify({ enabled }),
+          });
+          $("message").textContent = enabled ? "Project maintenance enabled" : "Project monitoring resumed";
+          await load();
+        } catch (err) {
+          $("message").textContent = err.message;
+        } finally {
+          state.projectMaintenanceUpdating = false;
+          renderProjectMaintenance();
+          renderOverview();
         }
       }
 
@@ -6627,7 +6720,7 @@
       ["run", "filters", "schedule"].forEach((pane) => {
         $(`settings-tab-${pane}`).addEventListener("click", () => switchSettingsPane(pane));
       });
-      ["subscription", "history", "telegram", "agents", "backup"].forEach((pane) => {
+      ["project", "history", "telegram", "agents", "backup"].forEach((pane) => {
         $(`global-settings-tab-${pane}`).addEventListener("click", () => switchGlobalSettingsPane(pane));
       });
       $("create-diagnostic-agent").addEventListener("click", createDiagnosticAgent);
@@ -6646,6 +6739,10 @@
       });
       $("refresh").addEventListener("click", () => load());
       $("refresh-subscription").addEventListener("click", refreshSubscription);
+      $("toggle-project-maintenance").addEventListener("click", (event) => {
+        updateProjectMaintenance(event.currentTarget.dataset.projectMaintenanceEnabled === "true");
+      });
+      $("resume-project-maintenance").addEventListener("click", () => updateProjectMaintenance(false));
       $("refresh-nodes-overview").addEventListener("click", loadNodesOverview);
       $("refresh-incidents").addEventListener("click", loadIncidents);
       $("remnawave-save").addEventListener("click", saveRemnawave);

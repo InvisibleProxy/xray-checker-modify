@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"xray-checker/nodearchive"
+	"xray-checker/projectmaintenance"
 	"xray-checker/remnawave"
 	"xray-checker/speedtest"
 	"xray-checker/telegram"
@@ -89,6 +90,14 @@ func validateDataFile(name string, data []byte) error {
 			return fmt.Errorf("backup file %s has invalid node registry: %w", name, err)
 		}
 		if state.Version != 1 || state.Nodes == nil {
+			return fmt.Errorf("backup file %s has an unsupported schema", name)
+		}
+	case "project_state.json":
+		var state projectmaintenance.StateFile
+		if err := json.Unmarshal(data, &state); err != nil {
+			return fmt.Errorf("backup file %s has invalid project state: %w", name, err)
+		}
+		if state.Version != projectmaintenance.StateVersion || (state.Enabled && state.Since.IsZero()) || (!state.Enabled && !state.Since.IsZero()) {
 			return fmt.Errorf("backup file %s has an unsupported schema", name)
 		}
 	case "remnawave_announce_config.json":

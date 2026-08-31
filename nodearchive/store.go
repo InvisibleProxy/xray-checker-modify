@@ -402,6 +402,49 @@ func (s *Store) SetMaintenance(stableID string, enabled bool) (NodeRecord, error
 	return record, nil
 }
 
+// PauseProjectMonitoring closes live accounting at the project maintenance
+// boundary without changing any per-node maintenance flag or historical data.
+func (s *Store) PauseProjectMonitoring() error {
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	previousNodes := make(map[string]NodeRecord, len(s.nodes))
+	for stableID, record := range s.nodes {
+		previousNodes[stableID] = record
+	}
+	previousIncidents := append([]IncidentRecord(nil), s.incidents...)
+	changed := false
+	for stableID, record := range s.nodes {
+		if !record.Active {
+			continue
+		}
+		previous := record
+		record = closeDowntime(record, now)
+		record = closeProxyFailure(record, now)
+		if previous != record {
+			s.nodes[stableID] = record
+			changed = true
+		}
+	}
+	for index := range s.incidents {
+		if s.incidents[index].Status != incidentStatusActive {
+			continue
+		}
+		s.resolveIncidentLocked(index, now)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	if err := s.saveLocked(); err != nil {
+		s.nodes = previousNodes
+		s.incidents = previousIncidents
+		return err
+	}
+	return nil
+}
+
 func (s *Store) SyncSpeedHistory(history map[string][]speedtest.Result) error {
 	if len(history) == 0 {
 		return nil

@@ -18,6 +18,7 @@ import (
 	"xray-checker/models"
 	"xray-checker/nodearchive"
 	"xray-checker/nodemerge"
+	"xray-checker/projectmaintenance"
 	"xray-checker/remnawave"
 	"xray-checker/speedtest"
 	"xray-checker/telegram"
@@ -84,6 +85,12 @@ type AdminSubscriptionRefreshRequest struct {
 }
 
 type AdminSubscriptionRefreshFunc func(AdminSubscriptionRefreshRequest) (AdminSubscriptionRefreshResult, error)
+
+type AdminProjectMaintenanceRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+type AdminProjectMaintenanceFunc func(bool) (projectmaintenance.Snapshot, error)
 
 type AdminNodesOverviewGeoRequest struct {
 	StableIDs []string `json:"stableIds"`
@@ -203,6 +210,37 @@ func AdminSubscriptionRefreshHandler(refresh AdminSubscriptionRefreshFunc) http.
 			return
 		}
 		writeJSON(w, result)
+	}
+}
+
+func AdminProjectMaintenanceHandler(snapshot func() projectmaintenance.Snapshot, update AdminProjectMaintenanceFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, snapshot())
+		case http.MethodPut:
+			r.Body = http.MaxBytesReader(w, r.Body, 4096)
+			var request AdminProjectMaintenanceRequest
+			decoder := json.NewDecoder(r.Body)
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&request); err != nil {
+				writeError(w, "Invalid JSON body", http.StatusBadRequest)
+				return
+			}
+			var trailing any
+			if err := decoder.Decode(&trailing); err != io.EOF {
+				writeError(w, "JSON body must contain one object", http.StatusBadRequest)
+				return
+			}
+			result, err := update(request.Enabled)
+			if err != nil {
+				writeError(w, err.Error(), http.StatusConflict)
+				return
+			}
+			writeJSON(w, result)
+		default:
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
 	}
 }
 

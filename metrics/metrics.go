@@ -23,10 +23,11 @@ type RemoteWriteConfig struct {
 }
 
 var (
-	proxyStatus     *prometheus.GaugeVec
-	proxyLatency    *prometheus.GaugeVec
-	metricsInstance string
-	hasInstance     bool
+	proxyStatus        *prometheus.GaugeVec
+	proxyLatency       *prometheus.GaugeVec
+	projectMaintenance prometheus.Gauge
+	metricsInstance    string
+	hasInstance        bool
 )
 
 func InitMetrics(instance string) {
@@ -53,6 +54,10 @@ func InitMetrics(instance string) {
 		},
 		labels,
 	)
+	projectMaintenance = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "xray_checker_project_maintenance",
+		Help: "Project-wide maintenance mode (1: enabled, 0: disabled)",
+	})
 }
 
 func GetProxyStatusMetric() *prometheus.GaugeVec {
@@ -61,6 +66,21 @@ func GetProxyStatusMetric() *prometheus.GaugeVec {
 
 func GetProxyLatencyMetric() *prometheus.GaugeVec {
 	return proxyLatency
+}
+
+func GetProjectMaintenanceMetric() prometheus.Gauge {
+	return projectMaintenance
+}
+
+func RecordProjectMaintenance(enabled bool) {
+	if projectMaintenance == nil {
+		return
+	}
+	if enabled {
+		projectMaintenance.Set(1)
+		return
+	}
+	projectMaintenance.Set(0)
 }
 
 func buildLabelValues(protocol, address, name, subName string) []string {
