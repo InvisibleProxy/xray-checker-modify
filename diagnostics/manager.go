@@ -679,10 +679,8 @@ func validateProfile(profile TestProfile) error {
 	if !validProfileID(profile.ID) {
 		return fmt.Errorf("%w: profile ID is invalid", ErrInvalidRequest)
 	}
-	switch profile.Method {
-	case ProbeMethodIP, ProbeMethodStatus, ProbeMethodDownload:
-	default:
-		return fmt.Errorf("%w: unsupported probe method", ErrInvalidRequest)
+	if !profile.Method.Valid() {
+		return fmt.Errorf("%w: unsupported probe method %q", ErrInvalidRequest, profile.Method)
 	}
 	if profile.AlternativeProfileID != "" {
 		if !validProfileID(profile.AlternativeProfileID) || profile.AlternativeProfileID == profile.ID {
@@ -746,6 +744,16 @@ func validFailureCode(value string) bool {
 		"proxy_handshake",
 		"proxy_timeout",
 		"tls",
+		// Reported by the TLS profile, which distinguishes how a handshake dies:
+		// a reset, a silent close and an alert point at different causes.
+		"tls_timeout",
+		"tls_reset",
+		"tls_eof",
+		"tls_alert",
+		"tls_failed",
+		// Reported by the DNS profile.
+		"dns_mismatch",
+		"dns_literal_address",
 		"http_status",
 		"source_ip_unchanged",
 		"download_incomplete",

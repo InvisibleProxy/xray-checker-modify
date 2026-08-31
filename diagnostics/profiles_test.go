@@ -78,3 +78,27 @@ func TestProfileForCheckMethodCoversEveryCheckerMethod(t *testing.T) {
 		t.Error("an unsupported check method resolved to a profile")
 	}
 }
+
+// The catalogue and the job validator are separate code paths. When they
+// disagreed, selecting one of the newer profiles created a session, failed to
+// register its job and cancelled the session immediately, with an export that
+// showed "jobs": null and no reason at all.
+func TestEveryCatalogueProfilePassesJobValidation(t *testing.T) {
+	for _, descriptor := range Profiles() {
+		alternativeID, _ := AlternativeFor(descriptor.ID)
+		if err := validateProfile(descriptor.TestProfileFor(alternativeID)); err != nil {
+			t.Errorf("profile %q is in the catalogue but rejected by job validation: %v", descriptor.ID, err)
+		}
+		if !descriptor.Method.Valid() {
+			t.Errorf("profile %q uses method %q, which the schema does not accept", descriptor.ID, descriptor.Method)
+		}
+	}
+}
+
+func TestProbeMethodValidRejectsUnknownMethods(t *testing.T) {
+	for _, method := range []ProbeMethod{"", "traceroute", "IP", "status "} {
+		if method.Valid() {
+			t.Errorf("method %q was accepted", method)
+		}
+	}
+}

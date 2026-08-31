@@ -410,3 +410,16 @@ func TestExportContainsNoExecutionConfigurationOrRawErrors(t *testing.T) {
 		}
 	}
 }
+
+// An observation carrying a failure code the validator does not know is refused
+// outright, so a probe that can produce a code must have it on the list.
+func TestFailureCodesEmittedByTheTransportProbesAreAccepted(t *testing.T) {
+	for _, code := range []string{
+		"tls_timeout", "tls_reset", "tls_eof", "tls_alert", "tls_failed",
+		"dns_mismatch", "dns_literal_address",
+	} {
+		if !validFailureCode(code) {
+			t.Errorf("failure code %q is produced by a probe but rejected by validation", code)
+		}
+	}
+}

@@ -80,6 +80,20 @@ const (
 	ProbeMethodDNS       ProbeMethod = "dns"
 )
 
+// Valid is the single list of probe methods the schema accepts. Job validation
+// and the profile catalogue both read it, so a method present in one cannot be
+// missing from the other: that mismatch registers no job and cancels the session
+// on the spot, leaving nothing in the export to explain why.
+func (m ProbeMethod) Valid() bool {
+	switch m {
+	case ProbeMethodIP, ProbeMethodStatus, ProbeMethodDownload,
+		ProbeMethodLatency, ProbeMethodStability, ProbeMethodTLS, ProbeMethodDNS:
+		return true
+	default:
+		return false
+	}
+}
+
 // TunnelledMethods run their probe through the agent's ephemeral Xray instance.
 // The transport methods reach the node directly instead, which is what lets
 // them separate a broken tunnel from a broken path to the server.
