@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
 	"net"
 	"net/url"
 	"strings"
@@ -17,6 +18,7 @@ const (
 	FailureCodeHostUnreachable    = "host_unreachable"
 	FailureCodeProxyHandshake     = "proxy_handshake"
 	FailureCodeProxyTimeout       = "proxy_timeout"
+	FailureCodeProxyStreamClosed  = "proxy_stream_closed"
 	FailureCodeTLS                = "tls"
 	FailureCodeHTTPStatus         = "http_status"
 	FailureCodeSourceIPUnchanged  = "source_ip_unchanged"
@@ -68,6 +70,14 @@ func failureFromError(err error) FailureDetails {
 	}
 	if strings.Contains(lower, "network is unreachable") || strings.Contains(lower, "no route to host") || strings.Contains(lower, "host is unreachable") {
 		return failureDetails(FailureCodeHostUnreachable, detail)
+	}
+	// A tunnel that accepts the connection and then hangs up without replying is
+	// a distinct fault from a refused port or a timeout: the SOCKS hop worked and
+	// the request went out, but the far side closed the stream. Xray surfaces it
+	// as a bare EOF, which matches none of the patterns above.
+	if errors.Is(err, io.EOF) || lower == "eof" || strings.Contains(lower, "unexpected eof") ||
+		strings.Contains(lower, "connection reset") || strings.Contains(lower, "broken pipe") {
+		return failureDetails(FailureCodeProxyStreamClosed, detail)
 	}
 	return failureDetails(FailureCodeUnknown, detail)
 }
@@ -159,6 +169,8 @@ func FailureSummary(code string) string {
 		return "Ошибка SOCKS/Xray соединения"
 	case FailureCodeProxyTimeout:
 		return "Проверка через прокси превысила таймаут"
+	case FailureCodeProxyStreamClosed:
+		return "Сервер закрыл соединение внутри туннеля"
 	case FailureCodeTLS:
 		return "Ошибка TLS или сертификата"
 	case FailureCodeHTTPStatus:

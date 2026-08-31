@@ -16,7 +16,7 @@ import (
 	"xray-checker/logger"
 	"xray-checker/models"
 
-	libXray "github.com/xtls/libxray"
+	libXrayShare "github.com/xtls/libxray/share"
 )
 
 type Parser struct{}
@@ -28,11 +28,6 @@ type fetchResult struct {
 
 func NewParser() *Parser {
 	return &Parser{}
-}
-
-type libXrayResponse struct {
-	Success bool            `json:"success"`
-	Data    json.RawMessage `json:"data"`
 }
 
 type libXrayOutbound struct {
@@ -250,28 +245,20 @@ func (p *Parser) Parse(subscriptionData string) (*ParseResult, error) {
 // parseViaLibXray attempts to parse all configs at once via libXray.
 // Returns parsed configs or nil if parsing fails.
 func (p *Parser) parseViaLibXray(cleanedData []byte, originalData map[string]*originalLinkData) []*models.ProxyConfig {
-	base64Data := base64.StdEncoding.EncodeToString(cleanedData)
-
-	resultBase64 := libXray.ConvertShareLinksToXrayJson(base64Data)
-
-	resultBytes, err := base64.StdEncoding.DecodeString(resultBase64)
+	// libXray accepts the raw subscription text and decodes base64 itself.
+	xrayConfig, err := libXrayShare.ConvertShareLinksToXrayJson(string(cleanedData))
 	if err != nil {
-		logger.Debug("Failed to decode libXray response: %v", err)
+		logger.Debug("libXray batch parsing failed: %v", err)
 		return nil
 	}
 
-	var response libXrayResponse
-	if err := json.Unmarshal(resultBytes, &response); err != nil {
-		logger.Debug("Failed to parse libXray response: %v", err)
+	data, err := json.Marshal(xrayConfig)
+	if err != nil {
+		logger.Debug("Failed to re-encode libXray config: %v", err)
 		return nil
 	}
 
-	if !response.Success {
-		logger.Debug("libXray batch parsing returned success=false")
-		return nil
-	}
-
-	return p.extractOutbounds(response.Data, originalData)
+	return p.extractOutbounds(data, originalData)
 }
 
 // parseLineByLine parses each config line individually, skipping broken ones.
@@ -286,30 +273,21 @@ func (p *Parser) parseLineByLine(cleanedData []byte, originalData map[string]*or
 			continue
 		}
 
-		lineBase64 := base64.StdEncoding.EncodeToString([]byte(line))
-		resultBase64 := libXray.ConvertShareLinksToXrayJson(lineBase64)
-
-		resultBytes, err := base64.StdEncoding.DecodeString(resultBase64)
+		xrayConfig, err := libXrayShare.ConvertShareLinksToXrayJson(line)
 		if err != nil {
-			logger.Warn("Skipping invalid config line (decode error): %.50s...", line)
-			skippedCount++
-			continue
-		}
-
-		var response libXrayResponse
-		if err := json.Unmarshal(resultBytes, &response); err != nil {
-			logger.Warn("Skipping invalid config line (parse error): %.50s...", line)
-			skippedCount++
-			continue
-		}
-
-		if !response.Success {
 			logger.Warn("Skipping invalid config line (libXray error): %.50s...", line)
 			skippedCount++
 			continue
 		}
 
-		configs := p.extractOutbounds(response.Data, originalData)
+		data, err := json.Marshal(xrayConfig)
+		if err != nil {
+			logger.Warn("Skipping invalid config line (encode error): %.50s...", line)
+			skippedCount++
+			continue
+		}
+
+		configs := p.extractOutbounds(data, originalData)
 		allConfigs = append(allConfigs, configs...)
 	}
 
@@ -354,6 +332,52 @@ func (p *Parser) extractOutbounds(data json.RawMessage, originalData map[string]
 	return proxyConfigs
 }
 
+// nameGroupedProxies assigns display names to the proxies parsed out of one JSON
+// config object, i.e. one "remarks" group.
+//
+// A single-outbound group describes one node, so the operator-authored remarks wins
+// over the outbound tag, which panels often generate as a placeholder ("proxy").
+//
+// A multi-outbound group is a balancer: remarks cannot tell its members apart, so
+// every node keeps its own outbound tag (set by convertOutbound) and remarks is
+// carried separately as GroupName. Nodes sharing a tag are disambiguated by
+// server:port, and a node with no tag falls back to server:port outright.
+func nameGroupedProxies(remarks string, group []*models.ProxyConfig) {
+	if len(group) == 0 {
+		return
+	}
+
+	remarks = strings.TrimSpace(remarks)
+
+	if len(group) == 1 {
+		if remarks != "" {
+			group[0].Name = remarks
+		}
+		return
+	}
+
+	nodeLabel := func(pc *models.ProxyConfig) string {
+		if pc.Name != "" {
+			return pc.Name
+		}
+		return fmt.Sprintf("%s:%d", pc.Server, pc.Port)
+	}
+
+	labelCounts := make(map[string]int, len(group))
+	for _, pc := range group {
+		labelCounts[nodeLabel(pc)]++
+	}
+
+	for _, pc := range group {
+		node := nodeLabel(pc)
+		if labelCounts[node] > 1 {
+			node = fmt.Sprintf("%s (%s:%d)", node, pc.Server, pc.Port)
+		}
+		pc.Name = node
+		pc.GroupName = remarks
+	}
+}
+
 func (p *Parser) parseJSONConfigs(data []byte) ([]*models.ProxyConfig, error) {
 	var configs []struct {
 		Remarks   string            `json:"remarks"`
@@ -370,19 +394,19 @@ func (p *Parser) parseJSONConfigs(data []byte) ([]*models.ProxyConfig, error) {
 	configIndex := 0
 
 	for _, config := range configs {
+		var group []*models.ProxyConfig
 		for _, outboundRaw := range config.Outbounds {
 			proxyConfig, err := p.convertOutbound(outboundRaw, configIndex, nil)
 			if err != nil {
 				continue
 			}
 			if proxyConfig != nil {
-				if config.Remarks != "" {
-					proxyConfig.Name = config.Remarks
-				}
-				proxyConfigs = append(proxyConfigs, proxyConfig)
+				group = append(group, proxyConfig)
 				configIndex++
 			}
 		}
+		nameGroupedProxies(config.Remarks, group)
+		proxyConfigs = append(proxyConfigs, group...)
 	}
 
 	if len(proxyConfigs) == 0 {
@@ -413,13 +437,12 @@ func (p *Parser) parseSingleJSONConfig(data []byte) ([]*models.ProxyConfig, erro
 			continue
 		}
 		if proxyConfig != nil {
-			if config.Remarks != "" {
-				proxyConfig.Name = config.Remarks
-			}
 			proxyConfigs = append(proxyConfigs, proxyConfig)
 			configIndex++
 		}
 	}
+
+	nameGroupedProxies(config.Remarks, proxyConfigs)
 
 	if len(proxyConfigs) == 0 {
 		return nil, fmt.Errorf("no valid proxy configurations found in single JSON config")
@@ -681,7 +704,8 @@ func (p *Parser) convertOutbound(raw json.RawMessage, index int, originalData ma
 	}
 
 	if pc.Name == "" {
-		pc.Name = baseOutbound.Tag
+		// Panel remarks used as outbound tags routinely carry stray padding.
+		pc.Name = strings.TrimSpace(baseOutbound.Tag)
 	}
 
 	var flatSettings libXraySettings
@@ -959,12 +983,11 @@ func (p *Parser) parseSingleConfigFile(data []byte, startIndex int) ([]*models.P
 				continue
 			}
 			if proxyConfig != nil {
-				if config.Remarks != "" {
-					proxyConfig.Name = config.Remarks
-				}
 				proxyConfigs = append(proxyConfigs, proxyConfig)
 			}
 		}
+
+		nameGroupedProxies(config.Remarks, proxyConfigs)
 
 		if len(proxyConfigs) == 0 {
 			return nil, fmt.Errorf("no valid proxy configurations found")

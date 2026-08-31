@@ -529,6 +529,11 @@ func main() {
 			}
 		}
 
+		if deduplicated, dropped := xray.DeduplicateByStableID(newConfigs); dropped > 0 {
+			logger.Info("Dropped %d duplicate node(s) listed more than once by the subscription", dropped)
+			newConfigs = deduplicated
+		}
+
 		if preserved := xray.PreserveStableIDs(*proxyConfigs, newConfigs); preserved > 0 {
 			logger.Info("Preserved node statistics for %d refreshed proxies", preserved)
 		}
