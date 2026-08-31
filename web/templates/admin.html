@@ -6869,9 +6869,10 @@
           renderSelectionCount();
           return;
         }
-        if (target.matches("[data-diagnostic-agent-for]")) {
-          const proxy = proxyFor(target.dataset.diagnosticAgentFor);
-          const card = nodeCardElement(target.dataset.diagnosticAgentFor);
+        if (target.matches("[data-diagnostic-agent-for], [data-diagnostic-profile-for]")) {
+          const stableId = target.dataset.diagnosticAgentFor || target.dataset.diagnosticProfileFor;
+          const proxy = proxyFor(stableId);
+          const card = nodeCardElement(stableId);
           if (proxy && card) updateNodeDiagnostics(card, proxy);
           return;
         }

@@ -136,6 +136,8 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`data-diagnose-id="${escapeHtml(proxy.stableId)}"`,
 		`data-diagnostic-start`,
 		`data-diagnostic-profile-for="${escapeHtml(proxy.stableId)}"`,
+		`target.matches("[data-diagnostic-agent-for], [data-diagnostic-profile-for]")`,
+		`const stableId = target.dataset.diagnosticAgentFor || target.dataset.diagnosticProfileFor`,
 		`body: JSON.stringify({ stableId, agentId, profileId })`,
 		`profileSelect.dataset.diagnosticProfilesSignature !== profileSignature`,
 		`.node-diagnostics [data-node-diagnostics-maintenance][hidden]`,
