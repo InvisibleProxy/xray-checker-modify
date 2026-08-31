@@ -5209,9 +5209,20 @@
       }
 
       function nodeSublineHTML(proxy) {
-        const prefix = [proxy.subName, proxy.protocol].filter(Boolean).map(escapeHtml).join(" · ");
+        // The transport is what separates two nodes on one server, so it sits next
+        // to the protocol rather than being left to a name suffix from the panel.
+        const transport = proxy.transport ? transportLabel(proxy.transport) : "";
+        const prefix = [proxy.subName, proxy.protocol, transport].filter(Boolean).map(escapeHtml).join(" · ");
         const address = copyIPButton(proxy.server);
         return prefix ? `${prefix} · ${address}` : address;
+      }
+
+      // Xray spells these in lower case; the list reads better with the shapes
+      // operators actually say.
+      const transportLabels = { tcp: "TCP", ws: "WS", grpc: "gRPC", xhttp: "xHTTP", splithttp: "xHTTP", httpupgrade: "HTTPUpgrade", kcp: "mKCP", http: "HTTP/2", h2: "HTTP/2" };
+
+      function transportLabel(transport) {
+        return transportLabels[String(transport).toLowerCase()] || transport;
       }
 
       function nodeCardHTML(proxy, index, animateCards) {
