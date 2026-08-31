@@ -239,6 +239,12 @@ type fakeDiagnosticSessionService struct {
 }
 
 func (f *fakeDiagnosticSessionService) Enabled() bool { return true }
+func (f *fakeDiagnosticSessionService) Profiles() []remoteprobe.ProfileView {
+	return []remoteprobe.ProfileView{{
+		ProfileDescriptor: diagnostics.ProfileDescriptor{ID: diagnostics.ProfileStatus, Method: diagnostics.ProbeMethodStatus},
+		Default:           true,
+	}}
+}
 func (f *fakeDiagnosticSessionService) CreateManual(remoteprobe.CreateManualRequest) (remoteprobe.SessionView, error) {
 	return remoteprobe.SessionView{}, f.createErr
 }

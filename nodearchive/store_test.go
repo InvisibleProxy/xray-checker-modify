@@ -262,6 +262,37 @@ func TestAvailabilityHistoryNormalizesDeduplicatesAndFiltersRange(t *testing.T) 
 	}
 }
 
+func TestReconcileAvailabilityStateDoesNotRecordStartupSample(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "node_registry.json")
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "Node 1", Protocol: "vless", Server: "node.example", Port: 443}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "", "", 1, 0, "status")
+	store := NewStore(path, proxyChecker)
+	if err := store.SyncProxies([]*models.ProxyConfig{proxy}); err != nil {
+		t.Fatal(err)
+	}
+	downSince := time.Now().Add(-time.Minute).Truncate(time.Second)
+	if !proxyChecker.RestoreOfflineStatus(proxy.StableID, downSince, checker.HostCheckDetails{}, checker.PingCheckDetails{}) {
+		t.Fatal("failed to restore offline checker state")
+	}
+
+	if err := store.ReconcileAvailabilityState(); err != nil {
+		t.Fatal(err)
+	}
+	if history := store.AvailabilityHistory(proxy.StableID, time.Time{}, time.Time{}); len(history) != 0 {
+		t.Fatalf("startup reconciliation recorded synthetic history: %+v", history)
+	}
+	if got := store.nodes[proxy.StableID].CurrentDownSince; !got.Equal(downSince) {
+		t.Fatalf("restored downtime = %v, want %v", got, downSince)
+	}
+
+	if err := store.RecordAvailability(); err != nil {
+		t.Fatal(err)
+	}
+	if history := store.AvailabilityHistory(proxy.StableID, time.Time{}, time.Time{}); len(history) != 1 {
+		t.Fatalf("real availability recording produced %d samples, want 1", len(history))
+	}
+}
+
 func TestAvailabilityHistoryUsesConfiguredSpeedTestRetention(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	path := filepath.Join(t.TempDir(), "node_registry.json")

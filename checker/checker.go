@@ -1217,15 +1217,18 @@ func (pc *ProxyChecker) RestoreProxyFailureStatus(stableID string, failureSince 
 	return true
 }
 
-func (pc *ProxyChecker) CheckAllProxies() {
-	pc.withCheckRun(pc.checkAllProxies)
+func (pc *ProxyChecker) CheckAllProxies() error {
+	var checkErr error
+	pc.withCheckRun(func() {
+		checkErr = pc.checkAllProxies()
+	})
+	return checkErr
 }
 
-func (pc *ProxyChecker) checkAllProxies() {
+func (pc *ProxyChecker) checkAllProxies() error {
 	if pc.checkMethod == "ip" {
 		if _, err := pc.GetCurrentIP(); err != nil {
-			logger.Warn("Error getting current IP: %v", err)
-			return
+			return fmt.Errorf("get current IP before full proxy check: %w", err)
 		}
 	}
 
@@ -1251,6 +1254,7 @@ func (pc *ProxyChecker) checkAllProxies() {
 		}(proxy, currentGeneration, probeOnly)
 	}
 	wg.Wait()
+	return nil
 }
 
 func (pc *ProxyChecker) CheckUnavailableProxies() (AvailabilityCheckReport, error) {

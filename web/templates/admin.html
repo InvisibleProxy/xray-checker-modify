@@ -1462,7 +1462,7 @@
         </div>
         <span id="overall-status" class="chip neutral">Waiting for data</span>
         <span id="last-updated" class="muted">Last updated: n/a</span>
-        <span id="run-state" class="pill state-chip idle">Idle</span>
+        <span id="run-state" class="pill state-chip idle" role="status" aria-live="polite">Idle</span>
         <button id="refresh" class="secondary" type="button">Refresh</button>
       </div>
     </header>
@@ -2565,6 +2565,8 @@
         nodesOverviewSortDir: "desc",
         speedPollRunning: false,
         loadRunning: false,
+        speedRunStarting: false,
+        speedRunRequestIDs: new Set(),
         availabilityCheckRunning: false,
         availabilityCheckIDs: new Set(),
         maintenanceUpdatingIDs: new Set(),
@@ -4365,6 +4367,13 @@
             observation && observation.tcp,
             observation && observation.ping,
             observation && observation.directConnectivity,
+            observation && observation.endpointProfile,
+            observation && observation.throughput,
+            observation && observation.latencySeries,
+            observation && observation.stability,
+            observation && observation.tls,
+            observation && observation.dns,
+            observation && observation.alternativeEndpoint,
           ];
         }));
       }
@@ -4374,20 +4383,52 @@
         return agents.map((agent) => `<option value="${escapeHtml(agent.agentId)}" ${agent.agentId === selectedAgentId ? "selected" : ""}>${escapeHtml(diagnosticAgentLabel(agent.agentId))}</option>`).join("");
       }
 
-      function diagnosticNodeControlState(proxy, preferredAgentId = "") {
+      function diagnosticProfiles() {
+        return (state.diagnosticSessions && state.diagnosticSessions.profiles) || [];
+      }
+
+      // A profile the selected agent cannot run is offered as disabled rather
+      // than hidden, so an operator can see why it is unavailable.
+      function diagnosticProfileOptionsHTML(profiles, agent, selectedProfileId) {
+        if (!profiles.length) return `<option value="">No diagnostics available</option>`;
+        const capabilities = new Set((agent && agent.capabilities) || []);
+        return profiles.map((profile) => {
+          const supported = capabilities.has(profile.capability);
+          const suffix = supported ? "" : " — agent update required";
+          return `<option value="${escapeHtml(profile.id)}"${profile.id === selectedProfileId ? " selected" : ""}${supported ? "" : " disabled"} title="${escapeHtml(profile.summary || "")}">${escapeHtml(profile.label)}${escapeHtml(suffix)}</option>`;
+        }).join("");
+      }
+
+      function diagnosticProfileSignature(profiles, agent) {
+        const capabilities = new Set((agent && agent.capabilities) || []);
+        return profiles.map((profile) => `${profile.id}:${capabilities.has(profile.capability) ? 1 : 0}`).join("|");
+      }
+
+      function diagnosticNodeControlState(proxy, preferredAgentId = "", preferredProfileId = "") {
         const agents = connectedDiagnosticAgents();
         const enabled = Boolean(state.diagnosticSessions && state.diagnosticSessions.enabled);
         const selectedAgent = agents.find((agent) => agent.agentId === preferredAgentId) || agents[0] || null;
         const agentId = selectedAgent ? selectedAgent.agentId : "";
+        const profiles = diagnosticProfiles();
+        const capabilities = new Set((selectedAgent && selectedAgent.capabilities) || []);
+        const runnable = profiles.filter((profile) => capabilities.has(profile.capability));
+        const selectedProfile = runnable.find((profile) => profile.id === preferredProfileId)
+          || runnable.find((profile) => profile.default)
+          || runnable[0]
+          || null;
+        const profileId = selectedProfile ? selectedProfile.id : "";
         const starting = state.diagnosticRunningIDs.has(proxy.stableId);
         const busy = diagnosticAgentBusy(proxy.stableId, agentId);
         return {
           agents,
           agentId,
+          agent: selectedAgent,
+          profiles,
+          profileId,
           enabled,
           starting,
           busy,
-          disabled: !enabled || !agentId || starting || busy,
+          disabled: !enabled || !agentId || !profileId || starting || busy,
           label: starting ? "Starting…" : (busy ? "Running…" : "Diagnose"),
         };
       }
@@ -4397,6 +4438,59 @@
         const latency = evidence.latencyMillis > 0 ? ` · ${evidence.latencyMillis} ms` : "";
         const failure = !evidence.online && evidence.failureCode ? ` · ${evidence.failureCode}` : "";
         return `<span class="chip ${evidence.online ? "ok" : "error"}">${escapeHtml(label)} ${evidence.online ? "OK" : "failed"}${escapeHtml(latency + failure)}</span>`;
+      }
+
+      function diagnosticProfileLabel(profileId) {
+        const profile = diagnosticProfiles().find((candidate) => candidate.id === profileId);
+        return profile ? profile.label : (profileId || "");
+      }
+
+      // Each profile contributes only its own evidence, so a session shows the
+      // measurements that were actually taken and nothing invented.
+      function diagnosticProfileEvidenceHTML(observation) {
+        const chips = [];
+        const throughput = observation.throughput;
+        if (throughput) {
+          const rate = throughput.mbps > 0 ? `${throughput.mbps} Mbps` : formatBytes(throughput.bytes);
+          chips.push(`<span class="chip ${throughput.mbps > 0 ? "ok" : "warn"}">Throughput ${escapeHtml(rate)}</span>`);
+        }
+        const series = observation.latencySeries;
+        if (series) {
+          const detail = series.succeeded > 0
+            ? `${series.medianMillis} ms p50 · ${series.p95Millis} ms p95 · ±${series.jitterMillis} ms`
+            : "no successful samples";
+          chips.push(`<span class="chip ${series.succeeded === series.samples ? "ok" : "warn"}">Latency ${escapeHtml(series.succeeded)}/${escapeHtml(series.samples)} · ${escapeHtml(detail)}</span>`);
+        }
+        const stability = observation.stability;
+        if (stability) {
+          const held = `${Math.round(stability.heldMillis / 1000)}s/${Math.round(stability.plannedMillis / 1000)}s`;
+          chips.push(`<span class="chip ${stability.interrupted ? "error" : "ok"}">Stability ${escapeHtml(held)} · ${escapeHtml(formatBytes(stability.bytes))}${stability.interrupted ? " · dropped" : ""}</span>`);
+        }
+        const tls = observation.tls;
+        if (tls && tls.checked) {
+          const detail = tls.handshake
+            ? [tls.negotiatedVersion, tls.negotiatedProtocol, tls.latencyMillis > 0 ? `${tls.latencyMillis} ms` : ""].filter(Boolean).join(" · ")
+            : (tls.failureCode || "failed");
+          chips.push(`<span class="chip ${tls.handshake ? "ok" : "error"}">TLS ${escapeHtml(detail)}</span>`);
+          if (tls.serverName) chips.push(`<span class="chip neutral">SNI ${escapeHtml(tls.serverName)}</span>`);
+        }
+        const dns = observation.dns;
+        if (dns && dns.checked) {
+          if (dns.literal) {
+            chips.push(`<span class="chip neutral">DNS not applicable · literal address</span>`);
+          } else {
+            chips.push(`<span class="chip ${dns.mismatch ? "error" : "ok"}">DNS ${dns.mismatch ? "resolvers disagree" : "consistent"}</span>`);
+            (dns.resolvers || []).forEach((resolver) => {
+              const answer = resolver.failureCode ? resolver.failureCode : (resolver.addresses || []).join(", ");
+              chips.push(`<span class="chip ${resolver.failureCode ? "error" : "neutral"}">${escapeHtml(resolver.resolver)} ${escapeHtml(answer || "no answer")}</span>`);
+            });
+          }
+        }
+        const alternative = observation.alternativeEndpoint;
+        if (alternative) {
+          chips.push(`<span class="chip ${alternative.status === "online" ? "ok" : "warn"}">Fallback ${escapeHtml(diagnosticProfileLabel(alternative.profileId))} ${escapeHtml(alternative.status)}</span>`);
+        }
+        return chips.join("");
       }
 
       function diagnosticSessionHTML(view) {
@@ -4413,11 +4507,13 @@
           ${diagnosticEvidenceChip("TCP", observation.tcp)}
           ${diagnosticEvidenceChip("Ping", observation.ping)}
           ${diagnosticEvidenceChip("Direct", observation.directConnectivity)}
+          ${diagnosticProfileEvidenceHTML(observation)}
           <span class="chip ${observationRecord.reliable ? "ok" : "error"}">${observationRecord.reliable ? "Reliable" : "Unreliable"}</span>
         </div>` : `<div class="muted">Waiting for signed observation</div>`;
+        const profileLabel = observation ? diagnosticProfileLabel(observation.endpointProfile) : "";
         return `<article class="diagnostic-session">
           <div class="diagnostic-session-head">
-            <div><strong>${escapeHtml(diagnosticAgentLabel(agentId))}</strong><div class="muted">${escapeHtml(formatTime(session.createdAt))}</div></div>
+            <div><strong>${escapeHtml(diagnosticAgentLabel(agentId))}</strong><div class="muted">${escapeHtml(formatTime(session.createdAt))}${profileLabel ? ` · ${escapeHtml(profileLabel)}` : ""}</div></div>
             <span class="chip ${statusClass}">${escapeHtml(session.state)}</span>
           </div>
           ${evidence}
@@ -4444,6 +4540,9 @@
             <select data-diagnostic-agent-for="${escapeHtml(proxy.stableId)}" data-diagnostic-agents-signature="${escapeHtml(agentSignature)}" ${!control.enabled || !control.agentId ? "disabled" : ""}>
               ${diagnosticAgentOptionsHTML(control.agents, control.agentId)}
             </select>
+            <select data-diagnostic-profile-for="${escapeHtml(proxy.stableId)}" data-diagnostic-profiles-signature="${escapeHtml(diagnosticProfileSignature(control.profiles, control.agent))}" ${!control.enabled || !control.profileId ? "disabled" : ""}>
+              ${diagnosticProfileOptionsHTML(control.profiles, control.agent, control.profileId)}
+            </select>
             <button class="secondary small" type="button" data-diagnose-id="${escapeHtml(proxy.stableId)}" data-diagnostic-start ${control.disabled ? "disabled" : ""}>${control.label}</button>
           </div>
           <div class="agent-list" data-diagnostic-session-list data-diagnostic-sessions-signature="${escapeHtml(sessionSignature)}">${sessions.map(diagnosticSessionHTML).join("") || `<div class="muted">No remote diagnostic sessions for this node</div>`}</div>
@@ -4456,8 +4555,10 @@
         const panel = card.querySelector("[data-node-panel]");
         const previousHeight = panel ? panel.getBoundingClientRect().height : 0;
         const select = section.querySelector(`[data-diagnostic-agent-for="${CSS.escape(proxy.stableId)}"]`);
+        const profileSelect = section.querySelector(`[data-diagnostic-profile-for="${CSS.escape(proxy.stableId)}"]`);
         const preferredAgentId = select ? select.value : "";
-        const control = diagnosticNodeControlState(proxy, preferredAgentId);
+        const preferredProfileId = profileSelect ? profileSelect.value : "";
+        const control = diagnosticNodeControlState(proxy, preferredAgentId, preferredProfileId);
         let changed = false;
 
         if (select) {
@@ -4471,6 +4572,23 @@
           const disabled = !control.enabled || !control.agentId;
           if (select.disabled !== disabled) {
             select.disabled = disabled;
+            changed = true;
+          }
+        }
+
+        // Rebuilt only when the catalogue or the selected agent's capabilities
+        // change; otherwise polling would discard the operator's choice.
+        if (profileSelect) {
+          const profileSignature = diagnosticProfileSignature(control.profiles, control.agent);
+          if (profileSelect.dataset.diagnosticProfilesSignature !== profileSignature) {
+            profileSelect.innerHTML = diagnosticProfileOptionsHTML(control.profiles, control.agent, control.profileId);
+            profileSelect.dataset.diagnosticProfilesSignature = profileSignature;
+            changed = true;
+          }
+          if (profileSelect.value !== control.profileId) profileSelect.value = control.profileId;
+          const disabled = !control.enabled || !control.profileId;
+          if (profileSelect.disabled !== disabled) {
+            profileSelect.disabled = disabled;
             changed = true;
           }
         }
@@ -4699,6 +4817,9 @@
         const result = resultFor(proxy.stableId);
         const muted = telegramAnyMutedNodeSet().has(proxy.stableId);
         const run = state.snapshot && state.snapshot.lastRun;
+        const runRequested = state.speedRunRequestIDs.has(proxy.stableId);
+        const runStarting = state.speedRunStarting && runRequested;
+        const runRunning = !state.speedRunStarting && Boolean(run && run.running) && runRequested;
         const checking = state.availabilityCheckRunning && state.availabilityCheckIDs.has(proxy.stableId);
         const maintenanceUpdating = state.maintenanceUpdatingIDs.has(proxy.stableId);
         const availabilityStatus = proxyAvailabilityStatus(proxy);
@@ -4706,9 +4827,11 @@
           result,
           rowClass: nodeRowClass(proxy, result, muted),
           checking,
+          runStarting,
+          runRunning,
           maintenanceUpdating,
           checkDisabled: state.availabilityCheckRunning || maintenanceUpdating,
-          runDisabled: Boolean(run && run.running) || maintenanceUpdating,
+          runDisabled: state.speedRunStarting || Boolean(run && run.running) || maintenanceUpdating,
           availabilityClass: proxy.maintenance || availabilityStatus === "proxy_failure" ? "warn" : (availabilityStatus === "online" ? "ok" : "error"),
           availabilityText: proxy.maintenance
             ? "Maintenance"
@@ -4766,7 +4889,7 @@
               </div>
               <div class="node-card-actions">
                 <button class="secondary small" type="button" data-check-id="${escapeHtml(proxy.stableId)}" ${view.checkDisabled ? "disabled" : ""}>${view.checking ? "Checking…" : "Check"}</button>
-                <button class="primary small" type="button" data-run-id="${escapeHtml(proxy.stableId)}" ${view.runDisabled ? "disabled" : ""}>Run</button>
+                <button class="primary small" type="button" data-run-id="${escapeHtml(proxy.stableId)}" ${view.runDisabled ? "disabled" : ""}>${view.runStarting ? "Starting…" : (view.runRunning ? "Running…" : "Run")}</button>
               </div>
               <button class="node-toggle" type="button" data-node-toggle="${escapeHtml(proxy.stableId)}" aria-expanded="${open}" aria-label="${open ? "Close" : "Open"} details">
                 <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
@@ -4828,7 +4951,9 @@
         const check = card.querySelector("[data-check-id]");
         check.disabled = view.checkDisabled;
         check.textContent = view.checking ? "Checking…" : "Check";
-        card.querySelector("[data-run-id]").disabled = view.runDisabled;
+        const run = card.querySelector("[data-run-id]");
+        run.disabled = view.runDisabled;
+        run.textContent = view.runStarting ? "Starting…" : (view.runRunning ? "Running…" : "Run");
         const open = state.openNodeStableIds.has(proxy.stableId);
         setNodeCardExpanded(card, open);
         if (open && !card.querySelector(".node-card-detail")) {
@@ -4948,14 +5073,23 @@
 
       function renderRunState() {
         const run = state.snapshot && state.snapshot.lastRun;
+        if (state.speedRunStarting) {
+          $("run-state").textContent = "Starting…";
+          $("run-state").className = "pill state-chip running";
+          $("run").textContent = "Starting…";
+          $("run").disabled = true;
+          return;
+        }
         if (!run || !run.running) {
           $("run-state").textContent = "Idle";
           $("run-state").className = "pill state-chip idle";
+          $("run").textContent = "Run Check";
           $("run").disabled = false;
           return;
         }
         $("run-state").textContent = `Running ${run.completed}/${run.selected}`;
         $("run-state").className = "pill state-chip running";
+        $("run").textContent = "Running…";
         $("run").disabled = true;
       }
 
@@ -4978,7 +5112,8 @@
         $("nodes-summary").textContent = `${filteredProxies().length} shown · ${state.proxies.length} total`;
         $("selection-check").textContent = state.availabilityCheckRunning ? "Checking…" : "Check";
         $("selection-check").disabled = count === 0 || state.availabilityCheckRunning;
-        $("selection-run").disabled = count === 0 || !!(run && run.running);
+        $("selection-run").textContent = state.speedRunStarting ? "Starting…" : ((run && run.running) ? "Running…" : "Run");
+        $("selection-run").disabled = count === 0 || state.speedRunStarting || !!(run && run.running);
         $("selection-mute").disabled = count === 0 || ids.every((id) => muted.has(id));
         $("selection-unmute").disabled = count === 0 || !ids.some((id) => anyMuted.has(id));
         $("selection-history").disabled = count !== 1;
@@ -5683,6 +5818,12 @@
           $("message").textContent = "Select a connected diagnostic agent";
           return;
         }
+        const profileSelect = card && card.querySelector(`[data-diagnostic-profile-for="${CSS.escape(stableId)}"]`);
+        const profileId = (profileSelect && profileSelect.value) || "";
+        if (!profileId) {
+          $("message").textContent = "Select a diagnostic to run";
+          return;
+        }
         if (diagnosticAgentBusy(stableId, agentId)) {
           $("message").textContent = "Remote diagnostics are already running for this node and agent";
           const proxy = proxyFor(stableId);
@@ -5694,7 +5835,7 @@
         try {
           await request("/diagnostic-sessions", {
             method: "POST",
-            body: JSON.stringify({ stableId, agentId }),
+            body: JSON.stringify({ stableId, agentId, profileId }),
           });
           await loadDiagnosticSessions();
           $("message").textContent = "Remote diagnostics started";
@@ -5807,6 +5948,9 @@
           ]);
           state.proxies = proxies;
           state.snapshot = snapshot;
+          if (!state.speedRunStarting && !(snapshot.lastRun && snapshot.lastRun.running)) {
+            state.speedRunRequestIDs.clear();
+          }
           state.telegram = telegram;
           state.nodesOverview = nodesOverview;
           if (diagnosticAgents.status === "fulfilled") state.diagnosticAgents = diagnosticAgents.value;
@@ -5905,18 +6049,33 @@
           $("message").textContent = "Select at least one node";
           return;
         }
+        if (state.speedRunStarting || (state.snapshot?.lastRun && state.snapshot.lastRun.running)) return;
+        state.speedRunStarting = true;
+        state.speedRunRequestIDs = new Set(proxyIds);
+        renderRunState();
+        renderNodes();
         try {
           saveSpeedDraft();
-          await request("/speed-tests/run", {
+          state.snapshot = await request("/speed-tests/run", {
             method: "POST",
             body: JSON.stringify({
               proxyIds,
               config: configFromForm(),
             }),
           });
+          state.lastUpdatedAt = new Date();
+          state.speedRunStarting = false;
+          renderAll();
           await load();
         } catch (err) {
           $("message").textContent = err.message;
+        } finally {
+          state.speedRunStarting = false;
+          if (!(state.snapshot?.lastRun && state.snapshot.lastRun.running)) {
+            state.speedRunRequestIDs.clear();
+          }
+          renderRunState();
+          renderNodes();
         }
       }
 

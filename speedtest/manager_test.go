@@ -89,6 +89,9 @@ func TestUnavailableNodesAreSkippedWithoutSpeedResultOrHistory(t *testing.T) {
 		if report.Selected != 2 || len(report.Results) != 0 {
 			t.Fatalf("skipped report = %+v, want selected nodes but no speed results", report)
 		}
+		if strings.Join(report.RequestedStableIDs, ",") != "proxy-failure,offline" {
+			t.Fatalf("requested StableIDs = %v, want skipped request IDs preserved", report.RequestedStableIDs)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for skipped speed-test report")
 	}

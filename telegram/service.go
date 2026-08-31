@@ -38,11 +38,13 @@ const (
 	maxRichMessageRunes                = 32768
 	speedConfirmationRetryDelay        = 30 * time.Minute
 	speedConfirmationRetryBusyDelay    = time.Minute
-	speedConfirmationRetrySource       = "speed-retry"
-	speedRetryKindConfirmation         = "speed-confirmation"
-	legacySpeedRetryKindLowSpeed       = "low-speed"
-	legacySpeedRetryKindDeadline       = "deadline"
-	legacyDeadlineRetryDelay           = 5 * time.Minute
+	// Shared with the manager, which branches on this source to keep the
+	// confirmation run's primary and fallback phases from overlapping.
+	speedConfirmationRetrySource = speedtest.ConfirmationRetrySource
+	speedRetryKindConfirmation   = "speed-confirmation"
+	legacySpeedRetryKindLowSpeed = "low-speed"
+	legacySpeedRetryKindDeadline = "deadline"
+	legacyDeadlineRetryDelay     = 5 * time.Minute
 )
 
 var defaultAlertReminderScheduleMinutes = parseMinuteSchedule(defaultAlertReminderScheduleString)
@@ -652,7 +654,7 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 	}
 
 	if kind, ok := speedRetryKindForSource(report.Source); ok {
-		s.completeSpeedRetry(kind, report.Results)
+		s.completeSpeedRetry(kind, report.RequestedStableIDs, report.Results)
 	}
 
 	report = filterMutedRunReport(report, cfg)
@@ -929,8 +931,8 @@ func (s *Service) runSpeedRetry(timerID uint64, kind string, req speedtest.RunRe
 	logger.Warn("Failed to start %s speed-test retry: %v", speedRetryKindLabel(kind), err)
 }
 
-func (s *Service) completeSpeedRetry(kind string, results []speedtest.Result) {
-	ids := make([]string, 0, len(results))
+func (s *Service) completeSpeedRetry(kind string, requestedStableIDs []string, results []speedtest.Result) {
+	ids := append([]string(nil), requestedStableIDs...)
 	for _, result := range results {
 		if result.StableID != "" {
 			ids = append(ids, result.StableID)
@@ -1828,8 +1830,7 @@ func (s *Service) runAvailabilityCheck(stableIDs []string) error {
 		return s.availabilityCheck(stableIDs)
 	}
 	if len(stableIDs) == 0 {
-		s.proxyChecker.CheckAllProxies()
-		return nil
+		return s.proxyChecker.CheckAllProxies()
 	}
 	_, err := s.proxyChecker.CheckProxiesByStableIDs(stableIDs)
 	return err

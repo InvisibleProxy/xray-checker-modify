@@ -388,6 +388,33 @@ func TestFullCheckNeverUsesTCPAsAGate(t *testing.T) {
 	}
 }
 
+func TestFullCheckReportsCurrentIPPreflightFailure(t *testing.T) {
+	proxy := testProxy("node-1", "Node one")
+	proxyChecker := NewProxyChecker(
+		[]*models.ProxyConfig{proxy},
+		10000,
+		"://invalid-current-ip-url",
+		1,
+		"",
+		"",
+		1,
+		0,
+		"ip",
+	)
+	proxyChecks := 0
+	proxyChecker.checkProxyFunc = func(*models.ProxyConfig, uint64, bool, bool) {
+		proxyChecks++
+	}
+
+	err := proxyChecker.CheckAllProxies()
+	if err == nil {
+		t.Fatal("full check did not report the current-IP preflight failure")
+	}
+	if proxyChecks != 0 {
+		t.Fatalf("proxy checks = %d, want 0 after failed preflight", proxyChecks)
+	}
+}
+
 func TestMaintenanceModeKeepsProbeChecksAndClearsMonitoringStatus(t *testing.T) {
 	proxy := testProxy("node-1", "Node one")
 	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{proxy})

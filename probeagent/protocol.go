@@ -67,6 +67,10 @@ type JobAssignment struct {
 	SocksPort  int                       `json:"socksPort"`
 	TargetHost string                    `json:"targetHost"`
 	TargetPort int                       `json:"targetPort"`
+	// TargetSNI is the name the TLS probe presents. It already travels in
+	// plaintext in every real handshake with this node, so carrying it here
+	// exposes nothing the network cannot already observe.
+	TargetSNI string `json:"targetSni,omitempty"`
 }
 
 type JobPollResponse struct {

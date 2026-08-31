@@ -88,3 +88,127 @@ func TestExecutorRejectsFingerprintMismatchBeforeStartingXray(t *testing.T) {
 		t.Fatalf("fingerprint mismatch result = %+v", observation)
 	}
 }
+
+func newProbeTestExecutor(t *testing.T, config ExecutorConfig) *Executor {
+	t.Helper()
+	config.RuntimeDir = "/tmp"
+	executor, err := NewExecutor(config)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	return executor
+}
+
+// A download that stalls short of the minimum is still worth measuring: the rate
+// it managed distinguishes a throttled path from a refused one.
+func TestDownloadProbeReportsThroughputForCompleteAndTruncatedTransfers(t *testing.T) {
+	payload := make([]byte, 64*1024)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	executor := newProbeTestExecutor(t, ExecutorConfig{DownloadURL: server.URL, DownloadMinSize: int64(len(payload))})
+	result := executor.proxyCheck(context.Background(), diagnostics.TestProfile{ID: diagnostics.ProfileDownload, Method: diagnostics.ProbeMethodDownload}, 0, "")
+	if result.status != diagnostics.ProbeStatusOnline {
+		t.Fatalf("complete transfer status = %q, want online", result.status)
+	}
+	if result.throughput == nil || result.throughput.Bytes != int64(len(payload)) {
+		t.Fatalf("throughput evidence = %+v, want %d bytes", result.throughput, len(payload))
+	}
+
+	truncating := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(payload[:1024])
+	}))
+	defer truncating.Close()
+	executor = newProbeTestExecutor(t, ExecutorConfig{DownloadURL: truncating.URL, DownloadMinSize: int64(len(payload))})
+	result = executor.proxyCheck(context.Background(), diagnostics.TestProfile{ID: diagnostics.ProfileDownload, Method: diagnostics.ProbeMethodDownload}, 0, "")
+	if result.status != diagnostics.ProbeStatusProxyFailure || result.failure.Code != "download_incomplete" {
+		t.Fatalf("truncated transfer = %q/%q, want proxy_failure/download_incomplete", result.status, result.failure.Code)
+	}
+	if result.throughput == nil || result.throughput.Bytes != 1024 {
+		t.Fatalf("truncated throughput = %+v, want the 1024 bytes that did arrive", result.throughput)
+	}
+}
+
+func TestLatencyProfileAggregatesEverySampleAndFailsOnPartialSuccess(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		// The third request fails, so the series is incomplete.
+		if requests == 3 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	executor := newProbeTestExecutor(t, ExecutorConfig{StatusCheckURL: server.URL, LatencySamples: 4})
+	result := executor.latencyProfile(context.Background(), 0)
+	if result.latencySeries == nil {
+		t.Fatal("latency profile returned no series")
+	}
+	if result.latencySeries.Samples != 4 || result.latencySeries.Succeeded != 3 {
+		t.Fatalf("series = %+v, want 3 of 4 samples succeeding", result.latencySeries)
+	}
+	// An intermittent tunnel is not a healthy one; reporting online would hide it.
+	if result.status != diagnostics.ProbeStatusProxyFailure {
+		t.Fatalf("partial series status = %q, want proxy_failure", result.status)
+	}
+	if requests != 4 {
+		t.Fatalf("issued %d requests, want one per configured sample", requests)
+	}
+}
+
+func TestDNSProbeReportsLiteralAddressesWithoutClaimingALookup(t *testing.T) {
+	executor := newProbeTestExecutor(t, ExecutorConfig{})
+	evidence := executor.dnsProbe(context.Background(), "203.0.113.10", time.Second)
+	if !evidence.Checked || !evidence.Literal {
+		t.Fatalf("literal address evidence = %+v, want Checked and Literal", evidence)
+	}
+	if len(evidence.Resolvers) != 0 {
+		t.Fatalf("literal address consulted %d resolvers, want none", len(evidence.Resolvers))
+	}
+}
+
+func TestTLSProbeReportsHandshakeAndPresentsTheConfiguredSNI(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	parsed, _ := url.Parse(server.URL)
+	port, _ := strconv.Atoi(parsed.Port())
+
+	executor := newProbeTestExecutor(t, ExecutorConfig{})
+	evidence := executor.tlsProbe(context.Background(), JobAssignment{
+		TargetHost: parsed.Hostname(), TargetPort: port, TargetSNI: "node.example.com",
+	}, 5*time.Second)
+	if !evidence.Checked || !evidence.Handshake {
+		t.Fatalf("TLS evidence = %+v, want a completed handshake", evidence)
+	}
+	if evidence.ServerName != "node.example.com" {
+		t.Fatalf("presented SNI = %q, want the node's configured name", evidence.ServerName)
+	}
+	if evidence.NegotiatedVersion == "" {
+		t.Error("handshake reported no negotiated version")
+	}
+}
+
+func TestTLSProbeReportsRefusedPortWithoutClaimingAHandshake(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	parsed, _ := url.Parse(server.URL)
+	port, _ := strconv.Atoi(parsed.Port())
+	server.Close()
+
+	executor := newProbeTestExecutor(t, ExecutorConfig{})
+	evidence := executor.tlsProbe(context.Background(), JobAssignment{
+		TargetHost: parsed.Hostname(), TargetPort: port, TargetSNI: "node.example.com",
+	}, 2*time.Second)
+	if evidence.Handshake {
+		t.Fatal("closed port reported a completed handshake")
+	}
+	if evidence.FailureCode == "" {
+		t.Error("closed port produced no failure code")
+	}
+}

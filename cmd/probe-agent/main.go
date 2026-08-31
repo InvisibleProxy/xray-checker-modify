@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"xray-checker/diagnostics"
 	"xray-checker/probeagent"
 )
 
@@ -28,6 +29,11 @@ func main() {
 		ProxyTimeout:    time.Duration(envPositiveInt("PROBE_PROXY_TIMEOUT_SECONDS", 30)) * time.Second,
 		DownloadTimeout: time.Duration(envPositiveInt("PROBE_DOWNLOAD_TIMEOUT_SECONDS", 60)) * time.Second,
 		DownloadMinSize: int64(envPositiveInt("PROBE_DOWNLOAD_MIN_SIZE", 51200)),
+		// Probe shapes stay agent-owned: the controller names a profile, it never
+		// dictates how long or how often that profile runs.
+		LatencySamples:    envPositiveInt("PROBE_LATENCY_SAMPLES", probeagent.DefaultLatencySamples),
+		StabilityDuration: time.Duration(envPositiveInt("PROBE_STABILITY_SECONDS", 20)) * time.Second,
+		DNSResolver:       envOrDefault("PROBE_DNS_RESOLVER", probeagent.DefaultDNSResolver),
 	})
 	if err != nil {
 		log.Fatalf("probe executor configuration failed: %v", err)
@@ -41,10 +47,17 @@ func main() {
 		ControllerCAFile: os.Getenv("PROBE_CONTROLLER_CA_FILE"),
 		IdentityDir:      envOrDefault("PROBE_IDENTITY_DIR", "/var/lib/xray-checker-agent"),
 		AgentVersion:     version,
-		Capabilities:     []string{"control-v1", "diagnostic-v1"},
-		RequestTimeout:   20 * time.Second,
-		JobPollInterval:  time.Duration(envPositiveInt("PROBE_JOB_POLL_INTERVAL_SECONDS", 5)) * time.Second,
-		Executor:         executor,
+		// diagnostic-v2 tells the controller this build can run the latency,
+		// stability, TLS and DNS profiles. An older agent advertises only v1 and
+		// is never offered them.
+		Capabilities: []string{
+			diagnostics.CapabilityControlV1,
+			diagnostics.CapabilityDiagnosticV1,
+			diagnostics.CapabilityDiagnosticV2,
+		},
+		RequestTimeout:  20 * time.Second,
+		JobPollInterval: time.Duration(envPositiveInt("PROBE_JOB_POLL_INTERVAL_SECONDS", 5)) * time.Second,
+		Executor:        executor,
 	})
 	if err != nil {
 		log.Fatalf("probe agent configuration failed: %v", err)

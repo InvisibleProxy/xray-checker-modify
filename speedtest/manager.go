@@ -32,6 +32,30 @@ const (
 	maxHistoryRetentionDays     = 3650
 )
 
+// Run sources. ConfirmationRetrySource is exported because the Telegram
+// confirmation workflow schedules those runs and must name the same source the
+// manager branches on.
+const (
+	ManualSource            = "manual"
+	TelegramSource          = "telegram"
+	ScheduleSource          = "schedule"
+	ConfirmationRetrySource = "speed-retry"
+)
+
+// usesSequencedFallback reports whether a run must finish every primary
+// measurement before starting any country fallback. Interleaving them lets one
+// node's fallback share bandwidth with another node's primary attempt and skew
+// its Mbps, which decides both the reported result and the confirmation alert.
+// Scheduled sweeps stay parallel: they trade that precision for throughput.
+func usesSequencedFallback(source string) bool {
+	switch source {
+	case ManualSource, TelegramSource, ConfirmationRetrySource:
+		return true
+	default:
+		return false
+	}
+}
+
 type TestConfig struct {
 	URL         string `json:"url"`
 	MaxBytes    int64  `json:"maxBytes"`
@@ -126,13 +150,14 @@ type Snapshot struct {
 }
 
 type RunReport struct {
-	Source       string
-	StartedAt    time.Time
-	FinishedAt   time.Time
-	Selected     int
-	Config       TestConfig
-	Results      []Result
-	ReportTarget ReportTarget `json:"-"`
+	Source             string
+	StartedAt          time.Time
+	FinishedAt         time.Time
+	Selected           int
+	Config             TestConfig
+	Results            []Result
+	RequestedStableIDs []string
+	ReportTarget       ReportTarget `json:"-"`
 }
 
 type resultStateFile struct {
@@ -602,7 +627,7 @@ func (m *Manager) Run(req RunRequest, source string) error {
 	if err := m.reloadCountryFallbackCatalog(false); err != nil {
 		logger.Warn("Failed to reload country Test URL catalog; keeping last valid catalog: %v", err)
 	}
-	if source == "manual" {
+	if source == ManualSource {
 		if err := m.updateScheduleTestURL(req.Config.URL); err != nil {
 			return fmt.Errorf("save test URL: %w", err)
 		}
@@ -620,7 +645,7 @@ func (m *Manager) Run(req RunRequest, source string) error {
 		}
 	}()
 
-	proxies := m.selectProxies(req, source == "manual")
+	proxies := m.selectProxies(req, source == ManualSource)
 	if len(proxies) == 0 {
 		var paused []string
 		for _, stableID := range req.ProxyIDs {
@@ -651,7 +676,16 @@ func (m *Manager) Run(req RunRequest, source string) error {
 	}
 	m.mu.Unlock()
 
-	go m.run(proxies, req.Config, source, startedAt, req.SkipOffline, req.ReportTarget, runGate)
+	go m.run(
+		proxies,
+		req.Config,
+		source,
+		startedAt,
+		req.SkipOffline,
+		append([]string(nil), req.ProxyIDs...),
+		req.ReportTarget,
+		runGate,
+	)
 	gateHeld = false
 	return nil
 }
@@ -688,7 +722,7 @@ func (m *Manager) schedulerLoop() {
 				Protocol:    schedule.Protocol,
 				Config:      schedule.Config,
 			}
-			if err := m.Run(req, "schedule"); err != nil {
+			if err := m.Run(req, ScheduleSource); err != nil {
 				logger.Warn("Scheduled speed test skipped: %v", err)
 			}
 		case <-m.scheduleCh:
@@ -774,7 +808,16 @@ func (m *Manager) advanceSchedulerDeadline(expected, now time.Time) (ScheduleCon
 	return schedule, true
 }
 
-func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source string, startedAt time.Time, skipOffline bool, reportTarget ReportTarget, runGate sync.Locker) {
+func (m *Manager) run(
+	proxies []*models.ProxyConfig,
+	cfg TestConfig,
+	source string,
+	startedAt time.Time,
+	skipOffline bool,
+	requestedStableIDs []string,
+	reportTarget ReportTarget,
+	runGate sync.Locker,
+) {
 	if runGate != nil {
 		defer runGate.Unlock()
 	}
@@ -805,7 +848,7 @@ func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source stri
 		m.mu.Unlock()
 	}
 
-	if source == "manual" {
+	if usesSequencedFallback(source) {
 		m.runManualTestPhases(proxies, cfg, source, skipOffline, sem, recordResult)
 	} else {
 		var wg sync.WaitGroup
@@ -836,13 +879,14 @@ func (m *Manager) run(proxies []*models.ProxyConfig, cfg TestConfig, source stri
 
 	finishedAt := time.Now()
 	report := RunReport{
-		Source:       source,
-		StartedAt:    startedAt,
-		FinishedAt:   finishedAt,
-		Selected:     len(proxies),
-		Config:       cfg,
-		Results:      runResults,
-		ReportTarget: reportTarget,
+		Source:             source,
+		StartedAt:          startedAt,
+		FinishedAt:         finishedAt,
+		Selected:           len(proxies),
+		Config:             cfg,
+		Results:            runResults,
+		RequestedStableIDs: requestedStableIDs,
+		ReportTarget:       reportTarget,
 	}
 
 	m.mu.Lock()

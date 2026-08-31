@@ -1359,6 +1359,45 @@ func TestLowSpeedConfirmationRunsOnlyAffectedNodes(t *testing.T) {
 	}
 }
 
+func TestSpeedConfirmationClearsRequestedNodesWithoutResults(t *testing.T) {
+	service := NewService("", nil, nil, 10000)
+	defer service.Stop()
+	service.speedRetryDelay = time.Hour
+	service.setConfig(Config{LowSpeedThresholdMbps: 10})
+
+	initial := speedtest.RunReport{
+		Results: []speedtest.Result{
+			{StableID: "measured", Mbps: 2},
+			{StableID: "skipped", Mbps: 3},
+		},
+	}
+	if !service.scheduleSpeedConfirmationRetry(initial) {
+		t.Fatal("confirmation retry was not scheduled")
+	}
+
+	service.NotifySpeedTest(speedtest.RunReport{
+		Source:             speedConfirmationRetrySource,
+		RequestedStableIDs: []string{"measured", "skipped"},
+		Results:            []speedtest.Result{{StableID: "measured", Mbps: 25}},
+	})
+
+	service.speedRetryMu.Lock()
+	pendingMeasured := service.speedRetryPending[speedRetryKey{Kind: speedRetryKindConfirmation, StableID: "measured"}]
+	pendingSkipped := service.speedRetryPending[speedRetryKey{Kind: speedRetryKindConfirmation, StableID: "skipped"}]
+	entryCount := len(service.speedRetryEntries)
+	timerCount := len(service.speedRetryTimers)
+	service.speedRetryMu.Unlock()
+	if pendingMeasured || pendingSkipped || entryCount != 0 || timerCount != 0 {
+		t.Fatalf(
+			"retry remained armed: measured=%t skipped=%t entries=%d timers=%d",
+			pendingMeasured,
+			pendingSkipped,
+			entryCount,
+			timerCount,
+		)
+	}
+}
+
 func TestPendingLowSpeedRetrySurvivesRestart(t *testing.T) {
 	dataDir := t.TempDir()
 	proxy := &models.ProxyConfig{StableID: "node-1", Name: "Node 1", Protocol: "vless", Server: "node.example", Port: 443}

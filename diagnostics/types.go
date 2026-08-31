@@ -3,9 +3,11 @@ package diagnostics
 import "time"
 
 const (
-	SessionSchemaVersion     = 1
-	JobSchemaVersion         = 1
-	ObservationSchemaVersion = 1
+	SessionSchemaVersion = 1
+	JobSchemaVersion     = 1
+	// Bumped to 2 for the selectable diagnostic profiles: throughput, latency
+	// series, stability, TLS and DNS evidence changed the signed payload.
+	ObservationSchemaVersion = 2
 )
 
 type Trigger string
@@ -69,10 +71,26 @@ const (
 type ProbeMethod string
 
 const (
-	ProbeMethodIP       ProbeMethod = "ip"
-	ProbeMethodStatus   ProbeMethod = "status"
-	ProbeMethodDownload ProbeMethod = "download"
+	ProbeMethodIP        ProbeMethod = "ip"
+	ProbeMethodStatus    ProbeMethod = "status"
+	ProbeMethodDownload  ProbeMethod = "download"
+	ProbeMethodLatency   ProbeMethod = "latency"
+	ProbeMethodStability ProbeMethod = "stability"
+	ProbeMethodTLS       ProbeMethod = "tls"
+	ProbeMethodDNS       ProbeMethod = "dns"
 )
+
+// TunnelledMethods run their probe through the agent's ephemeral Xray instance.
+// The transport methods reach the node directly instead, which is what lets
+// them separate a broken tunnel from a broken path to the server.
+func (m ProbeMethod) Tunnelled() bool {
+	switch m {
+	case ProbeMethodIP, ProbeMethodStatus, ProbeMethodDownload, ProbeMethodLatency, ProbeMethodStability:
+		return true
+	default:
+		return false
+	}
+}
 
 type FailureStage string
 
@@ -84,6 +102,8 @@ const (
 	FailureStagePing          FailureStage = "ping"
 	FailureStageDirect        FailureStage = "direct"
 	FailureStageEndpoint      FailureStage = "endpoint"
+	FailureStageDNS           FailureStage = "dns"
+	FailureStageTLS           FailureStage = "tls"
 )
 
 // FailureEvidence intentionally carries only bounded classification values.
@@ -99,6 +119,74 @@ type CheckEvidence struct {
 	Online        bool   `json:"online"`
 	LatencyMillis int64  `json:"latencyMillis,omitempty"`
 	FailureCode   string `json:"failureCode,omitempty"`
+}
+
+// ThroughputEvidence reports what a download probe actually achieved. Bytes and
+// duration are kept alongside the derived rate so a short transfer cannot be
+// mistaken for a sustained measurement.
+type ThroughputEvidence struct {
+	Bytes          int64 `json:"bytes"`
+	DurationMillis int64 `json:"durationMillis"`
+	Mbps           int64 `json:"mbps"`
+	TTFBMillis     int64 `json:"ttfbMillis,omitempty"`
+}
+
+// LatencySeriesEvidence summarises repeated requests. A single measurement
+// cannot distinguish a consistently slow node from one with a heavy tail, which
+// is exactly the distinction an operator needs before blaming the route.
+type LatencySeriesEvidence struct {
+	Samples      int    `json:"samples"`
+	Succeeded    int    `json:"succeeded"`
+	MinMillis    int64  `json:"minMillis,omitempty"`
+	MedianMillis int64  `json:"medianMillis,omitempty"`
+	P95Millis    int64  `json:"p95Millis,omitempty"`
+	MaxMillis    int64  `json:"maxMillis,omitempty"`
+	JitterMillis int64  `json:"jitterMillis,omitempty"`
+	FailureCode  string `json:"failureCode,omitempty"`
+}
+
+// StabilityEvidence records how long a tunnelled transfer survived. Filtering
+// that drops a session after a delay looks healthy to every short probe.
+type StabilityEvidence struct {
+	PlannedMillis int64  `json:"plannedMillis"`
+	HeldMillis    int64  `json:"heldMillis"`
+	Bytes         int64  `json:"bytes"`
+	Interrupted   bool   `json:"interrupted"`
+	FailureCode   string `json:"failureCode,omitempty"`
+}
+
+// TLSEvidence describes a direct handshake with the node, without the tunnel.
+// It separates "the port answers" from "the TLS session the node needs can
+// actually be established with this SNI".
+type TLSEvidence struct {
+	Checked            bool   `json:"checked"`
+	Handshake          bool   `json:"handshake"`
+	ServerName         string `json:"serverName,omitempty"`
+	NegotiatedVersion  string `json:"negotiatedVersion,omitempty"`
+	NegotiatedProtocol string `json:"negotiatedProtocol,omitempty"`
+	CertificateIssuer  string `json:"certificateIssuer,omitempty"`
+	CertificateExpiry  string `json:"certificateExpiry,omitempty"`
+	LatencyMillis      int64  `json:"latencyMillis,omitempty"`
+	FailureCode        string `json:"failureCode,omitempty"`
+}
+
+// DNSResolverEvidence is one resolver's answer. Addresses are node addresses the
+// controller already knows; no other hostname is ever resolved on its behalf.
+type DNSResolverEvidence struct {
+	Resolver      string   `json:"resolver"`
+	Addresses     []string `json:"addresses,omitempty"`
+	LatencyMillis int64    `json:"latencyMillis,omitempty"`
+	FailureCode   string   `json:"failureCode,omitempty"`
+}
+
+// DNSEvidence compares resolvers. Disagreement is the signal: it means the
+// answer depends on who is asked, which a single lookup cannot reveal.
+type DNSEvidence struct {
+	Checked   bool                  `json:"checked"`
+	Hostname  string                `json:"hostname,omitempty"`
+	Literal   bool                  `json:"literal,omitempty"`
+	Resolvers []DNSResolverEvidence `json:"resolvers,omitempty"`
+	Mismatch  bool                  `json:"mismatch,omitempty"`
 }
 
 type LocalResultSnapshot struct {
@@ -161,8 +249,15 @@ type Observation struct {
 	Ping                CheckEvidence                   `json:"ping"`
 	DirectConnectivity  CheckEvidence                   `json:"directConnectivity"`
 	AlternativeEndpoint *AlternativeEndpointObservation `json:"alternativeEndpoint,omitempty"`
-	AgentVersion        string                          `json:"agentVersion"`
-	Signature           []byte                          `json:"signature"`
+	// Method-specific evidence. Each probe fills only its own field, so an
+	// observation stays as small as the question it answers.
+	Throughput   *ThroughputEvidence    `json:"throughput,omitempty"`
+	Latency      *LatencySeriesEvidence `json:"latencySeries,omitempty"`
+	Stability    *StabilityEvidence     `json:"stability,omitempty"`
+	TLS          *TLSEvidence           `json:"tls,omitempty"`
+	DNS          *DNSEvidence           `json:"dns,omitempty"`
+	AgentVersion string                 `json:"agentVersion"`
+	Signature    []byte                 `json:"signature"`
 }
 
 type AcceptedObservation struct {

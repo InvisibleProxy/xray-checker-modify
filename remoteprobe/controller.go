@@ -24,9 +24,11 @@ const (
 )
 
 var (
-	ErrUnavailableAgent = errors.New("diagnostic agent is not connected")
-	ErrActiveSession    = errors.New("diagnostic session is already active for this node and agent")
-	ErrNoPendingJob     = errors.New("no pending diagnostic job")
+	ErrUnavailableAgent   = errors.New("diagnostic agent is not connected")
+	ErrActiveSession      = errors.New("diagnostic session is already active for this node and agent")
+	ErrNoPendingJob       = errors.New("no pending diagnostic job")
+	ErrUnknownProfile     = errors.New("unknown diagnostic profile")
+	ErrUnsupportedByAgent = errors.New("diagnostic agent does not support this profile")
 )
 
 type Config struct {
@@ -39,6 +41,16 @@ type Config struct {
 type CreateManualRequest struct {
 	StableID string `json:"stableId"`
 	AgentID  string `json:"agentId"`
+	// ProfileID selects the diagnostic. Empty keeps the profile matching the
+	// controller's configured availability check method, which is what the
+	// workflow used before profiles became selectable.
+	ProfileID string `json:"profileId,omitempty"`
+}
+
+// ProfileView is a catalogue entry as presented to the admin UI.
+type ProfileView struct {
+	diagnostics.ProfileDescriptor
+	Default bool `json:"default"`
 }
 
 type SessionView struct {
@@ -113,17 +125,26 @@ func (c *Controller) CreateManual(request CreateManualRequest) (SessionView, err
 	if !ok {
 		return SessionView{}, probeagent.ErrAgentNotFound
 	}
-	if !agent.Enabled || !agent.Connected || !contains(agent.Capabilities, "control-v1") || !contains(agent.Capabilities, "diagnostic-v1") {
+	if !agent.Enabled || !agent.Connected || !contains(agent.Capabilities, diagnostics.CapabilityControlV1) || !contains(agent.Capabilities, diagnostics.CapabilityDiagnosticV1) {
 		return SessionView{}, ErrUnavailableAgent
+	}
+	descriptor, err := c.resolveProfile(request.ProfileID, agent.Capabilities)
+	if err != nil {
+		return SessionView{}, err
 	}
 	snapshot, configJSON, fingerprint, err := c.executionSnapshot(request.StableID)
 	if err != nil {
 		return SessionView{}, err
 	}
-	profile, err := profileForMethod(c.config.CheckMethod)
-	if err != nil {
-		return SessionView{}, err
+	// A fallback endpoint is only offered when the agent could actually run it,
+	// otherwise the retry would come back as a configuration failure.
+	alternativeID := ""
+	if candidate, ok := diagnostics.AlternativeFor(descriptor.ID); ok {
+		if alternative, known := diagnostics.ProfileByID(candidate); known && contains(agent.Capabilities, alternative.Capability) {
+			alternativeID = alternative.ID
+		}
 	}
+	profile := descriptor.TestProfileFor(alternativeID)
 	now := time.Now().UTC()
 	expiresAt := now.Add(c.config.JobTTL)
 	c.mu.Lock()
@@ -164,11 +185,27 @@ func (c *Controller) CreateManual(request CreateManualRequest) (SessionView, err
 		SocksPort:  c.config.SocksPort,
 		TargetHost: snapshot.Proxy.Server,
 		TargetPort: snapshot.Proxy.Port,
+		TargetSNI:  strings.TrimSpace(snapshot.Proxy.SNI),
 	}
 	c.assignments[job.JobID] = &queuedAssignment{assignment: assignment}
 	c.signalAgentLocked(request.AgentID)
 	updated, _ := c.manager.Session(session.SessionID)
 	return view(updated), nil
+}
+
+// Profiles exposes the catalogue with the controller's own default marked, so
+// the admin UI does not have to duplicate either the list or the default rule.
+func (c *Controller) Profiles() []ProfileView {
+	defaultID := ""
+	if descriptor, ok := diagnostics.ProfileForCheckMethod(c.config.CheckMethod); ok {
+		defaultID = descriptor.ID
+	}
+	catalogue := diagnostics.Profiles()
+	result := make([]ProfileView, 0, len(catalogue))
+	for _, descriptor := range catalogue {
+		result = append(result, ProfileView{ProfileDescriptor: descriptor, Default: descriptor.ID == defaultID})
+	}
+	return result
 }
 
 func (c *Controller) Sessions(stableID string) []SessionView {
@@ -334,17 +371,34 @@ func (c *Controller) executionSnapshot(stableID string) (checker.DiagnosticProxy
 	return snapshot, canonicalConfig, diagnostics.ConfigFingerprint(canonicalConfig), nil
 }
 
+// resolveProfile turns the requested profile into a descriptor, refusing one the
+// agent cannot execute. Rejecting here produces an actionable error instead of
+// the opaque configuration failure the agent would otherwise return.
+func (c *Controller) resolveProfile(requested string, capabilities []string) (diagnostics.ProfileDescriptor, error) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		descriptor, ok := diagnostics.ProfileForCheckMethod(c.config.CheckMethod)
+		if !ok {
+			return diagnostics.ProfileDescriptor{}, fmt.Errorf("%w: unsupported diagnostic check method %q", ErrUnknownProfile, c.config.CheckMethod)
+		}
+		return descriptor, nil
+	}
+	descriptor, ok := diagnostics.ProfileByID(requested)
+	if !ok {
+		return diagnostics.ProfileDescriptor{}, fmt.Errorf("%w: %q", ErrUnknownProfile, requested)
+	}
+	if !contains(capabilities, descriptor.Capability) {
+		return diagnostics.ProfileDescriptor{}, fmt.Errorf("%w: %q requires %s", ErrUnsupportedByAgent, descriptor.ID, descriptor.Capability)
+	}
+	return descriptor, nil
+}
+
 func profileForMethod(method string) (diagnostics.TestProfile, error) {
-	switch strings.TrimSpace(method) {
-	case "ip":
-		return diagnostics.TestProfile{ID: "default-ip", Method: diagnostics.ProbeMethodIP}, nil
-	case "status":
-		return diagnostics.TestProfile{ID: "default-status", Method: diagnostics.ProbeMethodStatus}, nil
-	case "download":
-		return diagnostics.TestProfile{ID: "default-download", Method: diagnostics.ProbeMethodDownload}, nil
-	default:
+	descriptor, ok := diagnostics.ProfileForCheckMethod(method)
+	if !ok {
 		return diagnostics.TestProfile{}, fmt.Errorf("unsupported diagnostic check method %q", method)
 	}
+	return descriptor.TestProfileFor(""), nil
 }
 
 func localResult(snapshot checker.DiagnosticProxySnapshot) diagnostics.LocalResultSnapshot {

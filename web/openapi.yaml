@@ -992,7 +992,16 @@ paths:
           schema: {type: string}
       responses:
         '200':
-          description: Isolated diagnostic sessions
+          description: Isolated diagnostic sessions together with the selectable profile catalogue
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled, profiles, sessions]
+                properties:
+                  enabled: {type: boolean}
+                  profiles: {type: array, items: {$ref: '#/components/schemas/DiagnosticProfile'}}
+                  sessions: {type: array, items: {$ref: '#/components/schemas/DiagnosticSessionView'}}
         '401':
           $ref: '#/components/responses/Unauthorized'
     post:
@@ -2421,6 +2430,9 @@ components:
       properties:
         stableId: {type: string}
         agentId: {type: string}
+        profileId:
+          type: string
+          description: Diagnostic to run, from the profiles listed by GET /api/v1/admin/diagnostic-sessions. Omitted keeps the profile matching the controller's configured check method. A profile the selected agent does not advertise is rejected with 409.
 
     DiagnosticFailureEvidence:
       type: object
@@ -2464,7 +2476,7 @@ components:
       type: object
       required: [schemaVersion, agentId, sessionId, jobId, nonce, stableId, configGeneration, configFingerprint, checkedAt, durationMillis, endpointProfile, status, tcp, ping, directConnectivity, agentVersion, signature]
       properties:
-        schemaVersion: {type: integer, enum: [1]}
+        schemaVersion: {type: integer, enum: [2]}
         agentId: {type: string}
         sessionId: {type: string}
         jobId: {type: string}
@@ -2475,14 +2487,126 @@ components:
         checkedAt: {type: string, format: date-time}
         durationMillis: {type: integer, format: int64, minimum: 0}
         endpointProfile: {type: string}
-        status: {type: string, enum: [online, proxy_failure, offline]}
+        status: {type: string, enum: [unknown, online, proxy_failure, offline]}
         latencyMillis: {type: integer, format: int64, minimum: 0}
         failure: {$ref: '#/components/schemas/DiagnosticFailureEvidence'}
         tcp: {$ref: '#/components/schemas/DiagnosticCheckEvidence'}
         ping: {$ref: '#/components/schemas/DiagnosticCheckEvidence'}
         directConnectivity: {$ref: '#/components/schemas/DiagnosticCheckEvidence'}
+        alternativeEndpoint: {$ref: '#/components/schemas/DiagnosticAlternativeEndpoint'}
+        throughput:
+          allOf: [{$ref: '#/components/schemas/DiagnosticThroughputEvidence'}]
+          description: Present only for the download profile.
+        latencySeries:
+          allOf: [{$ref: '#/components/schemas/DiagnosticLatencySeries'}]
+          description: Present only for the latency profile.
+        stability:
+          allOf: [{$ref: '#/components/schemas/DiagnosticStabilityEvidence'}]
+          description: Present only for the stability profile.
+        tls:
+          allOf: [{$ref: '#/components/schemas/DiagnosticTLSEvidence'}]
+          description: Present only for the TLS profile, which runs without the tunnel.
+        dns:
+          allOf: [{$ref: '#/components/schemas/DiagnosticDNSEvidence'}]
+          description: Present only for the DNS profile, which runs without the tunnel.
         agentVersion: {type: string}
         signature: {type: string, format: byte, writeOnly: true}
+
+    DiagnosticAlternativeEndpoint:
+      type: object
+      description: Result of retrying a failed tunnelled probe against a second endpoint, which separates an unreachable endpoint from an unreachable node.
+      required: [profileId, status]
+      properties:
+        profileId: {type: string}
+        status: {type: string, enum: [unknown, online, proxy_failure, offline]}
+        latencyMillis: {type: integer, format: int64, minimum: 0}
+        failure: {$ref: '#/components/schemas/DiagnosticFailureEvidence'}
+
+    DiagnosticThroughputEvidence:
+      type: object
+      required: [bytes, durationMillis, mbps]
+      properties:
+        bytes: {type: integer, format: int64, minimum: 0}
+        durationMillis: {type: integer, format: int64, minimum: 0}
+        mbps: {type: integer, format: int64, minimum: 0}
+        ttfbMillis: {type: integer, format: int64, minimum: 0}
+
+    DiagnosticLatencySeries:
+      type: object
+      required: [samples, succeeded]
+      properties:
+        samples: {type: integer, minimum: 1}
+        succeeded: {type: integer, minimum: 0}
+        minMillis: {type: integer, format: int64, minimum: 0}
+        medianMillis: {type: integer, format: int64, minimum: 0}
+        p95Millis: {type: integer, format: int64, minimum: 0}
+        maxMillis: {type: integer, format: int64, minimum: 0}
+        jitterMillis: {type: integer, format: int64, minimum: 0}
+        failureCode: {type: string}
+
+    DiagnosticStabilityEvidence:
+      type: object
+      required: [plannedMillis, heldMillis, bytes, interrupted]
+      properties:
+        plannedMillis: {type: integer, format: int64, minimum: 0}
+        heldMillis: {type: integer, format: int64, minimum: 0}
+        bytes: {type: integer, format: int64, minimum: 0}
+        interrupted: {type: boolean}
+        failureCode: {type: string}
+
+    DiagnosticTLSEvidence:
+      type: object
+      required: [checked, handshake]
+      properties:
+        checked: {type: boolean}
+        handshake: {type: boolean}
+        serverName: {type: string}
+        negotiatedVersion: {type: string}
+        negotiatedProtocol: {type: string}
+        certificateIssuer: {type: string}
+        certificateExpiry: {type: string, format: date-time}
+        latencyMillis: {type: integer, format: int64, minimum: 0}
+        failureCode: {type: string}
+
+    DiagnosticDNSResolverEvidence:
+      type: object
+      required: [resolver]
+      properties:
+        resolver: {type: string}
+        addresses: {type: array, items: {type: string}}
+        latencyMillis: {type: integer, format: int64, minimum: 0}
+        failureCode: {type: string}
+
+    DiagnosticDNSEvidence:
+      type: object
+      required: [checked]
+      properties:
+        checked: {type: boolean}
+        hostname: {type: string}
+        literal: {type: boolean, description: True when the node is addressed by IP, so no lookup was performed.}
+        resolvers: {type: array, items: {$ref: '#/components/schemas/DiagnosticDNSResolverEvidence'}}
+        mismatch: {type: boolean, description: True when resolvers returned no address in common.}
+
+    DiagnosticProfile:
+      type: object
+      description: A selectable diagnostic. Jobs carry the ID only; the endpoints behind it belong to the agent's own configuration.
+      required: [id, method, capability, label, summary, tunnelled, default]
+      properties:
+        id: {type: string}
+        method: {type: string, enum: [ip, status, download, latency, stability, tls, dns]}
+        capability: {type: string, enum: [diagnostic-v1, diagnostic-v2]}
+        label: {type: string}
+        summary: {type: string}
+        tunnelled: {type: boolean, description: False for probes that reach the node directly instead of through the tunnel.}
+        default: {type: boolean, description: True for the profile matching the controller's configured check method.}
+
+    DiagnosticSessionView:
+      type: object
+      description: A session paired with the controller-derived plain-language summary shown in the admin UI.
+      required: [session, summary]
+      properties:
+        session: {$ref: '#/components/schemas/DiagnosticSession'}
+        summary: {type: string}
 
     DiagnosticSession:
       type: object

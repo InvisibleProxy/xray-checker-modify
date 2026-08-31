@@ -267,7 +267,7 @@ func main() {
 		}
 		logger.Startup("Confirmed restored persisted state")
 	}
-	if err := nodeArchive.RecordAvailability(); err != nil {
+	if err := nodeArchive.ReconcileAvailabilityState(); err != nil {
 		logger.Warn("Failed to record restored node availability: %v", err)
 	}
 	remnawaveService.Start()
@@ -282,13 +282,19 @@ func main() {
 		}
 		telegramService.NotifyNodeRecoveries(stableIDs)
 	}
+	// A failed check produced no fresh status, so archive, announce and recovery
+	// notifications must be skipped rather than fed the previous iteration's data.
 	runAvailabilityCheck := func(stableIDs []string, allowMaintenance bool) error {
 		var recovered []string
 		var checkErr error
+		var completed bool
 		if len(stableIDs) == 0 {
-			offlineBefore := offlineStableIDSet(proxyChecker)
-			proxyChecker.CheckAllProxies()
-			recovered = recoveredStableIDs(proxyChecker, offlineBefore)
+			unavailableBefore := unavailableStableIDSet(proxyChecker)
+			checkErr = proxyChecker.CheckAllProxies()
+			completed = checkErr == nil
+			if completed {
+				recovered = recoveredStableIDs(proxyChecker, unavailableBefore)
+			}
 		} else {
 			var report checker.AvailabilityCheckReport
 			if allowMaintenance {
@@ -296,13 +302,18 @@ func main() {
 			} else {
 				report, checkErr = proxyChecker.CheckProxiesByStableIDs(stableIDs)
 			}
-			recovered = report.RecoveredStableIDs()
+			completed = checkErr == nil
+			if completed {
+				recovered = report.RecoveredStableIDs()
+			}
 		}
-		if err := nodeArchive.RecordAvailability(); err != nil {
-			logger.Warn("Failed to record node availability after manual check: %v", err)
+		if completed {
+			if err := nodeArchive.RecordAvailability(); err != nil {
+				logger.Warn("Failed to record node availability after manual check: %v", err)
+			}
+			remnawaveService.Trigger()
+			notifyRecoveredNodes(recovered)
 		}
-		remnawaveService.Trigger()
-		notifyRecoveredNodes(recovered)
 		return checkErr
 	}
 	runManualAvailabilityCheck := func(stableIDs []string) error {
@@ -347,9 +358,12 @@ func main() {
 
 	runCheckIteration := func() {
 		logger.Info("Starting proxy check iteration")
-		offlineBefore := offlineStableIDSet(proxyChecker)
-		proxyChecker.CheckAllProxies()
-		recovered := recoveredStableIDs(proxyChecker, offlineBefore)
+		unavailableBefore := unavailableStableIDSet(proxyChecker)
+		if err := proxyChecker.CheckAllProxies(); err != nil {
+			logger.Warn("Proxy check iteration skipped: %v", err)
+			return
+		}
+		recovered := recoveredStableIDs(proxyChecker, unavailableBefore)
 		if err := nodeArchive.RecordAvailability(); err != nil {
 			logger.Warn("Failed to record node availability: %v", err)
 		}
@@ -643,8 +657,8 @@ func updateConfiguration(newConfigs []*models.ProxyConfig, currentConfigs *[]*mo
 	return nil
 }
 
-func offlineStableIDSet(proxyChecker *checker.ProxyChecker) map[string]bool {
-	offline := make(map[string]bool)
+func unavailableStableIDSet(proxyChecker *checker.ProxyChecker) map[string]bool {
+	unavailable := make(map[string]bool)
 	for _, proxy := range proxyChecker.GetProxies() {
 		if proxy == nil {
 			continue
@@ -654,11 +668,11 @@ func offlineStableIDSet(proxyChecker *checker.ProxyChecker) map[string]bool {
 			stableID = proxy.GenerateStableID()
 		}
 		details, err := proxyChecker.GetProxyStatusDetailsByStableID(stableID)
-		if err == nil && details.IsOffline() {
-			offline[stableID] = true
+		if err == nil && details.EffectiveStatus() != checker.AvailabilityStateOnline {
+			unavailable[stableID] = true
 		}
 	}
-	return offline
+	return unavailable
 }
 
 func activeStableIDSet(proxies []*models.ProxyConfig) map[string]bool {
@@ -678,12 +692,12 @@ func activeStableIDSet(proxies []*models.ProxyConfig) map[string]bool {
 	return active
 }
 
-func recoveredStableIDs(proxyChecker *checker.ProxyChecker, offlineBefore map[string]bool) []string {
-	if len(offlineBefore) == 0 {
+func recoveredStableIDs(proxyChecker *checker.ProxyChecker, unavailableBefore map[string]bool) []string {
+	if len(unavailableBefore) == 0 {
 		return nil
 	}
 	recovered := make([]string, 0)
-	for stableID := range offlineBefore {
+	for stableID := range unavailableBefore {
 		details, err := proxyChecker.GetProxyStatusDetailsByStableID(stableID)
 		if err == nil && details.EffectiveStatus() == checker.AvailabilityStateOnline {
 			recovered = append(recovered, stableID)

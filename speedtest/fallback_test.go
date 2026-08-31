@@ -253,18 +253,34 @@ countries:
 	}
 }
 
-func TestManualFallbackWaitsForAllPrimaryTests(t *testing.T) {
+func TestSequencedFallbackWaitsForAllPrimaryTests(t *testing.T) {
 	tests := []struct {
 		name          string
+		source        string
 		primaryResult Result
 	}{
 		{
 			name:          "low speed",
+			source:        ManualSource,
 			primaryResult: Result{DownloadedBytes: 1024, Mbps: 2},
 		},
 		{
 			name:          "context deadline exceeded",
+			source:        ManualSource,
 			primaryResult: Result{Error: "context deadline exceeded"},
+		},
+		{
+			name:          "telegram low speed",
+			source:        TelegramSource,
+			primaryResult: Result{DownloadedBytes: 1024, Mbps: 2},
+		},
+		{
+			// A confirmation retry decides whether the alert is sent, so a
+			// fallback sharing bandwidth with another node's primary attempt
+			// turns directly into a wrong verdict.
+			name:          "confirmation retry low speed",
+			source:        ConfirmationRetrySource,
+			primaryResult: Result{DownloadedBytes: 1024, Mbps: 2},
 		},
 	}
 
@@ -334,7 +350,7 @@ countries:
 					TimeoutSec:  30,
 					Concurrency: 2,
 				},
-			}, "manual"); err != nil {
+			}, tt.source); err != nil {
 				t.Fatal(err)
 			}
 
@@ -457,4 +473,20 @@ func mustParseFallbackCatalog(t *testing.T, value string) countryTestURLCatalog 
 		t.Fatal(err)
 	}
 	return catalog
+}
+
+// Scheduled sweeps stay parallel on purpose; every interactive or
+// alert-deciding source must sequence its phases.
+func TestUsesSequencedFallbackCoversAlertDecidingSources(t *testing.T) {
+	for source, want := range map[string]bool{
+		ManualSource:            true,
+		TelegramSource:          true,
+		ConfirmationRetrySource: true,
+		ScheduleSource:          false,
+		"":                      false,
+	} {
+		if got := usesSequencedFallback(source); got != want {
+			t.Errorf("usesSequencedFallback(%q) = %v, want %v", source, got, want)
+		}
+	}
 }

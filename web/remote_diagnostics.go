@@ -15,6 +15,7 @@ import (
 
 type DiagnosticSessionService interface {
 	Enabled() bool
+	Profiles() []remoteprobe.ProfileView
 	CreateManual(remoteprobe.CreateManualRequest) (remoteprobe.SessionView, error)
 	Sessions(string) []remoteprobe.SessionView
 	Cancel(string) error
@@ -23,8 +24,11 @@ type DiagnosticSessionService interface {
 	AcceptObservation(diagnostics.Observation) (diagnostics.AcceptedObservation, error)
 }
 
+// Profiles ship with the sessions snapshot so the admin UI never has to hold its
+// own copy of the catalogue, which would drift from the agents' capabilities.
 type diagnosticSessionsSnapshot struct {
 	Enabled  bool                      `json:"enabled"`
+	Profiles []remoteprobe.ProfileView `json:"profiles"`
 	Sessions []remoteprobe.SessionView `json:"sessions"`
 }
 
@@ -36,7 +40,11 @@ func AdminDiagnosticSessionsHandler(service DiagnosticSessionService) http.Handl
 	return func(w http.ResponseWriter, request *http.Request) {
 		switch request.Method {
 		case http.MethodGet:
-			writeJSON(w, diagnosticSessionsSnapshot{Enabled: service.Enabled(), Sessions: service.Sessions(request.URL.Query().Get("stableId"))})
+			writeJSON(w, diagnosticSessionsSnapshot{
+				Enabled:  service.Enabled(),
+				Profiles: service.Profiles(),
+				Sessions: service.Sessions(request.URL.Query().Get("stableId")),
+			})
 		case http.MethodPost:
 			var input remoteprobe.CreateManualRequest
 			if !decodeProbeAgentJSON(w, request, &input) {
@@ -166,6 +174,8 @@ func writeDiagnosticSessionError(w http.ResponseWriter, err error) {
 		status = http.StatusConflict
 	case errors.Is(err, probeagent.ErrAgentNotFound), errors.Is(err, diagnostics.ErrUnknownSession):
 		status = http.StatusNotFound
+	case errors.Is(err, remoteprobe.ErrUnsupportedByAgent):
+		status = http.StatusConflict
 	}
 	writeError(w, err.Error(), status)
 }

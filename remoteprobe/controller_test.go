@@ -221,3 +221,76 @@ func TestJobFingerprintSurvivesTheAgentTransport(t *testing.T) {
 			assignment.Job.ConfigFingerprint, received, len(assignment.XrayConfig), len(delivered.Job.XrayConfig))
 	}
 }
+
+// A profile the agent cannot run must be refused by the controller. Dispatching
+// it anyway would come back as a bare configuration failure, which reads to an
+// operator as a fault on the node rather than a version gap in the fleet.
+func TestCreateManualRejectsProfilesTheAgentCannotRun(t *testing.T) {
+	fixture := newControllerFixture(t)
+	if _, err := fixture.controller.CreateManual(CreateManualRequest{
+		StableID: "node-one", AgentID: fixture.agentID, ProfileID: diagnostics.ProfileTLS,
+	}); !errors.Is(err, ErrUnsupportedByAgent) {
+		t.Fatalf("TLS profile on a v1 agent = %v, want ErrUnsupportedByAgent", err)
+	}
+	if _, err := fixture.controller.CreateManual(CreateManualRequest{
+		StableID: "node-one", AgentID: fixture.agentID, ProfileID: "default-nonsense",
+	}); !errors.Is(err, ErrUnknownProfile) {
+		t.Fatalf("unknown profile = %v, want ErrUnknownProfile", err)
+	}
+}
+
+func TestCreateManualDispatchesTheSelectedProfileWithItsFallback(t *testing.T) {
+	fixture := newControllerFixture(t)
+	if _, err := fixture.controller.CreateManual(CreateManualRequest{
+		StableID: "node-one", AgentID: fixture.agentID, ProfileID: diagnostics.ProfileIP,
+	}); err != nil {
+		t.Fatalf("create manual diagnostics: %v", err)
+	}
+	assignment, err := fixture.controller.Claim(context.Background(), fixture.agentID)
+	if err != nil {
+		t.Fatalf("claim job: %v", err)
+	}
+	if assignment.Job.Profile.ID != diagnostics.ProfileIP || assignment.Job.Profile.Method != diagnostics.ProbeMethodIP {
+		t.Fatalf("dispatched profile = %+v, want the requested IP profile", assignment.Job.Profile)
+	}
+	// The fallback is only useful when the agent can actually run it, so it is
+	// populated from the same capability check.
+	if assignment.Job.Profile.AlternativeProfileID != diagnostics.ProfileStatus {
+		t.Fatalf("alternative profile = %q, want %q", assignment.Job.Profile.AlternativeProfileID, diagnostics.ProfileStatus)
+	}
+}
+
+// An empty selection must keep behaving like the pre-selection workflow.
+func TestCreateManualFallsBackToTheConfiguredCheckMethod(t *testing.T) {
+	fixture := newControllerFixture(t)
+	if _, err := fixture.controller.CreateManual(CreateManualRequest{StableID: "node-one", AgentID: fixture.agentID}); err != nil {
+		t.Fatalf("create manual diagnostics: %v", err)
+	}
+	assignment, err := fixture.controller.Claim(context.Background(), fixture.agentID)
+	if err != nil {
+		t.Fatalf("claim job: %v", err)
+	}
+	if assignment.Job.Profile.ID != diagnostics.ProfileStatus {
+		t.Fatalf("default profile = %q, want %q for check method \"status\"", assignment.Job.Profile.ID, diagnostics.ProfileStatus)
+	}
+}
+
+func TestProfilesMarkTheControllerDefault(t *testing.T) {
+	fixture := newControllerFixture(t)
+	profiles := fixture.controller.Profiles()
+	if len(profiles) != len(diagnostics.Profiles()) {
+		t.Fatalf("exposed %d profiles, want the whole catalogue", len(profiles))
+	}
+	defaults := 0
+	for _, profile := range profiles {
+		if profile.Default {
+			defaults++
+			if profile.ID != diagnostics.ProfileStatus {
+				t.Errorf("default profile = %q, want %q", profile.ID, diagnostics.ProfileStatus)
+			}
+		}
+	}
+	if defaults != 1 {
+		t.Fatalf("marked %d defaults, want exactly one", defaults)
+	}
+}

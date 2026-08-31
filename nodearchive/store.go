@@ -462,6 +462,16 @@ func (s *Store) SyncSpeedHistory(history map[string][]speedtest.Result) error {
 }
 
 func (s *Store) RecordAvailability() error {
+	return s.recordAvailability(true)
+}
+
+// ReconcileAvailabilityState applies restored checker status to downtime and
+// incident state without pretending that startup performed a network check.
+func (s *Store) ReconcileAvailabilityState() error {
+	return s.recordAvailability(false)
+}
+
+func (s *Store) recordAvailability(recordHistory bool) error {
 	if s.proxyChecker == nil {
 		return nil
 	}
@@ -506,7 +516,7 @@ func (s *Store) RecordAvailability() error {
 		if err == nil {
 			detailsByStableID[proxy.StableID] = details
 			record = applyAvailability(record, details, now)
-			if s.recordAvailabilitySampleLocked(proxy.StableID, details, now) {
+			if recordHistory && s.recordAvailabilitySampleLocked(proxy.StableID, details, now) {
 				changed = true
 			}
 			if s.updateNodeIncidentLocked(proxy, details, now) {
