@@ -2881,12 +2881,51 @@
         if (selected && !values.has(selected)) {
           html += selectOption(selected, `Missing active node: ${selected}`, selected);
         }
+        // Name and endpoint are what identify a node to a person. The subscription
+        // name repeats on every row and the StableID is unreadable, so both are
+        // dropped unless the short label would be ambiguous.
+        const shortLabel = (proxy) => `${proxy.name || "Unnamed"} · ${proxy.server || "n/a"}:${proxy.port || "n/a"}`;
+        const counts = new Map();
+        for (const proxy of proxies) {
+          const label = shortLabel(proxy);
+          counts.set(label, (counts.get(label) || 0) + 1);
+        }
         html += proxies.map((proxy) => {
-          const endpoint = `${proxy.server || "n/a"}:${proxy.port || "n/a"}`;
-          const label = `${proxy.name || "Unnamed"} · ${proxy.subName || "No subscription"} · ${endpoint} · ${proxy.stableId}`;
-          return selectOption(proxy.stableId, label, selected);
+          const label = shortLabel(proxy);
+          const text = counts.get(label) > 1 ? `${label} · ${String(proxy.stableId).slice(0, 8)}` : label;
+          return selectOption(proxy.stableId, text, selected);
         }).join("");
         return html;
+      }
+
+      // remnawavePairing mirrors the resolution the checker performs on every sync,
+      // so the admin can show whether a member is actually paired before saving.
+      function remnawavePairing(stableId, hostUuid, proxies, hosts) {
+        if (hostUuid) return { state: "manual" };
+        const proxy = proxies.find((item) => item.stableId === stableId);
+        if (!proxy) return { state: "unknown" };
+        const endpoint = `${String(proxy.server || "").toLowerCase()}:${proxy.port || 0}`;
+        const matches = hosts.filter((host) => `${String(host.address || "").toLowerCase()}:${host.port || 0}` === endpoint);
+        if (matches.length === 1) return { state: "derived", host: matches[0] };
+        if (matches.length > 1) return { state: "ambiguous" };
+        return { state: "unresolved" };
+      }
+
+      function remnawavePairingHTML(stableId, hostUuid, proxies, hosts) {
+        if (!stableId) return "";
+        const pairing = remnawavePairing(stableId, hostUuid, proxies, hosts);
+        switch (pairing.state) {
+          case "manual":
+            return `<div class="muted">Pinned manually</div>`;
+          case "derived":
+            return `<div class="muted"><span>Paired with</span> ${escapeHtml(pairing.host.remark || pairing.host.uuid)}</div>`;
+          case "ambiguous":
+            return `<div class="hint">Two hosts share this address and port — choose one</div>`;
+          case "unresolved":
+            return `<div class="hint">No host matches this address and port — this member is ignored</div>`;
+          default:
+            return "";
+        }
       }
 
       function renderRemnawaveLocations(input) {
@@ -2912,7 +2951,10 @@
             return `
               <tr data-remnawave-member>
                 <td><select data-remnawave-member-node aria-label="Checker node for location">${remnawaveProxyOptions(proxies, member.stableId || "")}</select></td>
-                <td><select data-remnawave-member-host aria-label="Remnawave Host for location">${hostOptions}</select></td>
+                <td>
+                  <select data-remnawave-member-host aria-label="Remnawave Host for location">${hostOptions}</select>
+                  <div data-remnawave-pairing>${remnawavePairingHTML(member.stableId || "", member.hostUuid || "", proxies, hosts)}</div>
+                </td>
                 <td><button class="danger small" type="button" data-remnawave-remove-member="${locationIndex}" data-remnawave-member-index="${memberIndex}">Remove</button></td>
               </tr>
             `;
@@ -4610,6 +4652,50 @@
         }).join("");
       }
 
+      // Which probe answers the question a given failure raises. This encodes the
+      // path an operator would otherwise rediscover every time: an instant tunnel
+      // close is a stability question, a timeout is usually about the check
+      // endpoint rather than the node, and a transport-level failure is about
+      // reachability from another network.
+      const diagnosticProfileForFailure = {
+        proxy_stream_closed: "default-stability",
+        proxy_handshake: "default-stability",
+        proxy_timeout: "default-ip",
+        source_ip_unchanged: "default-ip",
+        tls: "default-tls",
+        dns: "default-dns",
+        tcp_refused: "default-status",
+        tcp_timeout: "default-status",
+        host_unreachable: "default-status",
+        http_status: "default-status",
+        download_incomplete: "default-download",
+        unknown: "default-stability",
+      };
+
+      function diagnosticProfileHintHTML(control, proxy) {
+        const profiles = control.profiles || [];
+        const selected = profiles.find((profile) => profile.id === control.profileId);
+        const parts = [];
+        if (selected && selected.summary) {
+          parts.push(`<div class="muted">${escapeHtml(selected.summary)}</div>`);
+        }
+        const code = (proxy && proxy.failureCode) || "";
+        const suggestedId = diagnosticProfileForFailure[code];
+        if (suggestedId && suggestedId !== control.profileId) {
+          const suggested = profiles.find((profile) => profile.id === suggestedId);
+          if (suggested) {
+            // Static spans so the dictionary can translate them; the code and the
+            // profile name are data and stay as they are.
+            parts.push(`<div class="hint"><span>Current failure</span> <code>${escapeHtml(code)}</code> — <span>the probe that usually answers it:</span> <strong>${escapeHtml(suggested.label)}</strong></div>`);
+          }
+        }
+        return parts.join("");
+      }
+
+      function diagnosticProfileHintSignature(control, proxy) {
+        return `${control.profileId || ""}|${(proxy && proxy.failureCode) || ""}`;
+      }
+
       function diagnosticProfileSignature(profiles, agent) {
         const capabilities = new Set((agent && agent.capabilities) || []);
         return profiles.map((profile) => `${profile.id}:${capabilities.has(profile.capability) ? 1 : 0}`).join("|");
@@ -4760,6 +4846,7 @@
             </select>
             <button class="secondary small" type="button" data-diagnose-id="${escapeHtml(proxy.stableId)}" data-diagnostic-start ${control.disabled ? "disabled" : ""}>${control.label}</button>
           </div>
+          <div data-diagnostic-profile-hint data-diagnostic-hint-signature="${escapeHtml(diagnosticProfileHintSignature(control, proxy))}">${diagnosticProfileHintHTML(control, proxy)}</div>
           <div class="agent-list" data-diagnostic-session-list data-diagnostic-sessions-signature="${escapeHtml(sessionSignature)}">${sessions.map(diagnosticSessionHTML).join("") || `<div class="muted">No remote diagnostic sessions for this node</div>`}</div>
         </section>`;
       }
@@ -4804,6 +4891,18 @@
           const disabled = !control.enabled || !control.profileId;
           if (profileSelect.disabled !== disabled) {
             profileSelect.disabled = disabled;
+            changed = true;
+          }
+        }
+
+        // The hint follows both the selection and the node's current failure, so it
+        // is refreshed on either, and left alone otherwise.
+        const hint = section.querySelector("[data-diagnostic-profile-hint]");
+        if (hint) {
+          const hintSignature = diagnosticProfileHintSignature(control, proxy);
+          if (hint.dataset.diagnosticHintSignature !== hintSignature) {
+            hint.innerHTML = diagnosticProfileHintHTML(control, proxy);
+            hint.dataset.diagnosticHintSignature = hintSignature;
             changed = true;
           }
         }
@@ -6839,6 +6938,24 @@
         const locations = remnawaveLocationRowsFromForm();
         locations.push({ key: "", publicLabel: "", members: [{ stableId: "", hostUuid: "" }] });
         renderRemnawaveLocations(locations);
+      });
+      // Re-render only the touched row's pairing note: rebuilding the whole block
+      // would throw away the operator's scroll position and open selects.
+      $("remnawave-locations").addEventListener("change", (event) => {
+        const row = event.target.closest("[data-remnawave-member]");
+        if (!row) return;
+        const target = row.querySelector("[data-remnawave-pairing]");
+        const node = row.querySelector("[data-remnawave-member-node]");
+        const host = row.querySelector("[data-remnawave-member-host]");
+        if (!target || !node || !host) return;
+        const snapshot = state.remnawave || {};
+        const topology = snapshot.topology || {};
+        target.innerHTML = remnawavePairingHTML(
+          node.value,
+          host.value,
+          Array.isArray(snapshot.proxies) ? snapshot.proxies : [],
+          Array.isArray(topology.hosts) ? topology.hosts : [],
+        );
       });
       $("remnawave-suggest-locations").addEventListener("click", suggestRemnawaveLocations);
       $("remnawave-suggestions").addEventListener("click", (event) => {
