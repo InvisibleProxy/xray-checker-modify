@@ -6794,10 +6794,54 @@
         }
       }
 
+      const refreshPhaseLabels = {
+        fetching: "Fetching subscriptions",
+        resolving: "Resolving node addresses",
+        comparing: "Comparing with the current set",
+        applying: "Applying and restarting Xray",
+        finishing: "Finishing up",
+      };
+
+      // The refresh runs in one long request, so the phase is polled separately.
+      // Reading progress never touches the refresh itself.
+      function startRefreshProgressPolling() {
+        let stopped = false;
+        const tick = async () => {
+          if (stopped) return;
+          try {
+            const progress = await request("/subscription/refresh/progress");
+            if (!stopped && progress.running) {
+              const phase = refreshPhaseLabels[progress.phase] || progress.phase || "Working";
+              const seconds = Math.round((progress.elapsedMs || 0) / 1000);
+              $("subscription-state").textContent = `${tr(phase)} · ${seconds} ${tr("sec")}`;
+            }
+          } catch (err) {
+            // A failed poll must never disturb the refresh it is only watching.
+          }
+          if (!stopped) window.setTimeout(tick, 700);
+        };
+        window.setTimeout(tick, 300);
+        return () => {
+          stopped = true;
+        };
+      }
+
+      function refreshPhaseSummary(progress) {
+        const phases = Array.isArray(progress && progress.phases) ? progress.phases : [];
+        if (phases.length === 0) return "";
+        // Only the phases worth noticing: a millisecond-long step is noise.
+        const slow = phases.filter((phase) => phase.durationMs >= 200);
+        if (slow.length === 0) return "";
+        return slow
+          .map((phase) => `${tr(refreshPhaseLabels[phase.phase] || phase.phase)} ${(phase.durationMs / 1000).toFixed(1)} ${tr("sec")}`)
+          .join(" · ");
+      }
+
       async function refreshSubscription() {
         $("message").textContent = "";
         $("subscription-state").textContent = "Updating";
         $("refresh-subscription").disabled = true;
+        const stopPolling = startRefreshProgressPolling();
         try {
           let result = await request("/subscription/refresh", { method: "POST", body: JSON.stringify({ force: false }) });
           if (result.requiresConfirmation) {
@@ -6814,17 +6858,27 @@
               body: JSON.stringify({ force: true, confirmationToken: result.confirmationToken || "" }),
             });
           }
+          stopPolling();
           const suffix = result.count === 1 ? "node" : "nodes";
           $("subscription-state").textContent = result.updated
             ? `Updated ${result.count} ${suffix}`
             : `No changes (${result.count} ${suffix})`;
           const diff = `+${result.added || 0} / -${result.removed || 0} / ~${result.changed || 0}`;
-          $("message").textContent = `${result.message || $("subscription-state").textContent} · ${diff}`;
+          let timings = "";
+          try {
+            timings = refreshPhaseSummary(await request("/subscription/refresh/progress"));
+          } catch (err) {
+            // The refresh already succeeded; its timing breakdown is a bonus.
+          }
+          $("message").textContent = [result.message || $("subscription-state").textContent, diff, timings]
+            .filter(Boolean)
+            .join(" · ");
           await load(false, true);
         } catch (err) {
           $("subscription-state").textContent = err.message;
           $("message").textContent = err.message;
         } finally {
+          stopPolling();
           $("refresh-subscription").disabled = false;
         }
       }

@@ -887,6 +887,57 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /api/v1/admin/subscription/refresh/progress:
+    get:
+      summary: Report which phase the current or last subscription refresh is in
+      description: >-
+        A refresh runs as one long request, so its phase is polled separately. Reading progress never
+        interacts with the refresh itself, and the per-phase timings of the last run stay available
+        afterwards so a slow refresh can be attributed to a phase rather than guessed at.
+      tags: [Admin]
+      responses:
+        '200':
+          description: Current phase, elapsed time and the phases already completed
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          running:
+                            type: boolean
+                          source:
+                            type: string
+                            example: manual
+                          phase:
+                            type: string
+                            enum: [fetching, resolving, comparing, applying, finishing]
+                          elapsedMs:
+                            type: integer
+                            format: int64
+                          startedAt:
+                            type: string
+                            format: date-time
+                          finishedAt:
+                            type: string
+                            format: date-time
+                          failed:
+                            type: boolean
+                          phases:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                phase:
+                                  type: string
+                                durationMs:
+                                  type: integer
+                                  format: int64
+
   /api/v1/admin/remnawave/announce-base:
     post:
       summary: Adopt or forget the operator-owned announce base of an External Squad

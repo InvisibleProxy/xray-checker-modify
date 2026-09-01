@@ -513,6 +513,7 @@ func main() {
 		logger.Startup("Fast recovery checks enabled every %d seconds", recoveryInterval)
 	}
 
+	refreshProgress := web.NewSubscriptionRefreshTracker()
 	subscriptionRefreshLock := make(chan struct{}, 1)
 	refreshSubscription := func(source string, force bool, confirmationToken string) (web.AdminSubscriptionRefreshResult, error) {
 		if source != "manual" && projectMaintenance.Enabled() {
@@ -526,12 +527,18 @@ func main() {
 		}
 
 		logger.Info("Checking subscriptions for updates (%s)...", source)
+		refreshProgress.Begin(source)
+		refreshFailed := true
+		defer func() { refreshProgress.Done(refreshFailed) }()
+
+		refreshProgress.Phase(web.RefreshPhaseFetching)
 		newConfigs, err := subscription.ReadFromMultipleSources(config.CLIConfig.Subscription.URLs)
 		if err != nil {
 			return web.AdminSubscriptionRefreshResult{}, fmt.Errorf("fetch subscriptions: %w", err)
 		}
 
 		if config.CLIConfig.Proxy.ResolveDomains {
+			refreshProgress.Phase(web.RefreshPhaseResolving)
 			resolved, err := subscription.ResolveDomainsForConfigs(newConfigs)
 			if err != nil {
 				logger.Error("Error resolving domains: %v", err)
@@ -540,6 +547,7 @@ func main() {
 			}
 		}
 
+		refreshProgress.Phase(web.RefreshPhaseComparing)
 		if deduplicated, dropped := xray.DeduplicateByStableID(newConfigs); dropped > 0 {
 			logger.Info("Dropped %d duplicate node(s) listed more than once by the subscription", dropped)
 			newConfigs = deduplicated
@@ -564,6 +572,8 @@ func main() {
 			refreshResult.ConfirmationToken = xray.ConfigFingerprint(newConfigs)
 			refreshResult.Message = fmt.Sprintf("Suspicious subscription update blocked: %d of %d nodes would be removed", diff.Removed, diff.Before)
 			if source == "manual" {
+				// Awaiting the operator's confirmation is an outcome, not a failure.
+				refreshFailed = false
 				return refreshResult, nil
 			}
 			return refreshResult, fmt.Errorf("%s", refreshResult.Message)
@@ -575,8 +585,11 @@ func main() {
 		if xray.IsConfigsEqual(*proxyConfigs, newConfigs) {
 			logger.Info("Subscriptions checked, no changes")
 			refreshResult.Message = "Subscriptions checked, no changes"
+			refreshFailed = false
 			return refreshResult, nil
 		}
+
+		refreshProgress.Phase(web.RefreshPhaseApplying)
 
 		xrayLifecycle.Lock()
 		if source != "manual" && projectMaintenance.Enabled() {
@@ -593,6 +606,7 @@ func main() {
 		}
 		proxyChecker.ReplaceMaintenanceModes(nodeArchive.ActiveMaintenanceStableIDs())
 		xrayLifecycle.Unlock()
+		refreshProgress.Phase(web.RefreshPhaseFinishing)
 		if err := telegramService.PruneInactiveMutedNodes(); err != nil {
 			logger.Warn("Failed to prune inactive muted Telegram nodes: %v", err)
 		}
@@ -600,6 +614,7 @@ func main() {
 
 		refreshResult.Updated = true
 		refreshResult.Message = "Configuration updated"
+		refreshFailed = false
 		return refreshResult, nil
 	}
 
@@ -645,6 +660,7 @@ func main() {
 	protectedHandler.Handle("/admin/", web.AdminHandler())
 	protectedHandler.Handle("/api/v1/admin/proxies", web.AdminProxiesHandler(proxyChecker, config.CLIConfig.Xray.StartPort))
 	protectedHandler.Handle("/api/v1/admin/proxies/check", web.AdminProxyCheckHandler(runAdminAvailabilityCheck, proxyChecker, config.CLIConfig.Xray.StartPort))
+	protectedHandler.Handle("/api/v1/admin/subscription/refresh/progress", web.AdminSubscriptionRefreshProgressHandler(refreshProgress))
 	protectedHandler.Handle("/api/v1/admin/subscription/refresh", web.AdminSubscriptionRefreshHandler(func(request web.AdminSubscriptionRefreshRequest) (web.AdminSubscriptionRefreshResult, error) {
 		return refreshSubscription("manual", request.Force, request.ConfirmationToken)
 	}))
