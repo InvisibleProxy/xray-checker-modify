@@ -8,7 +8,6 @@ services:
     container_name: xray-checker
     restart: unless-stopped
     env_file:
-      - ./xray-checker.defaults.env
       - ./.env
     expose:
       - "2112"

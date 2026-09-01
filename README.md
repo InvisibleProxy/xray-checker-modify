@@ -59,7 +59,9 @@ Copy-Item .env.example .env
 
 `Caddyfile` — локальная конфигурация и игнорируется Git. Версионируемый шаблон находится в `Caddyfile.example`, поэтому доменные или инфраструктурные правки не засоряют `git status`.
 
-Отредактируйте `.env`: это единственный операторский файл с runtime-настройками основного stack-а. Сначала `xray-checker` читает несекретные совместимые defaults из версионируемого `xray-checker.defaults.env`, затем пользовательский `.env` переопределяет их. Поэтому добавление или изменение настройки приложения не требует правки Compose, а обновление старой установки не теряет прежние Compose-defaults. Сам `xray-checker.defaults.env` редактировать для конкретного сервера не нужно. Caddy получает из `.env` только явный allowlist `PUBLIC_DOMAIN`, `ACME_EMAIL` и `PROBE_TRUSTED_PROXY_SECRET`; Telegram, Remnawave и subscription-секреты в reverse proxy не передаются.
+Отредактируйте `.env`: это единственный операторский файл с runtime-настройками основного stack-а. `xray-checker` читает его целиком через `env_file`, поэтому добавление или изменение настройки приложения не требует правки Compose. Полный шаблон настроек и прежних Compose-defaults находится в `.env.example`. Caddy получает из `.env` только явный allowlist `PUBLIC_DOMAIN`, `ACME_EMAIL` и `PROBE_TRUSTED_PROXY_SECRET`; Telegram, Remnawave и subscription-секреты в reverse proxy не передаются.
+
+При обновлении существующей установки сначала сравните её `.env` с актуальным `.env.example` и перенесите недостающие параметры, не затирая реальные секреты. Особенно проверьте `WEB_PUBLIC`, `METRICS_PROTECTED`, `METRICS_USERNAME` и `PROXY_CHECK_METHOD`: раньше пример Compose подставлял их самостоятельно.
 
 ```dotenv
 SUBSCRIPTION_URL="https://example.com/subscription"
@@ -162,7 +164,7 @@ docker compose --env-file probe-agent.env -f docker-compose.agent.yml build
 docker compose --env-file probe-agent.env -f docker-compose.agent.yml up -d
 ```
 
-`probe-agent.env` одновременно задаёт Compose-параметры локальной сборки/лимитов и передаётся агенту через `env_file`. Поэтому runtime-настройки агента также меняются только в env-файле; после изменения пересоздайте сервис через `docker compose --env-file probe-agent.env -f docker-compose.agent.yml up -d --force-recreate`.
+`probe-agent.env` одновременно задаёт Compose-параметры локальной сборки/лимитов и передаётся агенту через `env_file`. Локальное имя образа задаётся отдельной переменной `PROBE_AGENT_LOCAL_IMAGE`, чтобы не смешивать её с controller-настройкой `PROBE_AGENT_IMAGE`, используемой при генерации персональных Compose-файлов. Старое имя в локальном env пока поддерживается как fallback. Поэтому runtime-настройки агента также меняются только в env-файле; после изменения пересоздайте сервис через `docker compose --env-file probe-agent.env -f docker-compose.agent.yml up -d --force-recreate`.
 
 Шаблон не открывает inbound-порты, запускает container без root и capabilities, с read-only root filesystem, resource limits и именованным `probe_agent_identity` volume. Приватные identity/observation keys генерируются внутри агента и сохраняются с mode `0600`. Временный Xray config создаётся с mode `0600` внутри tmpfs `/run/xray-checker-agent` и удаляется после задания. Endpoint URLs принадлежат конфигурации агента (`PROBE_IP_CHECK_URL`, `PROBE_STATUS_CHECK_URL`, `PROBE_DOWNLOAD_URL`, `PROBE_DIRECT_CHECK_URL`); controller выдаёт только фиксированный profile ID и не может превратить job в произвольный URL fetch. Проба `download` читает ровно `PROBE_DOWNLOAD_MIN_SIZE` байт и останавливается, поэтому это не нижняя граница, а сам объём передачи: по умолчанию 10 МБ с `100Mb.dat`, чего хватает и для осмысленной оценки скорости, и для того, чтобы оборвавшийся на середине endpoint попал в `download_incomplete`, а не зачёлся успешным. Меняя URL, проверяйте, что файл не меньше этого объёма.
 

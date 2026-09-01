@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile.agent
       args:
         GIT_TAG: ${PROBE_AGENT_VERSION:-local}
-    image: ${PROBE_AGENT_IMAGE:-xray-checker-probe-agent:local}
+    image: ${PROBE_AGENT_LOCAL_IMAGE:-${PROBE_AGENT_IMAGE:-xray-checker-probe-agent:local}}
     restart: unless-stopped
     init: true
     env_file:
