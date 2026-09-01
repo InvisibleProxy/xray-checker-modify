@@ -885,14 +885,7 @@ func visibleHostSet(internal InternalSquad, hosts []Host) map[string]bool {
 		if host.UUID == "" || host.IsDisabled || host.IsHidden || !inbounds[host.Inbound.ConfigProfileInboundUUID] {
 			continue
 		}
-		excluded := false
-		for _, squadUUID := range host.ExcludedInternalSquads {
-			if squadUUID == internal.UUID {
-				excluded = true
-				break
-			}
-		}
-		if !excluded {
+		if host.VisibleToInternalSquad(internal.UUID) {
 			result[host.UUID] = true
 		}
 	}
@@ -1209,6 +1202,8 @@ func cloneTopology(input Topology) Topology {
 	}
 	for index := range result.Hosts {
 		result.Hosts[index].ExcludedInternalSquads = append([]string(nil), result.Hosts[index].ExcludedInternalSquads...)
+		result.Hosts[index].InternalSquads.Squads = append([]string(nil), result.Hosts[index].InternalSquads.Squads...)
+		result.Hosts[index].Tags = append([]string(nil), result.Hosts[index].Tags...)
 	}
 	for index := range result.InternalSquads {
 		result.InternalSquads[index].Inbounds = append([]InternalInbound(nil), result.InternalSquads[index].Inbounds...)

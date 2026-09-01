@@ -2407,8 +2407,22 @@ components:
               type: string
             configProfileInboundUuid:
               type: string
+        internalSquads:
+          type: object
+          description: >-
+            Which internal squads may see this host. The list is read as a deny-list under
+            EXCLUDE and as an allow-list under ALLOW_ONLY.
+          properties:
+            mode:
+              type: string
+              enum: [EXCLUDE, ALLOW_ONLY]
+            squads:
+              type: array
+              items:
+                type: string
         excludedInternalSquads:
           type: array
+          description: Deprecated pre-3.4 shape of internalSquads, kept for panels that still send it.
           items:
             type: string
 

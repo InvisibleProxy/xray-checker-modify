@@ -243,3 +243,52 @@ func TestSuggestLocationsGroupsNodesByHostTag(t *testing.T) {
 		}
 	}
 }
+
+// Remnawave 3.4 replaced the host exclusion list with a mode plus a list, and an
+// unknown field decodes silently: reading the old one would have made every host
+// look visible to every squad, quietly announcing outages to the wrong audience.
+func TestHostVisibilityFollowsTheInternalSquadsMode(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		host  Host
+		squad string
+		want  bool
+	}{
+		{
+			name:  "excluded squad cannot see the host",
+			host:  Host{InternalSquads: HostInternalSquads{Mode: InternalSquadsModeExclude, Squads: []string{"squad-a"}}},
+			squad: "squad-a", want: false,
+		},
+		{
+			name:  "any other squad still sees an EXCLUDE host",
+			host:  Host{InternalSquads: HostInternalSquads{Mode: InternalSquadsModeExclude, Squads: []string{"squad-a"}}},
+			squad: "squad-b", want: true,
+		},
+		{
+			name:  "ALLOW_ONLY admits the listed squad",
+			host:  Host{InternalSquads: HostInternalSquads{Mode: InternalSquadsModeAllowOnly, Squads: []string{"squad-a"}}},
+			squad: "squad-a", want: true,
+		},
+		{
+			name:  "ALLOW_ONLY hides the host from everyone else",
+			host:  Host{InternalSquads: HostInternalSquads{Mode: InternalSquadsModeAllowOnly, Squads: []string{"squad-a"}}},
+			squad: "squad-b", want: false,
+		},
+		{
+			name:  "a panel older than 3.4 sends only the exclusion list",
+			host:  Host{ExcludedInternalSquads: []string{"squad-a"}},
+			squad: "squad-a", want: false,
+		},
+		{
+			name:  "an unlisted squad on an older panel still sees the host",
+			host:  Host{ExcludedInternalSquads: []string{"squad-a"}},
+			squad: "squad-b", want: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.host.VisibleToInternalSquad(test.squad); got != test.want {
+				t.Fatalf("VisibleToInternalSquad(%q) = %v, want %v", test.squad, got, test.want)
+			}
+		})
+	}
+}

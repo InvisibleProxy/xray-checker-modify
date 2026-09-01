@@ -116,20 +116,37 @@ type RuntimeFile struct {
 	Managed   map[string]ManagedAnnouncement `json:"managed"`
 }
 
+// Internal squad visibility modes published by the panel from 3.4 onwards.
+const (
+	InternalSquadsModeExclude   = "EXCLUDE"
+	InternalSquadsModeAllowOnly = "ALLOW_ONLY"
+)
+
+// HostInternalSquads is how a host states which internal squads may see it: one
+// list read either as a deny-list or as an allow-list.
+type HostInternalSquads struct {
+	Mode   string   `json:"mode"`
+	Squads []string `json:"squads"`
+}
+
 type HostInbound struct {
 	ConfigProfileUUID        string `json:"configProfileUuid"`
 	ConfigProfileInboundUUID string `json:"configProfileInboundUuid"`
 }
 
 type Host struct {
-	UUID                   string      `json:"uuid"`
-	Remark                 string      `json:"remark"`
-	Address                string      `json:"address"`
-	Port                   int         `json:"port"`
-	IsDisabled             bool        `json:"isDisabled"`
-	IsHidden               bool        `json:"isHidden"`
-	Inbound                HostInbound `json:"inbound"`
-	ExcludedInternalSquads []string    `json:"excludedInternalSquads"`
+	UUID           string             `json:"uuid"`
+	Remark         string             `json:"remark"`
+	Address        string             `json:"address"`
+	Port           int                `json:"port"`
+	IsDisabled     bool               `json:"isDisabled"`
+	IsHidden       bool               `json:"isHidden"`
+	Inbound        HostInbound        `json:"inbound"`
+	InternalSquads HostInternalSquads `json:"internalSquads"`
+	// ExcludedInternalSquads is the pre-3.4 shape of the same rule. Panels from
+	// 3.4 stopped sending it, and an unknown field decodes silently, so the
+	// legacy list is kept only as the fallback for older panels.
+	ExcludedInternalSquads []string `json:"excludedInternalSquads"`
 	// Tags are the panel's own grouping of hosts (BALANCER_NL and the like). They
 	// are never shown to subscribers, which makes them a stable key for deriving
 	// announce locations from topology instead of pairing nodes by hand.
@@ -614,4 +631,26 @@ func sortedMapKeys[V any](input map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// VisibleToInternalSquad mirrors the panel's own rule: a host is visible to a
+// squad when being listed matches the mode - listed under ALLOW_ONLY, unlisted
+// under EXCLUDE.
+//
+// A panel older than 3.4 sends only the exclusion list and no mode, which is
+// exactly EXCLUDE semantics. An unrecognised mode is read the same way, because
+// EXCLUDE is what every host meant before the field existed.
+func (h Host) VisibleToInternalSquad(squadUUID string) bool {
+	mode, squads := h.InternalSquads.Mode, h.InternalSquads.Squads
+	if mode == "" {
+		mode, squads = InternalSquadsModeExclude, h.ExcludedInternalSquads
+	}
+	listed := false
+	for _, candidate := range squads {
+		if candidate == squadUUID {
+			listed = true
+			break
+		}
+	}
+	return listed == (mode == InternalSquadsModeAllowOnly)
 }
