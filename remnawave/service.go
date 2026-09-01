@@ -331,6 +331,10 @@ func (s *Service) UpdateSettings(settings Settings) (Snapshot, error) {
 		Policy:     settings.Policy,
 		SquadPairs: append([]SquadPair(nil), settings.SquadPairs...),
 		Locations:  locations,
+		// Adopted bases are never part of the settings form: they are captured by
+		// their own explicit action, so saving settings must carry them through
+		// rather than let an older client silently drop them.
+		AnnounceBases: cloneStringMap(s.config.AnnounceBases),
 	}
 	if err := normalizeConfig(&config); err != nil {
 		s.operationMu.Unlock()
@@ -543,7 +547,14 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 				// operator-owned base announce.
 				continue
 			}
-			if knownBasePresent, knownBaseValue, known := splitKnownManagedAnnounce(currentValue, target.Message, target.KnownHealthyMessage); known {
+			if adopted, ok := config.AnnounceBases[externalUUID]; ok && strings.HasPrefix(currentValue, adopted) {
+				// The operator pointed at this exact text, so whatever follows it is
+				// a status line - ours or a stale one - and is replaced rather than
+				// absorbed. That is what keeps a lost ownership file from turning a
+				// previous status into part of the base.
+				basePresent = true
+				baseValue = adopted
+			} else if knownBasePresent, knownBaseValue, known := splitKnownManagedAnnounce(currentValue, target.Message, target.KnownHealthyMessage); known {
 				basePresent = knownBasePresent
 				baseValue = knownBaseValue
 			} else if !isAppendableBaseAnnounce(currentValue) {
@@ -629,7 +640,7 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 		LastTopologyAt:  topology.LoadedAt,
 		LastReconcileAt: now,
 		Conflicts:       conflicts,
-		Announcements:   announcementStatuses(updatedExternal, runtime.Managed),
+		Announcements:   announcementStatuses(updatedExternal, runtime.Managed, config.AnnounceBases),
 	}
 	if len(errorsSeen) > 0 {
 		status.LastError = strings.Join(errorsSeen, "; ")
@@ -1262,7 +1273,7 @@ func stringMapEqual(left, right map[string]string) bool {
 	return true
 }
 
-func announcementStatuses(external []ExternalSquad, managed map[string]ManagedAnnouncement) []RemoteAnnouncementStatus {
+func announcementStatuses(external []ExternalSquad, managed map[string]ManagedAnnouncement, bases map[string]string) []RemoteAnnouncementStatus {
 	result := make([]RemoteAnnouncementStatus, 0)
 	seen := make(map[string]bool)
 	for _, squad := range external {
@@ -1275,6 +1286,10 @@ func announcementStatuses(external []ExternalSquad, managed map[string]ManagedAn
 			Managed:           isManaged && present && !duplicateHeader && value == owned.Value,
 			PreservesBase:     (!isManaged && present && !duplicateHeader && isAppendableBaseAnnounce(value)) || (isManaged && owned.BasePresent),
 		}
+		_, status.BaseAdopted = bases[squad.UUID]
+		status.Adoptable = present && !duplicateHeader && isManagedBaseAnnounce(value)
+		_, status.BaseAdopted = bases[squad.UUID]
+		status.Adoptable = present && !duplicateHeader && isManagedBaseAnnounce(value)
 		if status.Managed {
 			status.Message = owned.Message
 		}
@@ -1395,4 +1410,77 @@ func (s *Service) SuggestLocations() LocationSuggestion {
 		return suggestion.Unmatched[left].StableID < suggestion.Unmatched[right].StableID
 	})
 	return suggestion
+}
+
+// AdoptAnnounceBase records the announce text an External Squad currently holds
+// as the operator-owned base the checker may build on, or forgets it again.
+//
+// The value is captured here rather than inferred during reconcile on purpose.
+// A base that has to be guessed from the live header can only be guessed by
+// stripping a status line the checker recognises, and once ownership state is
+// lost - it is deliberately outside backup - an unrecognised status line would
+// be absorbed into the base and the message would grow on every pass. Captured
+// text cannot grow: anything after it is replaced, and editing the text in the
+// panel stops matching and surfaces as a conflict instead of drifting silently.
+func (s *Service) AdoptAnnounceBase(externalSquadUUID string, release bool) (Snapshot, error) {
+	externalSquadUUID = strings.TrimSpace(externalSquadUUID)
+	if invalidIdentifier(externalSquadUUID) {
+		return Snapshot{}, fmt.Errorf("a valid external squad UUID is required")
+	}
+
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+
+	s.mu.RLock()
+	config := s.config
+	config.SquadPairs = append([]SquadPair(nil), config.SquadPairs...)
+	config.Locations = cloneLocations(config.Locations)
+	config.NodeMappings = cloneNodeMappings(config.NodeMappings)
+	config.AnnounceBases = cloneStringMap(config.AnnounceBases)
+	squads := append([]ExternalSquad(nil), s.topology.ExternalSquads...)
+	s.mu.RUnlock()
+
+	if release {
+		delete(config.AnnounceBases, externalSquadUUID)
+	} else {
+		var current string
+		found := false
+		for _, squad := range squads {
+			if squad.UUID != externalSquadUUID {
+				continue
+			}
+			found = true
+			for key, value := range squad.ResponseHeadersAdd {
+				if strings.EqualFold(key, announceHeader) {
+					current = value
+				}
+			}
+			break
+		}
+		if !found {
+			return Snapshot{}, fmt.Errorf("external squad %s is not in the loaded topology; sync it first", externalSquadUUID)
+		}
+		if !isManagedBaseAnnounce(current) {
+			return Snapshot{}, fmt.Errorf("this squad has no announce value the checker can build on; it must start with %s", announceValuePrefix)
+		}
+		if config.AnnounceBases == nil {
+			config.AnnounceBases = map[string]string{}
+		}
+		config.AnnounceBases[externalSquadUUID] = current
+	}
+
+	if err := validateConfig(config); err != nil {
+		return Snapshot{}, err
+	}
+	now := s.now().UTC()
+	if err := writeConfigFile(s.configPath, config, now); err != nil {
+		return Snapshot{}, err
+	}
+	s.mu.Lock()
+	config.UpdatedAt = now
+	s.config = config
+	s.mu.Unlock()
+
+	s.Trigger()
+	return s.Snapshot(), nil
 }

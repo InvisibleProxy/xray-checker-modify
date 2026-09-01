@@ -16,6 +16,8 @@ type fakeAdminRemnawaveService struct {
 	suggestion remnawave.LocationSuggestion
 	updated    remnawave.Settings
 	syncs      int
+	adopted    string
+	released   bool
 }
 
 func (f *fakeAdminRemnawaveService) Snapshot() remnawave.Snapshot {
@@ -35,6 +37,12 @@ func (f *fakeAdminRemnawaveService) SyncNow(context.Context) (remnawave.Snapshot
 
 func (f *fakeAdminRemnawaveService) SuggestLocations() remnawave.LocationSuggestion {
 	return f.suggestion
+}
+
+func (f *fakeAdminRemnawaveService) AdoptAnnounceBase(externalSquadUUID string, release bool) (remnawave.Snapshot, error) {
+	f.adopted = externalSquadUUID
+	f.released = release
+	return f.snapshot, nil
 }
 
 func TestAdminRemnawaveHandlerGetsAndUpdatesSanitizedSettings(t *testing.T) {

@@ -961,3 +961,49 @@ func testService(t *testing.T, api API, proxies ProxySource, incidents IncidentS
 	service.now = func() time.Time { return *current }
 	return service
 }
+
+// An adopted base is the whole point of the explicit action: once the operator
+// has pointed at their text, a status line already sitting behind it is replaced
+// rather than absorbed. Without that, a lost ownership file would turn the
+// previous status into part of the base and the message would grow every pass.
+func TestServiceReplacesStaleStatusBehindAnAdoptedAnnounceBase(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	base := announceValuePrefix + "{{USERNAME}} | Личный кабинет\n\nНажми обновить, если сервер недоступен"
+	// The panel still holds a status line written before the ownership file was lost.
+	current := base + "\nСтарый статус из прошлой жизни"
+
+	api, proxies := oneAudienceFixture(now, map[string]string{announceHeader: current, "x-test": "keep"})
+	service := testService(t, api, proxies, &fakeIncidentSource{}, &now)
+	config := audienceConfig("")
+	config.AnnounceBases = map[string]string{"external-users": base}
+	service.config = config
+
+	proxies.setOffline(now.Add(-20*time.Minute), "stable-a")
+	for range 3 {
+		service.ObserveFullCheck()
+	}
+	snapshot, err := service.SyncNow(context.Background())
+	if err != nil {
+		t.Fatalf("SyncNow: %v", err)
+	}
+	if len(snapshot.Status.Conflicts) != 0 {
+		t.Fatalf("adopted base still reported a conflict: %+v", snapshot.Status.Conflicts)
+	}
+	if len(api.updates) != 1 {
+		t.Fatalf("announce updates = %+v, want one", api.updates)
+	}
+
+	written := api.updates[0].Headers[announceHeader]
+	if !strings.HasPrefix(written, base) {
+		t.Fatalf("operator base was not preserved: %q", written)
+	}
+	if strings.Contains(written, "Старый статус из прошлой жизни") {
+		t.Fatalf("stale status line was absorbed into the base: %q", written)
+	}
+	if got := strings.Count(written, "\n") - strings.Count(base, "\n"); got != 1 {
+		t.Fatalf("announce gained %d status lines, want exactly one", got)
+	}
+	if api.updates[0].Headers["x-test"] != "keep" {
+		t.Fatalf("unrelated response headers were dropped: %+v", api.updates[0].Headers)
+	}
+}

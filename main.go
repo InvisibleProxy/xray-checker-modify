@@ -666,6 +666,7 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/schedules", web.AdminScheduleHandler(speedTestManager, nodeArchive))
 	protectedHandler.Handle("/api/v1/admin/telegram/test", web.AdminTelegramTestHandler(telegramService))
 	protectedHandler.Handle("/api/v1/admin/telegram", web.AdminTelegramHandler(telegramService))
+	protectedHandler.Handle("/api/v1/admin/remnawave/announce-base", web.AdminRemnawaveAnnounceBaseHandler(remnawaveService))
 	protectedHandler.Handle("/api/v1/admin/remnawave/locations/suggest", web.AdminRemnawaveSuggestLocationsHandler(remnawaveService))
 	protectedHandler.Handle("/api/v1/admin/remnawave/sync", web.AdminRemnawaveSyncHandler(remnawaveService))
 	protectedHandler.Handle("/api/v1/admin/remnawave", web.AdminRemnawaveHandler(remnawaveService))

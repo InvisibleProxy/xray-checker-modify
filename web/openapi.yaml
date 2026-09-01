@@ -887,6 +887,44 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /api/v1/admin/remnawave/announce-base:
+    post:
+      summary: Adopt or forget the operator-owned announce base of an External Squad
+      description: >-
+        Records the announce value the squad currently holds as the text the checker may build on,
+        so a multi-line operator announce can be extended with a status line. The value is captured
+        by this explicit action rather than inferred during reconcile: a base that had to be guessed
+        could absorb a stale status line whenever ownership state is lost, and the message would grow
+        on every pass. Send release=true to forget it again.
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [externalSquadUuid]
+              properties:
+                externalSquadUuid:
+                  type: string
+                release:
+                  type: boolean
+                  default: false
+      responses:
+        '200':
+          description: Updated settings, topology and reconciliation status
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/RemnawaveSnapshot'
+        '400':
+          description: The squad is unknown or its announce value cannot be built on
+
   /api/v1/admin/remnawave/locations/suggest:
     get:
       summary: Propose announce locations from Remnawave host tags

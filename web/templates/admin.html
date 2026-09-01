@@ -3149,10 +3149,23 @@
             ? "Existing rwEncodeBase64 announce stays on the first line"
             : (announcement.present ? "Existing announce is left untouched" : "Managed value is no longer present remotely"));
           const stateClass = announcement.managed ? "ok" : (announcement.preservesBase ? "muted" : "warn");
+          // Adopting is offered only where it would change something: a value the
+          // checker can build on that it has not been pointed at yet.
+          const uuid = escapeHtml(announcement.externalSquadUuid || "");
+          const action = announcement.baseAdopted
+            ? `<button class="secondary small" type="button" data-remnawave-release-base="${uuid}">Forget adopted base</button>`
+            : (announcement.adoptable
+              ? `<button class="secondary small" type="button" data-remnawave-adopt-base="${uuid}">Adopt current announce as base</button>`
+              : "");
+          const adopted = announcement.baseAdopted
+            ? `<span class="muted">Operator base adopted; the status line is written after it</span>`
+            : "";
           return `
             <div>
               <strong class="${stateClass}">${escapeHtml(announcement.externalSquadName || announcement.externalSquadUuid)} · ${label}</strong>
               <span>${escapeHtml(message)}</span>
+              ${adopted}
+              ${action}
             </div>
           `;
         }).join("") || `<div class="muted">No announce headers are currently tracked.</div>`;
@@ -7359,6 +7372,27 @@
           Array.isArray(snapshot.proxies) ? snapshot.proxies : [],
           Array.isArray(topology.hosts) ? topology.hosts : [],
         );
+      });
+      $("remnawave-announcements").addEventListener("click", async (event) => {
+        const adopt = event.target.closest("[data-remnawave-adopt-base]");
+        const release = event.target.closest("[data-remnawave-release-base]");
+        if (!adopt && !release) return;
+        const button = adopt || release;
+        const externalSquadUuid = adopt
+          ? adopt.dataset.remnawaveAdoptBase
+          : release.dataset.remnawaveReleaseBase;
+        button.disabled = true;
+        try {
+          state.remnawave = await request("/remnawave/announce-base", {
+            method: "POST",
+            body: JSON.stringify({ externalSquadUuid, release: Boolean(release) }),
+          });
+          renderRemnawave();
+        } catch (err) {
+          $("remnawave-state").textContent = err.message;
+          $("remnawave-state").className = "error";
+          button.disabled = false;
+        }
       });
       $("remnawave-suggest-locations").addEventListener("click", suggestRemnawaveLocations);
       $("remnawave-suggestions").addEventListener("click", (event) => {

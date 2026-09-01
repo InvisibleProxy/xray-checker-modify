@@ -128,6 +128,12 @@ type AdminRemnawaveService interface {
 	UpdateSettings(remnawave.Settings) (remnawave.Snapshot, error)
 	SyncNow(context.Context) (remnawave.Snapshot, error)
 	SuggestLocations() remnawave.LocationSuggestion
+	AdoptAnnounceBase(string, bool) (remnawave.Snapshot, error)
+}
+
+type AdminRemnawaveAnnounceBaseRequest struct {
+	ExternalSquadUUID string `json:"externalSquadUuid"`
+	Release           bool   `json:"release,omitempty"`
 }
 
 func AdminHandler() http.HandlerFunc {
@@ -186,6 +192,29 @@ func AdminRemnawaveSuggestLocationsHandler(service AdminRemnawaveService) http.H
 			return
 		}
 		writeJSON(w, service.SuggestLocations())
+	}
+}
+
+// AdminRemnawaveAnnounceBaseHandler records the announce text a squad currently
+// holds as the operator-owned base, or forgets it. Capturing it takes an explicit
+// action because the checker will not guess where operator text ends.
+func AdminRemnawaveAnnounceBaseHandler(service AdminRemnawaveService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var request AdminRemnawaveAnnounceBaseRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			writeError(w, "Invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		snapshot, err := service.AdoptAnnounceBase(request.ExternalSquadUUID, request.Release)
+		if err != nil {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, snapshot)
 	}
 }
 

@@ -61,6 +61,7 @@ func TestOpenAPISpecDocumentsEveryForkAdminRoute(t *testing.T) {
 		"/api/v1/admin/telegram",
 		"/api/v1/admin/telegram/test",
 		"/api/v1/admin/remnawave",
+		"/api/v1/admin/remnawave/announce-base",
 		"/api/v1/admin/remnawave/locations/suggest",
 		"/api/v1/admin/remnawave/sync",
 		"/api/v1/admin/diagnostic-agents",

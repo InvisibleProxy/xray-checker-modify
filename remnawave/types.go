@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	ConfigVersion  = 5
+	ConfigVersion  = 6
 	RuntimeVersion = 4
 
 	announceHeader       = "announce"
@@ -88,6 +88,11 @@ type ConfigFile struct {
 	// NodeMappings is accepted only while decoding v1-v4 state. New writes
 	// always persist Locations and omit this field.
 	NodeMappings map[string]NodeMapping `json:"nodeMappings,omitempty"`
+	// AnnounceBases records, per External Squad, the operator-owned announce text
+	// the checker was explicitly told to build on. It is captured by an admin
+	// action rather than inferred, so a lost ownership file can never make the
+	// checker mistake its own status line for part of the operator text.
+	AnnounceBases map[string]string `json:"announceBases,omitempty"`
 }
 
 type Settings struct {
@@ -201,7 +206,13 @@ type RemoteAnnouncementStatus struct {
 	Present           bool   `json:"present"`
 	Managed           bool   `json:"managed"`
 	PreservesBase     bool   `json:"preservesBase,omitempty"`
-	Message           string `json:"message,omitempty"`
+	// BaseAdopted reports whether the operator explicitly pointed the checker at
+	// this squad exact announce text, which is what lets it build on a multi-line
+	// value without ever mistaking a status line for part of that text.
+	BaseAdopted bool `json:"baseAdopted,omitempty"`
+	// Adoptable is true when the current value could be adopted right now.
+	Adoptable bool   `json:"adoptable,omitempty"`
+	Message   string `json:"message,omitempty"`
 }
 
 type ReconcileStatus struct {
@@ -251,7 +262,8 @@ func normalizeConfig(config *ConfigFile) error {
 		// v0 was the unversioned development format. v1 had hardcoded outage
 		// messages and one optional normalMessage. v2 added configurable outage
 		// scenarios, v3 partial availability, v4 maintenance scenarios, and v5
-		// replaced server-first nodeMappings with explicit locations.
+		// replaced server-first nodeMappings with explicit locations, and v6
+		// added operator-adopted announce bases.
 		config.Version = ConfigVersion
 	}
 	if config.Policy.OutageMinutes == 0 {
@@ -356,6 +368,16 @@ func normalizeRuntime(runtime *RuntimeFile) {
 func validateConfig(config ConfigFile) error {
 	if config.Version != ConfigVersion {
 		return fmt.Errorf("unsupported Remnawave config version %d", config.Version)
+	}
+	for externalUUID, base := range config.AnnounceBases {
+		if invalidIdentifier(externalUUID) {
+			return fmt.Errorf("announceBases contains an invalid external squad UUID")
+		}
+		// An adopted base is stored exactly as the panel holds it, so it must
+		// still be a value the checker is able to build on.
+		if !isManagedBaseAnnounce(base) {
+			return fmt.Errorf("announceBases[%s] is not a value this checker can build on", externalUUID)
+		}
 	}
 	if config.Policy.OutageMinutes < 1 || config.Policy.OutageMinutes > 24*60 {
 		return fmt.Errorf("outageMinutes must be between 1 and 1440")
