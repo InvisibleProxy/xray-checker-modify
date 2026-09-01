@@ -54,10 +54,11 @@ Thumbs.db
 Desktop.ini
 
 # GitHub automation inherited from upstream stays disabled in this fork. The
-# directory itself is not ignored, so the probe-agent publish workflow this fork
-# owns can be tracked; anything else pulled in from upstream is still skipped.
+# directory itself is not ignored, so the publish workflows this fork owns can be
+# tracked; anything else pulled in from upstream is still skipped.
 .github/workflows/*
 !.github/workflows/probe-agent-image.yml
+!.github/workflows/controller-image.yml
 .github/dependabot.yml
 
 xray-checker

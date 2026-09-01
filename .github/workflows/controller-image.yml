@@ -1,0 +1,103 @@
+name: Controller image
+
+# Publishes the checker controller to GHCR so production pulls a built image
+# instead of compiling on the box it is monitoring from.
+#
+# Tags come from two sources:
+#   push to main             -> :main and :sha-<short>
+#   tag controller-vX.Y.Z    -> :X.Y.Z and :latest
+#
+# The controller- prefix is deliberate, for the same reason the probe agent uses
+# its own: plain v* tags belong to the upstream kutovoys/xray-checker repository
+# and arrive here through `git fetch upstream --tags`, which must not publish.
+
+on:
+  push:
+    branches: [main]
+    tags: ['controller-v*']
+  workflow_dispatch:
+
+concurrency:
+  group: controller-image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/invisibleproxy/xray-checker-controller
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Go build cross-compiles from the build platform, but the final stage
+      # runs apk/adduser under the target architecture, so arm64 needs emulation.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=sha,format=short
+            type=match,pattern=controller-v(.*),group=1
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/controller-v') }}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          # metadata-action sets org.opencontainers.image.source to this
+          # repository, overriding the upstream value baked into the Dockerfile.
+          # GHCR uses that label to attach the package, so leaving the upstream
+          # one would file the image under a repository this fork does not own.
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GIT_TAG=${{ github.ref_type == 'tag' && github.ref_name || format('main-{0}', github.sha) }}
+            GIT_COMMIT=${{ github.sha }}
+            USERNAME=InvisibleProxy
+            REPOSITORY_NAME=xray-checker-modify
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Attestations would add an unknown/unknown entry to the published
+          # platform list, which reads as a broken multi-arch manifest.
+          provenance: false
+
+      - name: Summarise the published image
+        run: |
+          {
+            echo '## Controller image'
+            echo
+            echo 'Pin this exact build in production:'
+            echo
+            echo '```yaml'
+            echo "    image: ${IMAGE}@${{ steps.build.outputs.digest }}"
+            echo '```'
+            echo
+            echo 'Tags published:'
+            echo
+            echo '```'
+            echo "${TAGS}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
