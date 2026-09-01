@@ -3900,6 +3900,8 @@
         }
 
         const durations = {
+          "1h": 60 * 60 * 1000,
+          "3h": 3 * 60 * 60 * 1000,
           "1d": 24 * 60 * 60 * 1000,
           "3d": 3 * 24 * 60 * 60 * 1000,
           "7d": 7 * 24 * 60 * 60 * 1000,
@@ -4762,6 +4764,8 @@
             <div class="muted">${description}</div>
           </div>
           <div class="chart-ranges" aria-label="${availability ? "Availability chart period" : "Speed chart period"}">
+            <button class="chart-range ${active("1h")}" type="button" data-chart-range="1h" data-chart-node="${escapeHtml(stableId)}">1 h</button>
+            <button class="chart-range ${active("3h")}" type="button" data-chart-range="3h" data-chart-node="${escapeHtml(stableId)}">3 h</button>
             <button class="chart-range ${active("1d")}" type="button" data-chart-range="1d" data-chart-node="${escapeHtml(stableId)}">24 h</button>
             <button class="chart-range ${active("3d")}" type="button" data-chart-range="3d" data-chart-node="${escapeHtml(stableId)}">3 d</button>
             <button class="chart-range ${active("7d")}" type="button" data-chart-range="7d" data-chart-node="${escapeHtml(stableId)}">7 d</button>
@@ -6013,7 +6017,7 @@
         const history = dashboardHistoryFor(stableId);
         // An explicit pick is final: auto-fitting must not undo it on the next load.
         history.rangeChosen = true;
-        history.range = ["1d", "3d", "7d", "14d", "30d", "custom"].includes(range) ? range : "7d";
+        history.range = ["1h", "3h", "1d", "3d", "7d", "14d", "30d", "custom"].includes(range) ? range : "7d";
         if (history.range === "custom" && (!history.from || !history.to)) {
           const today = new Date();
           const from = new Date(today);
@@ -6054,11 +6058,19 @@
           .map((result) => Date.parse(result.checkedAt))
           .filter((value) => Number.isFinite(value));
         if (timestamps.length < 2) return false;
-        const spanDays = (Date.now() - Math.min(...timestamps)) / 86400000;
-        const presets = [["1d", 1], ["3d", 3], ["7d", 7], ["14d", 14], ["30d", 30]];
+        const spanMs = Date.now() - Math.min(...timestamps);
+        const presets = [
+          ["1h", 60 * 60 * 1000],
+          ["3h", 3 * 60 * 60 * 1000],
+          ["1d", 24 * 60 * 60 * 1000],
+          ["3d", 3 * 24 * 60 * 60 * 1000],
+          ["7d", 7 * 24 * 60 * 60 * 1000],
+          ["14d", 14 * 24 * 60 * 60 * 1000],
+          ["30d", 30 * 24 * 60 * 60 * 1000],
+        ];
         const current = presets.findIndex(([id]) => id === history.range);
         if (current < 0) return false;
-        const fitted = presets.findIndex(([, days]) => days >= spanDays);
+        const fitted = presets.findIndex(([, durationMs]) => durationMs >= spanMs);
         if (fitted < 0 || fitted >= current) return false;
         history.range = presets[fitted][0];
         return true;
