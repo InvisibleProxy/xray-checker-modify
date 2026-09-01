@@ -28,7 +28,7 @@ func main() {
 		DirectCheckURL:  os.Getenv("PROBE_DIRECT_CHECK_URL"),
 		ProxyTimeout:    time.Duration(envPositiveInt("PROBE_PROXY_TIMEOUT_SECONDS", 30)) * time.Second,
 		DownloadTimeout: time.Duration(envPositiveInt("PROBE_DOWNLOAD_TIMEOUT_SECONDS", 60)) * time.Second,
-		DownloadMinSize: int64(envPositiveInt("PROBE_DOWNLOAD_MIN_SIZE", 51200)),
+		DownloadMinSize: int64(envPositiveInt("PROBE_DOWNLOAD_MIN_SIZE", int(probeagent.DefaultDownloadMinSize))),
 		// Probe shapes stay agent-owned: the controller names a profile, it never
 		// dictates how long or how often that profile runs.
 		LatencySamples:    envPositiveInt("PROBE_LATENCY_SAMPLES", probeagent.DefaultLatencySamples),

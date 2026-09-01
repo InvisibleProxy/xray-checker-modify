@@ -288,7 +288,9 @@ func (m *Manager) testFallbackForPrimary(proxy *models.ProxyConfig, cfg TestConf
 	if len(candidates) > maxFallbackAttempts {
 		candidates = candidates[:maxFallbackAttempts]
 	}
+	attempted := 0
 	for _, endpoint := range candidates {
+		attempted++
 		probeConfig := cfg
 		probeConfig.URL = endpoint.URL
 		probeConfig.MaxBytes = fallbackProbeMaxBytes
@@ -316,8 +318,17 @@ func (m *Manager) testFallbackForPrimary(proxy *models.ProxyConfig, cfg TestConf
 		result.FallbackCountryCode = countryCode
 		result.PrimaryURL = primary.URL
 		result.PrimaryError = primary.Error
+		result.PrimaryMbps = primary.Mbps
+		result.FallbackAttempted = true
+		result.FallbackAttempts = attempted
 		result.TelegramAlertSuppressed = threshold <= 0 || result.Mbps >= threshold
 		return result
+	}
+	if attempted > 0 {
+		primary.PrimaryMbps = primary.Mbps
+		primary.FallbackAttempted = true
+		primary.FallbackAttempts = attempted
+		primary.FallbackExhausted = true
 	}
 	return primary
 }

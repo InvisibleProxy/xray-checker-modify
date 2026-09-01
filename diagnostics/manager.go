@@ -111,6 +111,9 @@ func (m *DiagnosticSessionManager) CreateSession(request CreateSessionRequest) (
 	now := m.now()
 	request.StableID = strings.TrimSpace(request.StableID)
 	request.ConfigFingerprint = strings.TrimSpace(request.ConfigFingerprint)
+	request.AutomationContext.Kind = strings.TrimSpace(request.AutomationContext.Kind)
+	request.AutomationContext.Outcome = strings.TrimSpace(request.AutomationContext.Outcome)
+	request.AutomationContext.Source = strings.TrimSpace(request.AutomationContext.Source)
 	agents, err := normalizedAgentIDs(request.RequestedAgents)
 	if err != nil {
 		return DiagnosticSession{}, err
@@ -139,6 +142,7 @@ func (m *DiagnosticSessionManager) CreateSession(request CreateSessionRequest) (
 		ConfigGeneration:      request.ConfigGeneration,
 		ConfigFingerprint:     request.ConfigFingerprint,
 		LocalResultSnapshot:   request.LocalResultSnapshot,
+		AutomationContext:     request.AutomationContext,
 		RequestedAgents:       append([]string(nil), request.RequestedAgents...),
 		MaintenanceDiagnostic: request.MaintenanceDiagnostic,
 		CreatedAt:             now,
@@ -551,12 +555,22 @@ func validateCreateSessionRequest(request CreateSessionRequest, now time.Time, m
 		return fmt.Errorf("%w: stableId is required", ErrInvalidRequest)
 	}
 	switch request.Trigger {
-	case TriggerManual, TriggerAutoProxyFailure, TriggerAutoCheckEndpoint, TriggerAutoAmbiguousFailure:
+	case TriggerManual, TriggerAutoProxyFailure, TriggerAutoCheckEndpoint, TriggerAutoAmbiguousFailure, TriggerAutoSpeedFallback:
 	default:
 		return fmt.Errorf("%w: unsupported trigger", ErrInvalidRequest)
 	}
 	if request.MaintenanceDiagnostic && request.Trigger.Automatic() {
 		return fmt.Errorf("%w: maintenance diagnostics must be manual", ErrInvalidRequest)
+	}
+	if request.Trigger == TriggerAutoSpeedFallback {
+		context := request.AutomationContext
+		if context.Kind != AutomationKindSpeedFallback ||
+			(context.Outcome != AutomationOutcomeTechnical && context.Outcome != AutomationOutcomeLowSpeed) ||
+			!validToken(context.Source) || context.ThresholdMbps < 0 || context.ObservedMbps < 0 || context.FallbackAttempts < 1 {
+			return fmt.Errorf("%w: invalid speed fallback automation context", ErrInvalidRequest)
+		}
+	} else if request.AutomationContext != (AutomationContext{}) {
+		return fmt.Errorf("%w: automation context does not match trigger", ErrInvalidRequest)
 	}
 	if !validFingerprint(request.ConfigFingerprint) {
 		return fmt.Errorf("%w: config fingerprint must be sha256", ErrInvalidRequest)

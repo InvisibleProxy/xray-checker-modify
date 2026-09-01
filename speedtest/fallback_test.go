@@ -95,6 +95,9 @@ countries:
 	if !result.FallbackUsed || result.FallbackID != "reserve-two" {
 		t.Fatalf("fallback result = %+v, want reserve-two", result)
 	}
+	if !result.FallbackAttempted || result.FallbackAttempts != 2 || result.FallbackExhausted {
+		t.Fatalf("fallback outcome = attempted:%v attempts:%d exhausted:%v", result.FallbackAttempted, result.FallbackAttempts, result.FallbackExhausted)
+	}
 	if result.URL != "https://second.example.test/100mb.bin" {
 		t.Fatalf("result URL = %q", result.URL)
 	}
@@ -149,6 +152,9 @@ countries:
 	if !result.FallbackUsed || result.URL != "https://reserve.example.test/100mb.bin" || result.Mbps != 25 {
 		t.Fatalf("fallback result = %+v", result)
 	}
+	if !result.FallbackAttempted || result.FallbackAttempts != 1 || result.FallbackExhausted || result.PrimaryMbps != 1 {
+		t.Fatalf("fallback outcome = %+v", result)
+	}
 	if result.PrimaryURL != "https://primary.example.test/100mb.bin" || result.PrimaryError != "" {
 		t.Fatalf("primary diagnostics = %q / %q", result.PrimaryURL, result.PrimaryError)
 	}
@@ -186,6 +192,9 @@ countries:
 	if !result.FallbackUsed || result.Mbps != 3 {
 		t.Fatalf("fallback result = %+v", result)
 	}
+	if !result.FallbackAttempted || result.FallbackAttempts != 1 || result.FallbackExhausted || result.PrimaryMbps != 2 {
+		t.Fatalf("fallback outcome = %+v", result)
+	}
 	if result.TelegramAlertSuppressed {
 		t.Fatal("low-speed fallback was suppressed from delayed confirmation")
 	}
@@ -222,6 +231,33 @@ countries:
 	}, "schedule")
 	if result.FallbackUsed || result.Error != "" || result.Mbps != 2 {
 		t.Fatalf("result = %+v, want original low-speed result", result)
+	}
+	if !result.FallbackAttempted || result.FallbackAttempts != 1 || !result.FallbackExhausted || result.PrimaryMbps != 2 {
+		t.Fatalf("exhausted fallback outcome = %+v", result)
+	}
+}
+
+func TestFailedFallbackKeepsPrimaryTechnicalErrorAndMarksExhaustion(t *testing.T) {
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "DE Node", Protocol: "vless"}
+	manager := newFallbackTestManager(proxy)
+	manager.fallbackCatalog = mustParseFallbackCatalog(t, `
+version: 1
+countries:
+  DE:
+    - id: reserve
+      url: https://reserve.example.test/100mb.bin
+      priority: 10
+`)
+	manager.SetCountryResolver(func(string) string { return "DE" })
+	manager.testAttempt = func(_ *models.ProxyConfig, cfg TestConfig, source string) Result {
+		return Result{StableID: proxy.StableID, URL: cfg.URL, Source: source, Error: "connection refused"}
+	}
+
+	result := manager.testProxyWithFallback(proxy, TestConfig{
+		URL: "https://primary.example.test/100mb.bin", MaxBytes: 1024, TimeoutSec: 30,
+	}, "schedule")
+	if result.Error != "connection refused" || !result.FallbackAttempted || result.FallbackAttempts != 1 || !result.FallbackExhausted {
+		t.Fatalf("technical fallback result = %+v", result)
 	}
 }
 

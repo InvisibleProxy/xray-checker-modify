@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"xray-checker/agentautomation"
 	"xray-checker/backup"
 	"xray-checker/checker"
 	"xray-checker/config"
@@ -185,6 +186,15 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to configure remote diagnostic jobs: %v", err)
 	}
+	diagnosticAutomation, err := agentautomation.New(agentautomation.Config{
+		Enabled:       config.CLIConfig.RemoteDiagnostics.AutomationEnabled,
+		Cooldown:      time.Duration(config.CLIConfig.RemoteDiagnostics.AutomationCooldownMinutes) * time.Minute,
+		AlertWait:     time.Duration(config.CLIConfig.RemoteDiagnostics.AutomationAlertWaitSeconds) * time.Second,
+		MaxConcurrent: config.CLIConfig.RemoteDiagnostics.AutomationMaxConcurrent,
+	}, remoteDiagnosticController, probeAgentRegistry)
+	if err != nil {
+		logger.Fatal("Failed to configure diagnostic automation: %v", err)
+	}
 
 	xrayLifecycle := &sync.RWMutex{}
 	proxyChecker.SetRunGate(xrayLifecycle.RLocker())
@@ -264,6 +274,7 @@ func main() {
 		config.CLIConfig.Xray.StartPort,
 	)
 	telegramService.SetProjectMaintenance(projectMaintenance.Enabled())
+	telegramService.SetSpeedDiagnosticAutomation(diagnosticAutomation)
 	handleStateLoadError("Telegram", telegramService.Load())
 	if projectMaintenance.Enabled() {
 		if err := telegramService.ClearAllMonitoringState(); err != nil {
@@ -666,7 +677,7 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions/delete", web.AdminDiagnosticSessionDeleteHandler(remoteDiagnosticController))
 	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions/clear", web.AdminDiagnosticSessionsClearHandler(remoteDiagnosticController))
 	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions/export", web.AdminDiagnosticSessionExportHandler(remoteDiagnosticController))
-	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions", web.AdminDiagnosticSessionsHandler(remoteDiagnosticController))
+	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions", web.AdminDiagnosticSessionsHandler(remoteDiagnosticController, diagnosticAutomation.Snapshot))
 
 	if config.CLIConfig.Web.Public {
 		mux.Handle("/", web.IndexHandler(version, proxyChecker, projectMaintenance))

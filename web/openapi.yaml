@@ -1081,9 +1081,11 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [enabled, profiles, sessions]
+                required: [enabled, automation, profiles, sessions]
                 properties:
                   enabled: {type: boolean}
+                  automation:
+                    $ref: '#/components/schemas/DiagnosticAutomationSnapshot'
                   profiles: {type: array, items: {$ref: '#/components/schemas/DiagnosticProfile'}}
                   sessions: {type: array, items: {$ref: '#/components/schemas/DiagnosticSessionView'}}
         '401':
@@ -1749,6 +1751,20 @@ components:
         primaryError:
           type: string
           description: Technical error returned by the original Test URL before fallback.
+        primaryMbps:
+          type: number
+          format: double
+          description: Original Test URL rate when a country fallback produced the final result.
+        fallbackAttempted:
+          type: boolean
+          description: At least one country fallback endpoint was actually attempted.
+        fallbackAttempts:
+          type: integer
+          minimum: 0
+          description: Number of distinct country fallback candidates attempted.
+        fallbackExhausted:
+          type: boolean
+          description: Every attempted country fallback candidate failed, so the original result remained final.
         fallbackUsed:
           type: boolean
         fallbackId:
@@ -2790,17 +2806,38 @@ components:
         session: {$ref: '#/components/schemas/DiagnosticSession'}
         summary: {type: string}
 
+    DiagnosticAutomationSnapshot:
+      type: object
+      required: [enabled, speedFallbackEnabled, cooldownSeconds, alertWaitSeconds, maxConcurrent, active]
+      properties:
+        enabled: {type: boolean}
+        speedFallbackEnabled: {type: boolean}
+        cooldownSeconds: {type: integer, minimum: 0}
+        alertWaitSeconds: {type: integer, minimum: 0}
+        maxConcurrent: {type: integer, minimum: 0}
+        active: {type: integer, minimum: 0}
+
     DiagnosticSession:
       type: object
       required: [schemaVersion, sessionId, stableId, trigger, configGeneration, configFingerprint, localResultSnapshot, requestedAgents, jobs, agentObservations, createdAt, expiresAt, state]
       properties:
-        schemaVersion: {type: integer, enum: [1]}
+        schemaVersion: {type: integer, enum: [2]}
         sessionId: {type: string}
         stableId: {type: string}
-        trigger: {type: string, enum: [manual, auto_proxy_failure, auto_check_endpoint, auto_ambiguous_failure]}
+        trigger: {type: string, enum: [manual, auto_proxy_failure, auto_check_endpoint, auto_ambiguous_failure, auto_speed_fallback]}
         configGeneration: {type: integer, format: int64}
         configFingerprint: {type: string}
         localResultSnapshot: {type: object}
+        automationContext:
+          type: object
+          description: Sanitized reason for an automatic session. URLs and raw transport errors are excluded.
+          properties:
+            kind: {type: string, enum: [speed_fallback]}
+            outcome: {type: string, enum: [technical_error, low_speed]}
+            source: {type: string}
+            thresholdMbps: {type: number, format: double}
+            observedMbps: {type: number, format: double}
+            fallbackAttempts: {type: integer, minimum: 1}
         requestedAgents: {type: array, items: {type: string}}
         jobs: {type: array, items: {$ref: '#/components/schemas/DiagnosticJob'}}
         agentObservations:

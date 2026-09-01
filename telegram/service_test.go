@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,10 +11,40 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"xray-checker/agentautomation"
 	"xray-checker/checker"
 	"xray-checker/models"
 	"xray-checker/speedtest"
 )
+
+type fakeSpeedDiagnosticAutomation struct {
+	enabled     bool
+	starts      int
+	awaits      int
+	annotations map[string]speedtest.AgentDiagnostic
+}
+
+func (f *fakeSpeedDiagnosticAutomation) Enabled() bool { return f.enabled }
+
+func (f *fakeSpeedDiagnosticAutomation) AlertWait() time.Duration { return time.Second }
+
+func (f *fakeSpeedDiagnosticAutomation) StartSpeedDiagnostics(report speedtest.RunReport, _ float64) map[string]agentautomation.Handle {
+	f.starts++
+	handles := make(map[string]agentautomation.Handle, len(report.Results))
+	for _, result := range report.Results {
+		handles[result.StableID] = agentautomation.Handle{StableID: result.StableID, SessionID: "diag-" + result.StableID}
+	}
+	return handles
+}
+
+func (f *fakeSpeedDiagnosticAutomation) Annotations(map[string]agentautomation.Handle) map[string]speedtest.AgentDiagnostic {
+	return f.annotations
+}
+
+func (f *fakeSpeedDiagnosticAutomation) Await(_ context.Context, _ map[string]agentautomation.Handle) map[string]speedtest.AgentDiagnostic {
+	f.awaits++
+	return f.annotations
+}
 
 func TestTelegramAPIErrorTextRedactsBotToken(t *testing.T) {
 	token := "123456:secret-token"
@@ -976,6 +1007,88 @@ func TestAutomaticLowSpeedAlertRequiresFailedConfirmation(t *testing.T) {
 		if !strings.Contains(sent[0].HTML, want) {
 			t.Fatalf("confirmed report does not contain %q:\n%s", want, sent[0].HTML)
 		}
+	}
+}
+
+func TestConfirmedSpeedAlertIncludesReadOnlyAgentEvidence(t *testing.T) {
+	service := NewService("", nil, nil, 10000)
+	defer service.Stop()
+	service.speedRetryDelay = time.Hour
+	service.setConfig(Config{
+		Enabled: true, ChatID: "alerts-chat", SpeedReportsEnabled: true, SpeedReportMode: "issues",
+		LowSpeedThresholdMbps: 10, SpeedReportLimit: 10, TimeoutSec: 1,
+	})
+	automation := &fakeSpeedDiagnosticAutomation{enabled: true, annotations: map[string]speedtest.AgentDiagnostic{
+		"node-1": {
+			State: speedtest.AgentDiagnosticReproduced, SessionID: "diag-node-1",
+			AgentName: "EU probe", Region: "DE", Mbps: 3,
+		},
+	}}
+	service.SetSpeedDiagnosticAutomation(automation)
+	var sent []formattedMessage
+	service.speedReportSendFunc = func(_ string, _ int, content formattedMessage) {
+		sent = append(sent, content)
+	}
+	initial := speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{{
+		StableID: "node-1", Name: "Node 1", Mbps: 4, FallbackUsed: true,
+		FallbackAttempted: true, FallbackAttempts: 1,
+	}}}
+	service.NotifySpeedTest(initial)
+	if len(sent) != 0 {
+		t.Fatalf("initial result sent an alert: %+v", sent)
+	}
+	confirmed := initial
+	confirmed.Source = speedConfirmationRetrySource
+	service.NotifySpeedTest(confirmed)
+	if len(sent) != 1 || automation.awaits != 1 {
+		t.Fatalf("sent=%d awaits=%d, want one enriched alert", len(sent), automation.awaits)
+	}
+	for _, want := range []string{"Agent EU probe / DE", "проблема воспроизведена", "Вероятнее общая проблема"} {
+		if !strings.Contains(sent[0].HTML, want) {
+			t.Fatalf("agent-enriched alert does not contain %q:\n%s", want, sent[0].HTML)
+		}
+	}
+	if initial.Results[0].AgentDiagnostic != nil {
+		t.Fatalf("source speed result was mutated: %+v", initial.Results[0])
+	}
+}
+
+func TestExhaustedTechnicalFallbackWaitsForAgentEvidenceInImmediateAlert(t *testing.T) {
+	service := NewService("", nil, nil, 10000)
+	defer service.Stop()
+	service.setConfig(Config{
+		Enabled: true, ChatID: "alerts-chat", SpeedReportsEnabled: true, SpeedReportMode: "issues",
+		LowSpeedThresholdMbps: 10, SpeedReportLimit: 10, TimeoutSec: 1,
+	})
+	automation := &fakeSpeedDiagnosticAutomation{enabled: true, annotations: map[string]speedtest.AgentDiagnostic{
+		"node-1": {
+			State: speedtest.AgentDiagnosticNotReproduced, SessionID: "diag-node-1",
+			AgentName: "US probe", Region: "US", RemoteStatus: "online", Mbps: 40,
+		},
+	}}
+	service.SetSpeedDiagnosticAutomation(automation)
+	var sent []formattedMessage
+	service.speedReportSendFunc = func(_ string, _ int, content formattedMessage) {
+		sent = append(sent, content)
+	}
+	report := speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{{
+		StableID: "node-1", Name: "Node 1", Error: "connection refused",
+		FallbackAttempted: true, FallbackAttempts: 2, FallbackExhausted: true,
+	}}}
+	service.NotifySpeedTest(report)
+	if len(sent) != 1 || automation.starts != 1 || automation.awaits != 1 {
+		t.Fatalf("sent=%d starts=%d awaits=%d", len(sent), automation.starts, automation.awaits)
+	}
+	for _, want := range []string{"connection refused", "Agent US probe / US", "проблема не воспроизведена", "40 Mbps"} {
+		if !strings.Contains(sent[0].HTML, want) {
+			t.Fatalf("technical fallback alert does not contain %q:\n%s", want, sent[0].HTML)
+		}
+	}
+	service.speedRetryMu.Lock()
+	pending := len(service.speedRetryPending)
+	service.speedRetryMu.Unlock()
+	if pending != 0 {
+		t.Fatalf("ordinary technical failure unexpectedly scheduled %d confirmation retries", pending)
 	}
 }
 

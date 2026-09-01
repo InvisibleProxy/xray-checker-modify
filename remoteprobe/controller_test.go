@@ -275,6 +275,58 @@ func TestCreateManualFallsBackToTheConfiguredCheckMethod(t *testing.T) {
 	}
 }
 
+func TestCreateAutomaticSelectsAHealthyAgentAndBindsSpeedFallbackContext(t *testing.T) {
+	fixture := newControllerFixture(t)
+	request := CreateAutomaticRequest{
+		StableID: "node-one", Trigger: diagnostics.TriggerAutoSpeedFallback, ProfileID: diagnostics.ProfileDownload,
+		AutomationContext: diagnostics.AutomationContext{
+			Kind: diagnostics.AutomationKindSpeedFallback, Outcome: diagnostics.AutomationOutcomeTechnical,
+			Source: "schedule", ThresholdMbps: 10, FallbackAttempts: 2,
+		},
+	}
+	created, err := fixture.controller.CreateAutomatic(request)
+	if err != nil {
+		t.Fatalf("create automatic diagnostics: %v", err)
+	}
+	if created.Session.Trigger != diagnostics.TriggerAutoSpeedFallback || created.Session.AutomationContext != request.AutomationContext {
+		t.Fatalf("automatic session = %+v", created.Session)
+	}
+	if len(created.Session.RequestedAgents) != 1 || created.Session.RequestedAgents[0] != fixture.agentID {
+		t.Fatalf("selected agents = %+v", created.Session.RequestedAgents)
+	}
+	assignment, err := fixture.controller.Claim(context.Background(), fixture.agentID)
+	if err != nil {
+		t.Fatalf("claim automatic job: %v", err)
+	}
+	if assignment.Job.Profile.ID != diagnostics.ProfileDownload || assignment.Job.Profile.AlternativeProfileID != diagnostics.ProfileStatus {
+		t.Fatalf("automatic profile = %+v", assignment.Job.Profile)
+	}
+}
+
+func TestCreateAutomaticSkipsProjectAndNodeMaintenance(t *testing.T) {
+	request := CreateAutomaticRequest{
+		StableID: "node-one", Trigger: diagnostics.TriggerAutoSpeedFallback, ProfileID: diagnostics.ProfileDownload,
+		AutomationContext: diagnostics.AutomationContext{
+			Kind: diagnostics.AutomationKindSpeedFallback, Outcome: diagnostics.AutomationOutcomeLowSpeed,
+			Source: "schedule", ThresholdMbps: 10, ObservedMbps: 2, FallbackAttempts: 1,
+		},
+	}
+
+	projectFixture := newControllerFixture(t)
+	projectFixture.proxyChecker.SetProjectMaintenance(true)
+	if _, err := projectFixture.controller.CreateAutomatic(request); !errors.Is(err, ErrAutomaticPaused) {
+		t.Fatalf("project maintenance error = %v, want ErrAutomaticPaused", err)
+	}
+
+	nodeFixture := newControllerFixture(t)
+	if err := nodeFixture.proxyChecker.SetMaintenanceMode("node-one", true); err != nil {
+		t.Fatalf("enable node maintenance: %v", err)
+	}
+	if _, err := nodeFixture.controller.CreateAutomatic(request); !errors.Is(err, ErrAutomaticPaused) {
+		t.Fatalf("node maintenance error = %v, want ErrAutomaticPaused", err)
+	}
+}
+
 func TestProfilesMarkTheControllerDefault(t *testing.T) {
 	fixture := newControllerFixture(t)
 	profiles := fixture.controller.Profiles()

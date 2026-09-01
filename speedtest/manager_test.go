@@ -233,6 +233,40 @@ func TestLoadResultsKeepsInactiveHistory(t *testing.T) {
 	}
 }
 
+func TestLegacySpeedResultsDefaultNewFallbackMetadataSafely(t *testing.T) {
+	dir := t.TempDir()
+	resultPath := filepath.Join(dir, "speedtest_results.json")
+	legacy := []byte(`{"version":1,"updatedAt":"2026-08-31T12:00:00Z","results":{"node-1":{"stableId":"node-1","name":"Node 1","mbps":5,"checkedAt":"2026-08-31T12:00:00Z"}},"history":{}}`)
+	if err := os.WriteFile(resultPath, legacy, 0644); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status"), 10000, filepath.Join(dir, "speedtest_schedule.json"), TestConfig{})
+	if err := manager.Load(); err != nil {
+		t.Fatalf("load legacy results: %v", err)
+	}
+	results := manager.Snapshot().Results
+	if len(results) != 1 || results[0].FallbackAttempted || results[0].FallbackAttempts != 0 || results[0].FallbackExhausted || results[0].PrimaryMbps != 0 {
+		t.Fatalf("normalized legacy result = %+v", results)
+	}
+}
+
+func TestAgentDiagnosticIsNeverSerializedWithSpeedResult(t *testing.T) {
+	data, err := json.Marshal(Result{
+		StableID: "node-1",
+		AgentDiagnostic: &AgentDiagnostic{
+			State: AgentDiagnosticReproduced, SessionID: "diag-secret-context", AgentName: "EU probe",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"agentDiagnostic", "diag-secret-context", "EU probe"} {
+		if strings.Contains(string(data), forbidden) {
+			t.Fatalf("serialized speed result contains ephemeral agent field %q: %s", forbidden, data)
+		}
+	}
+}
+
 func TestDeleteHistoryRemovesLatestAndHistory(t *testing.T) {
 	dir := t.TempDir()
 	schedulePath := filepath.Join(dir, "speedtest_schedule.json")

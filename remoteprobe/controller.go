@@ -29,6 +29,7 @@ var (
 	ErrNoPendingJob       = errors.New("no pending diagnostic job")
 	ErrUnknownProfile     = errors.New("unknown diagnostic profile")
 	ErrUnsupportedByAgent = errors.New("diagnostic agent does not support this profile")
+	ErrAutomaticPaused    = errors.New("automatic remote diagnostics are paused")
 )
 
 type Config struct {
@@ -45,6 +46,13 @@ type CreateManualRequest struct {
 	// controller's configured availability check method, which is what the
 	// workflow used before profiles became selectable.
 	ProfileID string `json:"profileId,omitempty"`
+}
+
+type CreateAutomaticRequest struct {
+	StableID          string
+	Trigger           diagnostics.Trigger
+	ProfileID         string
+	AutomationContext diagnostics.AutomationContext
 }
 
 // ProfileView is a catalogue entry as presented to the admin UI.
@@ -189,6 +197,104 @@ func (c *Controller) CreateManual(request CreateManualRequest) (SessionView, err
 	}
 	c.assignments[job.JobID] = &queuedAssignment{assignment: assignment}
 	c.signalAgentLocked(request.AgentID)
+	updated, _ := c.manager.Session(session.SessionID)
+	return view(updated), nil
+}
+
+// CreateAutomatic selects one healthy idle agent and creates the same bounded,
+// generation-bound assignment as the manual workflow. The returned session is
+// diagnostic evidence only; this method has no operational callbacks.
+func (c *Controller) CreateAutomatic(request CreateAutomaticRequest) (SessionView, error) {
+	if !c.Enabled() {
+		return SessionView{}, probeagent.ErrDisabled
+	}
+	request.StableID = strings.TrimSpace(request.StableID)
+	request.ProfileID = strings.TrimSpace(request.ProfileID)
+	if !request.Trigger.Automatic() || request.Trigger != diagnostics.TriggerAutoSpeedFallback {
+		return SessionView{}, fmt.Errorf("unsupported automatic diagnostic trigger %q", request.Trigger)
+	}
+	if c.checker.ProjectMaintenanceEnabled() {
+		return SessionView{}, ErrAutomaticPaused
+	}
+	descriptor, ok := diagnostics.ProfileByID(request.ProfileID)
+	if !ok {
+		return SessionView{}, ErrUnknownProfile
+	}
+	snapshot, configJSON, fingerprint, err := c.executionSnapshot(request.StableID)
+	if err != nil {
+		return SessionView{}, err
+	}
+	if snapshot.Maintenance || c.checker.ProjectMaintenanceEnabled() {
+		return SessionView{}, ErrAutomaticPaused
+	}
+
+	agents := c.registry.Snapshot()
+	sort.Slice(agents, func(i, j int) bool {
+		if agents[i].LastSeenAt.Equal(agents[j].LastSeenAt) {
+			return agents[i].AgentID < agents[j].AgentID
+		}
+		return agents[i].LastSeenAt.After(agents[j].LastSeenAt)
+	})
+	now := time.Now().UTC()
+	expiresAt := now.Add(c.config.JobTTL)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.removeExpiredAssignmentsLocked(now)
+	busyAgents := make(map[string]bool, len(c.assignments))
+	for _, queued := range c.assignments {
+		busyAgents[queued.assignment.Job.AgentID] = true
+	}
+	var agent probeagent.AgentSnapshot
+	for _, candidate := range agents {
+		if !candidate.Enabled || !candidate.Connected || candidate.Health != "healthy" || busyAgents[candidate.AgentID] ||
+			!contains(candidate.Capabilities, diagnostics.CapabilityControlV1) ||
+			!contains(candidate.Capabilities, descriptor.Capability) {
+			continue
+		}
+		agent = candidate
+		break
+	}
+	if agent.AgentID == "" {
+		return SessionView{}, ErrUnavailableAgent
+	}
+	alternativeID := ""
+	if candidate, ok := diagnostics.AlternativeFor(descriptor.ID); ok {
+		if alternative, known := diagnostics.ProfileByID(candidate); known && contains(agent.Capabilities, alternative.Capability) {
+			alternativeID = alternative.ID
+		}
+	}
+	session, err := c.manager.CreateSession(diagnostics.CreateSessionRequest{
+		StableID:            snapshot.Proxy.StableID,
+		Trigger:             request.Trigger,
+		ConfigGeneration:    snapshot.Generation,
+		ConfigFingerprint:   fingerprint,
+		LocalResultSnapshot: localResult(snapshot),
+		AutomationContext:   request.AutomationContext,
+		RequestedAgents:     []string{agent.AgentID},
+		ExpiresAt:           expiresAt,
+	})
+	if err != nil {
+		return SessionView{}, err
+	}
+	job, err := c.manager.RegisterJob(diagnostics.RegisterJobRequest{
+		SessionID: session.SessionID,
+		AgentID:   agent.AgentID,
+		Profile:   descriptor.TestProfileFor(alternativeID),
+		ExpiresAt: expiresAt,
+	})
+	if err != nil {
+		_ = c.manager.CancelSession(session.SessionID)
+		return SessionView{}, err
+	}
+	c.assignments[job.JobID] = &queuedAssignment{assignment: probeagent.JobAssignment{
+		Job:        job,
+		XrayConfig: append(json.RawMessage(nil), configJSON...),
+		SocksPort:  c.config.SocksPort,
+		TargetHost: snapshot.Proxy.Server,
+		TargetPort: snapshot.Proxy.Port,
+		TargetSNI:  strings.TrimSpace(snapshot.Proxy.SNI),
+	}}
+	c.signalAgentLocked(agent.AgentID)
 	updated, _ := c.manager.Session(session.SessionID)
 	return view(updated), nil
 }
@@ -502,6 +608,23 @@ func summarize(session diagnostics.DiagnosticSession) string {
 			return "The agent rejected the job before probing; no remote evidence was collected."
 		}
 		return "The agent network failed direct connectivity control; this result is unreliable."
+	}
+	if session.Trigger == diagnostics.TriggerAutoSpeedFallback {
+		if alternative := remote.AlternativeEndpoint; alternative != nil && alternative.Status == diagnostics.ProbeStatusOnline {
+			return "The agent reproduced a failure only against its download endpoint; the alternative tunnelled endpoint worked, so an endpoint-specific problem is likely."
+		}
+		if remote.Status == diagnostics.ProbeStatusOnline {
+			if session.AutomationContext.Outcome == diagnostics.AutomationOutcomeLowSpeed && session.AutomationContext.ThresholdMbps > 0 {
+				if remote.Throughput == nil {
+					return "The agent reached the endpoint but returned no throughput evidence; there is not enough data to compare the low-speed result."
+				}
+				if float64(remote.Throughput.Mbps) < session.AutomationContext.ThresholdMbps {
+					return "Low throughput was reproduced from another network; a shared node, server or upstream capacity issue is likely."
+				}
+			}
+			return "The speed-test problem was not reproduced from another network; the controller route or its Test URLs are more likely involved."
+		}
+		return "The speed-test problem was reproduced from another network; a shared node, server or configuration issue is likely."
 	}
 	if local.Status != diagnostics.ProbeStatusOnline && remote.Status == diagnostics.ProbeStatusOnline {
 		return "The problem was not reproduced from another network; a local ISP, route, DNS or DPI issue is likely."

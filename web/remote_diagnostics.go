@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"xray-checker/agentautomation"
 	"xray-checker/diagnostics"
 	"xray-checker/probeagent"
 	"xray-checker/remoteprobe"
@@ -29,23 +30,29 @@ type DiagnosticSessionService interface {
 // Profiles ship with the sessions snapshot so the admin UI never has to hold its
 // own copy of the catalogue, which would drift from the agents' capabilities.
 type diagnosticSessionsSnapshot struct {
-	Enabled  bool                      `json:"enabled"`
-	Profiles []remoteprobe.ProfileView `json:"profiles"`
-	Sessions []remoteprobe.SessionView `json:"sessions"`
+	Enabled    bool                      `json:"enabled"`
+	Automation agentautomation.Snapshot  `json:"automation"`
+	Profiles   []remoteprobe.ProfileView `json:"profiles"`
+	Sessions   []remoteprobe.SessionView `json:"sessions"`
 }
 
 type diagnosticSessionActionRequest struct {
 	SessionID string `json:"sessionId"`
 }
 
-func AdminDiagnosticSessionsHandler(service DiagnosticSessionService) http.HandlerFunc {
+func AdminDiagnosticSessionsHandler(service DiagnosticSessionService, automationSnapshots ...func() agentautomation.Snapshot) http.HandlerFunc {
 	return func(w http.ResponseWriter, request *http.Request) {
 		switch request.Method {
 		case http.MethodGet:
+			automation := agentautomation.Snapshot{}
+			if len(automationSnapshots) > 0 && automationSnapshots[0] != nil {
+				automation = automationSnapshots[0]()
+			}
 			writeJSON(w, diagnosticSessionsSnapshot{
-				Enabled:  service.Enabled(),
-				Profiles: service.Profiles(),
-				Sessions: service.Sessions(request.URL.Query().Get("stableId")),
+				Enabled:    service.Enabled(),
+				Automation: automation,
+				Profiles:   service.Profiles(),
+				Sessions:   service.Sessions(request.URL.Query().Get("stableId")),
 			})
 		case http.MethodPost:
 			var input remoteprobe.CreateManualRequest

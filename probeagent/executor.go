@@ -32,11 +32,19 @@ const (
 	DefaultAgentRuntimeDir = "/run/xray-checker-agent"
 	DefaultIPCheckURL      = "https://api.ipify.org?format=text"
 	DefaultStatusCheckURL  = "http://cp.cloudflare.com/generate_204"
-	DefaultDownloadURL     = "https://proof.ovh.net/files/1Mb.dat"
+	// Large enough that the measured rate reflects the link rather than TTFB and
+	// TCP ramp-up, and long enough for the transfer to expose an endpoint that
+	// only fails partway through. A short probe answers neither question.
+	DefaultDownloadURL     = "https://proof.ovh.net/files/100Mb.dat"
 	DefaultDirectCheckURL  = "https://api.ipify.org?format=text"
 	DefaultProxyTimeout    = 30 * time.Second
 	DefaultDownloadTimeout = 60 * time.Second
-	DefaultDownloadMinSize = int64(51200)
+	// This is the transfer size, not a floor: the probe reads exactly this many
+	// bytes and stops. It has to be large enough that the rate reflects the link
+	// rather than TTFB, and that a stream dying partway through is caught as
+	// download_incomplete. Kept comfortably below the default URL's size so the
+	// probe never fails for want of bytes.
+	DefaultDownloadMinSize = int64(10_000_000)
 	// Probe shapes are fixed by the agent, not by the job. The controller only
 	// names a profile, so it cannot ask a probe to run long enough or often
 	// enough to become a load generator against the node.

@@ -1999,6 +1999,21 @@
           <section id="global-settings-pane-agents" class="settings-pane stack" hidden>
             <div class="control-group">
               <div class="group-title">
+                <h3>Agent automation</h3>
+                <span id="diagnostic-automation-state" class="pill">Loading</span>
+              </div>
+              <div class="hint">Automatic sessions enrich Telegram speed alerts with isolated agent evidence. They never change status, history, incidents, retries or Remnawave.</div>
+              <div class="config-status">
+                <div><span>Trigger</span><strong id="diagnostic-automation-trigger">Speed fallback</strong></div>
+                <div><span>Cooldown</span><strong id="diagnostic-automation-cooldown">—</strong></div>
+                <div><span>Alert wait</span><strong id="diagnostic-automation-wait">—</strong></div>
+                <div><span>Concurrency</span><strong id="diagnostic-automation-concurrency">—</strong></div>
+              </div>
+              <div class="hint">Configured through environment variables; changing the policy requires a controller restart.</div>
+            </div>
+
+            <div class="control-group">
+              <div class="group-title">
                 <h3>Diagnostic agents</h3>
                 <span id="diagnostic-agents-state" class="pill">Loading</span>
               </div>
@@ -4868,6 +4883,8 @@
           return [
             session.sessionId,
             session.state,
+            session.trigger,
+            session.automationContext,
             session.createdAt,
             requestedAgents,
             requestedAgents.map(diagnosticAgentLabel),
@@ -5057,6 +5074,8 @@
         const agentId = Array.isArray(session.requestedAgents) ? session.requestedAgents[0] : "";
         const active = diagnosticSessionActive(view);
         const statusClass = session.state === "completed" ? "ok" : active ? "warn" : "neutral";
+        const trigger = diagnosticTriggerLabel(session.trigger);
+        const automationContext = diagnosticAutomationContextLabel(session.automationContext);
         const evidence = observation ? `<div class="diagnostic-evidence">
           <span class="chip ${observation.status === "online" ? "ok" : observation.status === "proxy_failure" ? "warn" : "error"}">Remote ${escapeHtml(observation.status)}</span>
           ${diagnosticEvidenceChip("TCP", observation.tcp)}
@@ -5068,8 +5087,8 @@
         const profileLabel = observation ? diagnosticProfileLabel(observation.endpointProfile) : "";
         return `<article class="diagnostic-session">
           <div class="diagnostic-session-head">
-            <div><strong>${escapeHtml(diagnosticAgentLabel(agentId))}</strong><div class="muted">${escapeHtml(formatTime(session.createdAt))}${profileLabel ? ` · ${escapeHtml(profileLabel)}` : ""}</div></div>
-            <span class="chip ${statusClass}">${escapeHtml(session.state)}</span>
+            <div><strong>${escapeHtml(diagnosticAgentLabel(agentId))}</strong><div class="muted">${escapeHtml(formatTime(session.createdAt))}${profileLabel ? ` · ${escapeHtml(profileLabel)}` : ""} · ${escapeHtml(trigger)}${automationContext ? ` · ${escapeHtml(automationContext)}` : ""}</div></div>
+            <div class="row"><span class="chip ${session.trigger === "manual" ? "neutral" : "warn"}">${escapeHtml(tr(session.trigger === "manual" ? "Manual" : "Automatic"))}</span><span class="chip ${statusClass}">${escapeHtml(session.state)}</span></div>
           </div>
           ${evidence}
           <div>${escapeHtml(view.summary || "No diagnostic summary")}</div>
@@ -5080,6 +5099,27 @@
             <button class="secondary small" type="button" data-delete-diagnostic="${escapeHtml(session.sessionId)}">Delete</button>
           </div>
         </article>`;
+      }
+
+      function diagnosticTriggerLabel(trigger) {
+        switch (trigger) {
+          case "manual": return tr("Manual");
+          case "auto_speed_fallback": return tr("Speed fallback");
+          case "auto_proxy_failure": return tr("Proxy failure");
+          case "auto_check_endpoint": return tr("Check endpoint");
+          case "auto_ambiguous_failure": return tr("Ambiguous failure");
+          default: return trigger || "Unknown";
+        }
+      }
+
+      function diagnosticAutomationContextLabel(context) {
+        if (!context || context.kind !== "speed_fallback") return "";
+        const parts = [context.outcome || "speed_fallback"];
+        if (context.outcome === "low_speed" && Number.isFinite(context.observedMbps) && Number.isFinite(context.thresholdMbps)) {
+          parts.push(`${context.observedMbps} / ${context.thresholdMbps} Mbps`);
+        }
+        if (context.fallbackAttempts) parts.push(`${tr("Fallback attempts")}: ${context.fallbackAttempts}`);
+        return parts.join(" · ");
       }
 
       function nodeDiagnosticsHTML(proxy) {
@@ -5910,6 +5950,7 @@
 
       function renderAll() {
         renderProjectMaintenance();
+        renderDiagnosticAutomation();
         renderRunState();
         renderOverview();
         renderNodes();
@@ -6470,6 +6511,19 @@
             </div>
           </article>`;
         }).join("") : `<div class="muted">No diagnostic agents configured</div>`;
+        renderDiagnosticAutomation();
+      }
+
+      function renderDiagnosticAutomation() {
+        const automation = (state.diagnosticSessions && state.diagnosticSessions.automation) || {};
+        const status = $("diagnostic-automation-state");
+        if (!status) return;
+        status.textContent = automation.enabled ? "Enabled" : "Disabled by environment";
+        status.className = `pill ${automation.enabled ? "ok" : "warn"}`;
+        $("diagnostic-automation-trigger").textContent = automation.speedFallbackEnabled ? "Speed fallback" : "Disabled";
+        $("diagnostic-automation-cooldown").textContent = automation.cooldownSeconds ? `${Math.round(automation.cooldownSeconds / 60)} ${tr("min")}` : "—";
+        $("diagnostic-automation-wait").textContent = automation.alertWaitSeconds >= 0 ? `${automation.alertWaitSeconds || 0} ${tr("sec")}` : "—";
+        $("diagnostic-automation-concurrency").textContent = automation.maxConcurrent ? `${automation.active || 0} / ${automation.maxConcurrent}` : "—";
       }
 
       function showDiagnosticAgentCreation(result) {
@@ -6490,6 +6544,7 @@
 
       async function loadDiagnosticSessions() {
         state.diagnosticSessions = await request("/diagnostic-sessions");
+        renderDiagnosticAutomation();
         renderNodes();
       }
 

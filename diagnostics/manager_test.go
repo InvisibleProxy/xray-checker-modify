@@ -363,6 +363,39 @@ func TestAutomaticMaintenanceSessionIsRejected(t *testing.T) {
 	}
 }
 
+func TestSpeedFallbackAutomationContextIsValidatedAndStored(t *testing.T) {
+	fixture := newManagerFixture(t)
+	request := CreateSessionRequest{
+		StableID:            "stable-node-1",
+		Trigger:             TriggerAutoSpeedFallback,
+		ConfigGeneration:    7,
+		ConfigFingerprint:   ConfigFingerprint([]byte("config")),
+		LocalResultSnapshot: LocalResultSnapshot{Status: ProbeStatusOnline, CheckedAt: *fixture.now},
+		RequestedAgents:     []string{"agent-eu"},
+		AutomationContext: AutomationContext{
+			Kind: AutomationKindSpeedFallback, Outcome: AutomationOutcomeTechnical,
+			Source: "schedule", ThresholdMbps: 10, FallbackAttempts: 2,
+		},
+	}
+	session, err := fixture.manager.CreateSession(request)
+	if err != nil {
+		t.Fatalf("create speed fallback session: %v", err)
+	}
+	if session.AutomationContext != request.AutomationContext {
+		t.Fatalf("automation context = %+v, want %+v", session.AutomationContext, request.AutomationContext)
+	}
+
+	request.AutomationContext.FallbackAttempts = 0
+	if _, err := fixture.manager.CreateSession(request); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("invalid automation context error = %v", err)
+	}
+	request.Trigger = TriggerManual
+	request.AutomationContext.FallbackAttempts = 1
+	if _, err := fixture.manager.CreateSession(request); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("manual session with automation context error = %v", err)
+	}
+}
+
 func TestManagerCancellationStopsOutstandingJobs(t *testing.T) {
 	fixture := newManagerFixture(t)
 	if err := fixture.manager.MarkJobRunning(fixture.job.JobID); err != nil {

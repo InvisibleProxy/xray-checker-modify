@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"xray-checker/agentautomation"
 	"xray-checker/checker"
 	"xray-checker/logger"
 	"xray-checker/models"
@@ -204,6 +205,15 @@ type Service struct {
 	availabilityCheck   func([]string) error
 	nodeAlertSendFunc   func(Config, formattedMessage) error
 	projectMaintenance  atomic.Bool
+	speedDiagnostics    SpeedDiagnosticAutomation
+}
+
+type SpeedDiagnosticAutomation interface {
+	Enabled() bool
+	AlertWait() time.Duration
+	StartSpeedDiagnostics(speedtest.RunReport, float64) map[string]agentautomation.Handle
+	Annotations(map[string]agentautomation.Handle) map[string]speedtest.AgentDiagnostic
+	Await(context.Context, map[string]agentautomation.Handle) map[string]speedtest.AgentDiagnostic
 }
 
 type nodeAlertState struct {
@@ -409,6 +419,10 @@ func NewService(statePath string, proxyChecker *checker.ProxyChecker, speedManag
 
 func (s *Service) SetAvailabilityCheckFunc(check func([]string) error) {
 	s.availabilityCheck = check
+}
+
+func (s *Service) SetSpeedDiagnosticAutomation(automation SpeedDiagnosticAutomation) {
+	s.speedDiagnostics = automation
 }
 
 func (s *Service) SetProjectMaintenance(enabled bool) {
@@ -682,6 +696,8 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 		if !cfg.Enabled || len(report.Results) == 0 {
 			return
 		}
+		handles := s.startSpeedDiagnostics(report, cfg)
+		report = attachSpeedDiagnostics(report, s.currentSpeedDiagnostics(handles))
 		failed, slow := countSpeedIssues(report.Results, cfg.LowSpeedThresholdMbps)
 		content := s.formatSpeedReportMessage(report, cfg, failed, slow, false)
 		s.sendSpeedTestReport(cfg, report.ReportTarget.ChatID, report.ReportTarget.MessageThreadID, content)
@@ -693,6 +709,10 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 	}
 
 	report = filterMutedRunReport(report, cfg)
+	var diagnosticHandles map[string]agentautomation.Handle
+	if automaticSpeedReportsEnabled(cfg) {
+		diagnosticHandles = s.startSpeedDiagnostics(report, cfg)
+	}
 	if automaticSpeedReportsEnabled(cfg) && report.Source != speedConfirmationRetrySource {
 		ids := speedConfirmationRetryIDs(report.Results, cfg.LowSpeedThresholdMbps)
 		if s.scheduleSpeedRetry(report, speedRetryKindConfirmation, ids, s.configuredSpeedRetryDelay()) {
@@ -711,9 +731,77 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 		}
 		issuesOnly = true
 	}
+	diagnosticHandles = diagnosticHandlesForResults(diagnosticHandles, report.Results)
+	if len(diagnosticHandles) > 0 {
+		report = attachSpeedDiagnostics(report, s.awaitSpeedDiagnostics(diagnosticHandles))
+	}
 
 	content := s.formatSpeedReportMessage(report, cfg, failed, slow, issuesOnly)
 	s.sendSpeedTestReport(cfg, cfg.ChatID, cfg.MessageThreadID, content)
+}
+
+func (s *Service) startSpeedDiagnostics(report speedtest.RunReport, cfg Config) map[string]agentautomation.Handle {
+	if s.speedDiagnostics == nil || !s.speedDiagnostics.Enabled() {
+		return nil
+	}
+	return s.speedDiagnostics.StartSpeedDiagnostics(report, cfg.LowSpeedThresholdMbps)
+}
+
+func (s *Service) currentSpeedDiagnostics(handles map[string]agentautomation.Handle) map[string]speedtest.AgentDiagnostic {
+	if s.speedDiagnostics == nil || len(handles) == 0 {
+		return nil
+	}
+	return s.speedDiagnostics.Annotations(handles)
+}
+
+func (s *Service) awaitSpeedDiagnostics(handles map[string]agentautomation.Handle) map[string]speedtest.AgentDiagnostic {
+	if s.speedDiagnostics == nil || len(handles) == 0 {
+		return nil
+	}
+	wait := s.speedDiagnostics.AlertWait()
+	if wait <= 0 {
+		return s.speedDiagnostics.Annotations(handles)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	return s.speedDiagnostics.Await(ctx, handles)
+}
+
+func diagnosticHandlesForResults(handles map[string]agentautomation.Handle, results []speedtest.Result) map[string]agentautomation.Handle {
+	if len(handles) == 0 || len(results) == 0 {
+		return nil
+	}
+	wanted := make(map[string]bool, len(results))
+	for _, result := range results {
+		wanted[result.StableID] = true
+	}
+	filtered := make(map[string]agentautomation.Handle)
+	for stableID, handle := range handles {
+		if wanted[stableID] {
+			filtered[stableID] = handle
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
+}
+
+func attachSpeedDiagnostics(report speedtest.RunReport, annotations map[string]speedtest.AgentDiagnostic) speedtest.RunReport {
+	if len(annotations) == 0 || len(report.Results) == 0 {
+		return report
+	}
+	results := append([]speedtest.Result(nil), report.Results...)
+	for index := range results {
+		annotation, ok := annotations[results[index].StableID]
+		if !ok {
+			continue
+		}
+		copyValue := annotation
+		results[index].AgentDiagnostic = &copyValue
+	}
+	report.Results = results
+	return report
 }
 
 func (s *Service) excludeMaintenanceSpeedResults(report speedtest.RunReport) speedtest.RunReport {
@@ -4008,14 +4096,17 @@ func speedIssuesHTML(results []speedtest.Result, threshold float64) []string {
 				diagnostics = "диагностики нет"
 			}
 			lines = append(lines, fmt.Sprintf("• 🔴 <b>%s</b> · недоступна · %s", htmlEscape(result.Name), diagnostics))
+			lines = appendSpeedAgentDiagnostic(lines, result)
 			continue
 		}
 		if result.Error != "" {
 			lines = append(lines, fmt.Sprintf("• ❌ <b>%s</b> · %s", htmlEscape(result.Name), htmlEscape(compactText(result.Error, 120))))
+			lines = appendSpeedAgentDiagnostic(lines, result)
 			continue
 		}
 		if threshold > 0 && result.Mbps < threshold {
 			lines = append(lines, fmt.Sprintf("• ⚠️ <b>%s</b> · <b>%.2f Mbps</b>", htmlEscape(result.Name), result.Mbps))
+			lines = appendSpeedAgentDiagnostic(lines, result)
 		}
 	}
 	return lines
@@ -4070,9 +4161,132 @@ func formatSpeedDiagnosticsRichDetails(results []speedtest.Result, limit int) st
 				fmt.Sprintf("TTFB %d ms", result.TTFBMs),
 			)
 		}
+		if diagnostic := formatSpeedAgentDiagnosticRich(result.AgentDiagnostic); diagnostic != "" {
+			parts = append(parts, diagnostic)
+		}
 		items = append(items, fmt.Sprintf("<li><b>%s</b> — %s</li>", htmlEscape(result.Name), strings.Join(parts, " · ")))
 	}
 	return "<details><summary>Технические детали</summary><ul>" + strings.Join(items, "") + "</ul></details>"
+}
+
+func appendSpeedAgentDiagnostic(lines []string, result speedtest.Result) []string {
+	diagnostic := formatSpeedAgentDiagnosticHTML(result.AgentDiagnostic)
+	if diagnostic == "" {
+		return lines
+	}
+	return append(lines, "  ↳ "+diagnostic)
+}
+
+func formatSpeedAgentDiagnosticHTML(diagnostic *speedtest.AgentDiagnostic) string {
+	if diagnostic == nil {
+		return ""
+	}
+	label := speedAgentDiagnosticLabel(diagnostic)
+	prefix := "🛰 <b>Agent"
+	if label != "" {
+		prefix += " " + htmlEscape(label)
+	}
+	prefix += "</b>"
+	detail := speedAgentDiagnosticDetail(diagnostic)
+	switch diagnostic.State {
+	case speedtest.AgentDiagnosticRunning:
+		return prefix + " · проверка запущена"
+	case speedtest.AgentDiagnosticReproduced:
+		return prefix + " · проблема воспроизведена" + detail + ". Вероятнее общая проблема ноды, сервера или конфигурации."
+	case speedtest.AgentDiagnosticNotReproduced:
+		if diagnostic.AlternativeStatus == "online" {
+			return prefix + " · основной endpoint агента не сработал, но альтернативный прошёл. Вероятна endpoint-specific проблема."
+		}
+		return prefix + " · проблема не воспроизведена" + detail + ". Вероятнее маршрут controller-а или его Test URL."
+	case speedtest.AgentDiagnosticUnreliable:
+		return prefix + " · данных недостаточно: " + htmlEscape(localizedSpeedDiagnosticDetail(diagnostic.Detail))
+	case speedtest.AgentDiagnosticUnavailable:
+		return prefix + " · данных недостаточно: " + htmlEscape(localizedSpeedDiagnosticDetail(diagnostic.Detail))
+	default:
+		return ""
+	}
+}
+
+func formatSpeedAgentDiagnosticRich(diagnostic *speedtest.AgentDiagnostic) string {
+	if diagnostic == nil {
+		return ""
+	}
+	return formatSpeedAgentDiagnosticHTML(diagnostic)
+}
+
+func speedAgentDiagnosticLabel(diagnostic *speedtest.AgentDiagnostic) string {
+	if diagnostic == nil {
+		return ""
+	}
+	name := strings.TrimSpace(diagnostic.AgentName)
+	if name == "" {
+		name = strings.TrimSpace(diagnostic.AgentID)
+	}
+	parts := []string{name}
+	if region := strings.TrimSpace(diagnostic.Region); region != "" {
+		parts = append(parts, region)
+	}
+	if provider := strings.TrimSpace(diagnostic.Provider); provider != "" {
+		parts = append(parts, provider)
+	}
+	return strings.Join(nonEmptyStrings(parts), " / ")
+}
+
+func speedAgentDiagnosticDetail(diagnostic *speedtest.AgentDiagnostic) string {
+	if diagnostic == nil {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if diagnostic.RemoteStatus != "" {
+		parts = append(parts, diagnostic.RemoteStatus)
+	}
+	if diagnostic.Mbps > 0 {
+		parts = append(parts, fmt.Sprintf("%d Mbps", diagnostic.Mbps))
+	}
+	if diagnostic.FailureCode != "" {
+		failure := diagnostic.FailureCode
+		if diagnostic.FailureStage != "" {
+			failure = diagnostic.FailureStage + "/" + failure
+		}
+		parts = append(parts, failure)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + htmlEscape(strings.Join(parts, " · ")) + ")"
+}
+
+func localizedSpeedDiagnosticDetail(detail string) string {
+	switch detail {
+	case "automation capacity is busy":
+		return "все слоты автоматической диагностики заняты"
+	case "no healthy idle diagnostic agent is connected":
+		return "нет подключённого healthy-агента"
+	case "automatic diagnostics are paused by maintenance":
+		return "автоматическая диагностика приостановлена maintenance-режимом"
+	case "remote diagnostics are disabled":
+		return "Remote Diagnostics отключены"
+	case "diagnostic session is no longer available":
+		return "diagnostic session больше недоступна"
+	case "no signed remote observation was received":
+		return "подписанный observation не получен до deadline"
+	case "agent direct connectivity control failed":
+		return "direct-connectivity control агента завершился ошибкой"
+	case "agent download observation has no throughput evidence":
+		return "agent observation не содержит throughput evidence"
+	default:
+		return "результат агента недоступен"
+	}
+}
+
+func nonEmptyStrings(values []string) []string {
+	result := values[:0]
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func formatSpeedResultsRichTable(results []speedtest.Result) string {

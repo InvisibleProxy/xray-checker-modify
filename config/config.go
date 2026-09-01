@@ -80,13 +80,17 @@ type CLI struct {
 	} `embed:"" prefix:""`
 
 	RemoteDiagnostics struct {
-		Enabled                  bool   `name:"remote-diagnostics-enabled" help:"Enable remote diagnostic probe-agent enrollment and control endpoints" default:"false" env:"REMOTE_DIAGNOSTICS_ENABLED"`
-		RegistryPath             string `name:"probe-agent-registry" help:"Path to the controller-bound probe-agent registry" default:"data/diagnostic_agents.json" env:"PROBE_AGENT_REGISTRY"`
-		AgentImage               string `name:"probe-agent-image" help:"Probe-agent image written into generated Compose files; pin an immutable digest in production" default:"ghcr.io/invisibleproxy/xray-checker-probe-agent:main" env:"PROBE_AGENT_IMAGE"`
-		EnrollmentTTLMinutes     int    `name:"probe-enrollment-ttl" help:"One-time enrollment token lifetime in minutes" default:"15" env:"PROBE_ENROLLMENT_TTL_MINUTES"`
-		HeartbeatIntervalSeconds int    `name:"probe-heartbeat-interval" help:"Requested probe-agent heartbeat interval in seconds" default:"30" env:"PROBE_HEARTBEAT_INTERVAL_SECONDS"`
-		HeartbeatMaxSkewSeconds  int    `name:"probe-heartbeat-max-skew" help:"Maximum accepted probe-agent heartbeat clock skew in seconds" default:"120" env:"PROBE_HEARTBEAT_MAX_SKEW_SECONDS"`
-		TrustedProxySecret       string `name:"probe-trusted-proxy-secret" help:"Secret required before trusting the Caddy-provided probe-agent source IP header" default:"" env:"PROBE_TRUSTED_PROXY_SECRET"`
+		Enabled                    bool   `name:"remote-diagnostics-enabled" help:"Enable remote diagnostic probe-agent enrollment and control endpoints" default:"false" env:"REMOTE_DIAGNOSTICS_ENABLED"`
+		AutomationEnabled          bool   `name:"remote-diagnostics-automation-enabled" help:"Automatically run isolated agent diagnostics after an unresolved speed-test fallback" default:"false" env:"REMOTE_DIAGNOSTICS_AUTOMATION_ENABLED"`
+		AutomationCooldownMinutes  int    `name:"probe-automation-cooldown" help:"Cooldown per StableID after an automatic diagnostic session, in minutes" default:"30" env:"PROBE_AUTOMATION_COOLDOWN_MINUTES"`
+		AutomationAlertWaitSeconds int    `name:"probe-automation-alert-wait" help:"Maximum time a background Telegram speed alert waits for agent evidence" default:"90" env:"PROBE_AUTOMATION_ALERT_WAIT_SECONDS"`
+		AutomationMaxConcurrent    int    `name:"probe-automation-max-concurrent" help:"Maximum concurrent automatic diagnostic sessions" default:"2" env:"PROBE_AUTOMATION_MAX_CONCURRENT"`
+		RegistryPath               string `name:"probe-agent-registry" help:"Path to the controller-bound probe-agent registry" default:"data/diagnostic_agents.json" env:"PROBE_AGENT_REGISTRY"`
+		AgentImage                 string `name:"probe-agent-image" help:"Probe-agent image written into generated Compose files; pin an immutable digest in production" default:"ghcr.io/invisibleproxy/xray-checker-probe-agent:main" env:"PROBE_AGENT_IMAGE"`
+		EnrollmentTTLMinutes       int    `name:"probe-enrollment-ttl" help:"One-time enrollment token lifetime in minutes" default:"15" env:"PROBE_ENROLLMENT_TTL_MINUTES"`
+		HeartbeatIntervalSeconds   int    `name:"probe-heartbeat-interval" help:"Requested probe-agent heartbeat interval in seconds" default:"30" env:"PROBE_HEARTBEAT_INTERVAL_SECONDS"`
+		HeartbeatMaxSkewSeconds    int    `name:"probe-heartbeat-max-skew" help:"Maximum accepted probe-agent heartbeat clock skew in seconds" default:"120" env:"PROBE_HEARTBEAT_MAX_SKEW_SECONDS"`
+		TrustedProxySecret         string `name:"probe-trusted-proxy-secret" help:"Secret required before trusting the Caddy-provided probe-agent source IP header" default:"" env:"PROBE_TRUSTED_PROXY_SECRET"`
 	} `embed:"" prefix:""`
 
 	Version  VersionFlag `name:"version" help:"Print version information and quit"`
@@ -117,6 +121,9 @@ func (c *CLI) Validate() error {
 			return fmt.Errorf("Remnawave timeout must be positive, reconcile interval at least 10 seconds, and topology interval at least 30 seconds")
 		}
 	}
+	if c.RemoteDiagnostics.AutomationEnabled && !c.RemoteDiagnostics.Enabled {
+		return fmt.Errorf("remote diagnostic automation requires Remote Diagnostics to be enabled")
+	}
 	if c.RemoteDiagnostics.Enabled {
 		if strings.TrimSpace(c.RemoteDiagnostics.RegistryPath) == "" || strings.TrimSpace(c.RemoteDiagnostics.AgentImage) == "" {
 			return fmt.Errorf("probe-agent registry path and image are required when remote diagnostics is enabled")
@@ -126,6 +133,11 @@ func (c *CLI) Validate() error {
 		}
 		if secret := c.RemoteDiagnostics.TrustedProxySecret; secret != "" && len(secret) < 32 {
 			return fmt.Errorf("probe trusted-proxy secret must contain at least 32 bytes when configured")
+		}
+		if c.RemoteDiagnostics.AutomationCooldownMinutes < 1 || c.RemoteDiagnostics.AutomationAlertWaitSeconds < 0 ||
+			c.RemoteDiagnostics.AutomationAlertWaitSeconds > 300 || c.RemoteDiagnostics.AutomationMaxConcurrent < 1 ||
+			c.RemoteDiagnostics.AutomationMaxConcurrent > 16 {
+			return fmt.Errorf("probe automation cooldown must be positive, alert wait 0-300 seconds, and max concurrency 1-16")
 		}
 	}
 	return nil

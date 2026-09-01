@@ -110,6 +110,10 @@ type Result struct {
 	URL                     string                    `json:"url"`
 	PrimaryURL              string                    `json:"primaryUrl,omitempty"`
 	PrimaryError            string                    `json:"primaryError,omitempty"`
+	PrimaryMbps             float64                   `json:"primaryMbps,omitempty"`
+	FallbackAttempted       bool                      `json:"fallbackAttempted,omitempty"`
+	FallbackAttempts        int                       `json:"fallbackAttempts,omitempty"`
+	FallbackExhausted       bool                      `json:"fallbackExhausted,omitempty"`
 	FallbackUsed            bool                      `json:"fallbackUsed,omitempty"`
 	FallbackID              string                    `json:"fallbackId,omitempty"`
 	FallbackProvider        string                    `json:"fallbackProvider,omitempty"`
@@ -129,6 +133,39 @@ type Result struct {
 	PingCheck               *checker.PingCheckDetails `json:"pingCheck,omitempty"`
 	CheckedAt               time.Time                 `json:"checkedAt"`
 	Source                  string                    `json:"source"`
+	// AgentDiagnostic is ephemeral alert enrichment. It is deliberately absent
+	// from persisted speed history, admin API snapshots and backup state.
+	AgentDiagnostic *AgentDiagnostic `json:"-"`
+}
+
+const (
+	AgentDiagnosticRunning       = "running"
+	AgentDiagnosticReproduced    = "reproduced"
+	AgentDiagnosticNotReproduced = "not_reproduced"
+	AgentDiagnosticUnreliable    = "unreliable"
+	AgentDiagnosticUnavailable   = "unavailable"
+)
+
+// AgentDiagnostic is a sanitized read-only annotation attached only to a
+// Telegram report copy. It never participates in result classification or any
+// operational decision.
+type AgentDiagnostic struct {
+	State                     string
+	SessionID                 string
+	AgentID                   string
+	AgentName                 string
+	Region                    string
+	Provider                  string
+	RemoteStatus              string
+	FailureCode               string
+	FailureStage              string
+	DirectConnectivityChecked bool
+	DirectConnectivityOnline  bool
+	AlternativeProfile        string
+	AlternativeStatus         string
+	Mbps                      int64
+	CheckedAt                 time.Time
+	Detail                    string
 }
 
 type RunInfo struct {

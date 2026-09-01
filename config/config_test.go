@@ -113,6 +113,9 @@ func TestValidateRemoteDiagnosticsConfiguration(t *testing.T) {
 	cfg.RemoteDiagnostics.HeartbeatIntervalSeconds = 30
 	cfg.RemoteDiagnostics.HeartbeatMaxSkewSeconds = 120
 	cfg.RemoteDiagnostics.TrustedProxySecret = "0123456789abcdef0123456789abcdef"
+	cfg.RemoteDiagnostics.AutomationCooldownMinutes = 30
+	cfg.RemoteDiagnostics.AutomationAlertWaitSeconds = 90
+	cfg.RemoteDiagnostics.AutomationMaxConcurrent = 2
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("valid remote diagnostics config rejected: %v", err)
 	}
@@ -127,5 +130,18 @@ func TestValidateRemoteDiagnosticsConfiguration(t *testing.T) {
 	weakSecret.RemoteDiagnostics.TrustedProxySecret = "too-short"
 	if err := weakSecret.Validate(); err == nil {
 		t.Fatal("weak trusted-proxy secret was accepted")
+	}
+
+	automationWithoutDiagnostics := cfg
+	automationWithoutDiagnostics.RemoteDiagnostics.Enabled = false
+	automationWithoutDiagnostics.RemoteDiagnostics.AutomationEnabled = true
+	if err := automationWithoutDiagnostics.Validate(); err == nil {
+		t.Fatal("agent automation without Remote Diagnostics was accepted")
+	}
+
+	invalidAutomation := cfg
+	invalidAutomation.RemoteDiagnostics.AutomationMaxConcurrent = 0
+	if err := invalidAutomation.Validate(); err == nil {
+		t.Fatal("zero automatic diagnostic concurrency was accepted")
 	}
 }

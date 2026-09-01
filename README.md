@@ -81,7 +81,7 @@ docker compose logs -f xray-checker
 
 ### Remote Diagnostics и отдельный Compose probe-agent-а
 
-Remote Diagnostics включает создание агентов из админки, IP-bound enrollment, постоянную Ed25519 identity, подписанный heartbeat и ручную диагностику одной ноды через выбранного агента. В раскрытой карточке active-ноды секция `Remote Diagnostics` создаёт эфемерную generation-bound session; пока session для той же пары `StableID` + agent активна, повторный запуск блокируется. Agent получает задание через подписанный outbound poll и выполняет выбранную диагностику. Отдельный direct-connectivity control определяет, можно ли считать observation достоверным.
+Remote Diagnostics включает создание агентов из админки, IP-bound enrollment, постоянную Ed25519 identity, подписанный heartbeat, ручную диагностику одной ноды и opt-in автоматическую перепроверку неразрешённого speedtest fallback. В раскрытой карточке active-ноды секция `Remote Diagnostics` создаёт эфемерную generation-bound session; пока session для той же пары `StableID` + agent активна, повторный запуск блокируется. Agent получает задание через подписанный outbound poll и выполняет выбранную диагностику. Отдельный direct-connectivity control определяет, можно ли считать observation достоверным.
 
 Рядом с выбором агента находится выбор диагностики. Задание несёт только ID профиля: endpoint-ы и параметры принадлежат конфигурации агента, поэтому выбор в админке не может превратить job в произвольный fetch. Доступны семь профилей:
 
@@ -95,19 +95,27 @@ Remote Diagnostics включает создание агентов из адм�
 | `TLS handshake` | нет | прямой handshake с SNI ноды — отличает «порт отвечает» от «сессия не устанавливается» |
 | `DNS resolution` | нет | резолвинг имени ноды несколькими резолверами и расхождение между ними |
 
-Туннельные профили поднимают временный embedded Xray и при ошибке добавляют TCP/ping evidence; для `Endpoint status`, `Exit IP` и `Latency profile` неудача сначала перепроверяется через резервный endpoint, что отличает недоступный endpoint от недоступной ноды. Транспортные профили Xray не запускают вообще — они идут к ноде напрямую, иначе туннель в пути скрыл бы именно то, что они ищут.
+Туннельные профили поднимают временный embedded Xray и при ошибке добавляют TCP/ping evidence; для `Endpoint status`, `Exit IP`, `Download throughput` и `Latency profile` неудача сначала перепроверяется через резервный endpoint, что отличает недоступный endpoint от недоступной ноды. Транспортные профили Xray не запускают вообще — они идут к ноде напрямую, иначе туннель в пути скрыл бы именно то, что они ищут.
 
 Профили гейтятся по capability агента: `Endpoint status`, `Exit IP` и `Download throughput` требуют `diagnostic-v1`, остальные — `diagnostic-v2`. Агент старой сборки видит новые профили в списке неактивными, а controller отклоняет такой запрос с понятной ошибкой вместо невнятного configuration-сбоя. Пустой выбор сохраняет профиль, соответствующий `PROXY_CHECK_METHOD` controller-а.
 
-Remote observation никогда не меняет Availability, history, downtime, incidents, Telegram, speedtest или Remnawave. Session хранится только в памяти controller-а, экспортируется отдельным sanitized JSON и исчезает после restart. Automatic trigger и multi-agent запуск пока не подключены.
+Remote observation никогда не меняет Availability, history, downtime, incidents, speedtest/retry или Remnawave и не создаёт самостоятельный Telegram alert. Автоматический слой может только добавить вероятностную строку к speedtest-алерту, решение об отправке которого уже принято по локальному результату. Session хранится только в памяти controller-а, экспортируется отдельным sanitized JSON и исчезает после restart. Multi-agent запуск пока не подключён.
+
+Автоматика запускается только после фактически выполненного country fallback: резервы исчерпаны техническими ошибками либо финальная скорость всё ещё ниже Telegram threshold. Retry ставится в очередь до ожидания агента; одна healthy idle probe выбирается автоматически, а одинаковый `StableID` дедуплицируется на время cooldown. Вердикт «воспроизвелось» по низкой скорости выносится только когда весь интервал агентского замера ниже порога: агент отдаёт целые Mbps, и на границе округления результат считается невоспроизведённым, чтобы не поднимать ложную тревогу. В алерте называется тот агент, который подписал observation. Per-node и project maintenance, retired/offline-ноды и выключенные фоновые speed reports пропускаются. В `Settings → Agents` виден read-only runtime snapshot автоматики.
 
 На controller-е включите подсистему и задайте отдельный длинный secret между Caddy и Xray Checker:
 
 ```dotenv
 REMOTE_DIAGNOSTICS_ENABLED=true
+REMOTE_DIAGNOSTICS_AUTOMATION_ENABLED=true
+PROBE_AUTOMATION_COOLDOWN_MINUTES=30
+PROBE_AUTOMATION_ALERT_WAIT_SECONDS=90
+PROBE_AUTOMATION_MAX_CONCURRENT=2
 PROBE_TRUSTED_PROXY_SECRET=replace-with-output-of-openssl-rand-hex-32
 PROBE_AGENT_IMAGE=registry.example.com/xray-checker-probe-agent:1.0.0
 ```
+
+`PROBE_AUTOMATION_ALERT_WAIT_SECONDS=0` отключает ожидание: алерт уйдёт сразу с состоянием `проверка запущена`. Максимум — 300 секунд. Эти параметры задаются через env/CLI и применяются после restart; админка намеренно не персистит их.
 
 Один и тот же `PROBE_TRUSTED_PROXY_SECRET` передаётся `xray-checker` и `caddy`; актуальный [`Caddyfile.example`](Caddyfile.example) публикует только четыре `POST` endpoint: `/enroll`, `/heartbeat`, `/jobs/next` и `/observations`, добавляет proxy secret и передаёт фактически увиденный `{remote_host}`. Controller игнорирует произвольные forwarded IP headers без правильного proxy secret. При прямом подключении без reverse proxy оставьте secret пустым: тогда проверяется socket peer из `RemoteAddr`.
 
@@ -150,7 +158,7 @@ docker compose --env-file probe-agent.env -f docker-compose.agent.yml build
 docker compose --env-file probe-agent.env -f docker-compose.agent.yml up -d
 ```
 
-Шаблон не открывает inbound-порты, запускает container без root и capabilities, с read-only root filesystem, resource limits и именованным `probe_agent_identity` volume. Приватные identity/observation keys генерируются внутри агента и сохраняются с mode `0600`. Временный Xray config создаётся с mode `0600` внутри tmpfs `/run/xray-checker-agent` и удаляется после задания. Endpoint URLs принадлежат конфигурации агента (`PROBE_IP_CHECK_URL`, `PROBE_STATUS_CHECK_URL`, `PROBE_DOWNLOAD_URL`, `PROBE_DIRECT_CHECK_URL`); controller выдаёт только фиксированный profile ID и не может превратить job в произвольный URL fetch.
+Шаблон не открывает inbound-порты, запускает container без root и capabilities, с read-only root filesystem, resource limits и именованным `probe_agent_identity` volume. Приватные identity/observation keys генерируются внутри агента и сохраняются с mode `0600`. Временный Xray config создаётся с mode `0600` внутри tmpfs `/run/xray-checker-agent` и удаляется после задания. Endpoint URLs принадлежат конфигурации агента (`PROBE_IP_CHECK_URL`, `PROBE_STATUS_CHECK_URL`, `PROBE_DOWNLOAD_URL`, `PROBE_DIRECT_CHECK_URL`); controller выдаёт только фиксированный profile ID и не может превратить job в произвольный URL fetch. Проба `download` читает ровно `PROBE_DOWNLOAD_MIN_SIZE` байт и останавливается, поэтому это не нижняя граница, а сам объём передачи: по умолчанию 10 МБ с `100Mb.dat`, чего хватает и для осмысленной оценки скорости, и для того, чтобы оборвавшийся на середине endpoint попал в `download_incomplete`, а не зачёлся успешным. Меняя URL, проверяйте, что файл не меньше этого объёма.
 
 После обычного restart одноразовый token больше не нужен: agent продолжает heartbeat с той же identity и persisted sequence. Когда агент появился как `Connected`, значение `PROBE_ENROLLMENT_TOKEN` можно очистить или удалить из персонального Compose; `docker-compose.agent.yml` допускает пустое значение. Именованный `probe_agent_identity` volume при этом нужно сохранить. Если identity volume удалён, старый token не сработает — в админке нужно выполнить `Re-enroll`, остановить прежний stack и развернуть новый персональный Compose. Re-enroll Compose получает новый project/volume, поэтому не переиспользует отозванные ключи; старый volume можно удалить после успешного подключения. `Revoke` немедленно блокирует старую identity и её observation public key. После отзыва запись можно удалить из controller registry кнопкой `Delete`; удалённый Compose stack и identity volume при этом не удаляются автоматически.
 

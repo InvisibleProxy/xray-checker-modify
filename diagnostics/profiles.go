@@ -131,6 +131,8 @@ func AlternativeFor(id string) (string, bool) {
 		return ProfileIP, true
 	case ProfileIP:
 		return ProfileStatus, true
+	case ProfileDownload:
+		return ProfileStatus, true
 	case ProfileLatency:
 		return ProfileStatus, true
 	default:

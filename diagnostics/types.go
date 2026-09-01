@@ -3,7 +3,7 @@ package diagnostics
 import "time"
 
 const (
-	SessionSchemaVersion = 1
+	SessionSchemaVersion = 2
 	JobSchemaVersion     = 1
 	// Bumped to 2 for the selectable diagnostic profiles: throughput, latency
 	// series, stability, TLS and DNS evidence changed the signed payload.
@@ -17,6 +17,7 @@ const (
 	TriggerAutoProxyFailure     Trigger = "auto_proxy_failure"
 	TriggerAutoCheckEndpoint    Trigger = "auto_check_endpoint"
 	TriggerAutoAmbiguousFailure Trigger = "auto_ambiguous_failure"
+	TriggerAutoSpeedFallback    Trigger = "auto_speed_fallback"
 )
 
 func (t Trigger) Automatic() bool {
@@ -212,6 +213,24 @@ type LocalResultSnapshot struct {
 	Ping          CheckEvidence   `json:"ping"`
 }
 
+const (
+	AutomationKindSpeedFallback = "speed_fallback"
+	AutomationOutcomeTechnical  = "technical_error"
+	AutomationOutcomeLowSpeed   = "low_speed"
+)
+
+// AutomationContext records only the bounded facts that explain why the
+// controller created an automatic session. It intentionally excludes URLs and
+// raw transport errors from session state and export.
+type AutomationContext struct {
+	Kind             string  `json:"kind,omitempty"`
+	Outcome          string  `json:"outcome,omitempty"`
+	Source           string  `json:"source,omitempty"`
+	ThresholdMbps    float64 `json:"thresholdMbps,omitempty"`
+	ObservedMbps     float64 `json:"observedMbps,omitempty"`
+	FallbackAttempts int     `json:"fallbackAttempts,omitempty"`
+}
+
 type TestProfile struct {
 	// ID resolves to controller/agent-owned endpoint configuration. It is not a
 	// URL and therefore cannot turn a diagnostic job into an arbitrary fetch.
@@ -290,6 +309,7 @@ type DiagnosticSession struct {
 	ConfigGeneration      uint64                `json:"configGeneration"`
 	ConfigFingerprint     string                `json:"configFingerprint"`
 	LocalResultSnapshot   LocalResultSnapshot   `json:"localResultSnapshot"`
+	AutomationContext     AutomationContext     `json:"automationContext,omitempty"`
 	RequestedAgents       []string              `json:"requestedAgents"`
 	Jobs                  []DiagnosticJob       `json:"jobs"`
 	AgentObservations     []AcceptedObservation `json:"agentObservations"`
@@ -305,6 +325,7 @@ type CreateSessionRequest struct {
 	ConfigGeneration      uint64
 	ConfigFingerprint     string
 	LocalResultSnapshot   LocalResultSnapshot
+	AutomationContext     AutomationContext
 	RequestedAgents       []string
 	MaintenanceDiagnostic bool
 	ExpiresAt             time.Time

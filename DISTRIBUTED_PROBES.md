@@ -1,15 +1,15 @@
 # Remote Diagnostics через distributed probe-agent'ов
 
-> Статус: этап 1 реализует защищённый manual diagnostic workflow с одним агентом: lifecycle из админки, IP-bound enrollment, persistent Ed25519 identity, replay-safe control requests, outbound job polling, временный embedded Xray executor, подписанные observations и изолированное отображение результата в карточке ноды.
+> Статус: защищённый manual workflow реализован полностью; из этапа 2 реализован opt-in `auto_speed_fallback` с одним агентом, cooldown/concurrency и read-only обогащением уже разрешённого Telegram speed alert.
 
 ## Текущее состояние реализации
 
 Реализованы безопасный фундамент этапа 0 и control plane этапа 1:
 
-- versioned schemas v1 для diagnostic session, job и подписанного observation;
+- versioned session schema v2, job schema v1 и observation schema v2;
 - ограниченный in-memory `DiagnosticSessionManager` без persisted state;
 - binding observation по `SessionID`, `JobID`, nonce, `StableID`, generation, SHA-256 config fingerprint и server-owned test profile;
-- fail-closed signature verifier и готовая Ed25519-проверка без фиксации enrollment/key lifecycle;
+- fail-closed signature verifier и Ed25519-проверка с controller-bound enrollment/key lifecycle;
 - stale, old-generation, duplicate, replay и unknown-job rejection;
 - отдельный session export без execution proxy config, credentials, raw errors и произвольных URL;
 - тестовый запрет зависимостей `diagnostics/` от operational packages проекта.
@@ -21,12 +21,13 @@
 - отдельные `Dockerfile.agent` и `docker-compose.agent.yml` для Linux с outbound-only network model, read-only root filesystem, non-root UID, drop всех capabilities, resource limits и persistent identity volume.
 - manual session из раскрытой карточки active-ноды с выбором одного подключённого агента;
 - ephemeral credential-bearing assignment queue, не входящая в session export или backup;
-- fixed profile ID `default-ip`/`default-status`/`default-download`, agent-owned endpoint URLs и fingerprint validation;
+- семь fixed profile ID, agent-owned endpoint/profile parameters и fingerprint validation;
 - временный Xray config с mode `0600` внутри tmpfs, loopback-only SOCKS inbound, embedded Xray lifecycle и обязательное удаление после job;
 - proxy-check, TCP/ping evidence, direct-connectivity control, отдельная observation-подпись и generation/fingerprint recheck перед приёмом;
 - cancel, sanitized JSON export и вероятностная summary без operational side effects.
+- opt-in `auto_speed_fallback`, выбирающий одну healthy idle probe, с per-node cooldown, concurrency limit и bounded read-only alert enrichment.
 
-Manager diagnostic sessions связан только с отдельным manual admin workflow и agent endpoints. Он намеренно не подключён как consumer или writer к availability workflow: текущий код ничего не меняет в status/history/incidents/Telegram/Remnawave/speedtest. Automatic trigger, alternative endpoint и multi-agent session пока не реализованы.
+Manager diagnostic sessions связан с отдельным manual admin workflow, agent endpoints и узким automation coordinator-ом. Он не является writer-ом availability или speedtest workflow: текущий код ничего не меняет в status/history/incidents/retries/Remnawave/speedtest. Реализованы alternative endpoint и automatic trigger только для неразрешённого speedtest country fallback; multi-agent session и availability-trigger пока не реализованы.
 
 ## Основная идея
 
@@ -46,7 +47,7 @@ Remote Diagnostics должны помогать оператору понять
 2. Оператор либо controller создаёт отдельную диагностическую сессию.
 3. Один или несколько агентов повторяют сопоставимую проверку той же ноды из других сетевых условий.
 4. Controller показывает локальный и удалённые результаты рядом и формирует только вероятностные подсказки для анализа.
-5. Никакой remote result не изменяет status, history, incidents, Telegram или Remnawave.
+5. Никакой remote result не изменяет status, history, incidents, решение об отправке Telegram alert или Remnawave; допускается только вероятностная строка в уже разрешённом alert.
 
 Пример: локальная проверка ноды «Германия» завершилась `proxy_failure`. Если агент из другой сети получает ту же ошибку на той же стадии, становится менее вероятна проблема только локального ISP или маршрута controller-а. Если у агента всё работает, подозрение смещается в сторону локальной сети, региональной маршрутизации, ISP или DPI. Это сужает область поиска, но само по себе не доказывает конкретную причину.
 
@@ -85,7 +86,7 @@ Controller может автоматически создать диагност
 - открывать, изменять или закрывать node/mass incidents;
 - участвовать в массовой корреляции failure codes;
 - менять dashboard KPI или основные Prometheus availability metrics;
-- запускать, подавлять или закрывать Telegram alerts, reminders и retries;
+- запускать, подавлять или закрывать Telegram alerts, reminders и retries; observation может только обогатить текст уже разрешённого локальными правилами alert;
 - запускать speedtest либо отменять speed-confirmation retry;
 - создавать, изменять, подавлять или удалять Remnawave `announce`;
 - влиять на Remnawave confirmation counters, location state или recovery hysteresis;
@@ -108,33 +109,34 @@ Controller может автоматически создать диагност
 ## Поток выполнения
 
 ```text
-Authoritative local availability-check
-                  |
-                  v
-      proxy_failure / ambiguous error
-                  |
-            manual or automatic
-                  |
-                  v
-       DiagnosticSessionManager
-                  |
-        +---------+---------+
-        |                   |
-        v                   v
-  Probe-agent A       Probe-agent B
-        |                   |
-        +---------+---------+
-                  |
-          signed observations
-                  |
-                  v
-       comparison in Admin UI
-                  |
-                  X
-      no operational side effects
+ Authoritative local workflow
+ availability or speedtest fallback
+                 |
+                 v
+   local result and operational decision
+                 |
+        manual or eligible opt-in auto
+                 |
+                 v
+      DiagnosticSessionManager
+                 |
+       +---------+---------+
+       |                   |
+       v                   v
+ Probe-agent A       Probe-agent B (future auto)
+       |                   |
+       +---------+---------+
+                 |
+         signed observations
+                 |
+                 v
+ Admin UI / copy of an already allowed alert
+                 |
+                 X
+      no operational state writes
 ```
 
-Диагностика запускается асинхронно и не задерживает локальный availability workflow. Telegram, incidents и Remnawave продолжают работать только по существующим локальным правилам, не ожидая remote observations.
+Диагностика запускается асинхронно и не задерживает локальный availability/speedtest result или постановку confirmation retry. Incidents и Remnawave продолжают работать только по существующим локальным правилам. Уже разрешённый фоновый speed alert может bounded-время ждать observation исключительно для дополнения текста; timeout или любой agent outcome не отменяет отправку.
 
 ## Diagnostic session
 
@@ -162,6 +164,7 @@ State
 - `auto_proxy_failure` — controller увидел переход локальной ноды в `proxy_failure`;
 - `auto_check_endpoint` — controller хочет проверить вероятную проблему test endpoint;
 - `auto_ambiguous_failure` — локальной диагностики недостаточно для уверенной классификации.
+- `auto_speed_fallback` — speedtest действительно выполнил country fallback, но резервы исчерпались technical error либо финальная скорость осталась ниже threshold.
 
 Автоматический trigger только создаёт diagnostic session. Он не меняет исходный local result и не задерживает его публикацию.
 
@@ -185,7 +188,7 @@ State
 
 - одновременно разрешена одна активная auto-session на `StableID + trigger`;
 - повторный локальный результат прикрепляется к существующей сессии либо игнорируется до её завершения;
-- после auto-session действует configurable cooldown;
+- после auto-session действует configurable cooldown; отказ, при котором session так и не стартовала — нет свободного healthy-агента либо исчерпан concurrency limit — cooldown не занимает и повторяется на следующем прогоне;
 - manual session может обходить cooldown, но остаётся под global/per-agent concurrency limit;
 - session имеет deadline и не ждёт недоступного агента бесконечно;
 - controller ограничивает число нод и агентов в одном запуске.
@@ -370,7 +373,7 @@ Raw credentials, subscription URL и произвольный error text зап�
 - состояния `global_offline`, `global_proxy_failure` и `regional_degradation` как operational state;
 - distributed incident correlation;
 - remote results в Availability history;
-- Telegram notifications по agent observations;
+- самостоятельные Telegram notifications и решения об отправке/подавлении по agent observations;
 - изменение или подавление Remnawave `announce`;
 - distributed speedtest;
 - балансировка пользовательского трафика;
@@ -396,12 +399,13 @@ Metadata network condition используется только для выбо
 - Хранить sessions только в памяти.
 - Не менять local status, history, incidents, Telegram и Remnawave.
 
-### Этап 2. Automatic controller trigger
+### Этап 2. Automatic controller trigger (частично реализован)
 
-- Добавить opt-in запуск при переходе в `proxy_failure`.
-- Реализовать deduplication, cooldown, concurrency и deadline.
-- Добавить direct connectivity и alternative endpoint probes.
-- Automatic session остаётся полностью изолированной.
+- Реализован opt-in `auto_speed_fallback` после исчерпанных резервов или низкой fallback-скорости.
+- Реализованы per-`StableID` deduplication/cooldown, общий concurrency limit и bounded alert wait.
+- Реализованы direct connectivity и alternative endpoint probes; automatic download использует status как alternative.
+- Operational retry/alert decision выполняется до ожидания агента; automatic session остаётся полностью изолированной.
+- Opt-in запуск при переходе availability в `proxy_failure` остаётся отдельным следующим расширением.
 
 ### Этап 3. Несколько агентов и улучшение подсказок
 
@@ -415,10 +419,10 @@ Metadata network condition используется только для выбо
 Функция готова к использованию, когда автоматически проверено:
 
 1. Manual и automatic trigger создают отдельную diagnostic session.
-2. Automatic trigger не задерживает и не меняет локальный availability result.
+2. Automatic trigger не задерживает и не меняет локальный availability/speedtest result или постановку retry.
 3. Observation никогда не вызывает запись в nodearchive или Availability history.
 4. Завершение session не открывает и не закрывает incident.
-5. Ни success, ни failure агента не отправляют Telegram notification.
+5. Ни success, ни failure агента не создают и не подавляют Telegram notification; они могут только дополнить уже разрешённый speed alert.
 6. Agent result не запускает Remnawave reconcile и не меняет `announce`.
 7. Agent result не создаёт и не отменяет speedtest/retry.
 8. Один или несколько одинаковых remote results остаются observations, а не общим status.
@@ -434,10 +438,9 @@ Metadata network condition используется только для выбо
 - Нужно ли заменять короткий подписанный polling на long-held request либо stream после проверки реальной нагрузки.
 - Нужна ли дополнительная controller-подпись job поверх pinned TLS и identity-authenticated poll.
 - Следует ли заменить передаваемый single-node Xray JSON на отдельную минимальную versioned execution schema.
-- Default cooldown и максимальное число параллельных sessions.
 - Какие local failure codes включают automatic trigger кроме `proxy_failure`.
 - Набор direct connectivity и alternative endpoints.
 - Нужна ли отдельная persisted diagnostic history после проверки первой версии.
 - Как долго UI показывает completed/expired sessions.
 
-До принятия этих решений первая реализация должна оставаться in-memory и opt-in. Любое будущее предложение использовать agent observations в operational workflows является отдельным изменением архитектуры, а не естественным расширением Remote Diagnostics.
+До принятия этих решений реализация остаётся in-memory и opt-in. Любое будущее предложение использовать agent observations в operational workflows является отдельным изменением архитектуры, а не естественным расширением Remote Diagnostics.
