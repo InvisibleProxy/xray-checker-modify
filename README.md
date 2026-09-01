@@ -54,16 +54,20 @@ docker run --rm `
 ```powershell
 Copy-Item docker-compose.yaml.example docker-compose.yaml
 Copy-Item Caddyfile.example Caddyfile
+Copy-Item .env.example .env
 ```
 
 `Caddyfile` — локальная конфигурация и игнорируется Git. Версионируемый шаблон находится в `Caddyfile.example`, поэтому доменные или инфраструктурные правки не засоряют `git status`.
 
-Создайте `.env`:
+Отредактируйте `.env`: это единственный операторский файл с runtime-настройками основного stack-а. Сначала `xray-checker` читает несекретные совместимые defaults из версионируемого `xray-checker.defaults.env`, затем пользовательский `.env` переопределяет их. Поэтому добавление или изменение настройки приложения не требует правки Compose, а обновление старой установки не теряет прежние Compose-defaults. Сам `xray-checker.defaults.env` редактировать для конкретного сервера не нужно. Caddy получает из `.env` только явный allowlist `PUBLIC_DOMAIN`, `ACME_EMAIL` и `PROBE_TRUSTED_PROXY_SECRET`; Telegram, Remnawave и subscription-секреты в reverse proxy не передаются.
 
 ```dotenv
 SUBSCRIPTION_URL="https://example.com/subscription"
 # Для нескольких источников перечислите URL через запятую внутри кавычек:
 # SUBSCRIPTION_URL="https://one.example.com/subscription,https://two.example.com/subscription"
+WEB_PUBLIC=true
+WEB_SHOW_DETAILS=false
+METRICS_PROTECTED=true
 METRICS_USERNAME=admin
 METRICS_PASSWORD=replace-with-a-long-password
 PUBLIC_DOMAIN=status.example.com
@@ -157,6 +161,8 @@ cp probe-agent.env.example probe-agent.env
 docker compose --env-file probe-agent.env -f docker-compose.agent.yml build
 docker compose --env-file probe-agent.env -f docker-compose.agent.yml up -d
 ```
+
+`probe-agent.env` одновременно задаёт Compose-параметры локальной сборки/лимитов и передаётся агенту через `env_file`. Поэтому runtime-настройки агента также меняются только в env-файле; после изменения пересоздайте сервис через `docker compose --env-file probe-agent.env -f docker-compose.agent.yml up -d --force-recreate`.
 
 Шаблон не открывает inbound-порты, запускает container без root и capabilities, с read-only root filesystem, resource limits и именованным `probe_agent_identity` volume. Приватные identity/observation keys генерируются внутри агента и сохраняются с mode `0600`. Временный Xray config создаётся с mode `0600` внутри tmpfs `/run/xray-checker-agent` и удаляется после задания. Endpoint URLs принадлежат конфигурации агента (`PROBE_IP_CHECK_URL`, `PROBE_STATUS_CHECK_URL`, `PROBE_DOWNLOAD_URL`, `PROBE_DIRECT_CHECK_URL`); controller выдаёт только фиксированный profile ID и не может превратить job в произвольный URL fetch. Проба `download` читает ровно `PROBE_DOWNLOAD_MIN_SIZE` байт и останавливается, поэтому это не нижняя граница, а сам объём передачи: по умолчанию 10 МБ с `100Mb.dat`, чего хватает и для осмысленной оценки скорости, и для того, чтобы оборвавшийся на середине endpoint попал в `download_incomplete`, а не зачёлся успешным. Меняя URL, проверяйте, что файл не меньше этого объёма.
 

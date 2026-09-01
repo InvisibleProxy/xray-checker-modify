@@ -10,6 +10,8 @@ services:
     image: ${PROBE_AGENT_IMAGE:-xray-checker-probe-agent:local}
     restart: unless-stopped
     init: true
+    env_file:
+      - ./probe-agent.env
     user: "${PROBE_AGENT_UID_GID:-10001:10001}"
     read_only: true
     cap_drop:
@@ -20,27 +22,6 @@ services:
     mem_limit: ${PROBE_AGENT_MEMORY_LIMIT:-512m}
     cpus: ${PROBE_AGENT_CPU_LIMIT:-1.0}
     stop_grace_period: 15s
-    environment:
-      PROBE_AGENT_ID: ${PROBE_AGENT_ID:?set PROBE_AGENT_ID}
-      # Required only until the first successful enrollment. The persisted
-      # identity volume authenticates ordinary container restarts.
-      PROBE_ENROLLMENT_TOKEN: ${PROBE_ENROLLMENT_TOKEN:-}
-      PROBE_CONTROLLER_URL: ${PROBE_CONTROLLER_URL:?set PROBE_CONTROLLER_URL}
-      PROBE_CONTROLLER_IP: ${PROBE_CONTROLLER_IP:?set exact PROBE_CONTROLLER_IP}
-      PROBE_CONTROLLER_CA_FILE: ${PROBE_CONTROLLER_CA_FILE:-}
-      PROBE_IDENTITY_DIR: /var/lib/xray-checker-agent
-      PROBE_RUNTIME_DIR: /run/xray-checker-agent
-      PROBE_JOB_POLL_INTERVAL_SECONDS: ${PROBE_JOB_POLL_INTERVAL_SECONDS:-5}
-      PROBE_LATENCY_SAMPLES: ${PROBE_LATENCY_SAMPLES:-5}
-      PROBE_STABILITY_SECONDS: ${PROBE_STABILITY_SECONDS:-20}
-      PROBE_DNS_RESOLVER: ${PROBE_DNS_RESOLVER:-1.1.1.1:53}
-      PROBE_IP_CHECK_URL: ${PROBE_IP_CHECK_URL:-https://api.ipify.org?format=text}
-      PROBE_STATUS_CHECK_URL: ${PROBE_STATUS_CHECK_URL:-http://cp.cloudflare.com/generate_204}
-      PROBE_DOWNLOAD_URL: ${PROBE_DOWNLOAD_URL:-https://proof.ovh.net/files/100Mb.dat}
-      PROBE_DIRECT_CHECK_URL: ${PROBE_DIRECT_CHECK_URL:-https://api.ipify.org?format=text}
-      PROBE_PROXY_TIMEOUT_SECONDS: ${PROBE_PROXY_TIMEOUT_SECONDS:-30}
-      PROBE_DOWNLOAD_TIMEOUT_SECONDS: ${PROBE_DOWNLOAD_TIMEOUT_SECONDS:-60}
-      PROBE_DOWNLOAD_MIN_SIZE: ${PROBE_DOWNLOAD_MIN_SIZE:-10000000}
     volumes:
       - probe_agent_identity:/var/lib/xray-checker-agent
     tmpfs:
