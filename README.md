@@ -64,6 +64,7 @@ Copy-Item .env.example .env
 При обновлении существующей установки сначала сравните её `.env` с актуальным `.env.example` и перенесите недостающие параметры, не затирая реальные секреты. Особенно проверьте `WEB_PUBLIC`, `METRICS_PROTECTED`, `METRICS_USERNAME` и `PROXY_CHECK_METHOD`: раньше пример Compose подставлял их самостоятельно.
 
 ```dotenv
+CONTROLLER_IMAGE=ghcr.io/invisibleproxy/xray-checker-controller:main
 SUBSCRIPTION_URL="https://example.com/subscription"
 # Для нескольких источников перечислите URL через запятую внутри кавычек:
 # SUBSCRIPTION_URL="https://one.example.com/subscription,https://two.example.com/subscription"
@@ -76,12 +77,28 @@ PUBLIC_DOMAIN=status.example.com
 ACME_EMAIL=admin@example.com
 ```
 
+Controller image публикуется workflow-ом [`controller-image.yml`](.github/workflows/controller-image.yml) для `linux/amd64` и `linux/arm64`. Push в `main` создаёт теги `main` и `sha-<short>`, а тег `controller-vX.Y.Z` — `X.Y.Z` и `latest`. `:main` удобен для первого запуска, но в production после успешного workflow замените его в `.env` на напечатанный в summary immutable digest:
+
+```dotenv
+CONTROLLER_IMAGE=ghcr.io/invisibleproxy/xray-checker-controller@sha256:<digest>
+```
+
 Запуск:
 
 ```powershell
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 docker compose logs -f xray-checker
 ```
+
+Для обновления только controller-а не пересобирайте проект и не останавливайте весь stack:
+
+```powershell
+docker compose pull xray-checker
+docker compose up -d --no-deps --force-recreate xray-checker
+```
+
+Локальная сборка из checkout-а остаётся отдельным сценарием из раздела «Локально через Docker»; build-аргумент `ENABLE_UPX` задаётся непосредственно команде `docker build` и не относится к production `.env`.
 
 В примере Caddy публикует только status page и публичные endpoints. Админка, метрики и приватный API снаружи возвращают `404` и остаются доступны через локальный порт `127.0.0.1:2112`.
 
