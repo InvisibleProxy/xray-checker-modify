@@ -138,6 +138,27 @@ func (s *Sweeper) Run(ctx context.Context) {
 
 // SweepOnce runs one full pass and reports what it managed to observe.
 func (s *Sweeper) SweepOnce(ctx context.Context) Summary {
+	return s.sweep(ctx, "")
+}
+
+// SweepNode re-asks every agent about a single node.
+//
+// It exists because confirming or clearing one finding should not cost a full
+// pass over every node from every vantage point. It runs the same job, with the
+// same trigger and the same profile, so its result is an ordinary observation
+// rather than a second class of evidence — and because the streak only advances
+// when the checker's own sample has moved on, repeating it cannot manufacture a
+// confirmation.
+func (s *Sweeper) SweepNode(ctx context.Context, stableID string) Summary {
+	stableID = strings.TrimSpace(stableID)
+	if stableID == "" {
+		return Summary{}
+	}
+	return s.sweep(ctx, stableID)
+}
+
+// sweep runs a pass over every node, or over one when stableID is set.
+func (s *Sweeper) sweep(ctx context.Context, stableID string) Summary {
 	if !s.Enabled() {
 		return Summary{}
 	}
@@ -154,22 +175,42 @@ func (s *Sweeper) SweepOnce(ctx context.Context) Summary {
 		s.mu.Unlock()
 	}()
 
-	targets := s.targets()
+	full := stableID == ""
+	all := s.targets()
 	agents := s.eligibleAgents()
-	names := make(map[string]string, len(targets))
-	for _, target := range targets {
-		names[target.StableID] = target.Name
+	targets := all
+	if !full {
+		targets = nil
+		for _, target := range all {
+			if target.StableID == stableID {
+				targets = append(targets, target)
+			}
+		}
+		// A node that is gone, paused, or not monitored has nothing to compare
+		// an agent's answer against, so there is no pass to run.
+		if len(targets) == 0 {
+			return Summary{Skipped: true}
+		}
 	}
-	known := make(map[string]bool, len(agents))
-	for _, agent := range agents {
-		known[agent.AgentID] = true
+
+	if full {
+		names := make(map[string]string, len(all))
+		for _, target := range all {
+			names[target.StableID] = target.Name
+		}
+		known := make(map[string]bool, len(agents))
+		for _, agent := range agents {
+			known[agent.AgentID] = true
+		}
+		// Retaining before the pass, not after, keeps a node deleted mid-sweep
+		// from being re-added by a result that is already meaningless. Only a
+		// full pass may do this: a single-node pass knows nothing about the
+		// other rows and would delete every one of them.
+		s.matrix.Retain(names, known)
 	}
-	// Retaining before the pass, not after, keeps a node deleted mid-sweep from
-	// being re-added by a result that is already meaningless.
-	s.matrix.Retain(names, known)
 	if len(targets) == 0 || len(agents) == 0 {
 		empty := Summary{Agents: len(agents), Nodes: len(targets)}
-		empty.SaveError = s.finish(false)
+		empty.SaveError = s.finish(full, false)
 		s.report(empty)
 		return empty
 	}
@@ -201,8 +242,9 @@ func (s *Sweeper) SweepOnce(ctx context.Context) Summary {
 		}
 	}
 	completed := ctx.Err() == nil
-	summary.SaveError = s.finish(completed)
+	summary.SaveError = s.finish(full, completed)
 	summary.Completed = completed
+	summary.Node = stableID
 	s.report(summary)
 	return summary
 }
@@ -216,11 +258,17 @@ func (s *Sweeper) report(summary Summary) {
 // finish records the pass and persists the matrix. A failed save is reported
 // but never aborts anything: the matrix is a cache of observations that the
 // next sweep rebuilds, so the only cost is losing one pass across a restart.
-func (s *Sweeper) finish(completed bool) error {
-	s.matrix.MarkSweep(s.config.Now().UTC())
-	s.mu.Lock()
-	s.lastDone = completed
-	s.mu.Unlock()
+//
+// Only a full pass moves the "last sweep" marker. A single-node recheck says
+// nothing about the rest of the matrix, and letting it claim otherwise would
+// make stale rows read as freshly confirmed.
+func (s *Sweeper) finish(full, completed bool) error {
+	if full {
+		s.matrix.MarkSweep(s.config.Now().UTC())
+		s.mu.Lock()
+		s.lastDone = completed
+		s.mu.Unlock()
+	}
 	return s.matrix.Save()
 }
 
@@ -345,6 +393,10 @@ func hasCapability(values []string, wanted string) bool {
 // Summary is what one pass managed to do. It exists so the caller can log a
 // pass in one line instead of per cell.
 type Summary struct {
+	// Node names the single node a targeted recheck covered, and is empty for a
+	// full pass. Without it a one-line log cannot say whether "1 node" means the
+	// matrix has one node or that only one was rechecked.
+	Node      string
 	Agents    int
 	Nodes     int
 	Recorded  int

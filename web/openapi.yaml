@@ -1221,8 +1221,21 @@ paths:
       summary: Run a reachability sweep now
       description: >-
         Starts one pass in the background and returns the current snapshot with sweeping set. A request made
-        while a pass is already running is ignored rather than queued.
+        while a pass is already running is ignored rather than queued. With stableId the pass covers only that
+        node, which is how one finding is confirmed or cleared without asking every agent about every node;
+        repeating it cannot manufacture a confirmation, because the streak only advances once the checker's own
+        result has been refreshed. Manual diagnostic sessions never write to the matrix — use this instead.
       tags: [Admin]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                stableId:
+                  type: string
+                  description: Recheck only this node. Omit or leave empty to sweep everything.
       responses:
         '200':
           description: Snapshot taken as the sweep was started

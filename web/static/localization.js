@@ -320,6 +320,8 @@
     "Starting a sweep": "Запускаю опрос",
     "Sweep started; every agent is being asked about every node": "Опрос запущен; каждый агент опрашивается по каждой ноде",
     "Reachability sweep is disabled": "Опрос достижимости отключён",
+    "Recheck": "Перепроверить", "Rechecking one node": "Перепроверяю одну ноду",
+    "Recheck started; every agent is being asked about this node": "Перепроверка запущена; каждый агент опрашивается по этой ноде",
     "agent returned no observation": "агент не вернул наблюдение",
     "agent lost its own connectivity during the probe": "агент потерял собственную связь во время проверки",
     "controller had no recent result to compare": "у контроллера не было свежего результата для сравнения",

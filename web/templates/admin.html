@@ -2630,6 +2630,7 @@
                   <th>Problem</th>
                   <th>Evidence</th>
                   <th>Since</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody id="reachability-findings"></tbody>
@@ -6614,8 +6615,9 @@
             <td><span class="${finding.confirmed ? "error" : "warn"}">${escapeHtml(tr("Cannot reach a node that is up elsewhere"))}</span><div class="muted">${escapeHtml(finding.confirmed ? tr("Confirmed") : tr("Seen once, not confirmed"))}</div></td>
             <td>${escapeHtml(reachabilityEvidence(finding).join(" · "))}</td>
             <td>${escapeHtml(formatTime(finding.since) || "n/a")}</td>
+            <td><button class="secondary reachability-recheck" type="button" data-stable-id="${escapeHtml(finding.stableId)}">${escapeHtml(tr("Recheck"))}</button></td>
           </tr>`;
-        }).join("") || `<tr><td colspan="5" class="muted">${escapeHtml(tr("Every vantage point agrees"))}</td></tr>`;
+        }).join("") || `<tr><td colspan="6" class="muted">${escapeHtml(tr("Every vantage point agrees"))}</td></tr>`;
 
         const confirmedCount = findings.filter((finding) => finding.confirmed).length;
         $("reachability-findings-state").textContent = `${confirmedCount} ${tr("confirmed")} · ${findings.length - confirmedCount} ${tr("provisional")}`;
@@ -6627,7 +6629,8 @@
         $("reachability-matrix-body").innerHTML = nodes.map((node) => {
           const cells = new Map((node.cells || []).map((cell) => [cell.agentId, cell]));
           return `<tr>
-            <td><strong>${escapeHtml(node.name || node.stableId)}</strong></td>
+            <td><strong>${escapeHtml(node.name || node.stableId)}</strong>
+              <button class="secondary reachability-recheck" type="button" data-stable-id="${escapeHtml(node.stableId)}">${escapeHtml(tr("Recheck"))}</button></td>
             ${localCellHtml(node)}
             ${agents.map((agent) => reachabilityCellHtml(cells.get(agent.agentId))).join("")}
           </tr>`;
@@ -6665,13 +6668,21 @@
         }
       }
 
-      async function sweepReachability() {
-        $("reachability-state").textContent = "Starting a sweep";
+      // stableId narrows the pass to one node, which is how a single finding is
+      // confirmed or cleared without asking every agent about every node.
+      async function sweepReachability(stableId) {
+        const node = (stableId || "").trim();
+        $("reachability-state").textContent = node ? "Rechecking one node" : "Starting a sweep";
         $("reachability-state").className = "table-meta";
         try {
-          state.reachability = await request("/reachability", { method: "POST" });
+          state.reachability = await request("/reachability", {
+            method: "POST",
+            body: JSON.stringify(node ? { stableId: node } : {}),
+          });
           renderReachability();
-          $("reachability-state").textContent = "Sweep started; every agent is being asked about every node";
+          $("reachability-state").textContent = node
+            ? "Recheck started; every agent is being asked about this node"
+            : "Sweep started; every agent is being asked about every node";
           $("reachability-state").className = "ok";
           // A full pass visits every node from every agent, so the result lands
           // well after this request returns. Poll until the sweep clears rather
@@ -7654,7 +7665,13 @@
       $("tab-incidents").addEventListener("click", () => switchTab("incidents"));
       $("tab-reachability").addEventListener("click", () => switchTab("reachability"));
       $("reachability-refresh").addEventListener("click", loadReachability);
-      $("reachability-sweep").addEventListener("click", sweepReachability);
+      $("reachability-sweep").addEventListener("click", () => sweepReachability());
+      // Delegated: both tables are re-rendered on every poll, so a listener
+      // bound to a button would not survive the next refresh.
+      $("reachability-view").addEventListener("click", (event) => {
+        const button = event.target.closest(".reachability-recheck");
+        if (button) sweepReachability(button.dataset.stableId);
+      });
       $("tab-remnawave").addEventListener("click", () => switchTab("remnawave"));
       $("tab-history").addEventListener("click", () => switchTab("history"));
       $("tab-settings").addEventListener("click", () => switchTab("settings"));

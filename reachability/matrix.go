@@ -262,7 +262,19 @@ func (m *Matrix) Record(stableID string, cell Cell) Cell {
 	}
 	if previous, exists := row[cell.AgentID]; exists && previous.Verdict == cell.Verdict && !previous.Since.IsZero() {
 		cell.Since = previous.Since
-		cell.Streak = previous.Streak + 1
+		// The streak counts independent observations, not repeated ones. Two
+		// observations compared against the same local sample are one piece of
+		// evidence read twice, and the streak exists precisely to outlast a
+		// stale local result — re-reading that same stale result cannot do it.
+		//
+		// This is also what makes an operator's targeted recheck safe: pressing
+		// it repeatedly cannot confirm a finding that the periodic sweep would
+		// not have confirmed on its own.
+		if cell.LocalCheckedAt.After(previous.LocalCheckedAt) {
+			cell.Streak = previous.Streak + 1
+		} else {
+			cell.Streak = previous.Streak
+		}
 	} else {
 		cell.Since = cell.CheckedAt
 		cell.Streak = 1

@@ -11,17 +11,19 @@ import (
 func TestRecordKeepsSinceAndCountsTheStreakWhileTheVerdictHolds(t *testing.T) {
 	matrix := NewMatrix("")
 	first := matrix.Record("node-1", Cell{
-		AgentID:   "agent-1",
-		Verdict:   VerdictAgentOnlyFailure,
-		CheckedAt: time.Unix(1000, 0).UTC(),
+		AgentID:        "agent-1",
+		Verdict:        VerdictAgentOnlyFailure,
+		CheckedAt:      time.Unix(1000, 0).UTC(),
+		LocalCheckedAt: time.Unix(900, 0).UTC(),
 	})
 	if !first.Since.Equal(time.Unix(1000, 0).UTC()) || first.Streak != 1 {
 		t.Fatalf("first record: since = %v streak = %d", first.Since, first.Streak)
 	}
 	second := matrix.Record("node-1", Cell{
-		AgentID:   "agent-1",
-		Verdict:   VerdictAgentOnlyFailure,
-		CheckedAt: time.Unix(2000, 0).UTC(),
+		AgentID:        "agent-1",
+		Verdict:        VerdictAgentOnlyFailure,
+		CheckedAt:      time.Unix(2000, 0).UTC(),
+		LocalCheckedAt: time.Unix(1900, 0).UTC(),
 	})
 	if !second.Since.Equal(time.Unix(1000, 0).UTC()) {
 		t.Fatalf("Since = %v, want the first observation of this verdict", second.Since)
@@ -104,6 +106,37 @@ func agentBlind(agentID string) Cell {
 		AgentID: agentID, Verdict: VerdictAgentOnlyFailure,
 		AgentStatus: diagnostics.ProbeStatusOffline, LocalStatus: diagnostics.ProbeStatusOnline,
 		FailureCode: "tcp_timeout", CheckedAt: time.Unix(1000, 0).UTC(),
+		LocalCheckedAt: time.Unix(900, 0).UTC(),
+	}
+}
+
+// The streak is meant to outlast a stale local result, so it may only advance
+// when the checker's own sample has moved on. Otherwise a targeted recheck,
+// pressed twice in a row, would confirm an artefact the periodic sweep would
+// have thrown away.
+func TestTheStreakOnlyAdvancesWhenTheLocalSampleDoes(t *testing.T) {
+	matrix := NewMatrix("")
+	first := agentBlind("agent-1")
+	matrix.Record("node-1", first)
+
+	// A recheck moments later: fresh agent result, same local sample.
+	repeat := first
+	repeat.CheckedAt = time.Unix(1010, 0).UTC()
+	held := matrix.Record("node-1", repeat)
+	if held.Streak != 1 || held.Confirmed() {
+		t.Fatalf("streak = %d confirmed = %v, want the streak held at 1", held.Streak, held.Confirmed())
+	}
+
+	// The checker re-checks, and now the observation is independent.
+	independent := first
+	independent.CheckedAt = time.Unix(2000, 0).UTC()
+	independent.LocalCheckedAt = time.Unix(1900, 0).UTC()
+	advanced := matrix.Record("node-1", independent)
+	if advanced.Streak != 2 {
+		t.Fatalf("streak = %d, want 2 once the local sample advanced", advanced.Streak)
+	}
+	if !advanced.Since.Equal(time.Unix(1000, 0).UTC()) {
+		t.Fatalf("since = %v, want the first observation of this verdict", advanced.Since)
 	}
 }
 
@@ -219,9 +252,10 @@ func TestFindingsListConfirmedFirstThenNewest(t *testing.T) {
 	matrix.Record("node-1", up("agent-1"))
 	matrix.Record("node-2", agentBlind("agent-1"))
 	matrix.Record("node-3", agentBlind("agent-2"))
-	// A second sweep confirms node-3 only.
+	// A second sweep, against a local sample that has moved on, confirms node-3.
 	third := agentBlind("agent-2")
 	third.CheckedAt = time.Unix(5000, 0).UTC()
+	third.LocalCheckedAt = time.Unix(4900, 0).UTC()
 	matrix.Record("node-3", third)
 
 	found := matrix.Findings()

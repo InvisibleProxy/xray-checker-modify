@@ -24,15 +24,28 @@ type fakeController struct {
 	canceled []string
 	sessions map[string]diagnostics.DiagnosticSession
 	seq      int
+	// localCheckedAt advances per sweep the way a real checker's own result
+	// does. The streak only counts observations against a local sample that has
+	// moved on, so a fake that froze it would never confirm anything.
+	localCheckedAt time.Time
 }
 
 func newFakeController() *fakeController {
 	return &fakeController{
-		statuses: make(map[string]diagnostics.ProbeStatus),
-		local:    diagnostics.ProbeStatusOnline,
-		failFor:  make(map[string]error),
-		sessions: make(map[string]diagnostics.DiagnosticSession),
+		statuses:       make(map[string]diagnostics.ProbeStatus),
+		local:          diagnostics.ProbeStatusOnline,
+		failFor:        make(map[string]error),
+		sessions:       make(map[string]diagnostics.DiagnosticSession),
+		localCheckedAt: time.Unix(1000, 0).UTC(),
 	}
+}
+
+// advanceLocalSample stands in for the checker running its own availability
+// pass between two sweeps.
+func (f *fakeController) advanceLocalSample() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.localCheckedAt = f.localCheckedAt.Add(time.Minute)
 }
 
 func (f *fakeController) Enabled() bool { return true }
@@ -69,7 +82,7 @@ func (f *fakeController) CreateSweep(request remoteprobe.CreateSweepRequest) (re
 		SessionID:           sessionID,
 		StableID:            request.StableID,
 		Trigger:             diagnostics.TriggerReachabilitySweep,
-		LocalResultSnapshot: diagnostics.LocalResultSnapshot{Status: f.local, CheckedAt: time.Unix(1000, 0).UTC()},
+		LocalResultSnapshot: diagnostics.LocalResultSnapshot{Status: f.local, CheckedAt: f.localCheckedAt},
 		AgentObservations:   observations,
 		State:               state,
 	}
@@ -170,10 +183,17 @@ func TestSweepOnceRecordsTheDisagreeingAgentOnly(t *testing.T) {
 	if summary.Confirmed != 0 {
 		t.Fatalf("confirmed = %d, want nothing confirmed on the first pass", summary.Confirmed)
 	}
-	// The second pass repeats the disagreement, which is what makes it a finding.
+	// A second pass against the same local sample is the same evidence read
+	// twice, so it must not confirm anything.
+	if repeat := sweeper.SweepOnce(context.Background()); repeat.Confirmed != 0 {
+		t.Fatalf("confirmed = %d against an unchanged local sample, want 0", repeat.Confirmed)
+	}
+	// Once the checker has produced a fresh result, the repeat is independent
+	// evidence and the finding is confirmed.
+	controller.advanceLocalSample()
 	second := sweeper.SweepOnce(context.Background())
 	if second.Confirmed != 1 {
-		t.Fatalf("confirmed = %d after a repeat, want 1", second.Confirmed)
+		t.Fatalf("confirmed = %d after an independent repeat, want 1", second.Confirmed)
 	}
 	if view := sweeper.Snapshot(); view.Divergent != 1 {
 		t.Fatalf("view divergent = %d, want the confirmed finding", view.Divergent)
@@ -348,5 +368,96 @@ func TestNewSweeperDefaultsToTheStatusProfile(t *testing.T) {
 	}
 	if sweeper.config.ProfileID != diagnostics.ProfileStatus {
 		t.Fatalf("profile = %q, want the status probe every agent supports", sweeper.config.ProfileID)
+	}
+}
+
+// Confirming or clearing one finding must not cost a full pass over every node
+// from every vantage point.
+func TestSweepNodeTouchesOnlyThatNode(t *testing.T) {
+	controller := newFakeController()
+	agents := fakeAgents{agents: []probeagent.AgentSnapshot{healthyAgent("agent-1"), healthyAgent("agent-2")}}
+	targets := []Target{{StableID: "node-1"}, {StableID: "node-2"}, {StableID: "node-3"}}
+	matrix := NewMatrix("")
+	sweeper := newTestSweeper(t, controller, agents, targets, matrix)
+	sweeper.SweepOnce(context.Background())
+
+	controller.mu.Lock()
+	controller.created = nil
+	controller.mu.Unlock()
+
+	summary := sweeper.SweepNode(context.Background(), "node-2")
+	if summary.Recorded != 2 || summary.Node != "node-2" {
+		t.Fatalf("summary = %+v, want both agents asked about node-2 only", summary)
+	}
+	controller.mu.Lock()
+	created := append([]remoteprobe.CreateSweepRequest(nil), controller.created...)
+	controller.mu.Unlock()
+	for _, request := range created {
+		if request.StableID != "node-2" {
+			t.Fatalf("recheck created a job for %q, want node-2 only", request.StableID)
+		}
+	}
+	// The other rows must survive: a single-node pass knows nothing about them.
+	if rows := matrix.Rows(); len(rows) != 3 {
+		t.Fatalf("rows = %d, want the whole matrix kept", len(rows))
+	}
+}
+
+// A recheck says nothing about the rest of the matrix, so it must not claim the
+// whole thing was just swept.
+func TestSweepNodeDoesNotMoveTheLastSweepMarker(t *testing.T) {
+	controller := newFakeController()
+	agents := fakeAgents{agents: []probeagent.AgentSnapshot{healthyAgent("agent-1")}}
+	matrix := NewMatrix("")
+	sweeper := newTestSweeper(t, controller, agents, []Target{{StableID: "node-1"}}, matrix)
+	sweeper.SweepOnce(context.Background())
+	marker := matrix.LastSweepAt()
+	if marker.IsZero() {
+		t.Fatal("a full pass must record when it ran")
+	}
+
+	sweeper.SweepNode(context.Background(), "node-1")
+	if !matrix.LastSweepAt().Equal(marker) {
+		t.Fatalf("last sweep = %v, want it left at %v", matrix.LastSweepAt(), marker)
+	}
+}
+
+func TestSweepNodeSkipsANodeItCannotCompare(t *testing.T) {
+	controller := newFakeController()
+	agents := fakeAgents{agents: []probeagent.AgentSnapshot{healthyAgent("agent-1")}}
+	sweeper := newTestSweeper(t, controller, agents, []Target{{StableID: "node-1"}}, NewMatrix(""))
+
+	// Not monitored, paused, or already gone: nothing to ask about.
+	summary := sweeper.SweepNode(context.Background(), "node-missing")
+	if !summary.Skipped || summary.Recorded != 0 {
+		t.Fatalf("summary = %+v, want a skipped recheck", summary)
+	}
+	if created, _, _ := controller.counts(); created != 0 {
+		t.Fatalf("created = %d jobs for an unknown node, want none", created)
+	}
+	if summary := sweeper.SweepNode(context.Background(), "  "); summary.Recorded != 0 {
+		t.Fatalf("summary = %+v, want an empty node id to do nothing", summary)
+	}
+}
+
+// Repeating a recheck must not manufacture a confirmation the periodic sweep
+// would not have produced.
+func TestRepeatedRechecksCannotConfirmOnTheirOwn(t *testing.T) {
+	controller := newFakeController()
+	controller.local = diagnostics.ProbeStatusOnline
+	controller.statuses["agent-1"] = diagnostics.ProbeStatusOffline
+	agents := fakeAgents{agents: []probeagent.AgentSnapshot{healthyAgent("agent-1")}}
+	matrix := NewMatrix("")
+	sweeper := newTestSweeper(t, controller, agents, []Target{{StableID: "node-1"}}, matrix)
+	sweeper.SweepOnce(context.Background())
+
+	for i := 0; i < 5; i++ {
+		if summary := sweeper.SweepNode(context.Background(), "node-1"); summary.Confirmed != 0 {
+			t.Fatalf("recheck %d confirmed a finding against an unchanged local sample", i+1)
+		}
+	}
+	controller.advanceLocalSample()
+	if summary := sweeper.SweepNode(context.Background(), "node-1"); summary.Confirmed != 1 {
+		t.Fatalf("confirmed = %d once the local sample advanced, want 1", summary.Confirmed)
 	}
 }
