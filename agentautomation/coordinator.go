@@ -340,6 +340,10 @@ func (c *Coordinator) annotation(handle Handle) speedtest.AgentDiagnostic {
 
 func (c *Coordinator) pruneLocked(now time.Time) {
 	for stableID, current := range c.entries {
+		if c.abandonedLocked(current.handle) {
+			delete(c.entries, stableID)
+			continue
+		}
 		if now.Sub(current.handle.StartedAt) < c.config.Cooldown {
 			continue
 		}
@@ -350,6 +354,35 @@ func (c *Coordinator) pruneLocked(now time.Time) {
 		}
 		delete(c.entries, stableID)
 	}
+}
+
+// abandonedLocked reports a session that reached a terminal state without a
+// single observation, and releases its cooldown early.
+//
+// The cooldown exists to stop a diagnostic being repeated while its evidence is
+// still fresh. A session that collected nothing has no evidence, so holding the
+// node for the full cooldown buys silence and no information. That happens for
+// real: an agent is chosen while it still looks connected — liveness is a
+// freshness window, so "connected" always means "was answering a moment ago" —
+// and then never claims the job, which expires. This is the same reasoning that
+// keeps a transient refusal in startSpeed from occupying the cooldown; without
+// it, the two paths disagree about the same situation.
+//
+// An unreliable observation is deliberately not abandoned. It answered: the
+// alert names the agent and says its own connectivity control failed, and
+// repeating it would ask the same broken agent the same question.
+func (c *Coordinator) abandonedLocked(handle Handle) bool {
+	if handle.SessionID == "" {
+		return false
+	}
+	view, ok := c.controller.Session(handle.SessionID)
+	if !ok {
+		// The session has aged out of the manager, so whether it ever answered
+		// is no longer knowable. Fall back to the cooldown rather than guessing
+		// in the direction that repeats work.
+		return false
+	}
+	return view.Session.State.Terminal() && len(view.Session.AgentObservations) == 0
 }
 
 func (c *Coordinator) activeLocked() int {

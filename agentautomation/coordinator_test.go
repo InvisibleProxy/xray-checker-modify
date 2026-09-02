@@ -42,6 +42,18 @@ func (f *fakeSessionController) Session(sessionID string) (remoteprobe.SessionVi
 	return view, ok
 }
 
+// expire drives a session to a terminal state with whatever the agent managed to
+// return, which is nothing when it never claimed the job.
+func (f *fakeSessionController) expire(sessionID string, observations []diagnostics.AcceptedObservation) {
+	view, ok := f.views[sessionID]
+	if !ok {
+		return
+	}
+	view.Session.State = diagnostics.SessionStateExpired
+	view.Session.AgentObservations = observations
+	f.views[sessionID] = view
+}
+
 type fakeAgentSource struct{}
 
 func (fakeAgentSource) Agent(agentID string) (probeagent.AgentSnapshot, bool) {
@@ -227,5 +239,119 @@ func TestAgentThroughputAtTheThresholdBoundaryIsNotCalledReproduced(t *testing.T
 				t.Errorf("AgentID = %q, want the agent that signed the observation", annotation.AgentID)
 			}
 		})
+	}
+}
+
+// An agent is selected while it still looks connected — liveness is a freshness
+// window, so "connected" means "was answering a moment ago". If it has already
+// gone away it never claims the job, the session expires with nothing in it, and
+// holding the cooldown would silence the node for half an hour over a diagnostic
+// that never happened.
+func TestASessionThatCollectedNothingReleasesTheCooldown(t *testing.T) {
+	controller := &fakeSessionController{enabled: true}
+	now := time.Date(2026, 9, 1, 1, 2, 3, 0, time.UTC)
+	coordinator, err := New(Config{
+		Enabled: true, Cooldown: 30 * time.Minute, AlertWait: time.Second, MaxConcurrent: 2,
+		Now: func() time.Time { return now },
+	}, controller, fakeAgentSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{
+		{StableID: "node-one", Error: "context deadline exceeded", FallbackAttempted: true, FallbackAttempts: 2, FallbackExhausted: true},
+	}}
+	if got := coordinator.StartSpeedDiagnostics(report, 10)["node-one"].SessionID; got == "" {
+		t.Fatal("the first attempt did not create a session")
+	}
+
+	// The agent never claimed the job and it expired without an observation.
+	controller.expire("diag-one", nil)
+
+	if got := coordinator.StartSpeedDiagnostics(report, 10)["node-one"].SessionID; got == "" {
+		t.Fatal("the retry was suppressed by a cooldown an empty session did not earn")
+	}
+	if len(controller.requests) != 2 {
+		t.Fatalf("automatic creates = %d, want the empty session to be retried", len(controller.requests))
+	}
+}
+
+// A session that did answer keeps its cooldown: repeating it would ask the same
+// question while its evidence is still fresh.
+func TestASessionThatAnsweredKeepsItsCooldown(t *testing.T) {
+	controller := &fakeSessionController{enabled: true}
+	now := time.Date(2026, 9, 1, 1, 2, 3, 0, time.UTC)
+	coordinator, err := New(Config{
+		Enabled: true, Cooldown: 30 * time.Minute, AlertWait: time.Second, MaxConcurrent: 2,
+		Now: func() time.Time { return now },
+	}, controller, fakeAgentSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{
+		{StableID: "node-one", Error: "context deadline exceeded", FallbackAttempted: true, FallbackAttempts: 2, FallbackExhausted: true},
+	}}
+	coordinator.StartSpeedDiagnostics(report, 10)
+
+	controller.expire("diag-one", []diagnostics.AcceptedObservation{{
+		Observation: diagnostics.Observation{AgentID: "agent-one", Status: diagnostics.ProbeStatusOffline},
+		Reliable:    true,
+	}})
+
+	coordinator.StartSpeedDiagnostics(report, 10)
+	if len(controller.requests) != 1 {
+		t.Fatalf("automatic creates = %d, want the answered session to hold its cooldown", len(controller.requests))
+	}
+}
+
+// An agent whose own connectivity control failed still answered, and naming it
+// in the alert is useful. Repeating it would ask the same broken agent again.
+func TestAnUnreliableAnswerStillHoldsTheCooldown(t *testing.T) {
+	controller := &fakeSessionController{enabled: true}
+	now := time.Date(2026, 9, 1, 1, 2, 3, 0, time.UTC)
+	coordinator, err := New(Config{
+		Enabled: true, Cooldown: 30 * time.Minute, AlertWait: time.Second, MaxConcurrent: 2,
+		Now: func() time.Time { return now },
+	}, controller, fakeAgentSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{
+		{StableID: "node-one", Error: "context deadline exceeded", FallbackAttempted: true, FallbackAttempts: 2, FallbackExhausted: true},
+	}}
+	coordinator.StartSpeedDiagnostics(report, 10)
+
+	controller.expire("diag-one", []diagnostics.AcceptedObservation{{
+		Observation: diagnostics.Observation{AgentID: "agent-one", Status: diagnostics.ProbeStatusOffline},
+		Reliable:    false,
+	}})
+
+	coordinator.StartSpeedDiagnostics(report, 10)
+	if len(controller.requests) != 1 {
+		t.Fatalf("automatic creates = %d, want an unreliable answer to hold its cooldown", len(controller.requests))
+	}
+}
+
+// A session the manager has already discarded says nothing about whether it
+// answered, so the cooldown stays rather than guessing towards repeating work.
+func TestAForgottenSessionKeepsItsCooldown(t *testing.T) {
+	controller := &fakeSessionController{enabled: true}
+	now := time.Date(2026, 9, 1, 1, 2, 3, 0, time.UTC)
+	coordinator, err := New(Config{
+		Enabled: true, Cooldown: 30 * time.Minute, AlertWait: time.Second, MaxConcurrent: 2,
+		Now: func() time.Time { return now },
+	}, controller, fakeAgentSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{
+		{StableID: "node-one", Error: "context deadline exceeded", FallbackAttempted: true, FallbackAttempts: 2, FallbackExhausted: true},
+	}}
+	coordinator.StartSpeedDiagnostics(report, 10)
+
+	delete(controller.views, "diag-one")
+
+	coordinator.StartSpeedDiagnostics(report, 10)
+	if len(controller.requests) != 1 {
+		t.Fatalf("automatic creates = %d, want a forgotten session to hold its cooldown", len(controller.requests))
 	}
 }
