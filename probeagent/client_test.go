@@ -184,3 +184,76 @@ func newRejectionTestClient(t *testing.T, server *httptest.Server, executions *a
 	client.config.JobPollInterval = 50 * time.Millisecond
 	return client
 }
+
+// The agent used to run a probe and say nothing about it, which left an
+// operator watching container logs with no idea what it was doing.
+func TestJobHooksReportWhatTheAgentWasAskedAndWhatItSaw(t *testing.T) {
+	var executions atomic.Int64
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case JobPollPath:
+			_, _ = w.Write([]byte(`{"success":true,"data":{"job":{"job":{"schemaVersion":1,"jobId":"job-abcdef012345","sessionId":"s","agentId":"agent_test","nonce":"n","stableId":"node-1","configFingerprint":"sha256:x","profile":{"id":"default-status","method":"status"},"expiresAt":"2099-01-01T00:00:00Z","state":"running"},"xrayConfig":{"ok":true},"socksPort":18080,"targetHost":"node.example.com","targetPort":443}}}`))
+		default:
+			_, _ = w.Write([]byte(`{"success":true,"data":{}}`))
+		}
+	}))
+	defer server.Close()
+
+	var started []JobStarted
+	var finished, accepted []JobFinished
+	client := newRejectionTestClient(t, server, &executions)
+	client.config.Executor = evidenceExecutor{}
+	client.config.Hooks = Hooks{
+		OnJobStarted:          func(job JobStarted) { started = append(started, job) },
+		OnJobFinished:         func(job JobFinished) { finished = append(finished, job) },
+		OnObservationAccepted: func(job JobFinished) { accepted = append(accepted, job) },
+	}
+
+	if err := client.pollAndExecute(context.Background()); err != nil {
+		t.Fatalf("poll and execute: %v", err)
+	}
+
+	if len(started) != 1 {
+		t.Fatalf("job start hooks = %d, want one", len(started))
+	}
+	if started[0].StableID != "node-1" || started[0].ProfileID != "default-status" {
+		t.Fatalf("start = %+v, want the node and profile the controller named", started[0])
+	}
+	// The target is what makes a log line actionable without opening the admin UI.
+	if started[0].Target != "node.example.com:443" {
+		t.Fatalf("target = %q, want host and port", started[0].Target)
+	}
+	if len(finished) != 1 || len(accepted) != 1 {
+		t.Fatalf("finish hooks = %d, accepted hooks = %d, want one each", len(finished), len(accepted))
+	}
+	result := finished[0]
+	if result.Status != diagnostics.ProbeStatusProxyFailure || result.FailureCode != "proxy_timeout" {
+		t.Fatalf("result = %+v, want the observed status and failure", result)
+	}
+	// The direct control decides whether the controller trusts the result at
+	// all, so it has to reach the log alongside it.
+	if result.Direct.Online {
+		t.Fatal("the failed direct connectivity control must be reported as failed")
+	}
+	if result.TCP.Online || !result.TCP.Checked {
+		t.Fatalf("tcp evidence = %+v, want the checked failure to survive into the hook", result.TCP)
+	}
+}
+
+type evidenceExecutor struct{}
+
+func (evidenceExecutor) Execute(_ context.Context, assignment JobAssignment) diagnostics.Observation {
+	return diagnostics.Observation{
+		SchemaVersion:      diagnostics.ObservationSchemaVersion,
+		JobID:              assignment.Job.JobID,
+		StableID:           assignment.Job.StableID,
+		EndpointProfile:    assignment.Job.Profile.ID,
+		Status:             diagnostics.ProbeStatusProxyFailure,
+		LatencyMillis:      120,
+		Failure:            diagnostics.FailureEvidence{Code: "proxy_timeout", Stage: diagnostics.FailureStageProxy},
+		TCP:                diagnostics.CheckEvidence{Checked: true, Online: false},
+		Ping:               diagnostics.CheckEvidence{Checked: true, Online: true, LatencyMillis: 30},
+		DirectConnectivity: diagnostics.CheckEvidence{Checked: true, Online: false},
+	}
+}

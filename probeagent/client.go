@@ -70,9 +70,9 @@ type ClientConfig struct {
 	JobPollInterval  time.Duration
 	Executor         JobExecutor
 	Now              func() time.Time
-	// LogJobRejection reports a refused job without ending the control
-	// connection. Optional: nil silently drops the notice.
-	LogJobRejection func(error)
+	// Hooks report enrollment, heartbeat and per-job progress so the binary can
+	// log them. Every field is optional.
+	Hooks Hooks
 }
 
 type IdentityFile struct {
@@ -176,6 +176,7 @@ func (c *Client) EnsureEnrolled(ctx context.Context) (int, error) {
 			if persistErr := c.persistIdentity(); persistErr != nil {
 				return 0, persistErr
 			}
+			c.notifyEnrolled(DefaultHeartbeatIntervalSec, true)
 			return DefaultHeartbeatIntervalSec, nil
 		}
 		return 0, err
@@ -187,7 +188,14 @@ func (c *Client) EnsureEnrolled(ctx context.Context) (int, error) {
 	if response.HeartbeatInterval < 5 {
 		response.HeartbeatInterval = DefaultHeartbeatIntervalSec
 	}
+	c.notifyEnrolled(response.HeartbeatInterval, false)
 	return response.HeartbeatInterval, nil
+}
+
+func (c *Client) notifyEnrolled(intervalSeconds int, resumed bool) {
+	if c.config.Hooks.OnEnrolled != nil {
+		c.config.Hooks.OnEnrolled(intervalSeconds, resumed)
+	}
 }
 
 func (c *Client) SendHeartbeat(ctx context.Context, health string) (HeartbeatResponse, error) {
@@ -220,6 +228,9 @@ func (c *Client) Run(ctx context.Context) error {
 	if _, err := c.SendHeartbeat(ctx, "healthy"); err != nil {
 		return err
 	}
+	if c.config.Hooks.OnConnected != nil {
+		c.config.Hooks.OnConnected(intervalSeconds)
+	}
 	if c.config.Executor == nil {
 		return c.runHeartbeatLoop(ctx, time.Duration(intervalSeconds)*time.Second)
 	}
@@ -245,6 +256,9 @@ func (c *Client) runHeartbeatLoop(ctx context.Context, interval time.Duration) e
 			return nil
 		case <-ticker.C:
 			if _, err := c.SendHeartbeat(ctx, "healthy"); err != nil {
+				if c.config.Hooks.OnHeartbeatFailed != nil {
+					c.config.Hooks.OnHeartbeatFailed(err)
+				}
 				return err
 			}
 		}
@@ -263,8 +277,8 @@ func (c *Client) runJobLoop(ctx context.Context) error {
 			if !errors.As(err, &rejection) || !rejection.JobScoped() {
 				return err
 			}
-			if c.config.LogJobRejection != nil {
-				c.config.LogJobRejection(err)
+			if c.config.Hooks.OnJobRejected != nil {
+				c.config.Hooks.OnJobRejected(err)
 			}
 		}
 		select {
@@ -295,11 +309,19 @@ func (c *Client) pollAndExecute(ctx context.Context) error {
 	if c.jobRefused(assignment.Job.JobID) {
 		return nil
 	}
+	if c.config.Hooks.OnJobStarted != nil {
+		c.config.Hooks.OnJobStarted(jobStartedFrom(assignment, c.config.Now().UTC()))
+	}
+	startedAt := c.config.Now()
 	jobContext, cancel := context.WithDeadline(ctx, assignment.Job.ExpiresAt)
 	observation := c.config.Executor.Execute(jobContext, assignment)
 	cancel()
 	observation.AgentID = c.config.AgentID
 	observation.AgentVersion = c.config.AgentVersion
+	finished := jobFinishedFrom(observation, c.config.Now().Sub(startedAt))
+	if c.config.Hooks.OnJobFinished != nil {
+		c.config.Hooks.OnJobFinished(finished)
+	}
 	_, observationPrivate, err := c.privateKeys()
 	if err != nil {
 		return err
@@ -320,6 +342,9 @@ func (c *Client) pollAndExecute(ctx context.Context) error {
 			c.markJobRefused(assignment.Job.JobID)
 		}
 		return err
+	}
+	if c.config.Hooks.OnObservationAccepted != nil {
+		c.config.Hooks.OnObservationAccepted(finished)
 	}
 	return nil
 }

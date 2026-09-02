@@ -73,6 +73,17 @@ type ExecutorConfig struct {
 	LatencySamples    int
 	StabilityDuration time.Duration
 	DNSResolver       string
+	// OnDetail explains, in the agent's own log, something the signed
+	// observation cannot say. Every configuration failure goes on the wire as
+	// the single bounded code "configuration", which tells an operator nothing
+	// about which step failed; this hook carries that missing half.
+	//
+	// message is a fixed phrase from this package and always safe to print. err
+	// is the underlying error and is handed over separately on purpose: an
+	// error from Xray or a transport can quote fragments of the node config, so
+	// the binary decides whether its log level is verbose enough to show it.
+	// Neither ever reaches the controller or the observation.
+	OnDetail func(jobID string, message string, err error)
 }
 
 type Executor struct {
@@ -122,6 +133,21 @@ func NewExecutor(config ExecutorConfig) (*Executor, error) {
 	return &Executor{config: config}, nil
 }
 
+// configurationFailure records the bounded code that goes on the wire and
+// reports the specific reason locally. The signed observation stays at
+// "configuration" because it is shared state with a schema; the operator
+// staring at a container log needs to know which step actually failed.
+func (e *Executor) configurationFailure(observation *diagnostics.Observation, reason string, err error) {
+	observation.Failure = diagnostics.FailureEvidence{Code: "configuration", Stage: diagnostics.FailureStageConfiguration}
+	e.detail(observation.JobID, reason, err)
+}
+
+func (e *Executor) detail(jobID string, message string, err error) {
+	if e.config.OnDetail != nil {
+		e.config.OnDetail(jobID, message, err)
+	}
+}
+
 func (e *Executor) Execute(ctx context.Context, assignment JobAssignment) (observation diagnostics.Observation) {
 	startedAt := time.Now().UTC()
 	observation = diagnostics.Observation{
@@ -146,24 +172,31 @@ func (e *Executor) Execute(ctx context.Context, assignment JobAssignment) (obser
 	}()
 
 	if err := validateAssignment(assignment); err != nil {
-		observation.Failure = diagnostics.FailureEvidence{Code: "configuration", Stage: diagnostics.FailureStageConfiguration}
+		e.configurationFailure(&observation, "job assignment is not usable", err)
 		return observation
 	}
 	if got := diagnostics.ConfigFingerprint(assignment.XrayConfig); got != assignment.Job.ConfigFingerprint {
-		observation.Failure = diagnostics.FailureEvidence{Code: "configuration", Stage: diagnostics.FailureStageConfiguration}
+		// Almost always a subscription refresh between the job being queued and
+		// the agent claiming it, which is a normal race rather than a fault.
+		e.configurationFailure(&observation, "Xray config fingerprint does not match the job; the node config changed after the job was created", nil)
 		return observation
 	}
 	if err := validateXrayExecutionConfig(assignment.XrayConfig, assignment.SocksPort); err != nil {
-		observation.Failure = diagnostics.FailureEvidence{Code: "configuration", Stage: diagnostics.FailureStageConfiguration}
+		e.configurationFailure(&observation, "Xray config rejected before it was written", err)
 		return observation
 	}
 	descriptor, known := diagnostics.ProfileByID(assignment.Job.Profile.ID)
 	if !known || descriptor.Method != assignment.Job.Profile.Method {
-		observation.Failure = diagnostics.FailureEvidence{Code: "configuration", Stage: diagnostics.FailureStageConfiguration}
+		e.configurationFailure(&observation, fmt.Sprintf("profile %q is not known to this agent build", assignment.Job.Profile.ID), nil)
 		return observation
 	}
 	directEvidence, directBody := e.directConnectivity(ctx)
 	observation.DirectConnectivity = directEvidence
+	if !directEvidence.Online {
+		// Worth its own line: the controller refuses to derive any verdict from
+		// this observation, so everything below is recorded but not believed.
+		e.detail(assignment.Job.JobID, "direct connectivity control failed; this agent cannot vouch for anything it measures now", nil)
+	}
 
 	// Transport probes deliberately never start Xray: their whole purpose is to
 	// reach the node the way the node itself is reached, so a tunnel in the path
@@ -174,34 +207,35 @@ func (e *Executor) Execute(ctx context.Context, assignment JobAssignment) (obser
 	}
 
 	if err := os.MkdirAll(e.config.RuntimeDir, 0700); err != nil {
-		observation.Failure = diagnostics.FailureEvidence{Code: "configuration", Stage: diagnostics.FailureStageConfiguration}
+		e.configurationFailure(&observation, "runtime directory is not writable", err)
 		return observation
 	}
 	temporary, err := os.CreateTemp(e.config.RuntimeDir, ".xray-job-*.json")
 	if err != nil {
-		observation.Failure = diagnostics.FailureEvidence{Code: "configuration", Stage: diagnostics.FailureStageConfiguration}
+		e.configurationFailure(&observation, "temporary Xray config could not be created", err)
 		return observation
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
 	if err := temporary.Chmod(0600); err != nil {
 		_ = temporary.Close()
-		observation.Failure = diagnostics.FailureEvidence{Code: "configuration", Stage: diagnostics.FailureStageConfiguration}
+		e.configurationFailure(&observation, "temporary Xray config permissions could not be set", err)
 		return observation
 	}
 	if _, err := temporary.Write(assignment.XrayConfig); err != nil {
 		_ = temporary.Close()
-		observation.Failure = diagnostics.FailureEvidence{Code: "configuration", Stage: diagnostics.FailureStageConfiguration}
+		e.configurationFailure(&observation, "temporary Xray config could not be written", err)
 		return observation
 	}
 	if err := temporary.Close(); err != nil {
-		observation.Failure = diagnostics.FailureEvidence{Code: "configuration", Stage: diagnostics.FailureStageConfiguration}
+		e.configurationFailure(&observation, "temporary Xray config could not be closed", err)
 		return observation
 	}
 
 	runner := xray.NewRunner(temporaryPath)
 	if err := runner.Start(); err != nil {
 		observation.Failure = diagnostics.FailureEvidence{Code: "configuration", Stage: diagnostics.FailureStageXrayStart}
+		e.detail(assignment.Job.JobID, "embedded Xray failed to start for this job", err)
 		return observation
 	}
 	defer runner.Stop()
