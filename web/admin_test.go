@@ -114,8 +114,8 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`function sortDashboardProxies(proxies)`,
 		`dashboardLocation(left)`,
 		`data-node-drag-handle="${escapeHtml(proxy.stableId)}"`,
-		`function commitDashboardVisibleOrder(visibleIDs)`,
-		`function dropDashboardVisibleNode(stableId, targetStableId, placeAfter)`,
+		`function commitDashboardVisibleOrder(visibleIDs, motion = {})`,
+		`function dropDashboardVisibleNode(stableId, targetStableId, placeAfter, motion = {})`,
 		`$("nodes").addEventListener("pointerdown"`,
 		`$("nodes").addEventListener("pointermove"`,
 		`container.appendChild(card)`,
@@ -176,6 +176,41 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 	}
 	if strings.Contains(html, `diagnostics.outerHTML = nodeDiagnosticsHTML(proxy)`) {
 		t.Fatal("admin polling still replaces the remote diagnostics controls")
+	}
+}
+
+func TestAdminTemplateImplementsFluidAccessibleMotion(t *testing.T) {
+	var rendered bytes.Buffer
+	if err := RenderAdmin(&rendered); err != nil {
+		t.Fatalf("RenderAdmin() error = %v", err)
+	}
+	html := rendered.String()
+	for _, marker := range []string{
+		`button:not(:disabled):active`,
+		`function springScalar(element, key, options)`,
+		`function springVector(element, key, options)`,
+		`function currentTranslation(element)`,
+		`grabOffsetY: event.clientY - bounds.top`,
+		`event.getCoalescedEvents`,
+		`function projectGestureMomentum(velocity, decelerationRate = 0.998)`,
+		`currentCenter + projectGestureMomentum(velocity.y)`,
+		`releaseVelocity: velocity`,
+		`role="tablist"`,
+		`role="tabpanel"`,
+		`aria-sort="descending"`,
+		`function bindTabListKeyboardNavigation()`,
+		`@media (prefers-reduced-transparency: reduce)`,
+		`@media (prefers-contrast: more)`,
+		`font-optical-sizing: auto`,
+		`font: 0.875rem/1.45 system-ui`,
+		`backdrop-filter: blur(22px) saturate(145%)`,
+	} {
+		if !strings.Contains(html, marker) {
+			t.Errorf("admin template missing fluid/accessibility behavior %q", marker)
+		}
+	}
+	if strings.Contains(html, `panel.style.maxHeight`) {
+		t.Error("admin panel motion still uses a fixed CSS max-height transition")
 	}
 }
 
@@ -247,7 +282,7 @@ func TestAdminTemplateSeparatesGlobalSettingsFromNodeControls(t *testing.T) {
 	}
 	for _, marker := range []string{
 		`function switchGlobalSettingsPane(pane)`,
-		`$("settings-view").hidden = tab !== "settings"`,
+		`["dashboard", "nodes-overview", "incidents", "reachability", "remnawave", "history", "settings"].forEach`,
 		`$("save-history-retention").addEventListener("click", saveHistoryRetention)`,
 		`proxyIds: Array.isArray(schedule.proxyIds) ? schedule.proxyIds : []`,
 	} {

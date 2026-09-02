@@ -77,6 +77,7 @@ configs/
 geo/
 .claude/
 TODO.md
+DESIGN.md
 
 # Throwaway harnesses used to drive the admin UI against mock data. They are
 # scratch tooling for one investigation, not something the build depends on.

@@ -11,9 +11,11 @@
       :root {
         color-scheme: dark;
         --bg: #121419;
-        --panel: #191d23;
+        --panel: rgba(25, 29, 35, 0.86);
+        --panel-solid: #191d23;
         --panel-2: #20252c;
-        --panel-3: #15191f;
+        --panel-3: rgba(21, 25, 31, 0.92);
+        --panel-3-solid: #15191f;
         --border: #303741;
         --text: #e5e7eb;
         --muted: #a5b0bd;
@@ -21,7 +23,7 @@
         --red: #ff5d5d;
         --yellow: #f2b84b;
         --blue: #6ea8fe;
-        --blue-strong: #2f80ed;
+        --blue-strong: #2563eb;
         --green-soft: rgba(53, 216, 120, 0.12);
         --red-soft: rgba(255, 93, 93, 0.12);
         --yellow-soft: rgba(242, 184, 75, 0.14);
@@ -30,6 +32,9 @@
       * {
         box-sizing: border-box;
       }
+      html {
+        font-size: 100%;
+      }
       body {
         margin: 0;
         min-height: 100vh;
@@ -37,7 +42,8 @@
           radial-gradient(circle at 50% -20%, rgba(77, 155, 255, 0.09), transparent 36%),
           var(--bg);
         color: var(--text);
-        font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font: 0.875rem/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-optical-sizing: auto;
       }
       header,
       main {
@@ -46,11 +52,18 @@
         padding: 20px;
       }
       header {
+        position: sticky;
+        top: 0;
+        z-index: 40;
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 16px;
         border-bottom: 1px solid var(--border);
+        background: rgba(18, 20, 25, 0.78);
+        -webkit-backdrop-filter: blur(22px) saturate(145%);
+        backdrop-filter: blur(22px) saturate(145%);
+        box-shadow: 0 12px 36px rgba(0, 0, 0, 0.16);
       }
       .brand {
         display: flex;
@@ -86,14 +99,17 @@
       h1,
       h2 {
         margin: 0;
-        font-size: 18px;
-        letter-spacing: 0;
+        font-size: 1.125rem;
+        line-height: 1.2;
+        letter-spacing: -0.012em;
       }
       h2 {
-        font-size: 15px;
+        font-size: 0.9375rem;
+        letter-spacing: -0.006em;
       }
       .muted {
         color: var(--muted);
+        letter-spacing: 0.004em;
       }
       .dashboard-grid {
         display: grid;
@@ -107,15 +123,18 @@
         border-radius: 12px;
         padding: 16px;
         min-width: 0;
+        -webkit-backdrop-filter: blur(18px) saturate(135%);
+        backdrop-filter: blur(18px) saturate(135%);
+        box-shadow: 0 14px 34px rgba(0, 0, 0, 0.13);
       }
       .control-panel {
         position: sticky;
-        top: 20px;
+        top: 96px;
         /* The panel is taller than a laptop viewport. Without its own scroll a
            sticky element pins its top and pushes the rest below the fold, so the
            lower controls stay unreachable until the whole node list is scrolled
            past. */
-        max-height: calc(100vh - 40px);
+        max-height: calc(100vh - 116px);
         overflow-y: auto;
         overscroll-behavior: contain;
         scrollbar-width: thin;
@@ -185,14 +204,20 @@
       }
       h3 {
         margin: 0;
-        font-size: 13px;
-        letter-spacing: 0;
+        font-size: 0.8125rem;
+        line-height: 1.3;
+        letter-spacing: -0.003em;
       }
       .tabs {
         display: flex;
         gap: 8px;
-        border-bottom: 1px solid var(--border);
-        padding-bottom: 10px;
+        border: 1px solid rgba(112, 124, 140, 0.22);
+        border-radius: 12px;
+        padding: 8px;
+        background: rgba(25, 29, 35, 0.68);
+        -webkit-backdrop-filter: blur(18px) saturate(140%);
+        backdrop-filter: blur(18px) saturate(140%);
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.12);
         /* Six tabs exceed a phone viewport. Scrolling the bar keeps the page
            itself from widening, which would otherwise push every panel sideways
            and cut off the last tab. */
@@ -236,7 +261,7 @@
         min-height: 280px;
         resize: vertical;
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       .node-diagnostics {
         display: grid;
@@ -297,7 +322,7 @@
         display: grid;
         gap: 6px;
         color: var(--muted);
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       input,
       select,
@@ -339,11 +364,32 @@
       button {
         cursor: pointer;
         font-weight: 600;
+        transform: translateZ(0) scale(1);
+        transform-origin: center;
+        transition:
+          transform 100ms ease-out,
+          border-color 140ms ease-out,
+          background-color 140ms ease-out,
+          color 140ms ease-out,
+          box-shadow 140ms ease-out;
+      }
+      button:not(:disabled):hover {
+        border-color: rgba(110, 168, 254, 0.58);
+        background-color: rgba(110, 168, 254, 0.08);
+      }
+      button:not(:disabled):active {
+        transform: translateZ(0) scale(0.97);
+        transition-duration: 0ms;
       }
       button.primary {
         background: var(--blue-strong);
         color: #ffffff;
         border-color: #4d9bff;
+        box-shadow: 0 6px 18px rgba(37, 99, 235, 0.2);
+      }
+      button.primary:not(:disabled):hover {
+        background: #1d4ed8;
+        border-color: #73b1ff;
       }
       button.secondary {
         background: transparent;
@@ -389,7 +435,7 @@
       }
       button.small {
         padding: 5px 8px;
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       button:disabled {
         cursor: not-allowed;
@@ -415,6 +461,9 @@
       .sortable {
         cursor: pointer;
         user-select: none;
+      }
+      .sortable:active {
+        color: var(--blue);
       }
       .status {
         display: inline-flex;
@@ -456,7 +505,7 @@
       }
       th {
         color: var(--muted);
-        font-size: 12px;
+        font-size: 0.75rem;
         font-weight: 600;
       }
       .mono {
@@ -555,7 +604,7 @@
         border-radius: 999px;
         padding: 3px 8px;
         color: var(--muted);
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       .pill:empty {
         display: none;
@@ -567,7 +616,8 @@
         border: 1px solid var(--border);
         border-radius: 999px;
         padding: 3px 8px;
-        font-size: 12px;
+        font-size: 0.75rem;
+        letter-spacing: 0.006em;
         line-height: 1.2;
         white-space: nowrap;
       }
@@ -639,18 +689,18 @@
       .kpi-card span {
         display: block;
         color: var(--muted);
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       .kpi-card strong {
         display: block;
         margin-top: 7px;
-        font-size: 26px;
+        font-size: 1.625rem;
         line-height: 1.1;
       }
       .kpi-card .metric-detail {
         margin-top: 7px;
         color: var(--muted);
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       .kpi-card.ok strong {
         color: var(--green);
@@ -696,20 +746,20 @@
         align-items: center;
         gap: 7px;
         color: var(--muted);
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       .nodes-sort-field select {
         width: auto;
         min-width: 150px;
         padding: 6px 28px 6px 8px;
         color: var(--text);
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       button.nodes-sort-direction {
         width: 32px;
         min-width: 32px;
         padding: 5px 0;
-        font-size: 16px;
+        font-size: 1rem;
         line-height: 1;
       }
       .remnawave-policy-grid {
@@ -745,7 +795,7 @@
       .remnawave-template-tokens button {
         padding: 5px 8px;
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-size: 11px;
+        font-size: 0.6875rem;
       }
       .remnawave-template-preview {
         min-height: 54px;
@@ -761,7 +811,7 @@
       .remnawave-template-preview span {
         margin-bottom: 4px;
         color: var(--muted);
-        font-size: 11px;
+        font-size: 0.6875rem;
         text-transform: uppercase;
         letter-spacing: 0.04em;
       }
@@ -789,7 +839,7 @@
       .remnawave-node-meta span {
         margin-top: 3px;
         color: var(--muted);
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       .remnawave-location-list {
         display: grid;
@@ -872,7 +922,17 @@
         transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
       }
       .node-card.dragging {
-        opacity: 0.52;
+        z-index: 24;
+        opacity: 0.94;
+        pointer-events: none;
+        border-color: rgba(110, 168, 254, 0.72);
+        box-shadow: 0 22px 56px rgba(0, 0, 0, 0.42), 0 0 0 1px rgba(110, 168, 254, 0.28);
+        will-change: transform;
+      }
+      .node-card.settling {
+        z-index: 12;
+        pointer-events: none;
+        will-change: transform;
       }
       .node-card.drag-before {
         box-shadow: 0 -3px 0 var(--blue);
@@ -910,9 +970,8 @@
       .node-card-head:hover {
         background: rgba(127, 140, 158, 0.07);
       }
-      .node-card-head:focus-visible {
-        outline: 2px solid rgba(110, 168, 254, 0.72);
-        outline-offset: -3px;
+      .node-card-head:active {
+        background: rgba(110, 168, 254, 0.12);
       }
       .node-card-head button,
       .node-card-head input,
@@ -941,9 +1000,11 @@
         color: var(--muted);
         cursor: grab;
         touch-action: none;
+        transition: transform 100ms ease-out, border-color 140ms ease-out, color 140ms ease-out;
       }
       .node-drag-handle:active {
         cursor: grabbing;
+        transform: scale(0.9);
       }
       .node-drag-handle:hover {
         border-color: var(--border);
@@ -962,7 +1023,7 @@
         align-items: center;
         gap: 8px;
         min-width: 0;
-        font-size: 15px;
+        font-size: 0.9375rem;
         font-weight: 600;
       }
       .node-title-text {
@@ -972,12 +1033,12 @@
       .node-summary-label {
         margin-top: 3px;
         color: var(--muted);
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       .node-current strong,
       .node-speed-summary strong {
         display: block;
-        font-size: 15px;
+        font-size: 0.9375rem;
       }
       .node-current strong.ok,
       .node-speed-summary strong.ok {
@@ -1008,22 +1069,22 @@
         color: var(--muted);
       }
       .node-toggle svg {
-        transition: transform 0.22s ease;
+        transform-origin: center;
+        will-change: transform;
       }
       .node-card.open .node-toggle svg {
         transform: rotate(180deg);
       }
       .node-card-panel {
-        max-height: 0;
+        height: 0;
         overflow: hidden;
         opacity: 0;
         padding: 0 20px;
         border-top: 1px solid transparent;
         background: rgba(14, 18, 23, 0.34);
-        transition: max-height 0.3s ease, opacity 0.24s ease, padding 0.28s ease, border-color 0.28s ease;
+        will-change: height, opacity;
       }
       .node-card.open .node-card-panel {
-        opacity: 1;
         padding: 16px 20px 18px;
         border-top-color: var(--border);
       }
@@ -1042,12 +1103,12 @@
       .node-detail-stat span {
         display: block;
         color: var(--muted);
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       .node-detail-stat strong {
         display: block;
         margin-top: 3px;
-        font-size: 16px;
+        font-size: 1rem;
         font-weight: 600;
         overflow-wrap: anywhere;
       }
@@ -1101,7 +1162,7 @@
         padding: 6px 9px;
         background: transparent;
         color: var(--muted);
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       button.chart-range.active {
         border-color: rgba(110, 168, 254, 0.65);
@@ -1137,7 +1198,7 @@
       }
       .chart-axis-label {
         fill: var(--muted);
-        font-size: 11px;
+        font-size: 0.6875rem;
       }
       .chart-line {
         fill: none;
@@ -1216,7 +1277,7 @@
         background: var(--panel-3);
         box-shadow: 0 12px 30px rgba(0, 0, 0, 0.32);
         color: var(--text);
-        font-size: 13px;
+        font-size: 0.8125rem;
         line-height: 1.5;
         transform: translateY(4px);
         transition: opacity 0.08s ease, transform 0.08s ease;
@@ -1255,7 +1316,7 @@
         gap: 14px;
         flex-wrap: wrap;
         color: var(--muted);
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       .chart-legend span {
         display: inline-flex;
@@ -1283,7 +1344,7 @@
         border-color: transparent;
         background: transparent;
         color: var(--muted);
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       button.chart-mode.active {
         border-color: rgba(110, 168, 254, 0.65);
@@ -1291,6 +1352,7 @@
         color: var(--text);
       }
       @media (prefers-reduced-motion: reduce) {
+        button,
         .node-card,
         .node-card.entering,
         .node-card-head,
@@ -1306,6 +1368,46 @@
         }
         .chart-line {
           stroke-dashoffset: 0;
+        }
+        button:active {
+          transform: none !important;
+        }
+        .node-drag-handle:active {
+          transform: none;
+        }
+      }
+      @media (prefers-reduced-transparency: reduce) {
+        header,
+        .tabs,
+        .panel,
+        dialog.merge-dialog {
+          -webkit-backdrop-filter: none;
+          backdrop-filter: none;
+        }
+        header { background: var(--bg); }
+        .tabs,
+        .panel,
+        dialog.merge-dialog { background: var(--panel-solid); }
+        .speed-chart-tooltip,
+        .language-switch { background: var(--panel-3-solid); }
+      }
+      @media (prefers-contrast: more) {
+        :root {
+          --border: #718096;
+          --muted: #d4dbe5;
+          --blue: #9bc2ff;
+          --blue-strong: #174ea6;
+        }
+        header,
+        .tabs,
+        .panel,
+        .node-card,
+        .kpi-card,
+        input,
+        select,
+        textarea,
+        button {
+          border-color: var(--border);
         }
       }
       .legend-dot {
@@ -1325,7 +1427,7 @@
       }
       .table-meta {
         color: var(--muted);
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       /* One failing vantage point inside a findings row. The name and its
          evidence share a line and wrap together, so a node with several of them
@@ -1346,7 +1448,7 @@
         background: transparent;
         border-color: transparent;
         color: var(--muted);
-        font-size: 12px;
+        font-size: 0.75rem;
         padding: 2px 6px;
       }
       tr:hover button.row-action {
@@ -1378,12 +1480,12 @@
       .hint {
         display: block;
         color: var(--muted);
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       .config-status strong {
         display: block;
         margin-top: 3px;
-        font-size: 13px;
+        font-size: 0.8125rem;
         overflow-wrap: anywhere;
       }
       .hint {
@@ -1448,6 +1550,8 @@
         padding: 0;
         background: var(--panel);
         color: var(--text);
+        -webkit-backdrop-filter: blur(24px) saturate(145%);
+        backdrop-filter: blur(24px) saturate(145%);
         box-shadow: 0 24px 80px rgba(0, 0, 0, 0.52);
       }
       dialog.merge-dialog::backdrop {
@@ -1481,7 +1585,7 @@
         width: 32px;
         height: 32px;
         padding: 0;
-        font-size: 20px;
+        font-size: 1.25rem;
         line-height: 1;
       }
       .merge-node-card {
@@ -1499,7 +1603,7 @@
       .merge-node-card span {
         margin-top: 3px;
         color: var(--muted);
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       .merge-preview-grid {
         display: grid;
@@ -1518,7 +1622,7 @@
       }
       .merge-preview-grid span {
         color: var(--muted);
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       .merge-preview-grid strong {
         margin-top: 4px;
@@ -1618,14 +1722,14 @@
     </header>
 
     <main class="stack">
-      <nav class="tabs" aria-label="Admin sections">
-        <button id="tab-dashboard" class="tab active" type="button">Dashboard</button>
-        <button id="tab-nodes-overview" class="tab" type="button">Nodes Overview</button>
-        <button id="tab-incidents" class="tab" type="button">Incidents</button>
-        <button id="tab-reachability" class="tab" type="button">Reachability</button>
-        <button id="tab-remnawave" class="tab" type="button">Remnawave</button>
-        <button id="tab-history" class="tab" type="button">Speed History</button>
-        <button id="tab-settings" class="tab" type="button">Settings</button>
+      <nav class="tabs" aria-label="Admin sections" role="tablist">
+        <button id="tab-dashboard" class="tab active" type="button" role="tab" aria-selected="true" aria-controls="dashboard-view" tabindex="0">Dashboard</button>
+        <button id="tab-nodes-overview" class="tab" type="button" role="tab" aria-selected="false" aria-controls="nodes-overview-view" tabindex="-1">Nodes Overview</button>
+        <button id="tab-incidents" class="tab" type="button" role="tab" aria-selected="false" aria-controls="incidents-view" tabindex="-1">Incidents</button>
+        <button id="tab-reachability" class="tab" type="button" role="tab" aria-selected="false" aria-controls="reachability-view" tabindex="-1">Reachability</button>
+        <button id="tab-remnawave" class="tab" type="button" role="tab" aria-selected="false" aria-controls="remnawave-view" tabindex="-1">Remnawave</button>
+        <button id="tab-history" class="tab" type="button" role="tab" aria-selected="false" aria-controls="history-view" tabindex="-1">Speed History</button>
+        <button id="tab-settings" class="tab" type="button" role="tab" aria-selected="false" aria-controls="settings-view" tabindex="-1">Settings</button>
       </nav>
       <div id="message" class="muted" role="status" aria-live="polite"></div>
       <section id="project-maintenance-banner" class="project-maintenance-banner" role="status" aria-live="polite" hidden>
@@ -1636,7 +1740,7 @@
         <button id="resume-project-maintenance" class="secondary" type="button">Resume Project</button>
       </section>
 
-      <section id="dashboard-view" class="view dashboard-grid">
+      <section id="dashboard-view" class="view dashboard-grid" role="tabpanel" aria-labelledby="tab-dashboard">
       <aside class="panel stack control-panel">
         <div class="panel-header">
           <div>
@@ -1645,13 +1749,13 @@
           </div>
         </div>
 
-        <nav class="settings-nav" aria-label="Node controls">
-          <button id="settings-tab-run" class="settings-tab active" type="button">Actions</button>
-          <button id="settings-tab-filters" class="settings-tab" type="button">Filters</button>
-          <button id="settings-tab-schedule" class="settings-tab" type="button">Schedule</button>
+        <nav class="settings-nav" aria-label="Node controls" role="tablist">
+          <button id="settings-tab-run" class="settings-tab active" type="button" role="tab" aria-selected="true" aria-controls="settings-pane-run" tabindex="0">Actions</button>
+          <button id="settings-tab-filters" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-pane-filters" tabindex="-1">Filters</button>
+          <button id="settings-tab-schedule" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-pane-schedule" tabindex="-1">Schedule</button>
         </nav>
 
-        <section id="settings-pane-run" class="settings-pane stack">
+        <section id="settings-pane-run" class="settings-pane stack" role="tabpanel" aria-labelledby="settings-tab-run">
           <div class="control-group">
             <div class="group-title">
               <h3>Speed Test</h3>
@@ -1721,7 +1825,7 @@
           <button id="run" class="primary" type="button">Run Check</button>
         </section>
 
-        <section id="settings-pane-filters" class="settings-pane stack" hidden>
+        <section id="settings-pane-filters" class="settings-pane stack" role="tabpanel" aria-labelledby="settings-tab-filters" hidden>
           <div class="control-group">
             <div class="group-title">
               <h3>Filters</h3>
@@ -1761,7 +1865,7 @@
           </div>
         </section>
 
-        <section id="settings-pane-schedule" class="settings-pane stack" hidden>
+        <section id="settings-pane-schedule" class="settings-pane stack" role="tabpanel" aria-labelledby="settings-tab-schedule" hidden>
           <div class="control-group">
             <div class="group-title">
               <h3>Schedule</h3>
@@ -1873,7 +1977,7 @@
       </section>
       </section>
 
-      <section id="settings-view" class="view stack" hidden>
+      <section id="settings-view" class="view stack" role="tabpanel" aria-labelledby="tab-settings" hidden>
         <section class="panel stack settings-panel">
           <div class="panel-header">
             <div>
@@ -1882,15 +1986,15 @@
             </div>
           </div>
 
-          <nav class="settings-nav global-settings-nav" aria-label="Global settings">
-            <button id="global-settings-tab-project" class="settings-tab active" type="button">Project</button>
-            <button id="global-settings-tab-history" class="settings-tab" type="button">History</button>
-            <button id="global-settings-tab-telegram" class="settings-tab" type="button">Telegram</button>
-            <button id="global-settings-tab-agents" class="settings-tab" type="button">Agents</button>
-            <button id="global-settings-tab-backup" class="settings-tab" type="button">Backup</button>
+          <nav class="settings-nav global-settings-nav" aria-label="Global settings" role="tablist">
+            <button id="global-settings-tab-project" class="settings-tab active" type="button" role="tab" aria-selected="true" aria-controls="global-settings-pane-project" tabindex="0">Project</button>
+            <button id="global-settings-tab-history" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="global-settings-pane-history" tabindex="-1">History</button>
+            <button id="global-settings-tab-telegram" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="global-settings-pane-telegram" tabindex="-1">Telegram</button>
+            <button id="global-settings-tab-agents" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="global-settings-pane-agents" tabindex="-1">Agents</button>
+            <button id="global-settings-tab-backup" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="global-settings-pane-backup" tabindex="-1">Backup</button>
           </nav>
 
-          <section id="global-settings-pane-project" class="settings-pane stack">
+          <section id="global-settings-pane-project" class="settings-pane stack" role="tabpanel" aria-labelledby="global-settings-tab-project">
             <div class="control-group">
               <div class="group-title">
                 <h3>Project maintenance</h3>
@@ -1901,7 +2005,7 @@
             </div>
           </section>
 
-          <section id="global-settings-pane-history" class="settings-pane stack" hidden>
+          <section id="global-settings-pane-history" class="settings-pane stack" role="tabpanel" aria-labelledby="global-settings-tab-history" hidden>
             <div class="control-group">
               <div class="group-title">
                 <h3>History retention</h3>
@@ -1915,7 +2019,7 @@
             </div>
           </section>
 
-          <section id="global-settings-pane-telegram" class="settings-pane stack" hidden>
+          <section id="global-settings-pane-telegram" class="settings-pane stack" role="tabpanel" aria-labelledby="global-settings-tab-telegram" hidden>
             <div class="control-group">
               <div class="group-title">
                 <h3>Telegram</h3>
@@ -2023,7 +2127,7 @@
             </div>
           </section>
 
-          <section id="global-settings-pane-agents" class="settings-pane stack" hidden>
+          <section id="global-settings-pane-agents" class="settings-pane stack" role="tabpanel" aria-labelledby="global-settings-tab-agents" hidden>
             <div class="control-group">
               <div class="group-title">
                 <h3>Agent automation</h3>
@@ -2100,7 +2204,7 @@
             </div>
           </section>
 
-          <section id="global-settings-pane-backup" class="settings-pane stack" hidden>
+          <section id="global-settings-pane-backup" class="settings-pane stack" role="tabpanel" aria-labelledby="global-settings-tab-backup" hidden>
             <div class="control-group">
               <div class="group-title">
                 <h3>Download Backup</h3>
@@ -2141,7 +2245,7 @@
         </section>
       </section>
 
-      <section id="nodes-overview-view" class="view stack" hidden>
+      <section id="nodes-overview-view" class="view stack" role="tabpanel" aria-labelledby="tab-nodes-overview" hidden>
         <section class="panel stack">
           <div class="panel-actions">
             <div>
@@ -2224,19 +2328,19 @@
             <table class="nodes-overview-table">
               <thead>
                 <tr>
-                  <th class="sortable" data-sort="name">Node</th>
-                  <th class="sortable" data-sort="active">Status</th>
-                  <th class="sortable" data-sort="server">IP / Server</th>
-                  <th class="sortable" data-sort="claimedCountry">Country</th>
-                  <th class="sortable" data-sort="countryMatch">Geo</th>
-                  <th class="sortable" data-sort="avgMbps">Avg</th>
-                  <th class="sortable" data-sort="minMbps">Min</th>
-                  <th class="sortable" data-sort="maxMbps">Max</th>
-                  <th class="sortable" data-sort="failedResults">Failures</th>
-                  <th class="sortable" data-sort="totalDowntimeSec">Downtime</th>
-                  <th class="sortable" data-sort="totalProxyFailureSec">Proxy failure</th>
-                  <th class="sortable" data-sort="lastSeenAt">Last seen</th>
-                  <th class="sortable" data-sort="subName">Subscription</th>
+                  <th class="sortable" data-sort="name" tabindex="0" aria-sort="none">Node</th>
+                  <th class="sortable" data-sort="active" tabindex="0" aria-sort="none">Status</th>
+                  <th class="sortable" data-sort="server" tabindex="0" aria-sort="none">IP / Server</th>
+                  <th class="sortable" data-sort="claimedCountry" tabindex="0" aria-sort="none">Country</th>
+                  <th class="sortable" data-sort="countryMatch" tabindex="0" aria-sort="none">Geo</th>
+                  <th class="sortable" data-sort="avgMbps" tabindex="0" aria-sort="descending">Avg</th>
+                  <th class="sortable" data-sort="minMbps" tabindex="0" aria-sort="none">Min</th>
+                  <th class="sortable" data-sort="maxMbps" tabindex="0" aria-sort="none">Max</th>
+                  <th class="sortable" data-sort="failedResults" tabindex="0" aria-sort="none">Failures</th>
+                  <th class="sortable" data-sort="totalDowntimeSec" tabindex="0" aria-sort="none">Downtime</th>
+                  <th class="sortable" data-sort="totalProxyFailureSec" tabindex="0" aria-sort="none">Proxy failure</th>
+                  <th class="sortable" data-sort="lastSeenAt" tabindex="0" aria-sort="none">Last seen</th>
+                  <th class="sortable" data-sort="subName" tabindex="0" aria-sort="none">Subscription</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -2246,7 +2350,7 @@
         </section>
       </section>
 
-      <section id="remnawave-view" class="view stack" hidden>
+      <section id="remnawave-view" class="view stack" role="tabpanel" aria-labelledby="tab-remnawave" hidden>
         <section class="panel stack">
           <div class="panel-actions">
             <div>
@@ -2578,7 +2682,7 @@
         </section>
       </section>
 
-      <section id="incidents-view" class="view stack" hidden>
+      <section id="incidents-view" class="view stack" role="tabpanel" aria-labelledby="tab-incidents" hidden>
         <section class="panel stack">
           <div class="row" style="justify-content: space-between">
             <div>
@@ -2608,7 +2712,7 @@
         </section>
       </section>
 
-      <section id="reachability-view" class="view stack" hidden>
+      <section id="reachability-view" class="view stack" role="tabpanel" aria-labelledby="tab-reachability" hidden>
         <section class="panel stack">
           <div class="row" style="justify-content: space-between">
             <div>
@@ -2678,7 +2782,7 @@
         </section>
       </section>
 
-      <section id="history-view" class="view stack" hidden>
+      <section id="history-view" class="view stack" role="tabpanel" aria-labelledby="tab-history" hidden>
         <section class="panel stack">
           <div class="row" style="justify-content: space-between">
             <h2>Speed History</h2>
@@ -2859,6 +2963,7 @@
         nodeMergeSourceID: "",
         nodeMergePreview: null,
       };
+      const motionControllers = new WeakMap();
 
       const basePath = (() => {
         const idx = window.location.pathname.indexOf("/admin");
@@ -3697,24 +3802,221 @@
         reset.hidden = state.dashboardSort !== "manual";
       }
 
-      function clearDashboardDragState() {
-        state.dashboardPointerDrag = null;
+      function motionController(element, key) {
+        return motionControllers.get(element)?.get(key) || null;
+      }
+
+      function takeMotionController(element, key) {
+        const controllers = motionControllers.get(element);
+        const controller = controllers?.get(key) || null;
+        if (!controller) return null;
+        window.cancelAnimationFrame(controller.frame);
+        controllers.delete(key);
+        if (controllers.size === 0) motionControllers.delete(element);
+        return controller;
+      }
+
+      function storeMotionController(element, key, controller) {
+        let controllers = motionControllers.get(element);
+        if (!controllers) {
+          controllers = new Map();
+          motionControllers.set(element, controllers);
+        }
+        controllers.set(key, controller);
+      }
+
+      function finishMotionController(element, key, controller) {
+        const controllers = motionControllers.get(element);
+        if (!controllers || controllers.get(key) !== controller) return;
+        controllers.delete(key);
+        if (controllers.size === 0) motionControllers.delete(element);
+      }
+
+      function springScalar(element, key, options) {
+        const previous = takeMotionController(element, key);
+        const target = Number(options.to || 0);
+        if (prefersReducedMotion()) {
+          options.onUpdate(target);
+          options.onComplete?.();
+          return;
+        }
+
+        const controller = {
+          frame: 0,
+          value: Number.isFinite(options.from) ? options.from : Number(previous?.value || 0),
+          velocity: Number.isFinite(options.velocity) ? options.velocity : Number(previous?.velocity || 0),
+          lastTime: performance.now(),
+        };
+        const response = Math.max(0.16, Number(options.response || 0.34));
+        const dampingRatio = Math.max(0.1, Number(options.damping || 1));
+        const angularFrequency = (Math.PI * 2) / response;
+
+        const tick = (now) => {
+          const delta = Math.min(1 / 30, Math.max(1 / 240, (now - controller.lastTime) / 1000));
+          controller.lastTime = now;
+          const acceleration = -angularFrequency * angularFrequency * (controller.value - target)
+            - 2 * dampingRatio * angularFrequency * controller.velocity;
+          controller.velocity += acceleration * delta;
+          controller.value += controller.velocity * delta;
+          options.onUpdate(controller.value);
+          if (Math.abs(controller.value - target) < 0.2 && Math.abs(controller.velocity) < 3) {
+            controller.value = target;
+            controller.velocity = 0;
+            options.onUpdate(target);
+            finishMotionController(element, key, controller);
+            options.onComplete?.();
+            return;
+          }
+          controller.frame = window.requestAnimationFrame(tick);
+        };
+
+        storeMotionController(element, key, controller);
+        controller.frame = window.requestAnimationFrame(tick);
+      }
+
+      function springVector(element, key, options) {
+        const previous = takeMotionController(element, key);
+        const targetX = Number(options.toX || 0);
+        const targetY = Number(options.toY || 0);
+        if (prefersReducedMotion()) {
+          options.onUpdate(targetX, targetY);
+          options.onComplete?.();
+          return;
+        }
+
+        const controller = {
+          frame: 0,
+          x: Number.isFinite(options.fromX) ? options.fromX : Number(previous?.x || 0),
+          y: Number.isFinite(options.fromY) ? options.fromY : Number(previous?.y || 0),
+          velocityX: Number.isFinite(options.velocityX) ? options.velocityX : Number(previous?.velocityX || 0),
+          velocityY: Number.isFinite(options.velocityY) ? options.velocityY : Number(previous?.velocityY || 0),
+          lastTime: performance.now(),
+        };
+        const response = Math.max(0.16, Number(options.response || 0.38));
+        const dampingRatio = Math.max(0.1, Number(options.damping || 1));
+        const angularFrequency = (Math.PI * 2) / response;
+
+        const stepAxis = (value, velocity, target, delta) => {
+          const acceleration = -angularFrequency * angularFrequency * (value - target)
+            - 2 * dampingRatio * angularFrequency * velocity;
+          const nextVelocity = velocity + acceleration * delta;
+          return [value + nextVelocity * delta, nextVelocity];
+        };
+        const tick = (now) => {
+          const delta = Math.min(1 / 30, Math.max(1 / 240, (now - controller.lastTime) / 1000));
+          controller.lastTime = now;
+          [controller.x, controller.velocityX] = stepAxis(controller.x, controller.velocityX, targetX, delta);
+          [controller.y, controller.velocityY] = stepAxis(controller.y, controller.velocityY, targetY, delta);
+          options.onUpdate(controller.x, controller.y);
+          const settled = Math.abs(controller.x - targetX) < 0.2
+            && Math.abs(controller.y - targetY) < 0.2
+            && Math.abs(controller.velocityX) < 3
+            && Math.abs(controller.velocityY) < 3;
+          if (settled) {
+            controller.x = targetX;
+            controller.y = targetY;
+            controller.velocityX = 0;
+            controller.velocityY = 0;
+            options.onUpdate(targetX, targetY);
+            finishMotionController(element, key, controller);
+            options.onComplete?.();
+            return;
+          }
+          controller.frame = window.requestAnimationFrame(tick);
+        };
+
+        storeMotionController(element, key, controller);
+        controller.frame = window.requestAnimationFrame(tick);
+      }
+
+      function currentTranslation(element) {
+        const transform = window.getComputedStyle(element).transform;
+        if (!transform || transform === "none") return { x: 0, y: 0 };
+        try {
+          const matrix = new DOMMatrixReadOnly(transform);
+          return { x: matrix.m41, y: matrix.m42 };
+        } catch (_) {
+          return { x: 0, y: 0 };
+        }
+      }
+
+      function dashboardCardRects() {
+        return new Map([...$("nodes").querySelectorAll("[data-node-card]")]
+          .map((card) => [card.dataset.nodeCard, card.getBoundingClientRect()]));
+      }
+
+      function resetDashboardDragClasses() {
         $("nodes").querySelectorAll(".dragging, .drag-before, .drag-after").forEach((card) => {
           card.classList.remove("dragging", "drag-before", "drag-after");
         });
       }
 
-      function commitDashboardVisibleOrder(visibleIDs) {
+      function clearDashboardDragState(options = {}) {
+        state.dashboardPointerDrag = null;
+        resetDashboardDragClasses();
+        if (options.keepTransforms) return;
+        $("nodes").querySelectorAll("[data-node-card]").forEach((card) => {
+          takeMotionController(card, "position");
+          card.classList.remove("settling");
+          card.style.removeProperty("transform");
+          card.style.removeProperty("will-change");
+        });
+      }
+
+      function settleDashboardCard(card, velocity = {}) {
+        if (!card) return;
+        const from = currentTranslation(card);
+        card.classList.remove("dragging");
+        card.classList.add("settling");
+        springVector(card, "position", {
+          fromX: from.x,
+          fromY: from.y,
+          toX: 0,
+          toY: 0,
+          velocityX: Number(velocity.x || 0),
+          velocityY: Number(velocity.y || 0),
+          damping: velocity.momentum ? 0.82 : 1,
+          response: velocity.momentum ? 0.38 : 0.32,
+          onUpdate: (x, y) => {
+            card.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+          },
+          onComplete: () => {
+            card.classList.remove("settling");
+            card.style.removeProperty("transform");
+            card.style.removeProperty("will-change");
+          },
+        });
+      }
+
+      function animateDashboardReorder(beforeRects, movedStableId, releaseVelocity = {}) {
+        if (!beforeRects || prefersReducedMotion()) return;
+        $("nodes").querySelectorAll("[data-node-card]").forEach((card) => {
+          const before = beforeRects.get(card.dataset.nodeCard);
+          if (!before) return;
+          const after = card.getBoundingClientRect();
+          const x = before.left - after.left;
+          const y = before.top - after.top;
+          if (Math.abs(x) < 0.2 && Math.abs(y) < 0.2) return;
+          card.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+          settleDashboardCard(card, card.dataset.nodeCard === movedStableId
+            ? { ...releaseVelocity, momentum: true }
+            : {});
+        });
+      }
+
+      function commitDashboardVisibleOrder(visibleIDs, motion = {}) {
         normalizeDashboardManualOrder();
         const visibleSet = new Set(visibleIDs);
         if (visibleSet.size !== visibleIDs.length) return false;
         const currentVisible = filteredProxies().map((proxy) => proxy.stableId);
         if (currentVisible.length !== visibleIDs.length || currentVisible.some((stableId) => !visibleSet.has(stableId))) return false;
         const queue = [...visibleIDs];
+        const beforeRects = motion.animate ? dashboardCardRects() : null;
         state.dashboardManualOrder = state.dashboardManualOrder.map((stableId) => visibleSet.has(stableId) ? queue.shift() : stableId);
         saveDashboardOrderState();
         clearDashboardDragState();
         renderNodes();
+        animateDashboardReorder(beforeRects, motion.movedStableId, motion.releaseVelocity);
         return true;
       }
 
@@ -3725,10 +4027,10 @@
         const nextIndex = index + offset;
         if (index < 0 || nextIndex < 0 || nextIndex >= visibleIDs.length) return false;
         [visibleIDs[index], visibleIDs[nextIndex]] = [visibleIDs[nextIndex], visibleIDs[index]];
-        return commitDashboardVisibleOrder(visibleIDs);
+        return commitDashboardVisibleOrder(visibleIDs, { animate: true, movedStableId: stableId });
       }
 
-      function dropDashboardVisibleNode(stableId, targetStableId, placeAfter) {
+      function dropDashboardVisibleNode(stableId, targetStableId, placeAfter, motion = {}) {
         if (state.dashboardSort !== "manual" || stableId === targetStableId) return false;
         const visibleIDs = filteredProxies().map((proxy) => proxy.stableId);
         if (!visibleIDs.includes(stableId) || !visibleIDs.includes(targetStableId)) return false;
@@ -3737,7 +4039,65 @@
         if (targetIndex < 0) return false;
         if (placeAfter) targetIndex += 1;
         reordered.splice(targetIndex, 0, stableId);
-        return commitDashboardVisibleOrder(reordered);
+        if (reordered.every((id, index) => id === visibleIDs[index])) return false;
+        return commitDashboardVisibleOrder(reordered, {
+          animate: true,
+          movedStableId: stableId,
+          releaseVelocity: motion.releaseVelocity,
+        });
+      }
+
+      function recordDashboardDragSample(drag, event) {
+        const samples = event.getCoalescedEvents ? event.getCoalescedEvents() : [event];
+        samples.forEach((sample) => {
+          drag.samples.push({ x: sample.clientX, y: sample.clientY, time: sample.timeStamp });
+        });
+        const newest = drag.samples[drag.samples.length - 1]?.time || event.timeStamp;
+        drag.samples = drag.samples.filter((sample) => newest - sample.time <= 160);
+      }
+
+      function dashboardDragVelocity(drag) {
+        const last = drag.samples[drag.samples.length - 1];
+        if (!last) return { x: 0, y: 0 };
+        const first = drag.samples.find((sample) => last.time - sample.time <= 120) || drag.samples[0];
+        const seconds = Math.max(0.016, (last.time - first.time) / 1000);
+        const clampVelocity = (value) => Math.max(-3500, Math.min(3500, value));
+        return {
+          x: clampVelocity((last.x - first.x) / seconds),
+          y: clampVelocity((last.y - first.y) / seconds),
+        };
+      }
+
+      function projectGestureMomentum(velocity, decelerationRate = 0.998) {
+        const rate = Math.max(0, Math.min(0.999, decelerationRate));
+        return (velocity / 1000) * rate / Math.max(0.001, 1 - rate);
+      }
+
+      function dashboardDropTargetAt(drag, centerY) {
+        const cards = [...$("nodes").querySelectorAll("[data-node-card]")]
+          .filter((card) => card.dataset.nodeCard !== drag.stableId);
+        if (cards.length === 0) return null;
+        let closest = null;
+        cards.forEach((card) => {
+          const bounds = card.getBoundingClientRect();
+          const distance = Math.abs(centerY - (bounds.top + bounds.height / 2));
+          if (!closest || distance < closest.distance) closest = { card, bounds, distance };
+        });
+        return {
+          stableId: closest.card.dataset.nodeCard,
+          placeAfter: centerY >= closest.bounds.top + closest.bounds.height / 2,
+          card: closest.card,
+        };
+      }
+
+      function updateDashboardDropIndicator(drag, centerY) {
+        $("nodes").querySelectorAll(".drag-before, .drag-after").forEach((card) => {
+          card.classList.remove("drag-before", "drag-after");
+        });
+        const target = dashboardDropTargetAt(drag, centerY);
+        drag.targetStableId = target?.stableId || "";
+        drag.placeAfter = Boolean(target?.placeAfter);
+        target?.card.classList.add(drag.placeAfter ? "drag-after" : "drag-before");
       }
 
       function proxyAvailabilityStatus(proxy) {
@@ -4730,6 +5090,12 @@
       function renderNodesOverview() {
         renderNodesOverviewFilters();
         const rows = filteredNodesOverview();
+        document.querySelectorAll(".nodes-overview-table th.sortable").forEach((header) => {
+          const active = header.dataset.sort === state.nodesOverviewSort;
+          header.setAttribute("aria-sort", active
+            ? (state.nodesOverviewSortDir === "asc" ? "ascending" : "descending")
+            : "none");
+        });
         const active = (state.nodesOverview || []).filter((node) => node.active).length;
         const maintenance = (state.nodesOverview || []).filter((node) => node.active && node.maintenance).length;
         const retired = (state.nodesOverview || []).length - active;
@@ -5494,16 +5860,61 @@
         return state.proxies.find((proxy) => proxy.stableId === stableId) || null;
       }
 
-      function setNodeCardExpanded(card, expanded) {
+      function setNodeCardSemantics(card, expanded) {
         if (!card) return;
-        const head = card.querySelector("[data-node-toggle-area]");
         const toggle = card.querySelector("[data-node-toggle]");
         const panel = card.querySelector("[data-node-panel]");
-        card.classList.toggle("open", expanded);
-        head?.setAttribute("aria-expanded", String(expanded));
         toggle?.setAttribute("aria-expanded", String(expanded));
         toggle?.setAttribute("aria-label", `${expanded ? "Close" : "Open"} details`);
         panel?.setAttribute("aria-hidden", String(!expanded));
+      }
+
+      function nodeToggleAngle(toggleIcon) {
+        if (!toggleIcon) return 0;
+        const active = motionController(toggleIcon, "toggle");
+        if (active && Number.isFinite(active.value)) return active.value;
+        const transform = window.getComputedStyle(toggleIcon).transform;
+        if (!transform || transform === "none") return 0;
+        try {
+          const matrix = new DOMMatrixReadOnly(transform);
+          let angle = Math.atan2(matrix.m12, matrix.m11) * 180 / Math.PI;
+          if (angle < 0) angle += 360;
+          return angle;
+        } catch (_) {
+          return 0;
+        }
+      }
+
+      function animateNodeToggle(card, expanded, immediate = false) {
+        const icon = card?.querySelector("[data-node-toggle] svg");
+        if (!icon) return;
+        const target = expanded ? 180 : 0;
+        if (immediate || prefersReducedMotion()) {
+          takeMotionController(icon, "toggle");
+          icon.style.transform = `rotate(${target}deg)`;
+          return;
+        }
+        springScalar(icon, "toggle", {
+          from: nodeToggleAngle(icon),
+          to: target,
+          damping: 0.92,
+          response: 0.32,
+          onUpdate: (angle) => { icon.style.transform = `rotate(${angle}deg)`; },
+        });
+      }
+
+      function setNodeCardExpanded(card, expanded) {
+        if (!card) return;
+        const panel = card.querySelector("[data-node-panel]");
+        setNodeCardSemantics(card, expanded);
+        if (panel?.dataset.panelAnimating === "true") return;
+        card.classList.toggle("open", expanded);
+        if (panel) {
+          takeMotionController(panel, "panel-height");
+          panel.style.height = expanded ? "auto" : "0px";
+          panel.style.opacity = expanded ? "1" : "0";
+        }
+        animateNodeToggle(card, expanded, true);
       }
 
       function syncNodePanel(stableId, options = {}) {
@@ -5511,19 +5922,37 @@
         const card = nodeCardElement(stableId);
         const panel = card?.querySelector("[data-node-panel]");
         if (!panel) return;
-        setNodeCardExpanded(card, true);
+        setNodeCardSemantics(card, true);
+        card.classList.add("open");
+        animateNodeToggle(card, true, Boolean(options.immediate));
         if (options.immediate || prefersReducedMotion()) {
-          panel.style.maxHeight = `${panel.scrollHeight}px`;
+          takeMotionController(panel, "panel-height");
+          delete panel.dataset.panelAnimating;
+          panel.style.height = "auto";
+          panel.style.opacity = "1";
           return;
         }
         const fromHeight = Number.isFinite(options.fromHeight)
           ? Math.max(0, options.fromHeight)
           : panel.getBoundingClientRect().height;
-        panel.style.maxHeight = `${fromHeight}px`;
-        panel.getBoundingClientRect();
-        window.requestAnimationFrame(() => {
-          if (!panel.isConnected || !state.openNodeStableIds.has(stableId)) return;
-          panel.style.maxHeight = `${panel.scrollHeight}px`;
+        const targetHeight = panel.scrollHeight;
+        panel.dataset.panelAnimating = "true";
+        panel.style.height = `${fromHeight}px`;
+        springScalar(panel, "panel-height", {
+          from: fromHeight,
+          to: targetHeight,
+          damping: 1,
+          response: 0.4,
+          onUpdate: (height) => {
+            panel.style.height = `${Math.max(0, height)}px`;
+            panel.style.opacity = String(Math.max(0, Math.min(1, height / Math.max(1, targetHeight))));
+          },
+          onComplete: () => {
+            delete panel.dataset.panelAnimating;
+            if (!panel.isConnected || !state.openNodeStableIds.has(stableId)) return;
+            panel.style.height = "auto";
+            panel.style.opacity = "1";
+          },
         });
       }
 
@@ -5536,7 +5965,8 @@
         const panel = card?.querySelector("[data-node-panel]");
         if (!card || !panel) return;
         const fromHeight = panel.getBoundingClientRect().height;
-        setNodeCardExpanded(card, true);
+        setNodeCardSemantics(card, true);
+        card.classList.add("open");
         syncNodePanel(stableId, { fromHeight });
       }
 
@@ -5545,16 +5975,34 @@
         const panel = card?.querySelector("[data-node-panel]");
         if (!card || !panel) return;
         const visibleHeight = panel.getBoundingClientRect().height || panel.scrollHeight;
-        panel.style.maxHeight = `${visibleHeight}px`;
-        panel.getBoundingClientRect();
-        setNodeCardExpanded(card, false);
+        setNodeCardSemantics(card, false);
+        animateNodeToggle(card, false);
         if (prefersReducedMotion()) {
-          panel.style.maxHeight = "0px";
+          takeMotionController(panel, "panel-height");
+          delete panel.dataset.panelAnimating;
+          card.classList.remove("open");
+          panel.style.height = "0px";
+          panel.style.opacity = "0";
           return;
         }
-        window.requestAnimationFrame(() => {
-          if (!panel.isConnected || state.openNodeStableIds.has(stableId)) return;
-          panel.style.maxHeight = "0px";
+        panel.dataset.panelAnimating = "true";
+        panel.style.height = `${visibleHeight}px`;
+        springScalar(panel, "panel-height", {
+          from: visibleHeight,
+          to: 0,
+          damping: 1,
+          response: 0.36,
+          onUpdate: (height) => {
+            panel.style.height = `${Math.max(0, height)}px`;
+            panel.style.opacity = String(Math.max(0, Math.min(1, height / Math.max(1, visibleHeight))));
+          },
+          onComplete: () => {
+            delete panel.dataset.panelAnimating;
+            if (!panel.isConnected || state.openNodeStableIds.has(stableId)) return;
+            card.classList.remove("open");
+            panel.style.height = "0px";
+            panel.style.opacity = "0";
+          },
         });
       }
 
@@ -5648,7 +6096,7 @@
         const history = open ? dashboardHistoryFor(proxy.stableId) : null;
         return `
           <article class="node-card ${view.rowClass} ${open ? "open" : ""} ${animateCards ? "entering" : ""}" data-node-card="${escapeHtml(proxy.stableId)}"${animateCards ? ` style="--node-card-index: ${Math.min(index, 12)}"` : ""}>
-            <div class="node-card-head" data-node-toggle-area="${escapeHtml(proxy.stableId)}" tabindex="0" aria-expanded="${open}" aria-controls="${panelID}">
+            <div class="node-card-head" data-node-toggle-area="${escapeHtml(proxy.stableId)}">
               <div class="node-leading-actions">
                 <span class="node-drag-handle" role="button" tabindex="0" data-node-drag-handle="${escapeHtml(proxy.stableId)}" title="Drag to reorder. Use arrow keys to move." aria-label="Move ${escapeHtml(proxy.name || "node")}"${manualOrder ? "" : " hidden"}>
                   <svg width="12" height="18" viewBox="0 0 12 18" fill="currentColor" aria-hidden="true"><circle cx="3" cy="3" r="1.3"/><circle cx="9" cy="3" r="1.3"/><circle cx="3" cy="9" r="1.3"/><circle cx="9" cy="9" r="1.3"/><circle cx="3" cy="15" r="1.3"/><circle cx="9" cy="15" r="1.3"/></svg>
@@ -5673,7 +6121,7 @@
                 <button class="secondary small" type="button" data-check-id="${escapeHtml(proxy.stableId)}" ${view.checkDisabled ? "disabled" : ""}>${view.checking ? "Checking…" : "Check"}</button>
                 <button class="primary small" type="button" data-run-id="${escapeHtml(proxy.stableId)}" ${view.runDisabled ? "disabled" : ""}>${view.runStarting ? "Starting…" : (view.runRunning ? "Running…" : "Run")}</button>
               </div>
-              <button class="node-toggle" type="button" data-node-toggle="${escapeHtml(proxy.stableId)}" aria-expanded="${open}" aria-label="${open ? "Close" : "Open"} details">
+              <button class="node-toggle" type="button" data-node-toggle="${escapeHtml(proxy.stableId)}" aria-expanded="${open}" aria-controls="${panelID}" aria-label="${open ? "Close" : "Open"} details">
                 <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
               </button>
             </div>
@@ -6791,20 +7239,14 @@
 
       async function switchTab(tab) {
         state.activeTab = tab;
-        $("dashboard-view").hidden = tab !== "dashboard";
-        $("nodes-overview-view").hidden = tab !== "nodes-overview";
-        $("incidents-view").hidden = tab !== "incidents";
-        $("reachability-view").hidden = tab !== "reachability";
-        $("remnawave-view").hidden = tab !== "remnawave";
-        $("history-view").hidden = tab !== "history";
-        $("settings-view").hidden = tab !== "settings";
-        $("tab-dashboard").classList.toggle("active", tab === "dashboard");
-        $("tab-nodes-overview").classList.toggle("active", tab === "nodes-overview");
-        $("tab-incidents").classList.toggle("active", tab === "incidents");
-        $("tab-reachability").classList.toggle("active", tab === "reachability");
-        $("tab-remnawave").classList.toggle("active", tab === "remnawave");
-        $("tab-history").classList.toggle("active", tab === "history");
-        $("tab-settings").classList.toggle("active", tab === "settings");
+        ["dashboard", "nodes-overview", "incidents", "reachability", "remnawave", "history", "settings"].forEach((name) => {
+          const active = name === tab;
+          $(`${name}-view`).hidden = !active;
+          const tabButton = $(`tab-${name}`);
+          tabButton.classList.toggle("active", active);
+          tabButton.setAttribute("aria-selected", String(active));
+          tabButton.tabIndex = active ? 0 : -1;
+        });
 
         if (tab === "history") {
           const ids = selectedIDs();
@@ -6830,18 +7272,45 @@
       function switchSettingsPane(pane) {
         state.settingsPane = pane;
         ["run", "filters", "schedule"].forEach((name) => {
-          $(`settings-pane-${name}`).hidden = name !== pane;
-          $(`settings-tab-${name}`).classList.toggle("active", name === pane);
+          const active = name === pane;
+          $(`settings-pane-${name}`).hidden = !active;
+          const tabButton = $(`settings-tab-${name}`);
+          tabButton.classList.toggle("active", active);
+          tabButton.setAttribute("aria-selected", String(active));
+          tabButton.tabIndex = active ? 0 : -1;
         });
       }
 
       function switchGlobalSettingsPane(pane) {
         state.globalSettingsPane = pane;
         ["project", "history", "telegram", "agents", "backup"].forEach((name) => {
-          $(`global-settings-pane-${name}`).hidden = name !== pane;
-          $(`global-settings-tab-${name}`).classList.toggle("active", name === pane);
+          const active = name === pane;
+          $(`global-settings-pane-${name}`).hidden = !active;
+          const tabButton = $(`global-settings-tab-${name}`);
+          tabButton.classList.toggle("active", active);
+          tabButton.setAttribute("aria-selected", String(active));
+          tabButton.tabIndex = active ? 0 : -1;
         });
         if (pane === "agents") loadDiagnosticAgents();
+      }
+
+      function bindTabListKeyboardNavigation() {
+        document.querySelectorAll('[role="tablist"]').forEach((tabList) => {
+          tabList.addEventListener("keydown", (event) => {
+            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+            const tabs = [...tabList.querySelectorAll('[role="tab"]')].filter((tab) => !tab.hidden && !tab.disabled);
+            const currentIndex = tabs.indexOf(document.activeElement);
+            if (currentIndex < 0 || tabs.length === 0) return;
+            event.preventDefault();
+            let nextIndex = currentIndex;
+            if (event.key === "Home") nextIndex = 0;
+            if (event.key === "End") nextIndex = tabs.length - 1;
+            if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+            if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % tabs.length;
+            tabs[nextIndex].focus();
+            tabs[nextIndex].click();
+          });
+        });
       }
 
       function diagnosticAgentStatus(agent) {
@@ -7595,11 +8064,23 @@
         const stableId = handle.dataset.nodeDragHandle;
         const card = nodeCardElement(stableId);
         if (!stableId || !card) return;
+        takeMotionController(card, "position");
+        card.classList.remove("settling");
+        const base = currentTranslation(card);
+        const bounds = card.getBoundingClientRect();
         state.dashboardPointerDrag = {
           pointerId: event.pointerId,
           stableId,
           startX: event.clientX,
           startY: event.clientY,
+          baseX: base.x,
+          baseY: base.y,
+          grabOffsetX: event.clientX - bounds.left,
+          grabOffsetY: event.clientY - bounds.top,
+          cardHeight: bounds.height,
+          currentX: base.x,
+          currentY: base.y,
+          samples: [{ x: event.clientX, y: event.clientY, time: event.timeStamp }],
           dragging: false,
           targetStableId: "",
           placeAfter: false,
@@ -7611,32 +8092,58 @@
       $("nodes").addEventListener("pointermove", (event) => {
         const drag = state.dashboardPointerDrag;
         if (!drag || drag.pointerId !== event.pointerId || state.dashboardSort !== "manual") return;
-        if (!drag.dragging && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 5) return;
+        recordDashboardDragSample(drag, event);
+        if (!drag.dragging && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 8) return;
         drag.dragging = true;
         const draggedCard = nodeCardElement(drag.stableId);
-        if (draggedCard) draggedCard.classList.add("dragging");
-        const target = document.elementFromPoint(event.clientX, event.clientY);
-        const targetCard = target instanceof Element ? target.closest("[data-node-card]") : null;
-        $("nodes").querySelectorAll(".drag-before, .drag-after").forEach((card) => card.classList.remove("drag-before", "drag-after"));
-        drag.targetStableId = "";
-        if (targetCard && targetCard.dataset.nodeCard !== drag.stableId) {
-          const bounds = targetCard.getBoundingClientRect();
-          drag.targetStableId = targetCard.dataset.nodeCard;
-          drag.placeAfter = event.clientY >= bounds.top + bounds.height / 2;
-          targetCard.classList.add(drag.placeAfter ? "drag-after" : "drag-before");
-        }
+        if (!draggedCard) return;
+        drag.currentX = drag.baseX + event.clientX - drag.startX;
+        drag.currentY = drag.baseY + event.clientY - drag.startY;
+        draggedCard.classList.add("dragging");
+        draggedCard.style.transform = `translate3d(${drag.currentX}px, ${drag.currentY}px, 0)`;
+        const draggedTop = event.clientY - drag.grabOffsetY;
+        updateDashboardDropIndicator(drag, draggedTop + drag.cardHeight / 2);
         event.preventDefault();
       });
       $("nodes").addEventListener("pointerup", (event) => {
         const drag = state.dashboardPointerDrag;
         if (!drag || drag.pointerId !== event.pointerId) return;
         event.preventDefault();
+        recordDashboardDragSample(drag, event);
+        const velocity = dashboardDragVelocity(drag);
+        const draggedCard = nodeCardElement(drag.stableId);
+        if (drag.dragging) {
+          const cards = [...$("nodes").querySelectorAll("[data-node-card]")];
+          const listBounds = cards.reduce((range, card) => {
+            const bounds = card.getBoundingClientRect();
+            return { top: Math.min(range.top, bounds.top), bottom: Math.max(range.bottom, bounds.bottom) };
+          }, { top: Number.POSITIVE_INFINITY, bottom: Number.NEGATIVE_INFINITY });
+          const currentCenter = event.clientY - drag.grabOffsetY + drag.cardHeight / 2;
+          const projectedCenter = Math.max(listBounds.top, Math.min(
+            listBounds.bottom,
+            currentCenter + projectGestureMomentum(velocity.y),
+          ));
+          updateDashboardDropIndicator(drag, projectedCenter);
+        }
         const changed = drag.dragging && drag.targetStableId
-          ? dropDashboardVisibleNode(drag.stableId, drag.targetStableId, drag.placeAfter)
+          ? dropDashboardVisibleNode(drag.stableId, drag.targetStableId, drag.placeAfter, { releaseVelocity: velocity })
           : false;
-        if (!changed) clearDashboardDragState();
+        if (!changed) {
+          state.dashboardPointerDrag = null;
+          resetDashboardDragClasses();
+          if (drag.dragging) settleDashboardCard(draggedCard, { ...velocity, momentum: true });
+          else clearDashboardDragState();
+        }
       });
-      $("nodes").addEventListener("pointercancel", clearDashboardDragState);
+      $("nodes").addEventListener("pointercancel", (event) => {
+        const drag = state.dashboardPointerDrag;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        const draggedCard = nodeCardElement(drag.stableId);
+        state.dashboardPointerDrag = null;
+        resetDashboardDragClasses();
+        if (drag.dragging) settleDashboardCard(draggedCard);
+        else clearDashboardDragState();
+      });
 
       $("nodes").addEventListener("click", (event) => {
         const target = event.target instanceof Element ? event.target : null;
@@ -7727,10 +8234,6 @@
           handle.focus();
           return;
         }
-        const head = event.target instanceof Element ? event.target.closest("[data-node-toggle-area]") : null;
-        if (!head || event.target !== head || !["Enter", " "].includes(event.key)) return;
-        event.preventDefault();
-        toggleNodeDetails(head.dataset.nodeToggleArea);
       });
 
       $("tab-dashboard").addEventListener("click", () => switchTab("dashboard"));
@@ -8004,17 +8507,23 @@
         $(id).addEventListener("input", renderNodesOverview);
         $(id).addEventListener("change", renderNodesOverview);
       });
-      document.querySelectorAll(".nodes-overview-table th.sortable").forEach((th) => {
-        th.addEventListener("click", () => {
-          const sort = th.dataset.sort;
-          if (state.nodesOverviewSort === sort) {
-            state.nodesOverviewSortDir = state.nodesOverviewSortDir === "asc" ? "desc" : "asc";
-          } else {
-            state.nodesOverviewSort = sort;
-            state.nodesOverviewSortDir = ["name", "server", "subName", "claimedCountry", "countryMatch"].includes(sort) ? "asc" : "desc";
-          }
-          $("nodes-overview-sort").value = sort;
-          renderNodesOverview();
+      function activateNodesOverviewSort(header) {
+        const sort = header.dataset.sort;
+        if (state.nodesOverviewSort === sort) {
+          state.nodesOverviewSortDir = state.nodesOverviewSortDir === "asc" ? "desc" : "asc";
+        } else {
+          state.nodesOverviewSort = sort;
+          state.nodesOverviewSortDir = ["name", "server", "subName", "claimedCountry", "countryMatch"].includes(sort) ? "asc" : "desc";
+        }
+        $("nodes-overview-sort").value = sort;
+        renderNodesOverview();
+      }
+      document.querySelectorAll(".nodes-overview-table th.sortable").forEach((header) => {
+        header.addEventListener("click", () => activateNodesOverviewSort(header));
+        header.addEventListener("keydown", (event) => {
+          if (!["Enter", " "].includes(event.key)) return;
+          event.preventDefault();
+          activateNodesOverviewSort(header);
         });
       });
       ["url", "max-mb", "timeout", "concurrency"].forEach((id) => {
@@ -8038,6 +8547,7 @@
 
       restoreDashboardOrderState();
       syncDashboardOrderControls();
+      bindTabListKeyboardNavigation();
       switchSettingsPane(state.settingsPane);
       switchGlobalSettingsPane(state.globalSettingsPane);
       load(true).catch((err) => {
