@@ -19,6 +19,7 @@ const maxProbeAgentRequestBytes = 64 * 1024
 type AdminDiagnosticAgentService interface {
 	Enabled() bool
 	Snapshot() []probeagent.AgentSnapshot
+	ControllerDefaults() (string, string)
 	Create(probeagent.CreateAgentRequest) (probeagent.CreationResult, error)
 	Reissue(string) (probeagent.CreationResult, error)
 	Revoke(string) (probeagent.AgentSnapshot, error)
@@ -28,6 +29,15 @@ type AdminDiagnosticAgentService interface {
 type diagnosticAgentsSnapshot struct {
 	Enabled bool                       `json:"enabled"`
 	Agents  []probeagent.AgentSnapshot `json:"agents"`
+	// Defaults describe this controller, which is the same for every agent. The
+	// admin form prefills them so the operator states the address once rather
+	// than retyping it for each probe.
+	Defaults controllerDefaults `json:"defaults"`
+}
+
+type controllerDefaults struct {
+	ControllerURL string `json:"controllerUrl,omitempty"`
+	ControllerIP  string `json:"controllerIp,omitempty"`
 }
 
 type diagnosticAgentActionRequest struct {
@@ -38,7 +48,12 @@ func AdminDiagnosticAgentsHandler(service AdminDiagnosticAgentService) http.Hand
 	return func(w http.ResponseWriter, request *http.Request) {
 		switch request.Method {
 		case http.MethodGet:
-			writeJSON(w, diagnosticAgentsSnapshot{Enabled: service.Enabled(), Agents: service.Snapshot()})
+			controllerURL, controllerIP := service.ControllerDefaults()
+			writeJSON(w, diagnosticAgentsSnapshot{
+				Enabled:  service.Enabled(),
+				Agents:   service.Snapshot(),
+				Defaults: controllerDefaults{ControllerURL: controllerURL, ControllerIP: controllerIP},
+			})
 		case http.MethodPost:
 			var input probeagent.CreateAgentRequest
 			if !decodeProbeAgentJSON(w, request, &input) {

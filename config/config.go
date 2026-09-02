@@ -89,6 +89,8 @@ type CLI struct {
 		ReachabilityIntervalMin    int    `name:"reachability-sweep-interval" help:"Gap between the end of one reachability sweep and the start of the next, in minutes" default:"60" env:"REACHABILITY_SWEEP_INTERVAL_MINUTES"`
 		ReachabilityTimeoutSeconds int    `name:"reachability-sweep-timeout" help:"How long one reachability probe may take before the sweep moves on, in seconds" default:"120" env:"REACHABILITY_SWEEP_TIMEOUT_SECONDS"`
 		ReachabilityProfile        string `name:"reachability-sweep-profile" help:"Diagnostic profile the sweep runs; empty selects the status probe every agent supports" default:"" env:"REACHABILITY_SWEEP_PROFILE"`
+		ControllerURL              string `name:"probe-controller-url" help:"HTTPS URL every probe agent enrolls against; prefills the create-agent form so it is stated once, not per agent" default:"" env:"PROBE_CONTROLLER_URL"`
+		ControllerIP               string `name:"probe-controller-ip" help:"Exact IP every probe agent opens its control connection to; prefills the create-agent form" default:"" env:"PROBE_CONTROLLER_IP"`
 		RegistryPath               string `name:"probe-agent-registry" help:"Path to the controller-bound probe-agent registry" default:"data/diagnostic_agents.json" env:"PROBE_AGENT_REGISTRY"`
 		AgentImage                 string `name:"probe-agent-image" help:"Probe-agent image written into generated Compose files; pin an immutable digest in production" default:"ghcr.io/invisibleproxy/xray-checker-probe-agent:main" env:"PROBE_AGENT_IMAGE"`
 		EnrollmentTTLMinutes       int    `name:"probe-enrollment-ttl" help:"One-time enrollment token lifetime in minutes" default:"15" env:"PROBE_ENROLLMENT_TTL_MINUTES"`
@@ -148,6 +150,11 @@ func (c *CLI) Validate() error {
 		}
 		if c.RemoteDiagnostics.EnrollmentTTLMinutes < 1 || c.RemoteDiagnostics.HeartbeatIntervalSeconds < 5 || c.RemoteDiagnostics.HeartbeatMaxSkewSeconds < 1 {
 			return fmt.Errorf("probe enrollment TTL must be positive, heartbeat interval at least 5 seconds, and heartbeat clock skew positive")
+		}
+		// Both or neither: half a default still makes the operator type the
+		// other field for every agent, while looking like it was configured.
+		if (strings.TrimSpace(c.RemoteDiagnostics.ControllerURL) == "") != (strings.TrimSpace(c.RemoteDiagnostics.ControllerIP) == "") {
+			return fmt.Errorf("--probe-controller-url and --probe-controller-ip must be set together or not at all")
 		}
 		if secret := c.RemoteDiagnostics.TrustedProxySecret; secret != "" && len(secret) < 32 {
 			return fmt.Errorf("probe trusted-proxy secret must contain at least 32 bytes when configured")

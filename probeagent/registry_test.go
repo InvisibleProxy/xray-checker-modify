@@ -232,3 +232,83 @@ func enrollTestAgent(t *testing.T, registry *Registry) (CreationResult, ed25519.
 	}
 	return created, identityPrivate
 }
+
+// The controller's own address is the same for every agent, so an operator
+// should state it once instead of retyping it per probe.
+func TestCreateFillsTheControllerAddressFromTheConfiguredDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "diagnostic_agents.json")
+	registry, err := NewRegistry(RegistryConfig{
+		Path: path, Enabled: true, AgentImage: "agent:test",
+		DefaultControllerURL: "https://checker.example.com/",
+		DefaultControllerIP:  "198.51.100.10",
+		EnrollmentTTL:        15 * time.Minute, HeartbeatMaxSkew: 2 * time.Minute,
+		HeartbeatIntervalSec: 30,
+	})
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	created, err := registry.Create(CreateAgentRequest{DisplayName: "EU probe 1", ExpectedSourceIP: "203.0.113.40"})
+	if err != nil {
+		t.Fatalf("create without a controller address: %v", err)
+	}
+	// The trailing slash is normalised the same way a typed value would be.
+	if created.Agent.ControllerURL != "https://checker.example.com" || created.Agent.ControllerIP != "198.51.100.10" {
+		t.Fatalf("agent = %+v, want the configured controller address", created.Agent)
+	}
+	url, ip := registry.ControllerDefaults()
+	if url != "https://checker.example.com" || ip != "198.51.100.10" {
+		t.Fatalf("defaults = %q/%q, want the normalised configured values", url, ip)
+	}
+}
+
+// A controller reachable at a second address must stay expressible without
+// changing the configured default.
+func TestCreateKeepsAnExplicitControllerAddressOverTheDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "diagnostic_agents.json")
+	registry, err := NewRegistry(RegistryConfig{
+		Path: path, Enabled: true, AgentImage: "agent:test",
+		DefaultControllerURL: "https://checker.example.com",
+		DefaultControllerIP:  "198.51.100.10",
+		EnrollmentTTL:        15 * time.Minute, HeartbeatMaxSkew: 2 * time.Minute,
+		HeartbeatIntervalSec: 30,
+	})
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	created, err := registry.Create(CreateAgentRequest{
+		DisplayName: "EU probe 2", ExpectedSourceIP: "203.0.113.41",
+		ControllerURL: "https://second.example.com", ControllerIP: "198.51.100.11",
+	})
+	if err != nil {
+		t.Fatalf("create with an explicit controller address: %v", err)
+	}
+	if created.Agent.ControllerURL != "https://second.example.com" || created.Agent.ControllerIP != "198.51.100.11" {
+		t.Fatalf("agent = %+v, want the explicitly requested address", created.Agent)
+	}
+}
+
+// A typo in the controller's own address must stop startup rather than surface
+// weeks later when someone adds a probe.
+func TestNewRegistryRejectsAnInvalidControllerDefault(t *testing.T) {
+	base := RegistryConfig{
+		Path: filepath.Join(t.TempDir(), "diagnostic_agents.json"), Enabled: true, AgentImage: "agent:test",
+		EnrollmentTTL: 15 * time.Minute, HeartbeatMaxSkew: 2 * time.Minute, HeartbeatIntervalSec: 30,
+	}
+	plaintext := base
+	plaintext.DefaultControllerURL = "http://checker.example.com"
+	plaintext.DefaultControllerIP = "198.51.100.10"
+	if _, err := NewRegistry(plaintext); err == nil {
+		t.Fatal("expected a non-https controller default to be rejected")
+	}
+	hostname := base
+	hostname.DefaultControllerURL = "https://checker.example.com"
+	hostname.DefaultControllerIP = "checker.example.com"
+	if _, err := NewRegistry(hostname); err == nil {
+		t.Fatal("expected a hostname in place of the controller IP to be rejected")
+	}
+	half := base
+	half.DefaultControllerURL = "https://checker.example.com"
+	if _, err := NewRegistry(half); err == nil {
+		t.Fatal("expected a default with no controller IP to be rejected")
+	}
+}

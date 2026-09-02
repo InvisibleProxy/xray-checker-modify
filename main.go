@@ -154,6 +154,8 @@ func main() {
 	probeAgentRegistry, err := probeagent.NewRegistry(probeagent.RegistryConfig{
 		Path:                 config.CLIConfig.RemoteDiagnostics.RegistryPath,
 		Enabled:              config.CLIConfig.RemoteDiagnostics.Enabled,
+		DefaultControllerURL: config.CLIConfig.RemoteDiagnostics.ControllerURL,
+		DefaultControllerIP:  config.CLIConfig.RemoteDiagnostics.ControllerIP,
 		AgentImage:           config.CLIConfig.RemoteDiagnostics.AgentImage,
 		EnrollmentTTL:        time.Duration(config.CLIConfig.RemoteDiagnostics.EnrollmentTTLMinutes) * time.Minute,
 		HeartbeatMaxSkew:     time.Duration(config.CLIConfig.RemoteDiagnostics.HeartbeatMaxSkewSeconds) * time.Second,

@@ -121,8 +121,14 @@ type CreationResult struct {
 }
 
 type RegistryConfig struct {
-	Path                 string
-	Enabled              bool
+	Path    string
+	Enabled bool
+	// DefaultControllerURL and DefaultControllerIP describe this controller, not
+	// any one agent: every agent enrolls against the same address. They fill in
+	// a create request that leaves them empty, so the operator states them once
+	// instead of retyping them for each probe.
+	DefaultControllerURL string
+	DefaultControllerIP  string
 	AgentImage           string
 	EnrollmentTTL        time.Duration
 	HeartbeatMaxSkew     time.Duration
@@ -162,6 +168,17 @@ func NewRegistry(config RegistryConfig) (*Registry, error) {
 	}
 	if strings.TrimSpace(config.AgentImage) == "" {
 		config.AgentImage = "ghcr.io/invisibleproxy/xray-checker-probe-agent:main"
+	}
+	// The defaults go through the same normalisation and the same validation as
+	// a typed request, and are checked here rather than at the first Create: a
+	// typo in the controller's own address should stop startup, not surface
+	// weeks later when someone adds a probe.
+	config.DefaultControllerURL = strings.TrimRight(strings.TrimSpace(config.DefaultControllerURL), "/")
+	config.DefaultControllerIP = normalizeIP(config.DefaultControllerIP)
+	if config.DefaultControllerURL != "" || config.DefaultControllerIP != "" {
+		if err := validateControllerAddress(config.DefaultControllerURL, config.DefaultControllerIP); err != nil {
+			return nil, err
+		}
 	}
 	return &Registry{
 		config: config,
@@ -284,7 +301,7 @@ func (r *Registry) Create(request CreateAgentRequest) (CreationResult, error) {
 	if !r.Enabled() {
 		return CreationResult{}, ErrDisabled
 	}
-	request = normalizeCreateRequest(request)
+	request = r.applyControllerDefaults(normalizeCreateRequest(request))
 	if err := validateCreateRequest(request); err != nil {
 		return CreationResult{}, err
 	}
@@ -644,12 +661,8 @@ func validateCreateRequest(request CreateAgentRequest) error {
 	if _, err := parseExactIP(request.ExpectedSourceIP); err != nil {
 		return fmt.Errorf("%w: expectedSourceIp must be an exact IPv4 or IPv6 address", ErrInvalidAgent)
 	}
-	if _, err := parseExactIP(request.ControllerIP); err != nil {
-		return fmt.Errorf("%w: controllerIp must be an exact IPv4 or IPv6 address", ErrInvalidAgent)
-	}
-	parsed, err := url.Parse(request.ControllerURL)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return fmt.Errorf("%w: controllerUrl must be an https URL without credentials, query or fragment", ErrInvalidAgent)
+	if err := validateControllerAddress(request.ControllerURL, request.ControllerIP); err != nil {
+		return err
 	}
 	for name, value := range map[string]string{"region": request.Region, "provider": request.Provider, "networkGroup": request.NetworkGroup} {
 		if value != "" && !validShortText(value, 80) {
@@ -701,6 +714,44 @@ func validateRecord(record AgentRecord) error {
 	}
 	if record.EnrollmentTokenHash != "" && (record.EnrollmentExpiresAt.IsZero() || !record.EnrollmentUsedAt.IsZero()) {
 		return fmt.Errorf("%w: inconsistent enrollment token state", ErrInvalidAgent)
+	}
+	return nil
+}
+
+// ControllerDefaults reports the address every agent enrolls against, so the
+// admin UI can prefill it instead of asking for it once per probe. An empty
+// field means nothing was configured and the operator must supply it.
+func (r *Registry) ControllerDefaults() (controllerURL string, controllerIP string) {
+	if r == nil {
+		return "", ""
+	}
+	return r.config.DefaultControllerURL, r.config.DefaultControllerIP
+}
+
+// applyControllerDefaults fills only what the request left empty. An explicit
+// value still wins: a controller reachable at a second address, or a migration
+// in progress, must stay expressible without changing the configured default.
+func (r *Registry) applyControllerDefaults(request CreateAgentRequest) CreateAgentRequest {
+	if request.ControllerURL == "" {
+		request.ControllerURL = r.config.DefaultControllerURL
+	}
+	if request.ControllerIP == "" {
+		request.ControllerIP = r.config.DefaultControllerIP
+	}
+	return request
+}
+
+// validateControllerAddress enforces the pinning rules on the pair the agent
+// dials: an exact IP it opens TCP to, and an https URL whose hostname the TLS
+// handshake must match. Both are checked in one place so a configured default
+// cannot be looser than a value typed into the admin form.
+func validateControllerAddress(controllerURL, controllerIP string) error {
+	if _, err := parseExactIP(controllerIP); err != nil {
+		return fmt.Errorf("%w: controllerIp must be an exact IPv4 or IPv6 address", ErrInvalidAgent)
+	}
+	parsed, err := url.Parse(controllerURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("%w: controllerUrl must be an https URL without credentials, query or fragment", ErrInvalidAgent)
 	}
 	return nil
 }
