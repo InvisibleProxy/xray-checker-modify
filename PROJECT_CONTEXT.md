@@ -20,13 +20,16 @@
 | `checker/` | проверки доступности, latency, host/ping diagnostics, классификация причин и текущее состояние нод |
 | `diagnostics/` | изолированные versioned schemas и in-memory lifecycle Remote Diagnostics; не владеет operational status и не зависит от monitoring-компонентов |
 | `probeagent/` | persisted controller registry, IP-bound enrollment, signed heartbeat, pinned HTTPS client и Linux Compose rendering для удалённых агентов |
+| `remoteprobe/` | единственный адаптер между operational proxy-конфигурацией и изолированным `diagnostics/`; создаёт manual, automatic и sweep-сессии и владеет ephemeral credential-bearing assignment queue |
+| `agentautomation/` | opt-in координатор автоматических сессий после неразрешённого speedtest fallback; отдаёт только sanitized annotation и не имеет callbacks в operational state |
+| `reachability/` | периодический sweep «нода × агент», матрица вердиктов с hysteresis и её persisted состояние; читает `remoteprobe` через узкий интерфейс и не пишет operational state |
 | `projectmaintenance/` | persisted глобальный режим обслуживания; владеет только состоянием и не знает о компонентах, которые на него смотрят |
 | `metrics/` | Prometheus-метрики и Pushgateway |
 | `speedtest/` | ручные и плановые тесты скорости, Test URL нод и temporal retention |
 | `nodearchive/` | долгоживущий реестр активных/выбывших нод, downtime, persisted incident journal, GeoIP активных нод и speedtest summary |
 | `nodemerge/` | preview и crash-safe перенос persisted identity/history с retired StableID в active StableID |
 | `remnawave/` | безопасный API client, topology model, audience-aware policy, ownership и reconciliation subscription `announce` |
-| `telegram/` | компактный HTML и Rich Messages, команды, отчёты, алерты, recovery и настройки mute |
+| `telegram/` | компактный HTML и Rich Messages, команды, отчёты, алерты, recovery и настройки mute; разложен по темам (alerts, bot, transport, format), карта — в package doc `telegram/service.go` |
 | `backup/` | создание ZIP, автоматическая ротация, типизированная проверка и транзакционный staged restore |
 | `web/` | dashboard, admin UI, REST API, OpenAPI и Basic Auth middleware |
 
@@ -93,7 +96,19 @@ Manual workflow связывается отдельным adapter-пакетом
 
 Admin UI показывает `Remote Diagnostics` в раскрытой карточке active-ноды: оператор выбирает подключённый agent и вид диагностики, запускает session, видит local snapshot, signed remote observation, evidence выбранного профиля и вероятностную summary, может отменить session либо скачать sanitized JSON. Профиль, недоступный выбранному агенту, показывается неактивным, а не скрывается. Controller атомарно разрешает не более одной активной session для пары `StableID` + agent; UI сохраняет выбранные agent и профиль при polling и выводит active sessions раньше завершённых. Неудача туннельного HTTP-профиля сначала перепроверяется через alternative endpoint, что отличает недоступный endpoint от недоступной ноды. Перед приёмом observation adapter повторно проверяет текущую generation/fingerprint; refresh делает старое задание stale.
 
-`agentautomation/` является узким consumer-ом финального speedtest report. При `FallbackAttempted` и неразрешённой technical error либо низкой fallback-скорости он создаёт `auto_speed_fallback` session с фиксированным `Download throughput` и альтернативным `Endpoint status`, выбирая одну healthy idle probe. Действуют per-`StableID` cooldown и общий concurrency limit — их занимает только реально стартовавшая session, поэтому отказ без агента или при исчерпанной ёмкости повторяется на следующем прогоне; per-node/project maintenance, retired и offline results пропускаются. Operational retry/alert decision выполняется раньше bounded ожидания observation. Результат копируется только в ephemeral `AgentDiagnostic` для форматирования уже разрешённого Telegram alert и никогда не сохраняется в speedtest result/history. Multi-agent запуск остаётся следующим этапом.
+`agentautomation/` является узким consumer-ом финального speedtest report. При `FallbackAttempted` и неразрешённой technical error либо низкой fallback-скорости он создаёт `auto_speed_fallback` session с фиксированным `Download throughput` и альтернативным `Endpoint status`, выбирая одну healthy idle probe. Действуют per-`StableID` cooldown и общий concurrency limit — их занимает только реально стартовавшая session, поэтому отказ без агента или при исчерпанной ёмкости повторяется на следующем прогоне; per-node/project maintenance, retired и offline results пропускаются. Operational retry/alert decision выполняется раньше bounded ожидания observation. Результат копируется только в ephemeral `AgentDiagnostic` для форматирования уже разрешённого Telegram alert и никогда не сохраняется в speedtest result/history.
+
+### Матрица достижимости
+
+`reachability/` — единственный multi-agent workflow и единственная часть Remote Diagnostics с persisted состоянием. Она отвечает на вопрос, недоступный обычному циклу availability: нода мертва или недостижима по конкретному пути? Локально эти случаи неразличимы, а чинить их надо по-разному.
+
+Проход идёт по одной goroutine на подключённого агента, ноды внутри — последовательно; параллелить нечего, потому что controller отказывает во второй session для той же пары, а агент выполняет одну пробу за раз. Каждая пара создаёт обычную bounded generation-bound session через `CreateSweep` — он отличается от manual workflow только тем, что агента называет sweep, а не оператор. Из завершённой session извлекается одна ячейка, после чего session удаляется: sweep не должен наполнять список диагностик сотнями записей и растить in-memory state manager-а.
+
+Вердикт сравнивает статус агента с последним локальным результатом и называет наблюдение, а не причину: `agreed_up`, `agreed_down`, `agent_only_failure`, `local_only_failure`, `unknown`. Ячейка хранит оба статуса, `failureCode`/`failureStage`, `tcpReached`, время обеих сторон, `Since` и `streak`.
+
+Три правила удерживают матрицу от ложных находок. Вердикт не выводится из observation с неуспешным direct-connectivity контролем, иначе агент с упавшим uplink пометил бы все ноды разом. Вердикт не выводится при локальном статусе `unknown`. И расхождение становится находкой только со второго совпадающего прохода: локальная половина сравнения отстаёт на величину до `PROXY_CHECK_INTERVAL`, поэтому нода, умершая перед проходом, один раз выглядит расхождением — hysteresis отсеивает это без обращения к availability loop, которое нарушило бы изоляцию.
+
+Матрица не является operational state: ни один вердикт не читается availability, incidents, speedtest, Telegram или Remnawave. Ноды в maintenance пропускаются, project maintenance останавливает sweep целиком.
 
 ### Remnawave subscription announce
 
@@ -227,6 +242,7 @@ Recovery alert хранит `RecoveryPending`, время и latency до усп
 | `data/node_alert_state.json` | `telegram` | состояние последовательностей алертов, диагностические причины и pending 30-минутные speedtest confirmation retries |
 | `data/remnawave_announce_config.json` | `remnawave` | versioned policy, Internal/External pairs и location-first members (`location key → StableID → Host UUID`); входит в backup |
 | `data/remnawave_announce_state.json` | `remnawave` | последнее exact managed value и announced locations; не входит в backup |
+| `data/reachability.json` | `reachability` | последний вердикт на пару «нода × агент», момент его появления и streak; кэш наблюдений, восстанавливаемый следующим sweep |
 | `data/project_state.json` | `projectmaintenance` | глобальный режим обслуживания и момент его включения; отсутствие файла означает выключенный режим; входит в backup |
 | `data/backups/*.zip` | `backup` | до 7 автоматических архивов за последние 7 суток |
 | `data/.node-merge-{pending,applied,rollback}` | `nodemerge` | временная crash-safe транзакция переноса identity/history |
@@ -253,7 +269,10 @@ Recovery alert хранит `RecoveryPending`, время и latency до усп
 - Remnawave `external-squads:update` не ограничен одним полем; компрометация token позволяет менять и другие настройки External Squad. Минимальные scopes и сетевое ограничение остаются обязательными.
 - User-specific Remnawave Response Rule имеет более высокий приоритет, чем External Squad header override, поэтому может скрыть управляемый `announce` для отдельного пользователя.
 - Node merge не переносит location membership из Remnawave config: после смены StableID оператор вручную заменяет retired member на новый active StableID в нужной location. Host UUID и location key не переносятся автоматически, что сохраняет узкий transactional scope merge и исключает неявное изменение аудитории.
+- Матрица достижимости покрывает ровно те точки наблюдения, где стоят агенты. Один агент в одной стране отвечает только про эту страну; отсутствие находок не означает, что нода доступна отовсюду.
+- Подтверждение находки требует двух проходов, поэтому минимальная задержка обнаружения — два интервала sweep. Это сознательный размен: сократить его можно только частыми проходами, которые нагружают и агентов, и ноды.
+- Sweep не является alert-каналом: находки видны во вкладке `Reachability` и через API, но не отправляются в Telegram. Самостоятельные notifications по agent observations входят в список того, что `DISTRIBUTED_PROBES.md` намеренно не реализует.
 
 ## Текущее состояние
 
-Реализованы и покрыты Go-тестами: сохранение и проверка StableID при refresh, suspicious-diff guard и Xray config rollback, staged node identity merge с rollback/lineage, persisted maintenance mode со сквозным исключением из monitoring workflows, Xray lifecycle-lock speedtest, единый scheduled/Telegram TestConfig, temporal speedtest retention, persisted 30-минутные speedtest confirmation retries с миграцией legacy deadline entries, node archive и incident journal, детерминированные failure codes, корреляция массовых сбоев, audience-aware Remnawave announce с ownership guard, структурированный Telegram output, retryable recovery alerts, ручные/автоматические backup и транзакционный staged restore. GitHub Actions и Dependabot в форке отключены; CI, Docker Hub description и release jobs на GitHub не выполняются. Перед релизом обязательны локальные проверки из [`AGENTS.md`](AGENTS.md).
+Реализованы и покрыты Go-тестами: сохранение и проверка StableID при refresh, suspicious-diff guard и Xray config rollback, staged node identity merge с rollback/lineage, persisted maintenance mode со сквозным исключением из monitoring workflows, Xray lifecycle-lock speedtest, единый scheduled/Telegram TestConfig, temporal speedtest retention, persisted 30-минутные speedtest confirmation retries с миграцией legacy deadline entries, node archive и incident journal, детерминированные failure codes, корреляция массовых сбоев, audience-aware Remnawave announce с ownership guard, структурированный Telegram output, retryable recovery alerts, ручные/автоматические backup и транзакционный staged restore, изолированная remote-диагностика с opt-in speed-fallback automation и periodic reachability sweep. Наследованные от upstream GitHub Actions и Dependabot отключены; форк владеет только двумя собственными publish workflow для образов controller-а и probe-агента. CI, Docker Hub description и release jobs upstream не выполняются. Перед релизом обязательны локальные проверки из [`AGENTS.md`](AGENTS.md).

@@ -297,7 +297,32 @@
     "Deleting node": "Удаление ноды", "All subscriptions": "Все подписки", "No changes": "Без изменений",
     "Apply this update anyway?": "Всё равно применить это обновление?",
     "Restore this backup on the next application restart?\n\nCurrent persisted data will be replaced.": "Восстановить этот бэкап при следующем перезапуске приложения?\n\nТекущие сохранённые данные будут заменены.",
-    "Switch language": "Переключить язык"
+    "Switch language": "Переключить язык",
+
+    "Reachability": "Достижимость",
+    "What each probe agent sees, next to what this checker sees": "Что видит каждый probe-агент рядом с тем, что видит сам checker",
+    "Sweep now": "Опросить сейчас", "Sweep": "Опрос", "Interval": "Интервал", "Last sweep": "Последний опрос",
+    "Confirmed findings": "Подтверждённые находки", "Running now": "Идёт сейчас",
+    "A node is only a finding when the two vantage points disagree twice in a row. One disagreement is a sample, not a fault.": "Нода становится находкой, только если две точки наблюдения разошлись два раза подряд. Одно расхождение — это выборка, а не сбой.",
+    "Findings": "Находки", "No findings": "Находок нет", "Matrix": "Матрица",
+    "Vantage point": "Точка наблюдения", "Disagreement": "Расхождение", "Evidence": "Свидетельства", "Since": "С",
+    "Reachable from both": "Доступна с обеих сторон", "Down from both": "Недоступна с обеих сторон",
+    "Fails from the agent only": "Не работает только у агента", "Fails from the checker only": "Не работает только у checker",
+    "No comparable answer": "Нет сопоставимого ответа",
+    "Agent": "Агент", "Checker": "Checker", "Streak": "Подряд",
+    "TCP reached the node": "TCP дошёл до ноды", "TCP did not reach the node": "TCP не дошёл до ноды",
+    "Confirmed": "Подтверждено", "Seen once, not confirmed": "Замечено один раз, не подтверждено",
+    "Every vantage point agrees": "Все точки наблюдения сходятся", "No sweep results yet": "Результатов опроса ещё нет",
+    "confirmed": "подтверждено", "provisional": "предварительно", "offline": "не на связи",
+    "Reachability sweep": "Опрос достижимости",
+    "Starting a sweep": "Запускаю опрос",
+    "Sweep started; every agent is being asked about every node": "Опрос запущен; каждый агент опрашивается по каждой ноде",
+    "Reachability sweep is disabled": "Опрос достижимости отключён",
+    "agent returned no observation": "агент не вернул наблюдение",
+    "agent lost its own connectivity during the probe": "агент потерял собственную связь во время проверки",
+    "controller had no recent result to compare": "у контроллера не было свежего результата для сравнения",
+    "diagnostic job expired before the agent answered": "диагностическая задача истекла до ответа агента",
+    "diagnostic session was cancelled": "диагностическая сессия отменена"
   };
 
   const patterns = [

@@ -555,7 +555,8 @@ func validateCreateSessionRequest(request CreateSessionRequest, now time.Time, m
 		return fmt.Errorf("%w: stableId is required", ErrInvalidRequest)
 	}
 	switch request.Trigger {
-	case TriggerManual, TriggerAutoProxyFailure, TriggerAutoCheckEndpoint, TriggerAutoAmbiguousFailure, TriggerAutoSpeedFallback:
+	case TriggerManual, TriggerAutoProxyFailure, TriggerAutoCheckEndpoint, TriggerAutoAmbiguousFailure,
+		TriggerAutoSpeedFallback, TriggerReachabilitySweep:
 	default:
 		return fmt.Errorf("%w: unsupported trigger", ErrInvalidRequest)
 	}

@@ -18,6 +18,11 @@ const (
 	TriggerAutoCheckEndpoint    Trigger = "auto_check_endpoint"
 	TriggerAutoAmbiguousFailure Trigger = "auto_ambiguous_failure"
 	TriggerAutoSpeedFallback    Trigger = "auto_speed_fallback"
+	// TriggerReachabilitySweep is the periodic per-agent sweep. It is automatic,
+	// but unlike the other automatic triggers it is not a reaction to a failure:
+	// it runs against healthy nodes precisely so a node that works here and not
+	// there is visible before anyone reports it.
+	TriggerReachabilitySweep Trigger = "reachability_sweep"
 )
 
 func (t Trigger) Automatic() bool {

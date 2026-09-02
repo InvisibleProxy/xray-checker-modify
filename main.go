@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"xray-checker/nodemerge"
 	"xray-checker/probeagent"
 	"xray-checker/projectmaintenance"
+	"xray-checker/reachability"
 	remnawaveannounce "xray-checker/remnawave"
 	"xray-checker/remoteprobe"
 	"xray-checker/speedtest"
@@ -194,6 +196,29 @@ func main() {
 	}, remoteDiagnosticController, probeAgentRegistry)
 	if err != nil {
 		logger.Fatal("Failed to configure diagnostic automation: %v", err)
+	}
+	reachabilityMatrix := reachability.NewMatrix("data/reachability.json")
+	handleStateLoadError("reachability matrix", reachabilityMatrix.Load())
+	reachabilitySweeper, err := reachability.NewSweeper(reachability.Config{
+		Enabled:      config.CLIConfig.RemoteDiagnostics.ReachabilityEnabled,
+		Interval:     time.Duration(config.CLIConfig.RemoteDiagnostics.ReachabilityIntervalMin) * time.Minute,
+		ProbeTimeout: time.Duration(config.CLIConfig.RemoteDiagnostics.ReachabilityTimeoutSeconds) * time.Second,
+		ProfileID:    config.CLIConfig.RemoteDiagnostics.ReachabilityProfile,
+		OnSweep: func(summary reachability.Summary) {
+			if summary.SaveError != nil {
+				logger.Warn("Failed to persist the reachability matrix: %v", summary.SaveError)
+			}
+			if summary.Skipped {
+				return
+			}
+			logger.Info("Reachability sweep: %d agents, %d nodes, %d cells, %d confirmed divergences, %d timeouts, %d errors",
+				summary.Agents, summary.Nodes, summary.Recorded, summary.Confirmed, summary.Timeouts, summary.Errors)
+		},
+	}, remoteDiagnosticController, probeAgentRegistry, func() []reachability.Target {
+		return reachabilityTargets(proxyChecker)
+	}, reachabilityMatrix)
+	if err != nil {
+		logger.Fatal("Failed to configure the reachability sweep: %v", err)
 	}
 
 	xrayLifecycle := &sync.RWMutex{}
@@ -473,6 +498,12 @@ func main() {
 	})
 	checkScheduler.StartAsync()
 
+	// The sweep returns immediately when it is disabled, so it needs no guard
+	// here. It deliberately starts after the check scheduler: the local half of
+	// every comparison is the checker's own last result, and sweeping before
+	// the first pass has produced one only yields unknown cells.
+	go reachabilitySweeper.Run(context.Background())
+
 	if recoveryInterval := config.CLIConfig.Proxy.RecoveryInterval; recoveryInterval > 0 {
 		recoveryStop := make(chan struct{})
 		var recoveryWG sync.WaitGroup
@@ -695,6 +726,7 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions/clear", web.AdminDiagnosticSessionsClearHandler(remoteDiagnosticController))
 	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions/export", web.AdminDiagnosticSessionExportHandler(remoteDiagnosticController))
 	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions", web.AdminDiagnosticSessionsHandler(remoteDiagnosticController, diagnosticAutomation.Snapshot))
+	protectedHandler.Handle("/api/v1/admin/reachability", web.AdminReachabilityHandler(reachabilitySweeper))
 
 	if config.CLIConfig.Web.Public {
 		mux.Handle("/", web.IndexHandler(version, proxyChecker, projectMaintenance))
@@ -766,6 +798,29 @@ func updateConfiguration(newConfigs []*models.ProxyConfig, currentConfigs *[]*mo
 
 	logger.Info("Configuration updated: %d proxies", len(newConfigs))
 	return nil
+}
+
+// reachabilityTargets lists the nodes worth asking the agents about: the ones
+// the checker is currently monitoring. A paused node is excluded on purpose —
+// its local status is not being maintained, so an agent's answer would be
+// compared against a result nobody is refreshing.
+func reachabilityTargets(proxyChecker *checker.ProxyChecker) []reachability.Target {
+	proxies := proxyChecker.GetProxies()
+	targets := make([]reachability.Target, 0, len(proxies))
+	for _, proxy := range proxies {
+		if proxy == nil {
+			continue
+		}
+		stableID := strings.TrimSpace(proxy.StableID)
+		if stableID == "" {
+			stableID = proxy.GenerateStableID()
+		}
+		if stableID == "" || !proxyChecker.MonitoringEnabled(stableID) {
+			continue
+		}
+		targets = append(targets, reachability.Target{StableID: stableID, Name: proxy.Name})
+	}
+	return targets
 }
 
 func unavailableStableIDSet(proxyChecker *checker.ProxyChecker) map[string]bool {

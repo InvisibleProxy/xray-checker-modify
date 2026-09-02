@@ -26,8 +26,23 @@
 - proxy-check, TCP/ping evidence, direct-connectivity control, отдельная observation-подпись и generation/fingerprint recheck перед приёмом;
 - cancel, sanitized JSON export и вероятностная summary без operational side effects.
 - opt-in `auto_speed_fallback`, выбирающий одну healthy idle probe, с per-node cooldown, concurrency limit и bounded read-only alert enrichment.
+- opt-in `reachability_sweep`: периодический обход «каждая нода × каждый подключённый агент» с persisted матрицей вердиктов, hysteresis по streak и отдельной вкладкой `Reachability`.
 
-Manager diagnostic sessions связан с отдельным manual admin workflow, agent endpoints и узким automation coordinator-ом. Он не является writer-ом availability или speedtest workflow: текущий код ничего не меняет в status/history/incidents/retries/Remnawave/speedtest. Реализованы alternative endpoint и automatic trigger только для неразрешённого speedtest country fallback; multi-agent session и availability-trigger пока не реализованы.
+Manager diagnostic sessions связан с отдельным manual admin workflow, agent endpoints, узким automation coordinator-ом и sweep-ом достижимости. Он не является writer-ом availability или speedtest workflow: текущий код ничего не меняет в status/history/incidents/retries/Remnawave/speedtest. Automatic trigger реализован для неразрешённого speedtest country fallback и для периодического sweep-а; availability-trigger по-прежнему не реализован.
+
+### Sweep достижимости
+
+Sweep — единственный multi-agent workflow, и он остаётся строго за границей изоляции. Он создаёт те же bounded generation-bound сессии, что и manual workflow, отличаясь только тем, что агента называет он сам, а не оператор: матрице нужна каждая ячейка, а не один ответ от того агента, который оказался свободен.
+
+Из сессии извлекается ровно одна ячейка, после чего сессия удаляется. Ячейка содержит вердикт, оба статуса, `failureCode`/`failureStage`, `tcpReached`, время обеих сторон сравнения и `streak`; ничего из execution config, credentials или raw transport errors в неё не попадает, а причина `unknown` берётся из фиксированного списка фраз пакета, а не из текста ошибки.
+
+Три правила удерживают sweep от ложных находок:
+
+- вердикт не выводится из observation без успешного direct-connectivity контроля, иначе агент с упавшим uplink пометил бы все ноды разом;
+- вердикт не выводится, если локальный статус `unknown` — сравнивать не с чем;
+- расхождение становится находкой только со второго совпадающего прохода. Локальная половина сравнения отстаёт на величину до `PROXY_CHECK_INTERVAL`, и это единственный дешёвый способ отсеять артефакт устаревания, не заставляя диагностический workflow дёргать availability loop.
+
+Вердикт намеренно называет наблюдение, а не причину: `agent_only_failure` и `local_only_failure` описывают, кто с кем разошёлся, и ничего не утверждают про блокировку. Это не operational state — ни одно из состояний `global_offline`, `global_proxy_failure` или `regional_degradation` из списка ниже здесь не появляется, и ни один вердикт не читается ни availability, ни Telegram, ни Remnawave.
 
 ## Основная идея
 

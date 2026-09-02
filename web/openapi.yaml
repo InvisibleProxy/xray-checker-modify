@@ -1199,6 +1199,42 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
+  /api/v1/admin/reachability:
+    get:
+      summary: Per-agent reachability matrix
+      description: >-
+        Reports what each connected probe agent last saw for each monitored node, next to the checker's own
+        result for the same node. Only disagreements are findings: a node reachable here and not from an agent,
+        or the reverse. The matrix is advisory and never writes availability, downtime, incidents or Remnawave.
+        Cells carry a streak, and divergentCells counts only disagreements that survived a second sweep.
+      tags: [Admin]
+      responses:
+        '200':
+          description: Current matrix with one column per agent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReachabilityView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      summary: Run a reachability sweep now
+      description: >-
+        Starts one pass in the background and returns the current snapshot with sweeping set. A request made
+        while a pass is already running is ignored rather than queued.
+      tags: [Admin]
+      responses:
+        '200':
+          description: Snapshot taken as the sweep was started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReachabilityView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: The reachability sweep is disabled
+
   /api/v1/admin/diagnostic-sessions/cancel:
     post:
       summary: Cancel an active diagnostic session
@@ -2920,6 +2956,69 @@ components:
         maxConcurrent: {type: integer, minimum: 0}
         active: {type: integer, minimum: 0}
 
+    ReachabilityView:
+      type: object
+      required: [enabled, intervalSeconds, profileId, agents, nodes, lastSweepCompleted, sweeping, divergentCells]
+      properties:
+        enabled: {type: boolean}
+        intervalSeconds: {type: integer, minimum: 0}
+        profileId: {type: string}
+        agents: {type: array, items: {$ref: '#/components/schemas/ReachabilityAgent'}}
+        nodes: {type: array, items: {$ref: '#/components/schemas/ReachabilityNodeRow'}}
+        lastSweepAt: {type: string, format: date-time}
+        lastSweepCompleted: {type: boolean}
+        sweeping: {type: boolean}
+        divergentCells:
+          type: integer
+          minimum: 0
+          description: Confirmed disagreements only; a cell that diverged on a single sweep is not counted.
+
+    ReachabilityAgent:
+      type: object
+      required: [agentId, connected]
+      properties:
+        agentId: {type: string}
+        displayName: {type: string}
+        region: {type: string}
+        provider: {type: string}
+        networkGroup: {type: string}
+        connected: {type: boolean}
+
+    ReachabilityNodeRow:
+      type: object
+      required: [stableId, cells]
+      properties:
+        stableId: {type: string}
+        name: {type: string}
+        cells: {type: array, items: {$ref: '#/components/schemas/ReachabilityCell'}}
+
+    ReachabilityCell:
+      type: object
+      required: [agentId, verdict, agentStatus, localStatus, checkedAt, tcpReached, since, streak]
+      properties:
+        agentId: {type: string}
+        verdict:
+          type: string
+          enum: [unknown, agreed_up, agreed_down, agent_only_failure, local_only_failure]
+          description: >-
+            agent_only_failure means the node answered the checker and not this agent; local_only_failure is the
+            mirror image and points at the checker's own path. The verdict names what was seen, not why.
+        agentStatus: {type: string, enum: [unknown, online, proxy_failure, offline]}
+        localStatus: {type: string, enum: [unknown, online, proxy_failure, offline]}
+        checkedAt: {type: string, format: date-time}
+        localCheckedAt: {type: string, format: date-time}
+        latencyMillis: {type: integer, minimum: 0}
+        failureCode: {type: string}
+        failureStage: {type: string}
+        tcpReached:
+          type: boolean
+          description: Separates a path that carries nothing from one that completes TCP and then fails inside the tunnel.
+        detail:
+          type: string
+          description: Fixed phrase explaining an unknown verdict. Never a raw transport error.
+        since: {type: string, format: date-time}
+        streak: {type: integer, minimum: 0, description: Consecutive sweeps that reached this verdict.}
+
     DiagnosticSession:
       type: object
       required: [schemaVersion, sessionId, stableId, trigger, configGeneration, configFingerprint, localResultSnapshot, requestedAgents, jobs, agentObservations, createdAt, expiresAt, state]
@@ -2927,7 +3026,7 @@ components:
         schemaVersion: {type: integer, enum: [2]}
         sessionId: {type: string}
         stableId: {type: string}
-        trigger: {type: string, enum: [manual, auto_proxy_failure, auto_check_endpoint, auto_ambiguous_failure, auto_speed_fallback]}
+        trigger: {type: string, enum: [manual, auto_proxy_failure, auto_check_endpoint, auto_ambiguous_failure, auto_speed_fallback, reachability_sweep]}
         configGeneration: {type: integer, format: int64}
         configFingerprint: {type: string}
         localResultSnapshot: {type: object}

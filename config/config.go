@@ -85,6 +85,10 @@ type CLI struct {
 		AutomationCooldownMinutes  int    `name:"probe-automation-cooldown" help:"Cooldown per StableID after an automatic diagnostic session, in minutes" default:"30" env:"PROBE_AUTOMATION_COOLDOWN_MINUTES"`
 		AutomationAlertWaitSeconds int    `name:"probe-automation-alert-wait" help:"Maximum time a background Telegram speed alert waits for agent evidence" default:"90" env:"PROBE_AUTOMATION_ALERT_WAIT_SECONDS"`
 		AutomationMaxConcurrent    int    `name:"probe-automation-max-concurrent" help:"Maximum concurrent automatic diagnostic sessions" default:"2" env:"PROBE_AUTOMATION_MAX_CONCURRENT"`
+		ReachabilityEnabled        bool   `name:"reachability-sweep-enabled" help:"Periodically ask every connected agent whether it can reach every node, and record the disagreements" default:"false" env:"REACHABILITY_SWEEP_ENABLED"`
+		ReachabilityIntervalMin    int    `name:"reachability-sweep-interval" help:"Gap between the end of one reachability sweep and the start of the next, in minutes" default:"60" env:"REACHABILITY_SWEEP_INTERVAL_MINUTES"`
+		ReachabilityTimeoutSeconds int    `name:"reachability-sweep-timeout" help:"How long one reachability probe may take before the sweep moves on, in seconds" default:"120" env:"REACHABILITY_SWEEP_TIMEOUT_SECONDS"`
+		ReachabilityProfile        string `name:"reachability-sweep-profile" help:"Diagnostic profile the sweep runs; empty selects the status probe every agent supports" default:"" env:"REACHABILITY_SWEEP_PROFILE"`
 		RegistryPath               string `name:"probe-agent-registry" help:"Path to the controller-bound probe-agent registry" default:"data/diagnostic_agents.json" env:"PROBE_AGENT_REGISTRY"`
 		AgentImage                 string `name:"probe-agent-image" help:"Probe-agent image written into generated Compose files; pin an immutable digest in production" default:"ghcr.io/invisibleproxy/xray-checker-probe-agent:main" env:"PROBE_AGENT_IMAGE"`
 		EnrollmentTTLMinutes       int    `name:"probe-enrollment-ttl" help:"One-time enrollment token lifetime in minutes" default:"15" env:"PROBE_ENROLLMENT_TTL_MINUTES"`
@@ -123,6 +127,20 @@ func (c *CLI) Validate() error {
 	}
 	if c.RemoteDiagnostics.AutomationEnabled && !c.RemoteDiagnostics.Enabled {
 		return fmt.Errorf("remote diagnostic automation requires Remote Diagnostics to be enabled")
+	}
+	if c.RemoteDiagnostics.ReachabilityEnabled {
+		if !c.RemoteDiagnostics.Enabled {
+			return fmt.Errorf("the reachability sweep requires Remote Diagnostics to be enabled")
+		}
+		// The floors are not taste: a shorter interval turns the sweep into
+		// continuous load on every agent and every node, and a shorter probe
+		// timeout would abandon jobs that were about to answer.
+		if c.RemoteDiagnostics.ReachabilityIntervalMin < 5 {
+			return fmt.Errorf("--reachability-sweep-interval must be at least 5 minutes")
+		}
+		if c.RemoteDiagnostics.ReachabilityTimeoutSeconds < 15 {
+			return fmt.Errorf("--reachability-sweep-timeout must be at least 15 seconds")
+		}
 	}
 	if c.RemoteDiagnostics.Enabled {
 		if strings.TrimSpace(c.RemoteDiagnostics.RegistryPath) == "" || strings.TrimSpace(c.RemoteDiagnostics.AgentImage) == "" {

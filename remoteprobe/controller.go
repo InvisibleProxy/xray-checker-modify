@@ -124,8 +124,51 @@ func (c *Controller) Enabled() bool {
 }
 
 func (c *Controller) CreateManual(request CreateManualRequest) (SessionView, error) {
+	return c.createTargeted(targetedRequest{
+		StableID:  request.StableID,
+		AgentID:   request.AgentID,
+		ProfileID: request.ProfileID,
+		Trigger:   diagnostics.TriggerManual,
+	})
+}
+
+// CreateSweepRequest asks one named agent whether it can reach one node. It is
+// the reachability sweep's only entry into the diagnostics manager and carries
+// no operational authority: the session it produces is evidence like any other.
+type CreateSweepRequest struct {
+	StableID  string
+	AgentID   string
+	ProfileID string
+}
+
+// CreateSweep runs the same bounded, generation-bound job as the manual
+// workflow, against an agent the sweeper names rather than one the controller
+// picks. Naming the agent is the whole point: a matrix needs every cell, not
+// one answer from whichever agent happened to be idle.
+func (c *Controller) CreateSweep(request CreateSweepRequest) (SessionView, error) {
+	return c.createTargeted(targetedRequest{
+		StableID:  request.StableID,
+		AgentID:   request.AgentID,
+		ProfileID: request.ProfileID,
+		Trigger:   diagnostics.TriggerReachabilitySweep,
+	})
+}
+
+// targetedRequest is the shared shape of the workflows that name their own
+// agent, as opposed to CreateAutomatic which selects one.
+type targetedRequest struct {
+	StableID  string
+	AgentID   string
+	ProfileID string
+	Trigger   diagnostics.Trigger
+}
+
+func (c *Controller) createTargeted(request targetedRequest) (SessionView, error) {
 	if !c.Enabled() {
 		return SessionView{}, probeagent.ErrDisabled
+	}
+	if request.Trigger.Automatic() && c.checker.ProjectMaintenanceEnabled() {
+		return SessionView{}, ErrAutomaticPaused
 	}
 	request.StableID = strings.TrimSpace(request.StableID)
 	request.AgentID = strings.TrimSpace(request.AgentID)
@@ -143,6 +186,14 @@ func (c *Controller) CreateManual(request CreateManualRequest) (SessionView, err
 	snapshot, configJSON, fingerprint, err := c.executionSnapshot(request.StableID)
 	if err != nil {
 		return SessionView{}, err
+	}
+	// Only an operator may diagnose a paused node. An automatic trigger has
+	// nothing to learn from one: its result cannot be compared against a local
+	// status the checker stopped maintaining. The manager rejects the pairing
+	// outright, so refusing here keeps the automatic workflows from producing a
+	// validation error instead of an explanation.
+	if snapshot.Maintenance && request.Trigger.Automatic() {
+		return SessionView{}, ErrAutomaticPaused
 	}
 	// A fallback endpoint is only offered when the agent could actually run it,
 	// otherwise the retry would come back as a configuration failure.
@@ -166,7 +217,7 @@ func (c *Controller) CreateManual(request CreateManualRequest) (SessionView, err
 	}
 	session, err := c.manager.CreateSession(diagnostics.CreateSessionRequest{
 		StableID:              snapshot.Proxy.StableID,
-		Trigger:               diagnostics.TriggerManual,
+		Trigger:               request.Trigger,
 		ConfigGeneration:      snapshot.Generation,
 		ConfigFingerprint:     fingerprint,
 		LocalResultSnapshot:   localResult(snapshot),

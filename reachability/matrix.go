@@ -1,0 +1,422 @@
+// Package reachability answers a question the controller cannot answer alone:
+// is a node reachable from somewhere other than here?
+//
+// The checker's availability loop observes every node from a single vantage
+// point. That is enough to tell a dead node from a live one, but not enough to
+// tell a dead node from one that is merely unreachable along one path. Those
+// look identical locally and are opposite problems: the first is the operator's
+// to fix, the second is a network between a user and a node that is perfectly
+// healthy.
+//
+// A sweep asks each connected probe agent the same question about each node and
+// keeps the last answer per pair. The interesting output is not a cell but a
+// disagreement: a node that answers here and not there, or the reverse.
+//
+// Nothing here writes operational state. The matrix never changes Availability,
+// downtime, incidents, speed-test scheduling or Remnawave, and no verdict feeds
+// back into the checker. It is a second opinion an operator reads, which is the
+// same boundary every other remote observation in this project respects.
+package reachability
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"xray-checker/diagnostics"
+)
+
+const StateVersion = 1
+
+// Verdict names what the two vantage points said, and deliberately stops there.
+// "Unreachable from that agent" is an observation; "blocked" would be a theory
+// about why, and the evidence in a single cell cannot distinguish censorship
+// from a routing fault, a provider null-route or a node that refuses one
+// network. FailureCode and FailureStage carry what is known about the flavour.
+type Verdict string
+
+const (
+	// VerdictUnknown covers every case where the pair produced no comparable
+	// answer: the job expired, the session was cancelled, or the agent's own
+	// connectivity control failed. It is not a synonym for "not yet swept" —
+	// a node with no cell at all is simply absent from the matrix.
+	VerdictUnknown Verdict = "unknown"
+	// VerdictAgreedUp and VerdictAgreedDown are the uninteresting majority.
+	VerdictAgreedUp   Verdict = "agreed_up"
+	VerdictAgreedDown Verdict = "agreed_down"
+	// VerdictAgentOnlyFailure is the case the sweep exists for: the node
+	// answers the controller and refuses this agent.
+	VerdictAgentOnlyFailure Verdict = "agent_only_failure"
+	// VerdictLocalOnlyFailure is the mirror image, and just as useful: the node
+	// answers the agent and refuses the controller, which means the fault is on
+	// the controller's own path and not in the node.
+	VerdictLocalOnlyFailure Verdict = "local_only_failure"
+)
+
+// Divergent reports whether the two vantage points disagreed. Only a
+// disagreement is worth an operator's attention; agreement, in either
+// direction, is already visible in the ordinary availability view.
+func (v Verdict) Divergent() bool {
+	return v == VerdictAgentOnlyFailure || v == VerdictLocalOnlyFailure
+}
+
+// Cell is the last comparable answer for one node and one agent.
+type Cell struct {
+	AgentID string  `json:"agentId"`
+	Verdict Verdict `json:"verdict"`
+	// AgentStatus and LocalStatus are kept verbatim rather than folded into the
+	// verdict, because "proxy_failure here, offline there" and "offline both
+	// ways" are the same verdict and different problems.
+	AgentStatus diagnostics.ProbeStatus `json:"agentStatus"`
+	LocalStatus diagnostics.ProbeStatus `json:"localStatus"`
+	CheckedAt   time.Time               `json:"checkedAt"`
+	// LocalCheckedAt is when the controller's side of the comparison was
+	// sampled. A divergence against a stale local result is worth less than one
+	// against a fresh sample, and only this field makes that visible.
+	LocalCheckedAt time.Time                `json:"localCheckedAt,omitempty"`
+	LatencyMillis  int64                    `json:"latencyMillis,omitempty"`
+	FailureCode    string                   `json:"failureCode,omitempty"`
+	FailureStage   diagnostics.FailureStage `json:"failureStage,omitempty"`
+	// TCPReached separates a path that carries no packets at all from one that
+	// completes a TCP handshake and then fails inside the tunnel. The first
+	// points at the network in front of the node, the second at the node.
+	TCPReached bool `json:"tcpReached"`
+	// Detail explains an unknown verdict. It is a fixed phrase chosen from this
+	// package, never a transport error, so nothing unbounded reaches the state
+	// file or the API.
+	Detail string `json:"detail,omitempty"`
+	// Since is when this verdict was first observed. It survives repeated
+	// sweeps that reach the same conclusion, which is what turns a cell into
+	// "unreachable from Frankfurt for the last two hours".
+	Since time.Time `json:"since"`
+	// Streak counts consecutive sweeps that reached this verdict. It is the
+	// hysteresis: see Confirmed for why a single disagreement is not a finding.
+	Streak int `json:"streak"`
+}
+
+// NodeRow is one node's answers, ordered by agent for stable presentation.
+type NodeRow struct {
+	StableID string `json:"stableId"`
+	Name     string `json:"name,omitempty"`
+	Cells    []Cell `json:"cells"`
+}
+
+// View is the whole matrix as the API and the admin UI consume it.
+type View struct {
+	Enabled       bool      `json:"enabled"`
+	IntervalSec   int       `json:"intervalSeconds"`
+	ProfileID     string    `json:"profileId"`
+	Agents        []Agent   `json:"agents"`
+	Nodes         []NodeRow `json:"nodes"`
+	LastSweepAt   time.Time `json:"lastSweepAt,omitempty"`
+	LastSweepDone bool      `json:"lastSweepCompleted"`
+	Sweeping      bool      `json:"sweeping"`
+	// Divergent counts only confirmed disagreements, so a caller can decide
+	// whether the matrix is worth opening without reading every cell, and does
+	// not act on a single unrepeated sample.
+	Divergent int `json:"divergentCells"`
+}
+
+// Agent is the column header: enough to label a vantage point without
+// republishing the agent registry.
+type Agent struct {
+	AgentID      string `json:"agentId"`
+	DisplayName  string `json:"displayName,omitempty"`
+	Region       string `json:"region,omitempty"`
+	Provider     string `json:"provider,omitempty"`
+	NetworkGroup string `json:"networkGroup,omitempty"`
+	Connected    bool   `json:"connected"`
+}
+
+type stateFile struct {
+	Version     int                        `json:"version"`
+	UpdatedAt   time.Time                  `json:"updatedAt"`
+	LastSweepAt time.Time                  `json:"lastSweepAt,omitempty"`
+	Nodes       map[string]map[string]Cell `json:"nodes"`
+}
+
+// Matrix owns the cells. It is safe for concurrent use: the sweeper writes from
+// one goroutine per agent while the admin API reads.
+type Matrix struct {
+	path string
+	now  func() time.Time
+
+	mu          sync.RWMutex
+	cells       map[string]map[string]Cell
+	names       map[string]string
+	lastSweepAt time.Time
+}
+
+func NewMatrix(path string) *Matrix {
+	return &Matrix{
+		path:  path,
+		now:   time.Now,
+		cells: make(map[string]map[string]Cell),
+		names: make(map[string]string),
+	}
+}
+
+func (m *Matrix) Load() error {
+	if m == nil || m.path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(m.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var state stateFile
+	if err := json.Unmarshal(data, &state); err != nil {
+		return fmt.Errorf("decode reachability state: %w", err)
+	}
+	if state.Version != StateVersion {
+		return fmt.Errorf("unsupported reachability state version %d", state.Version)
+	}
+	cells := make(map[string]map[string]Cell, len(state.Nodes))
+	for stableID, row := range state.Nodes {
+		stableID = strings.TrimSpace(stableID)
+		if stableID == "" {
+			continue
+		}
+		kept := make(map[string]Cell, len(row))
+		for agentID, cell := range row {
+			agentID = strings.TrimSpace(agentID)
+			// A cell whose agent or verdict did not survive encoding is dropped
+			// rather than repaired: a matrix that invents a verdict is worse
+			// than one with a hole, because the hole is visible.
+			if agentID == "" || !knownVerdict(cell.Verdict) {
+				continue
+			}
+			cell.AgentID = agentID
+			kept[agentID] = cell
+		}
+		if len(kept) > 0 {
+			cells[stableID] = kept
+		}
+	}
+	m.mu.Lock()
+	m.cells = cells
+	m.lastSweepAt = state.LastSweepAt
+	m.mu.Unlock()
+	return nil
+}
+
+func knownVerdict(value Verdict) bool {
+	switch value {
+	case VerdictUnknown, VerdictAgreedUp, VerdictAgreedDown, VerdictAgentOnlyFailure, VerdictLocalOnlyFailure:
+		return true
+	default:
+		return false
+	}
+}
+
+// Record stores one observation, preserving Since when the verdict is unchanged.
+func (m *Matrix) Record(stableID string, cell Cell) Cell {
+	stableID = strings.TrimSpace(stableID)
+	cell.AgentID = strings.TrimSpace(cell.AgentID)
+	if m == nil || stableID == "" || cell.AgentID == "" {
+		return cell
+	}
+	if cell.CheckedAt.IsZero() {
+		cell.CheckedAt = m.currentTime()
+	}
+	cell.CheckedAt = cell.CheckedAt.UTC()
+	m.mu.Lock()
+	row, ok := m.cells[stableID]
+	if !ok {
+		row = make(map[string]Cell)
+		m.cells[stableID] = row
+	}
+	if previous, exists := row[cell.AgentID]; exists && previous.Verdict == cell.Verdict && !previous.Since.IsZero() {
+		cell.Since = previous.Since
+		cell.Streak = previous.Streak + 1
+	} else {
+		cell.Since = cell.CheckedAt
+		cell.Streak = 1
+	}
+	row[cell.AgentID] = cell
+	m.mu.Unlock()
+	return cell
+}
+
+// Retain drops rows and cells for nodes and agents that no longer exist, and
+// remembers the display names so a row can be labelled without the caller
+// holding the proxy list. Without it a deleted node keeps a stale verdict
+// forever, which reads as a live finding.
+func (m *Matrix) Retain(nodes map[string]string, agents map[string]bool) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for stableID, row := range m.cells {
+		if _, ok := nodes[stableID]; !ok {
+			delete(m.cells, stableID)
+			continue
+		}
+		for agentID := range row {
+			if !agents[agentID] {
+				delete(row, agentID)
+			}
+		}
+		if len(row) == 0 {
+			delete(m.cells, stableID)
+		}
+	}
+	m.names = make(map[string]string, len(nodes))
+	for stableID, name := range nodes {
+		m.names[stableID] = name
+	}
+}
+
+// MarkSweep records when a full pass finished, which is what tells an operator
+// whether an empty matrix means "all good" or "never ran".
+func (m *Matrix) MarkSweep(at time.Time) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.lastSweepAt = at.UTC()
+	m.mu.Unlock()
+}
+
+// Rows returns the matrix ordered by node then agent.
+func (m *Matrix) Rows() []NodeRow {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	stableIDs := make([]string, 0, len(m.cells))
+	for stableID := range m.cells {
+		stableIDs = append(stableIDs, stableID)
+	}
+	sort.Strings(stableIDs)
+	rows := make([]NodeRow, 0, len(stableIDs))
+	for _, stableID := range stableIDs {
+		row := m.cells[stableID]
+		cells := make([]Cell, 0, len(row))
+		for _, cell := range row {
+			cells = append(cells, cell)
+		}
+		sort.Slice(cells, func(i, j int) bool { return cells[i].AgentID < cells[j].AgentID })
+		rows = append(rows, NodeRow{StableID: stableID, Name: m.names[stableID], Cells: cells})
+	}
+	return rows
+}
+
+// Divergences lists only the disagreeing cells, newest change first. This is
+// the shape an alert or a summary wants; Rows is the shape a table wants.
+func (m *Matrix) Divergences() []Divergence {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []Divergence
+	for stableID, row := range m.cells {
+		for _, cell := range row {
+			if !cell.Verdict.Divergent() {
+				continue
+			}
+			result = append(result, Divergence{StableID: stableID, Name: m.names[stableID], Cell: cell})
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Cell.Since.Equal(result[j].Cell.Since) {
+			if result[i].StableID == result[j].StableID {
+				return result[i].Cell.AgentID < result[j].Cell.AgentID
+			}
+			return result[i].StableID < result[j].StableID
+		}
+		return result[i].Cell.Since.After(result[j].Cell.Since)
+	})
+	return result
+}
+
+type Divergence struct {
+	StableID string `json:"stableId"`
+	Name     string `json:"name,omitempty"`
+	Cell     Cell   `json:"cell"`
+}
+
+func (m *Matrix) LastSweepAt() time.Time {
+	if m == nil {
+		return time.Time{}
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.lastSweepAt
+}
+
+func (m *Matrix) currentTime() time.Time {
+	if m != nil && m.now != nil {
+		return m.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+// Save persists the matrix. It is called once per sweep rather than per cell:
+// the state is a cache of observations that can be rebuilt by sweeping again,
+// so losing the last pass to a crash costs one interval, not correctness.
+func (m *Matrix) Save() error {
+	if m == nil || m.path == "" {
+		return nil
+	}
+	m.mu.RLock()
+	state := stateFile{
+		Version:     StateVersion,
+		UpdatedAt:   m.currentTime(),
+		LastSweepAt: m.lastSweepAt,
+		Nodes:       make(map[string]map[string]Cell, len(m.cells)),
+	}
+	for stableID, row := range m.cells {
+		copied := make(map[string]Cell, len(row))
+		for agentID, cell := range row {
+			copied[agentID] = cell
+		}
+		state.Nodes[stableID] = copied
+	}
+	m.mu.RUnlock()
+	return writeStateFile(m.path, state)
+}
+
+func writeStateFile(path string, state stateFile) error {
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode reachability state: %w", err)
+	}
+	data = append(data, '\n')
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create reachability state directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".reachability-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create reachability state temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("set reachability state permissions: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write reachability state: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close reachability state: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("replace reachability state: %w", err)
+	}
+	return nil
+}
