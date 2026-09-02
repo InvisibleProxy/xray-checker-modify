@@ -1327,6 +1327,19 @@
         color: var(--muted);
         font-size: 12px;
       }
+      /* One failing vantage point inside a findings row. The name and its
+         evidence share a line and wrap together, so a node with several of them
+         costs one line each instead of a whole table row. */
+      .finding-point {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 8px;
+        align-items: baseline;
+        line-height: 1.5;
+      }
+      .finding-point + .finding-point {
+        margin-top: 2px;
+      }
       .error {
         color: var(--red);
       }
@@ -2626,10 +2639,10 @@
               <thead>
                 <tr>
                   <th>Node</th>
-                  <th>Vantage point</th>
-                  <th>Problem</th>
-                  <th>Evidence</th>
-                  <th>Since</th>
+                  <!-- One row per node, not per vantage point. "Problem" was
+                       dropped: every finding says the same thing, and the panel
+                       subtitle above already says it once. -->
+                  <th>Cannot reach it</th>
                   <th></th>
                 </tr>
               </thead>
@@ -6601,26 +6614,56 @@
         const byAgent = new Map(agents.map((agent) => [agent.agentId, agent]));
         const byNode = new Map(nodes.map((node) => [node.stableId, node]));
 
-        $("reachability-findings").innerHTML = findings.map((finding) => {
-          const node = byNode.get(finding.stableId) || { stableId: finding.stableId };
-          const agent = byAgent.get(finding.agentId) || { agentId: finding.agentId };
-          // The checker is a vantage point like any other, it just has no agent
-          // record to name it with.
-          const where = finding.local
-            ? `<strong>${escapeHtml(tr("This checker"))}</strong>`
-            : `${escapeHtml(agent.displayName || agent.agentId || "n/a")}<div class="muted">${escapeHtml([agent.region, agent.provider].filter(Boolean).join(" · "))}</div>`;
+        // Grouped by node, because that is the unit an operator acts on: the
+        // recheck button targets a node, so a row per vantage point produced
+        // several buttons firing the identical request. The API's order is kept
+        // by taking each node's first appearance, which already sorts confirmed
+        // findings ahead of provisional ones.
+        const findingsByNode = new Map();
+        findings.forEach((finding) => {
+          let group = findingsByNode.get(finding.stableId);
+          if (!group) {
+            group = { stableId: finding.stableId, name: finding.name, points: [] };
+            findingsByNode.set(finding.stableId, group);
+          }
+          if (!group.name) group.name = finding.name;
+          group.points.push(finding);
+        });
+
+        $("reachability-findings").innerHTML = Array.from(findingsByNode.values()).map((group) => {
+          const node = byNode.get(group.stableId) || {};
+          const points = group.points.map((finding) => {
+            const agent = byAgent.get(finding.agentId) || { agentId: finding.agentId };
+            // The checker is a vantage point like any other, it just has no
+            // agent record to name it with.
+            const name = finding.local
+              ? tr("This checker")
+              : (agent.displayName || agent.agentId || "n/a");
+            // Everything that varies per vantage point stays on its own line:
+            // the evidence and the time are exactly what differs between the
+            // checker and an agent looking at the same node.
+            const detail = [
+              ...reachabilityEvidence(finding),
+              formatTime(finding.since) || "",
+            ].filter(Boolean).join(" · ");
+            const marker = finding.confirmed ? "" : ` <span class="muted">(${escapeHtml(tr("seen once"))})</span>`;
+            return `<div class="finding-point">
+              <span class="${finding.confirmed ? "error" : "warn"}">${escapeHtml(name)}</span>${marker}
+              <span class="muted">${escapeHtml(detail)}</span>
+            </div>`;
+          }).join("");
           return `<tr>
-            <td><strong>${escapeHtml(finding.name || node.name || finding.stableId)}</strong><div class="muted mono">${escapeHtml(finding.stableId)}</div></td>
-            <td>${where}</td>
-            <td><span class="${finding.confirmed ? "error" : "warn"}">${escapeHtml(tr("Cannot reach a node that is up elsewhere"))}</span><div class="muted">${escapeHtml(finding.confirmed ? tr("Confirmed") : tr("Seen once, not confirmed"))}</div></td>
-            <td>${escapeHtml(reachabilityEvidence(finding).join(" · "))}</td>
-            <td>${escapeHtml(formatTime(finding.since) || "n/a")}</td>
-            <td><button class="secondary reachability-recheck" type="button" data-stable-id="${escapeHtml(finding.stableId)}">${escapeHtml(tr("Recheck"))}</button></td>
+            <td><strong>${escapeHtml(group.name || node.name || group.stableId)}</strong>
+              <span class="muted mono">${escapeHtml(group.stableId)}</span></td>
+            <td>${points}</td>
+            <td><button class="secondary reachability-recheck" type="button" data-stable-id="${escapeHtml(group.stableId)}">${escapeHtml(tr("Recheck"))}</button></td>
           </tr>`;
-        }).join("") || `<tr><td colspan="6" class="muted">${escapeHtml(tr("Every vantage point agrees"))}</td></tr>`;
+        }).join("") || `<tr><td colspan="3" class="muted">${escapeHtml(tr("Every vantage point agrees"))}</td></tr>`;
 
         const confirmedCount = findings.filter((finding) => finding.confirmed).length;
-        $("reachability-findings-state").textContent = `${confirmedCount} ${tr("confirmed")} · ${findings.length - confirmedCount} ${tr("provisional")}`;
+        $("reachability-findings-state").textContent = findings.length === 0
+          ? tr("No findings")
+          : `${findingsByNode.size} ${tr("nodes")} · ${confirmedCount} ${tr("confirmed")} · ${findings.length - confirmedCount} ${tr("provisional")}`;
 
         $("reachability-matrix-head").innerHTML = `<th>${escapeHtml(tr("Node"))}</th><th>${escapeHtml(tr("This checker"))}</th>` + agents.map((agent) =>
           `<th title="${escapeHtml(reachabilityAgentLabel(agent))}">${escapeHtml(agent.displayName || agent.agentId)}${agent.connected ? "" : ` <span class="muted">(${escapeHtml(tr("offline"))})</span>`}</th>`
