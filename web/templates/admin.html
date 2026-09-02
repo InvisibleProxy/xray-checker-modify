@@ -2613,7 +2613,7 @@
             </div>
           </div>
           <span id="reachability-state" class="table-meta"></span>
-          <div class="muted">A node is only a finding when the two vantage points disagree twice in a row. One disagreement is a sample, not a fault.</div>
+          <div class="muted">A vantage point becomes a finding only after it fails to reach a live node twice in a row. One observation is a sample, not a fault.</div>
         </section>
 
         <section class="panel panel-strong stack">
@@ -2627,7 +2627,7 @@
                 <tr>
                   <th>Node</th>
                   <th>Vantage point</th>
-                  <th>Disagreement</th>
+                  <th>Problem</th>
                   <th>Evidence</th>
                   <th>Since</th>
                 </tr>
@@ -6521,19 +6521,27 @@
         }
       }
 
-      // The chip carries the verdict; the tooltip carries the evidence. Keeping
-      // the cell to one glyph is what lets a wide matrix stay readable, and the
-      // findings table above it is where the detail belongs.
-      const REACHABILITY_VERDICTS = {
-        agreed_up: { label: "Reachable from both", chip: "ok", mark: "✓" },
-        agreed_down: { label: "Down from both", chip: "neutral", mark: "✕" },
-        agent_only_failure: { label: "Fails from the agent only", chip: "error", mark: "▲" },
-        local_only_failure: { label: "Fails from the checker only", chip: "warn", mark: "▼" },
+      // The chip says what this vantage point could do; the tooltip carries the
+      // evidence. Keeping the cell to one glyph is what lets a wide matrix stay
+      // readable, and the findings table above it is where the detail belongs.
+      //
+      // The states are deliberately not the stored pairwise verdict. That
+      // verdict compares each agent against the checker, and the checker is the
+      // wrong baseline exactly when it is the one that is cut off: an agent that
+      // cannot reach a node the checker cannot reach either is "agreed_down",
+      // even when a third agent just proved the node is up. `unreachable` is
+      // derived from the whole row and is the state worth showing.
+      const REACHABILITY_STATES = {
+        reached: { label: "Reached from here", chip: "ok", mark: "✓" },
+        unreachable: { label: "Cannot reach a node that is up elsewhere", chip: "error", mark: "▲" },
+        down: { label: "Down from every vantage point", chip: "neutral", mark: "✕" },
         unknown: { label: "No comparable answer", chip: "neutral", mark: "?" },
       };
 
-      function reachabilityVerdict(verdict) {
-        return REACHABILITY_VERDICTS[verdict] || REACHABILITY_VERDICTS.unknown;
+      function reachabilityCellState(cell) {
+        if (!cell || cell.verdict === "unknown") return "unknown";
+        if (cell.agentStatus === "online") return "reached";
+        return cell.unreachable ? "unreachable" : "down";
       }
 
       function reachabilityAgentLabel(agent) {
@@ -6543,39 +6551,41 @@
         return parts.join("\n");
       }
 
-      function reachabilityEvidence(cell) {
+      // Takes a matrix cell or a finding: both carry the same bounded evidence,
+      // except that a finding about the checker itself has no agent-side TCP
+      // result to report.
+      function reachabilityEvidence(entry) {
         const parts = [];
-        if (cell.detail) parts.push(tr(cell.detail));
-        if (cell.failureCode) parts.push(cell.failureCode + (cell.failureStage ? ` (${cell.failureStage})` : ""));
-        parts.push(cell.tcpReached ? tr("TCP reached the node") : tr("TCP did not reach the node"));
-        if (Number(cell.latencyMillis) > 0) parts.push(`${Number(cell.latencyMillis)} ms`);
+        if (entry.detail) parts.push(tr(entry.detail));
+        if (entry.failureCode) parts.push(entry.failureCode + (entry.failureStage ? ` (${entry.failureStage})` : ""));
+        if (!entry.local) {
+          parts.push(entry.tcpReached ? tr("TCP reached the node") : tr("TCP did not reach the node"));
+        }
+        if (Number(entry.latencyMillis) > 0) parts.push(`${Number(entry.latencyMillis)} ms`);
         return parts.filter(Boolean);
       }
 
       function reachabilityCellHtml(cell) {
         if (!cell) return `<td class="muted">—</td>`;
-        const verdict = reachabilityVerdict(cell.verdict);
+        const state = REACHABILITY_STATES[reachabilityCellState(cell)];
         const tooltip = [
-          tr(verdict.label),
+          tr(state.label),
           `${tr("Agent")}: ${cell.agentStatus || "unknown"} · ${tr("Checker")}: ${cell.localStatus || "unknown"}`,
           ...reachabilityEvidence(cell),
           `${tr("Since")}: ${formatTime(cell.since) || "n/a"} · ${tr("Streak")}: ${Number(cell.streak || 0)}`,
         ].join("\n");
-        // An unconfirmed disagreement is deliberately shown differently from a
+        // An unconfirmed finding is deliberately shown differently from a
         // confirmed one: acting on a single sample is the mistake this whole
         // feature is trying to avoid.
-        const provisional = verdictDiverges(cell.verdict) && Number(cell.streak || 0) < 2;
-        return `<td title="${escapeHtml(tooltip)}"><span class="chip ${verdict.chip}">${verdict.mark}</span>${provisional ? `<span class="muted"> ?</span>` : ""}</td>`;
-      }
-
-      function verdictDiverges(verdict) {
-        return verdict === "agent_only_failure" || verdict === "local_only_failure";
+        const provisional = cell.unreachable && Number(cell.streak || 0) < 2;
+        return `<td title="${escapeHtml(tooltip)}"><span class="chip ${state.chip}">${state.mark}</span>${provisional ? `<span class="muted"> ?</span>` : ""}</td>`;
       }
 
       function renderReachability() {
         const view = state.reachability || {};
         const agents = Array.isArray(view.agents) ? view.agents : [];
         const nodes = Array.isArray(view.nodes) ? view.nodes : [];
+        const findings = Array.isArray(view.findings) ? view.findings : [];
 
         $("reachability-enabled-state").textContent = view.enabled ? tr("Enabled") : tr("Disabled");
         $("reachability-interval-state").textContent = Number(view.intervalSeconds) > 0
@@ -6588,35 +6598,29 @@
         $("reachability-sweep").disabled = !view.enabled || Boolean(view.sweeping);
 
         const byAgent = new Map(agents.map((agent) => [agent.agentId, agent]));
-        const findings = [];
-        nodes.forEach((node) => {
-          (node.cells || []).forEach((cell) => {
-            if (verdictDiverges(cell.verdict)) findings.push({ node, cell });
-          });
-        });
-        findings.sort((a, b) => {
-          const confirmed = Number(b.cell.streak >= 2) - Number(a.cell.streak >= 2);
-          if (confirmed !== 0) return confirmed;
-          return new Date(b.cell.since || 0) - new Date(a.cell.since || 0);
-        });
+        const byNode = new Map(nodes.map((node) => [node.stableId, node]));
 
-        $("reachability-findings").innerHTML = findings.map(({ node, cell }) => {
-          const verdict = reachabilityVerdict(cell.verdict);
-          const agent = byAgent.get(cell.agentId) || { agentId: cell.agentId };
-          const confirmed = Number(cell.streak || 0) >= 2;
+        $("reachability-findings").innerHTML = findings.map((finding) => {
+          const node = byNode.get(finding.stableId) || { stableId: finding.stableId };
+          const agent = byAgent.get(finding.agentId) || { agentId: finding.agentId };
+          // The checker is a vantage point like any other, it just has no agent
+          // record to name it with.
+          const where = finding.local
+            ? `<strong>${escapeHtml(tr("This checker"))}</strong>`
+            : `${escapeHtml(agent.displayName || agent.agentId || "n/a")}<div class="muted">${escapeHtml([agent.region, agent.provider].filter(Boolean).join(" · "))}</div>`;
           return `<tr>
-            <td><strong>${escapeHtml(node.name || node.stableId)}</strong><div class="muted mono">${escapeHtml(node.stableId)}</div></td>
-            <td>${escapeHtml(agent.displayName || agent.agentId)}<div class="muted">${escapeHtml([agent.region, agent.provider].filter(Boolean).join(" · "))}</div></td>
-            <td><span class="${confirmed ? "error" : "warn"}">${escapeHtml(tr(verdict.label))}</span><div class="muted">${escapeHtml(confirmed ? tr("Confirmed") : tr("Seen once, not confirmed"))}</div></td>
-            <td>${escapeHtml(reachabilityEvidence(cell).join(" · "))}</td>
-            <td>${escapeHtml(formatTime(cell.since) || "n/a")}</td>
+            <td><strong>${escapeHtml(finding.name || node.name || finding.stableId)}</strong><div class="muted mono">${escapeHtml(finding.stableId)}</div></td>
+            <td>${where}</td>
+            <td><span class="${finding.confirmed ? "error" : "warn"}">${escapeHtml(tr("Cannot reach a node that is up elsewhere"))}</span><div class="muted">${escapeHtml(finding.confirmed ? tr("Confirmed") : tr("Seen once, not confirmed"))}</div></td>
+            <td>${escapeHtml(reachabilityEvidence(finding).join(" · "))}</td>
+            <td>${escapeHtml(formatTime(finding.since) || "n/a")}</td>
           </tr>`;
         }).join("") || `<tr><td colspan="5" class="muted">${escapeHtml(tr("Every vantage point agrees"))}</td></tr>`;
 
-        const confirmedCount = findings.filter(({ cell }) => Number(cell.streak || 0) >= 2).length;
+        const confirmedCount = findings.filter((finding) => finding.confirmed).length;
         $("reachability-findings-state").textContent = `${confirmedCount} ${tr("confirmed")} · ${findings.length - confirmedCount} ${tr("provisional")}`;
 
-        $("reachability-matrix-head").innerHTML = `<th>${escapeHtml(tr("Node"))}</th>` + agents.map((agent) =>
+        $("reachability-matrix-head").innerHTML = `<th>${escapeHtml(tr("Node"))}</th><th>${escapeHtml(tr("This checker"))}</th>` + agents.map((agent) =>
           `<th title="${escapeHtml(reachabilityAgentLabel(agent))}">${escapeHtml(agent.displayName || agent.agentId)}${agent.connected ? "" : ` <span class="muted">(${escapeHtml(tr("offline"))})</span>`}</th>`
         ).join("");
 
@@ -6624,13 +6628,29 @@
           const cells = new Map((node.cells || []).map((cell) => [cell.agentId, cell]));
           return `<tr>
             <td><strong>${escapeHtml(node.name || node.stableId)}</strong></td>
+            ${localCellHtml(node)}
             ${agents.map((agent) => reachabilityCellHtml(cells.get(agent.agentId))).join("")}
           </tr>`;
-        }).join("") || `<tr><td colspan="${agents.length + 1}" class="muted">${escapeHtml(tr("No sweep results yet"))}</td></tr>`;
+        }).join("") || `<tr><td colspan="${agents.length + 2}" class="muted">${escapeHtml(tr("No sweep results yet"))}</td></tr>`;
 
-        $("reachability-legend").innerHTML = Object.values(REACHABILITY_VERDICTS).map((verdict) =>
-          `<span class="chip ${verdict.chip}">${verdict.mark}</span> ${escapeHtml(tr(verdict.label))}`
+        $("reachability-legend").innerHTML = Object.values(REACHABILITY_STATES).map((state) =>
+          `<span class="chip ${state.chip}">${state.mark}</span> ${escapeHtml(tr(state.label))}`
         ).join(" &nbsp; ");
+      }
+
+      // The checker gets its own column. Leaving it out was what made the matrix
+      // read as though the checker were the arbiter rather than one more vantage
+      // point that can be the odd one out.
+      function localCellHtml(node) {
+        const cell = (node.cells || []).find((candidate) => candidate.verdict !== "unknown");
+        if (!cell) return `<td class="muted">—</td>`;
+        let key = "reached";
+        if (cell.localStatus !== "online") key = node.localUnreachable ? "unreachable" : "down";
+        const state = REACHABILITY_STATES[key];
+        const tooltip = [tr(state.label), `${tr("Checker")}: ${cell.localStatus || "unknown"}`,
+          `${tr("Since")}: ${formatTime(node.localSince) || "n/a"}`].join("\n");
+        const provisional = node.localUnreachable && Number(node.localStreak || 0) < 2;
+        return `<td title="${escapeHtml(tooltip)}"><span class="chip ${state.chip}">${state.mark}</span>${provisional ? `<span class="muted"> ?</span>` : ""}</td>`;
       }
 
       async function loadReachability() {
@@ -6755,6 +6775,7 @@
         status.textContent = snapshot.enabled ? "Enabled" : "Disabled by environment";
         status.className = `pill ${snapshot.enabled ? "ok" : "warn"}`;
         $("create-diagnostic-agent").disabled = !snapshot.enabled;
+        applyControllerDefaults(snapshot.defaults);
         const agents = Array.isArray(snapshot.agents) ? snapshot.agents : [];
         $("diagnostic-agents-list").innerHTML = agents.length ? agents.map((agent) => {
           const statusText = diagnosticAgentStatus(agent);
@@ -6798,6 +6819,25 @@
         $("diagnostic-agent-compose").value = result.compose || "";
         $("diagnostic-agent-created").hidden = false;
       }
+
+      // The controller's address is the same for every agent, so the form is
+      // prefilled from the controller's own configuration. It stays editable: a
+      // second address, or a migration in progress, has to remain expressible.
+      // Only an untouched field is overwritten, or a re-render mid-typing would
+      // wipe what the operator just entered.
+      function applyControllerDefaults(defaults) {
+        if (!defaults) return;
+        [defaults.controllerUrl, defaults.controllerIp].forEach((value, index) => {
+          const field = $(controllerDefaultFields[index]);
+          if (!field || !value) return;
+          field.placeholder = value;
+          if (!field.value.trim() && !field.dataset.touched) {
+            field.value = value;
+          }
+        });
+      }
+
+      const controllerDefaultFields = ["diagnostic-agent-controller-url", "diagnostic-agent-controller-ip"];
 
       async function loadDiagnosticAgents() {
         try {
@@ -6915,6 +6955,12 @@
             }),
           });
           showDiagnosticAgentCreation(result);
+          // The next agent enrolls against the same controller, so let the
+          // prefill take over again rather than keeping this one's typing.
+          controllerDefaultFields.forEach((id) => {
+            const field = $(id);
+            if (field) delete field.dataset.touched;
+          });
           await loadDiagnosticAgents();
         } catch (err) {
           $("message").textContent = err.message;
@@ -7619,6 +7665,12 @@
         $(`global-settings-tab-${pane}`).addEventListener("click", () => switchGlobalSettingsPane(pane));
       });
       $("create-diagnostic-agent").addEventListener("click", createDiagnosticAgent);
+      // Once the operator types into a prefilled field, a later render must not
+      // overwrite it with the controller default.
+      controllerDefaultFields.forEach((id) => {
+        const field = $(id);
+        if (field) field.addEventListener("input", () => { field.dataset.touched = "1"; });
+      });
       $("refresh-diagnostic-agents").addEventListener("click", loadDiagnosticAgents);
       $("copy-diagnostic-agent-compose").addEventListener("click", async () => {
         await copyToClipboard($("diagnostic-agent-compose").value);

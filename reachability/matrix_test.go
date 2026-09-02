@@ -26,8 +26,14 @@ func TestRecordKeepsSinceAndCountsTheStreakWhileTheVerdictHolds(t *testing.T) {
 	if !second.Since.Equal(time.Unix(1000, 0).UTC()) {
 		t.Fatalf("Since = %v, want the first observation of this verdict", second.Since)
 	}
-	if second.Streak != 2 || !second.Confirmed() {
-		t.Fatalf("streak = %d confirmed = %v, want 2/true", second.Streak, second.Confirmed())
+	if second.Streak != 2 {
+		t.Fatalf("streak = %d, want 2", second.Streak)
+	}
+	// Confirmed is deliberately false here: a cell straight out of Record has
+	// not been read as part of a row yet, so nothing has established that any
+	// vantage point reached this node.
+	if second.Confirmed() {
+		t.Fatal("a cell must not confirm itself before the row is derived")
 	}
 }
 
@@ -84,18 +90,168 @@ func TestRetainDropsARowLeftWithNoAgents(t *testing.T) {
 	}
 }
 
-func TestDivergencesListOnlyDisagreementsNewestFirst(t *testing.T) {
-	matrix := NewMatrix("")
-	matrix.Record("node-1", Cell{AgentID: "agent-1", Verdict: VerdictAgreedUp, CheckedAt: time.Unix(1000, 0).UTC()})
-	matrix.Record("node-2", Cell{AgentID: "agent-1", Verdict: VerdictAgentOnlyFailure, CheckedAt: time.Unix(1000, 0).UTC()})
-	matrix.Record("node-3", Cell{AgentID: "agent-2", Verdict: VerdictLocalOnlyFailure, CheckedAt: time.Unix(5000, 0).UTC()})
-
-	found := matrix.Divergences()
-	if len(found) != 2 {
-		t.Fatalf("divergences = %d, want 2", len(found))
+func up(agentID string) Cell {
+	return Cell{
+		AgentID: agentID, Verdict: VerdictAgreedUp,
+		AgentStatus: diagnostics.ProbeStatusOnline, LocalStatus: diagnostics.ProbeStatusOnline,
+		CheckedAt: time.Unix(1000, 0).UTC(),
 	}
-	if found[0].StableID != "node-3" {
-		t.Fatalf("first divergence = %q, want the most recent change", found[0].StableID)
+}
+
+// agentBlind is the cell for an agent that cannot reach a node the checker can.
+func agentBlind(agentID string) Cell {
+	return Cell{
+		AgentID: agentID, Verdict: VerdictAgentOnlyFailure,
+		AgentStatus: diagnostics.ProbeStatusOffline, LocalStatus: diagnostics.ProbeStatusOnline,
+		FailureCode: "tcp_timeout", CheckedAt: time.Unix(1000, 0).UTC(),
+	}
+}
+
+// checkerBlind is the cell for an agent that reaches a node the checker cannot.
+func checkerBlind(agentID string) Cell {
+	return Cell{
+		AgentID: agentID, Verdict: VerdictLocalOnlyFailure,
+		AgentStatus: diagnostics.ProbeStatusOnline, LocalStatus: diagnostics.ProbeStatusProxyFailure,
+		CheckedAt: time.Unix(1000, 0).UTC(),
+	}
+}
+
+// bothBlind is the cell for an agent that agrees with a checker which cannot
+// reach the node. On its own it means "the node is down"; in a row where
+// another agent reached the node it means "this agent cannot reach it either".
+func bothBlind(agentID string) Cell {
+	return Cell{
+		AgentID: agentID, Verdict: VerdictAgreedDown,
+		AgentStatus: diagnostics.ProbeStatusOffline, LocalStatus: diagnostics.ProbeStatusProxyFailure,
+		FailureCode: "tcp_refused", CheckedAt: time.Unix(1000, 0).UTC(),
+	}
+}
+
+// The case that exposed the pairwise comparison: the checker cannot reach the
+// node, one agent can, and a second agent cannot. Comparing each agent against
+// the checker calls the second agent "agreed_down" and hides the very finding
+// it is reporting.
+func TestAnAgentAgreeingWithACutOffCheckerIsStillAFinding(t *testing.T) {
+	matrix := NewMatrix("")
+	matrix.Record("node-1", checkerBlind("agent-de"))
+	matrix.Record("node-1", bothBlind("agent-ru"))
+
+	rows := matrix.Rows()
+	if len(rows) != 1 || !rows[0].Alive {
+		t.Fatalf("row = %+v, want the node recognised as alive from agent-de", rows)
+	}
+	byAgent := map[string]Cell{}
+	for _, cell := range rows[0].Cells {
+		byAgent[cell.AgentID] = cell
+	}
+	if byAgent["agent-de"].Unreachable {
+		t.Fatal("the agent that reached the node must not be a finding")
+	}
+	if !byAgent["agent-ru"].Unreachable {
+		t.Fatal("the agent that could not reach a live node must be a finding, even though it agreed with the checker")
+	}
+	if !rows[0].LocalUnreachable {
+		t.Fatal("the checker itself could not reach a live node and must be reported")
+	}
+}
+
+func TestFindingsReportTheCheckerOnceRegardlessOfAgentCount(t *testing.T) {
+	matrix := NewMatrix("")
+	matrix.Record("node-1", checkerBlind("agent-de"))
+	matrix.Record("node-1", checkerBlind("agent-nl"))
+	matrix.Record("node-1", checkerBlind("agent-fi"))
+
+	findings := matrix.Findings()
+	local := 0
+	for _, finding := range findings {
+		if finding.Local {
+			local++
+		}
+	}
+	if local != 1 {
+		t.Fatalf("local findings = %d, want exactly one however many agents can reach the node", local)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("findings = %+v, want only the checker's own failure", findings)
+	}
+}
+
+// A node nobody can reach is an ordinary outage. It is already visible in the
+// availability view and must not be repeated here as a reachability finding.
+func TestANodeDownEverywhereProducesNoFindings(t *testing.T) {
+	matrix := NewMatrix("")
+	matrix.Record("node-1", bothBlind("agent-de"))
+	matrix.Record("node-1", bothBlind("agent-ru"))
+
+	rows := matrix.Rows()
+	if rows[0].Alive || rows[0].LocalUnreachable {
+		t.Fatalf("row = %+v, want nothing claimed about a node no vantage point reached", rows[0])
+	}
+	if findings := matrix.Findings(); len(findings) != 0 {
+		t.Fatalf("findings = %+v, want none", findings)
+	}
+}
+
+// An agent that could not vouch for its own connectivity must not be counted as
+// evidence that a node is unreachable, nor as evidence that it is alive.
+func TestUnknownCellsAreNotEvidenceInEitherDirection(t *testing.T) {
+	matrix := NewMatrix("")
+	matrix.Record("node-1", Cell{
+		AgentID: "agent-blind", Verdict: VerdictUnknown, Detail: detailAgentOffline,
+		AgentStatus: diagnostics.ProbeStatusOffline, LocalStatus: diagnostics.ProbeStatusProxyFailure,
+		CheckedAt: time.Unix(1000, 0).UTC(),
+	})
+	matrix.Record("node-1", bothBlind("agent-ru"))
+
+	rows := matrix.Rows()
+	if rows[0].Alive {
+		t.Fatal("an unknown cell must not make a node look alive")
+	}
+	for _, cell := range rows[0].Cells {
+		if cell.Unreachable {
+			t.Fatalf("cell %q must not be a finding when nothing proved the node alive", cell.AgentID)
+		}
+	}
+}
+
+func TestFindingsListConfirmedFirstThenNewest(t *testing.T) {
+	matrix := NewMatrix("")
+	matrix.Record("node-1", up("agent-1"))
+	matrix.Record("node-2", agentBlind("agent-1"))
+	matrix.Record("node-3", agentBlind("agent-2"))
+	// A second sweep confirms node-3 only.
+	third := agentBlind("agent-2")
+	third.CheckedAt = time.Unix(5000, 0).UTC()
+	matrix.Record("node-3", third)
+
+	found := matrix.Findings()
+	if len(found) != 2 {
+		t.Fatalf("findings = %+v, want two", found)
+	}
+	if !found[0].Confirmed || found[0].StableID != "node-3" {
+		t.Fatalf("first finding = %+v, want the confirmed one", found[0])
+	}
+	if found[1].Confirmed {
+		t.Fatalf("second finding = %+v, want the unconfirmed one last", found[1])
+	}
+}
+
+func TestFindingsCarryTheEvidenceOfTheFailingVantagePoint(t *testing.T) {
+	matrix := NewMatrix("")
+	matrix.Record("node-1", checkerBlind("agent-de"))
+	matrix.Record("node-1", bothBlind("agent-ru"))
+
+	var agentFinding Finding
+	for _, finding := range matrix.Findings() {
+		if finding.AgentID == "agent-ru" {
+			agentFinding = finding
+		}
+	}
+	if agentFinding.FailureCode != "tcp_refused" {
+		t.Fatalf("failure code = %q, want the failing agent's own evidence", agentFinding.FailureCode)
+	}
+	if agentFinding.Status != diagnostics.ProbeStatusOffline {
+		t.Fatalf("status = %q, want the agent's status", agentFinding.Status)
 	}
 }
 

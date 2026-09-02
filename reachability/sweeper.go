@@ -191,6 +191,15 @@ func (s *Sweeper) SweepOnce(ctx context.Context) Summary {
 	}
 	wg.Wait()
 
+	// Counted now rather than per pair: a cell is only a finding relative to
+	// what the other agents saw for the same node, which is known only once the
+	// whole pass has landed in the matrix.
+	for _, finding := range s.matrix.Findings() {
+		summary.Divergent++
+		if finding.Confirmed {
+			summary.Confirmed++
+		}
+	}
 	completed := ctx.Err() == nil
 	summary.SaveError = s.finish(completed)
 	summary.Completed = completed
@@ -269,21 +278,17 @@ func (s *Sweeper) sweepPair(ctx context.Context, agentID string, target Target) 
 		return Summary{Timeouts: 1}, false
 	}
 
-	cell := s.matrix.Record(target.StableID, CellFor(session, agentID, s.config.Now()))
+	s.matrix.Record(target.StableID, CellFor(session, agentID, s.config.Now()))
 	// The session has served its purpose. Deleting it keeps the sweep from
 	// filling the operator's diagnostics list with hundreds of entries and
 	// bounds the manager's in-memory state, while the cell keeps the part worth
 	// remembering.
 	_ = s.controller.Delete(sessionID)
 
-	outcome := Summary{Recorded: 1}
-	if cell.Verdict.Divergent() {
-		outcome.Divergent = 1
-	}
-	if cell.Confirmed() {
-		outcome.Confirmed = 1
-	}
-	return outcome, false
+	// Findings are deliberately not counted here. Whether this cell is a
+	// finding depends on what the other agents saw for the same node, and the
+	// pass has not finished collecting that yet.
+	return Summary{Recorded: 1}, false
 }
 
 func (s *Sweeper) await(ctx context.Context, sessionID string) (diagnostics.DiagnosticSession, bool) {
@@ -388,15 +393,15 @@ func (s *Sweeper) Snapshot() View {
 		})
 	}
 	rows := s.matrix.Rows()
+	findings := s.matrix.Findings()
 	confirmed := 0
-	for _, row := range rows {
-		for _, cell := range row.Cells {
-			if cell.Confirmed() {
-				confirmed++
-			}
+	for _, finding := range findings {
+		if finding.Confirmed {
+			confirmed++
 		}
 	}
 	return View{
+		Findings:      findings,
 		Enabled:       s.Enabled(),
 		IntervalSec:   int(s.config.Interval / time.Second),
 		ProfileID:     s.config.ProfileID,

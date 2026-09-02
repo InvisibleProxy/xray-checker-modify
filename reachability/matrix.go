@@ -97,6 +97,16 @@ type Cell struct {
 	// Streak counts consecutive sweeps that reached this verdict. It is the
 	// hysteresis: see Confirmed for why a single disagreement is not a finding.
 	Streak int `json:"streak"`
+	// Unreachable marks a vantage point that could not reach a node some other
+	// vantage point proved alive in the same sweep. It is derived from the whole
+	// row when the matrix is read, never stored.
+	//
+	// It exists because Verdict compares each agent against the checker, and
+	// that baseline is wrong exactly when the checker is the odd one out: a node
+	// the checker cannot reach and one agent can is "agreed_down" for every
+	// other agent that also cannot reach it, which buries the finding those
+	// agents are reporting.
+	Unreachable bool `json:"unreachable,omitempty"`
 }
 
 // NodeRow is one node's answers, ordered by agent for stable presentation.
@@ -104,15 +114,31 @@ type NodeRow struct {
 	StableID string `json:"stableId"`
 	Name     string `json:"name,omitempty"`
 	Cells    []Cell `json:"cells"`
+	// Alive reports that at least one vantage point — the checker or any agent —
+	// reached the node. It is what turns another vantage point's failure into a
+	// finding rather than an ordinary outage everybody agrees on.
+	Alive bool `json:"alive"`
+	// LocalUnreachable marks the checker as the vantage point that cannot reach
+	// a live node. It is a property of the row, not of any one agent: reporting
+	// it per cell would repeat the same fact once per agent that can reach it.
+	LocalUnreachable bool `json:"localUnreachable,omitempty"`
+	// LocalSince and LocalStreak describe how long that has been true, taken
+	// from the longest-running cell that observed it.
+	LocalSince  time.Time `json:"localSince,omitempty"`
+	LocalStreak int       `json:"localStreak,omitempty"`
 }
 
 // View is the whole matrix as the API and the admin UI consume it.
 type View struct {
-	Enabled       bool      `json:"enabled"`
-	IntervalSec   int       `json:"intervalSeconds"`
-	ProfileID     string    `json:"profileId"`
-	Agents        []Agent   `json:"agents"`
-	Nodes         []NodeRow `json:"nodes"`
+	Enabled     bool      `json:"enabled"`
+	IntervalSec int       `json:"intervalSeconds"`
+	ProfileID   string    `json:"profileId"`
+	Agents      []Agent   `json:"agents"`
+	Nodes       []NodeRow `json:"nodes"`
+	// Findings is the derived list the operator actually acts on: every vantage
+	// point, checker included, that cannot reach a node another vantage point
+	// proved alive.
+	Findings      []Finding `json:"findings"`
 	LastSweepAt   time.Time `json:"lastSweepAt,omitempty"`
 	LastSweepDone bool      `json:"lastSweepCompleted"`
 	Sweeping      bool      `json:"sweeping"`
@@ -307,44 +333,133 @@ func (m *Matrix) Rows() []NodeRow {
 			cells = append(cells, cell)
 		}
 		sort.Slice(cells, func(i, j int) bool { return cells[i].AgentID < cells[j].AgentID })
-		rows = append(rows, NodeRow{StableID: stableID, Name: m.names[stableID], Cells: cells})
+		rows = append(rows, deriveRow(NodeRow{StableID: stableID, Name: m.names[stableID], Cells: cells}))
 	}
 	return rows
 }
 
-// Divergences lists only the disagreeing cells, newest change first. This is
-// the shape an alert or a summary wants; Rows is the shape a table wants.
-func (m *Matrix) Divergences() []Divergence {
+// deriveRow answers the question a single cell cannot: was this node alive
+// anywhere during the sweep? Once one vantage point has reached it, every other
+// vantage point that could not is reporting a reachability problem — including
+// the checker itself, and including agents whose pairwise verdict says the
+// checker agreed with them.
+func deriveRow(row NodeRow) NodeRow {
+	localUp := false
+	for _, cell := range row.Cells {
+		// An unknown cell is not evidence in either direction: its agent could
+		// not answer, or could not vouch for its own connectivity.
+		if cell.Verdict == VerdictUnknown {
+			continue
+		}
+		if cell.LocalStatus == diagnostics.ProbeStatusOnline {
+			localUp = true
+		}
+		if cell.AgentStatus == diagnostics.ProbeStatusOnline {
+			row.Alive = true
+		}
+	}
+	row.Alive = row.Alive || localUp
+	if !row.Alive {
+		return row
+	}
+	for i, cell := range row.Cells {
+		if cell.Verdict == VerdictUnknown {
+			continue
+		}
+		row.Cells[i].Unreachable = cell.AgentStatus != diagnostics.ProbeStatusOnline
+		if localUp || cell.LocalStatus == diagnostics.ProbeStatusOnline {
+			continue
+		}
+		// The checker cannot reach a node an agent just reached. Keep the
+		// longest-running observation of that, so the row reports how long it
+		// has been true rather than when it was last re-observed.
+		row.LocalUnreachable = true
+		if cell.Streak > row.LocalStreak {
+			row.LocalStreak = cell.Streak
+		}
+		if row.LocalSince.IsZero() || cell.Since.Before(row.LocalSince) {
+			row.LocalSince = cell.Since
+		}
+	}
+	return row
+}
+
+// Finding is one vantage point that could not reach a node another vantage
+// point proved alive. The checker is a vantage point like any other, which is
+// why AgentID can be empty.
+type Finding struct {
+	StableID string `json:"stableId"`
+	Name     string `json:"name,omitempty"`
+	// AgentID is empty when the vantage point is the checker itself.
+	AgentID      string                   `json:"agentId,omitempty"`
+	Local        bool                     `json:"local"`
+	Status       diagnostics.ProbeStatus  `json:"status"`
+	FailureCode  string                   `json:"failureCode,omitempty"`
+	FailureStage diagnostics.FailureStage `json:"failureStage,omitempty"`
+	TCPReached   bool                     `json:"tcpReached"`
+	Since        time.Time                `json:"since"`
+	Streak       int                      `json:"streak"`
+	Confirmed    bool                     `json:"confirmed"`
+}
+
+// Findings lists every vantage point that cannot reach a live node, confirmed
+// ones first and then newest. This is the shape a summary wants; Rows is the
+// shape a table wants.
+//
+// The checker contributes at most one entry per node. Emitting it per cell
+// would repeat the same fact once for every agent that can reach the node.
+func (m *Matrix) Findings() []Finding {
 	if m == nil {
 		return nil
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	var result []Divergence
-	for stableID, row := range m.cells {
-		for _, cell := range row {
-			if !cell.Verdict.Divergent() {
+	var result []Finding
+	for _, row := range m.Rows() {
+		if !row.Alive {
+			continue
+		}
+		if row.LocalUnreachable {
+			result = append(result, Finding{
+				StableID: row.StableID, Name: row.Name, Local: true,
+				Status: localStatusOf(row), Since: row.LocalSince, Streak: row.LocalStreak,
+				Confirmed: row.LocalStreak >= confirmSweeps,
+			})
+		}
+		for _, cell := range row.Cells {
+			if !cell.Unreachable {
 				continue
 			}
-			result = append(result, Divergence{StableID: stableID, Name: m.names[stableID], Cell: cell})
+			result = append(result, Finding{
+				StableID: row.StableID, Name: row.Name, AgentID: cell.AgentID,
+				Status: cell.AgentStatus, FailureCode: cell.FailureCode, FailureStage: cell.FailureStage,
+				TCPReached: cell.TCPReached, Since: cell.Since, Streak: cell.Streak,
+				Confirmed: cell.Confirmed(),
+			})
 		}
 	}
 	sort.Slice(result, func(i, j int) bool {
-		if result[i].Cell.Since.Equal(result[j].Cell.Since) {
-			if result[i].StableID == result[j].StableID {
-				return result[i].Cell.AgentID < result[j].Cell.AgentID
-			}
+		if result[i].Confirmed != result[j].Confirmed {
+			return result[i].Confirmed
+		}
+		if !result[i].Since.Equal(result[j].Since) {
+			return result[i].Since.After(result[j].Since)
+		}
+		if result[i].StableID != result[j].StableID {
 			return result[i].StableID < result[j].StableID
 		}
-		return result[i].Cell.Since.After(result[j].Cell.Since)
+		return result[i].AgentID < result[j].AgentID
 	})
 	return result
 }
 
-type Divergence struct {
-	StableID string `json:"stableId"`
-	Name     string `json:"name,omitempty"`
-	Cell     Cell   `json:"cell"`
+// localStatusOf reads the checker's own status, which every cell in the row
+// carries identically.
+func localStatusOf(row NodeRow) diagnostics.ProbeStatus {
+	for _, cell := range row.Cells {
+		if cell.Verdict != VerdictUnknown {
+			return cell.LocalStatus
+		}
+	}
+	return diagnostics.ProbeStatusUnknown
 }
 
 func (m *Matrix) LastSweepAt() time.Time {

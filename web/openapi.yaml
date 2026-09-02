@@ -2958,20 +2958,46 @@ components:
 
     ReachabilityView:
       type: object
-      required: [enabled, intervalSeconds, profileId, agents, nodes, lastSweepCompleted, sweeping, divergentCells]
+      required: [enabled, intervalSeconds, profileId, agents, nodes, findings, lastSweepCompleted, sweeping, divergentCells]
       properties:
         enabled: {type: boolean}
         intervalSeconds: {type: integer, minimum: 0}
         profileId: {type: string}
         agents: {type: array, items: {$ref: '#/components/schemas/ReachabilityAgent'}}
         nodes: {type: array, items: {$ref: '#/components/schemas/ReachabilityNodeRow'}}
+        findings:
+          type: array
+          items: {$ref: '#/components/schemas/ReachabilityFinding'}
+          description: >-
+            Every vantage point, this checker included, that could not reach a node another vantage point
+            proved alive. This is the derived list to act on; nodes carries the raw matrix.
         lastSweepAt: {type: string, format: date-time}
         lastSweepCompleted: {type: boolean}
         sweeping: {type: boolean}
         divergentCells:
           type: integer
           minimum: 0
-          description: Confirmed disagreements only; a cell that diverged on a single sweep is not counted.
+          description: Confirmed findings only; one that was seen on a single sweep is not counted.
+
+    ReachabilityFinding:
+      type: object
+      required: [stableId, local, status, tcpReached, since, streak, confirmed]
+      properties:
+        stableId: {type: string}
+        name: {type: string}
+        agentId:
+          type: string
+          description: Absent when the vantage point is this checker itself, which has no agent record.
+        local: {type: boolean}
+        status: {type: string, enum: [unknown, online, proxy_failure, offline]}
+        failureCode: {type: string}
+        failureStage: {type: string}
+        tcpReached: {type: boolean}
+        since: {type: string, format: date-time}
+        streak: {type: integer, minimum: 0}
+        confirmed:
+          type: boolean
+          description: True once the same observation has survived a second consecutive sweep.
 
     ReachabilityAgent:
       type: object
@@ -2986,11 +3012,21 @@ components:
 
     ReachabilityNodeRow:
       type: object
-      required: [stableId, cells]
+      required: [stableId, cells, alive]
       properties:
         stableId: {type: string}
         name: {type: string}
         cells: {type: array, items: {$ref: '#/components/schemas/ReachabilityCell'}}
+        alive:
+          type: boolean
+          description: >-
+            At least one vantage point reached the node. This is what turns another vantage point's failure
+            into a finding rather than an ordinary outage everybody agrees on.
+        localUnreachable:
+          type: boolean
+          description: This checker is the vantage point that cannot reach a live node.
+        localSince: {type: string, format: date-time}
+        localStreak: {type: integer, minimum: 0}
 
     ReachabilityCell:
       type: object
@@ -3001,8 +3037,15 @@ components:
           type: string
           enum: [unknown, agreed_up, agreed_down, agent_only_failure, local_only_failure]
           description: >-
-            agent_only_failure means the node answered the checker and not this agent; local_only_failure is the
-            mirror image and points at the checker's own path. The verdict names what was seen, not why.
+            The stored pairwise comparison against this checker. agent_only_failure means the node answered the
+            checker and not this agent; local_only_failure is the mirror image. Read `unreachable` rather than
+            this field to decide whether a cell is a finding: the pairwise verdict uses the checker as the
+            baseline, which is wrong exactly when the checker is the vantage point that is cut off.
+        unreachable:
+          type: boolean
+          description: >-
+            Derived from the whole row when the matrix is read, never stored. True when this vantage point could
+            not reach a node another vantage point proved alive in the same sweep.
         agentStatus: {type: string, enum: [unknown, online, proxy_failure, offline]}
         localStatus: {type: string, enum: [unknown, online, proxy_failure, offline]}
         checkedAt: {type: string, format: date-time}

@@ -104,12 +104,17 @@ func detailForMissing(state diagnostics.SessionState) string {
 	}
 }
 
-// Confirmed reports whether a divergence has survived a second sweep. One
-// disagreement is a sample; two consecutive ones are a finding. Everything that
-// notifies or counts should read this rather than Verdict.Divergent, which
-// answers only "did the two sides disagree this time".
+// Confirmed reports whether this vantage point's failure to reach a live node
+// has survived a second sweep. One observation is a sample; two consecutive
+// ones are a finding.
+//
+// It reads Unreachable rather than Verdict.Divergent because the pairwise
+// verdict measures agreement with the checker, and agreement with a checker
+// that is itself cut off is not evidence of anything. Unreachable is only set
+// once the row has been read as a whole, so a cell straight out of Record
+// always answers false here.
 func (c Cell) Confirmed() bool {
-	return c.Verdict.Divergent() && c.Streak >= confirmSweeps
+	return c.Unreachable && c.Streak >= confirmSweeps
 }
 
 const confirmSweeps = 2

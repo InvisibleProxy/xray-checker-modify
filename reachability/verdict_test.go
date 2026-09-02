@@ -128,16 +128,25 @@ func TestCellForIgnoresAnotherAgentsObservation(t *testing.T) {
 }
 
 func TestConfirmedRequiresASecondSweep(t *testing.T) {
-	cell := Cell{Verdict: VerdictAgentOnlyFailure, Streak: 1}
+	// Unreachable is what Rows derives once it knows some vantage point reached
+	// the node; Confirmed then asks only whether that has held for two sweeps.
+	cell := Cell{Verdict: VerdictAgentOnlyFailure, Unreachable: true, Streak: 1}
 	if cell.Confirmed() {
-		t.Fatal("a single disagreement must not be confirmed")
+		t.Fatal("a single observation must not be confirmed")
 	}
 	cell.Streak = 2
 	if !cell.Confirmed() {
-		t.Fatal("a repeated disagreement must be confirmed")
+		t.Fatal("a repeated observation must be confirmed")
 	}
-	agreed := Cell{Verdict: VerdictAgreedUp, Streak: 9}
-	if agreed.Confirmed() {
-		t.Fatal("agreement is never a confirmed finding")
+	reached := Cell{Verdict: VerdictAgreedUp, Streak: 9}
+	if reached.Confirmed() {
+		t.Fatal("a vantage point that reached the node is never a finding")
+	}
+	// A long-standing disagreement that no row has derived yet is not a finding
+	// either: without a live node to be unreachable from, there is nothing to
+	// confirm.
+	underived := Cell{Verdict: VerdictAgentOnlyFailure, Streak: 9}
+	if underived.Confirmed() {
+		t.Fatal("a cell must not confirm on its verdict alone")
 	}
 }
