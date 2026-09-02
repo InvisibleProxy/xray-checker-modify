@@ -444,8 +444,28 @@ func (s *Sweeper) Snapshot() View {
 			Connected:    agent.Connected && agent.Enabled,
 		})
 	}
+	// The name belongs to the subscription, not to the matrix. Resolving it here
+	// rather than trusting the stored copy means a renamed node reads correctly
+	// at once, and a matrix restored from disk is labelled before the first
+	// sweep has had a chance to refresh anything.
+	live := make(map[string]string)
+	for _, target := range s.targets() {
+		if target.Name != "" {
+			live[target.StableID] = target.Name
+		}
+	}
 	rows := s.matrix.Rows()
+	for i := range rows {
+		if name := live[rows[i].StableID]; name != "" {
+			rows[i].Name = name
+		}
+	}
 	findings := s.matrix.Findings()
+	for i := range findings {
+		if name := live[findings[i].StableID]; name != "" {
+			findings[i].Name = name
+		}
+	}
 	confirmed := 0
 	for _, finding := range findings {
 		if finding.Confirmed {

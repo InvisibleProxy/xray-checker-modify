@@ -367,3 +367,47 @@ func TestLoadTreatsAMissingFileAsAnEmptyMatrix(t *testing.T) {
 		t.Fatalf("rows = %+v, want none", rows)
 	}
 }
+
+// Names were held only in memory, so a restart produced a matrix of StableIDs
+// until the next full sweep repopulated them — a whole interval of output no
+// operator can read.
+func TestNamesSurviveARestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reachability.json")
+	matrix := NewMatrix(path)
+	matrix.Record("node-1", up("agent-1"))
+	matrix.Retain(map[string]string{"node-1": "Нидерланды #3"}, map[string]bool{"agent-1": true})
+	if err := matrix.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	reloaded := NewMatrix(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	rows := reloaded.Rows()
+	if len(rows) != 1 || rows[0].Name != "Нидерланды #3" {
+		t.Fatalf("rows = %+v, want the stored display name", rows)
+	}
+}
+
+// A name whose row did not survive labels nothing and must not accumulate.
+func TestLoadDropsNamesWithoutARow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reachability.json")
+	if err := writeStateFile(path, stateFile{
+		Version: StateVersion,
+		Nodes:   map[string]map[string]Cell{"node-1": {"agent-1": up("agent-1")}},
+		Names:   map[string]string{"node-1": "Kept", "node-gone": "Orphan"},
+	}); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	matrix := NewMatrix(path)
+	if err := matrix.Load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := len(matrix.names); got != 1 {
+		t.Fatalf("names = %d, want only the one with a row", got)
+	}
+	if matrix.names["node-1"] != "Kept" {
+		t.Fatalf("names = %+v, want the surviving row labelled", matrix.names)
+	}
+}

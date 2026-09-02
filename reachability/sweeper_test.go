@@ -461,3 +461,30 @@ func TestRepeatedRechecksCannotConfirmOnTheirOwn(t *testing.T) {
 		t.Fatalf("confirmed = %d once the local sample advanced, want 1", summary.Confirmed)
 	}
 }
+
+// The subscription owns the name, so a rename must show at once rather than
+// waiting for a sweep to refresh the matrix's stored copy.
+func TestSnapshotLabelsRowsFromTheLiveNodeList(t *testing.T) {
+	controller := newFakeController()
+	controller.statuses["agent-1"] = diagnostics.ProbeStatusOffline
+	agents := fakeAgents{agents: []probeagent.AgentSnapshot{healthyAgent("agent-1")}}
+	matrix := NewMatrix("")
+	targets := []Target{{StableID: "node-1", Name: "Old name"}}
+	sweeper, err := NewSweeper(Config{
+		Enabled: true, Interval: time.Hour, ProbeTimeout: time.Minute, PollInterval: time.Millisecond,
+		Now: func() time.Time { return time.Unix(3000, 0).UTC() },
+	}, controller, agents, func() []Target { return targets }, matrix)
+	if err != nil {
+		t.Fatalf("new sweeper: %v", err)
+	}
+	sweeper.SweepOnce(context.Background())
+
+	targets = []Target{{StableID: "node-1", Name: "Нидерланды #3"}}
+	view := sweeper.Snapshot()
+	if len(view.Nodes) != 1 || view.Nodes[0].Name != "Нидерланды #3" {
+		t.Fatalf("rows = %+v, want the current subscription name", view.Nodes)
+	}
+	if len(view.Findings) != 1 || view.Findings[0].Name != "Нидерланды #3" {
+		t.Fatalf("findings = %+v, want the current subscription name", view.Findings)
+	}
+}

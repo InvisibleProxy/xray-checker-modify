@@ -1340,6 +1340,19 @@
       .finding-point + .finding-point {
         margin-top: 2px;
       }
+      /* The matrix is read as a grid, so its per-row action stays quiet until
+         it is looked for. The findings table keeps the full-weight button. */
+      button.row-action {
+        background: transparent;
+        border-color: transparent;
+        color: var(--muted);
+        font-size: 12px;
+        padding: 2px 6px;
+      }
+      tr:hover button.row-action {
+        border-color: var(--border);
+        color: inherit;
+      }
       .error {
         color: var(--red);
       }
@@ -6552,6 +6565,24 @@
         unknown: { label: "No comparable answer", chip: "neutral", mark: "?" },
       };
 
+      // A node is named by its subscription. Falling back to the StableID is
+      // fine, but printing it twice — once as the name, once as the identifier —
+      // is not, so the identifier is only added when it says something the name
+      // does not.
+      // compact keeps the identifier in the tooltip. The matrix is read as a
+      // grid, so its first column has to stay a name; the findings table is
+      // where an operator acts on a node and wants the identifier in reach.
+      function nodeLabelHtml(name, stableId, compact) {
+        const label = (name || "").trim();
+        if (!label || label === stableId) {
+          return `<strong class="mono">${escapeHtml(stableId)}</strong>`;
+        }
+        if (compact) {
+          return `<strong title="${escapeHtml(stableId)}">${escapeHtml(label)}</strong>`;
+        }
+        return `<strong>${escapeHtml(label)}</strong> <span class="muted mono">${escapeHtml(stableId)}</span>`;
+      }
+
       function reachabilityCellState(cell) {
         if (!cell || cell.verdict === "unknown") return "unknown";
         if (cell.agentStatus === "online") return "reached";
@@ -6653,8 +6684,7 @@
             </div>`;
           }).join("");
           return `<tr>
-            <td><strong>${escapeHtml(group.name || node.name || group.stableId)}</strong>
-              <span class="muted mono">${escapeHtml(group.stableId)}</span></td>
+            <td>${nodeLabelHtml(group.name || node.name, group.stableId)}</td>
             <td>${points}</td>
             <td><button class="secondary reachability-recheck" type="button" data-stable-id="${escapeHtml(group.stableId)}">${escapeHtml(tr("Recheck"))}</button></td>
           </tr>`;
@@ -6672,8 +6702,8 @@
         $("reachability-matrix-body").innerHTML = nodes.map((node) => {
           const cells = new Map((node.cells || []).map((cell) => [cell.agentId, cell]));
           return `<tr>
-            <td><strong>${escapeHtml(node.name || node.stableId)}</strong>
-              <button class="secondary reachability-recheck" type="button" data-stable-id="${escapeHtml(node.stableId)}">${escapeHtml(tr("Recheck"))}</button></td>
+            <td>${nodeLabelHtml(node.name, node.stableId, true)}
+              <button class="row-action reachability-recheck" type="button" data-stable-id="${escapeHtml(node.stableId)}">${escapeHtml(tr("Recheck"))}</button></td>
             ${localCellHtml(node)}
             ${agents.map((agent) => reachabilityCellHtml(cells.get(agent.agentId))).join("")}
           </tr>`;

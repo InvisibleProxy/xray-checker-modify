@@ -164,6 +164,11 @@ type stateFile struct {
 	UpdatedAt   time.Time                  `json:"updatedAt"`
 	LastSweepAt time.Time                  `json:"lastSweepAt,omitempty"`
 	Nodes       map[string]map[string]Cell `json:"nodes"`
+	// Names labels the rows. Without it a restart shows a matrix of StableIDs
+	// until the next full sweep repopulates them, which is a whole interval of
+	// unreadable output. It is a cache of the subscription's own names, so a
+	// live one always wins over it.
+	Names map[string]string `json:"names,omitempty"`
 }
 
 // Matrix owns the cells. It is safe for concurrent use: the sweeper writes from
@@ -227,8 +232,16 @@ func (m *Matrix) Load() error {
 			cells[stableID] = kept
 		}
 	}
+	names := make(map[string]string, len(state.Names))
+	for stableID, name := range state.Names {
+		// Only for rows that survived: a name without cells labels nothing.
+		if _, ok := cells[strings.TrimSpace(stableID)]; ok {
+			names[strings.TrimSpace(stableID)] = name
+		}
+	}
 	m.mu.Lock()
 	m.cells = cells
+	m.names = names
 	m.lastSweepAt = state.LastSweepAt
 	m.mu.Unlock()
 	return nil
@@ -503,6 +516,7 @@ func (m *Matrix) Save() error {
 		UpdatedAt:   m.currentTime(),
 		LastSweepAt: m.lastSweepAt,
 		Nodes:       make(map[string]map[string]Cell, len(m.cells)),
+		Names:       make(map[string]string, len(m.names)),
 	}
 	for stableID, row := range m.cells {
 		copied := make(map[string]Cell, len(row))
@@ -510,6 +524,9 @@ func (m *Matrix) Save() error {
 			copied[agentID] = cell
 		}
 		state.Nodes[stableID] = copied
+		if name := m.names[stableID]; name != "" {
+			state.Names[stableID] = name
+		}
 	}
 	m.mu.RUnlock()
 	return writeStateFile(m.path, state)
