@@ -1741,7 +1741,7 @@ func TestMassNodeFailuresAreCorrelatedByCause(t *testing.T) {
 		{Proxy: proxies[1], State: nodeAlertState{Failure: failure}},
 		{Proxy: proxies[2], State: nodeAlertState{Failure: failure}},
 	}
-	groups, remaining := partitionMassNodeDownAlerts(alerts, proxies, nil)
+	groups, remaining := partitionMassNodeDownAlerts(alerts, proxies, nil, nil)
 	if len(groups) != 1 || len(groups[0].Alerts) != 3 || len(remaining) != 0 {
 		t.Fatalf("groups=%+v remaining=%+v", groups, remaining)
 	}
@@ -1751,7 +1751,7 @@ func TestMassNodeFailuresAreCorrelatedByCause(t *testing.T) {
 	}
 
 	alerts[2].State.Failure = checker.FailureDetails{Code: checker.FailureCodeTLS, Summary: checker.FailureSummary(checker.FailureCodeTLS)}
-	groups, _ = partitionMassNodeDownAlerts(alerts, proxies, nil)
+	groups, _ = partitionMassNodeDownAlerts(alerts, proxies, nil, nil)
 	if len(groups) != 0 {
 		t.Fatalf("mixed causes were correlated: %+v", groups)
 	}

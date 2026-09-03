@@ -109,12 +109,13 @@ func (s *Service) formatRecentSpeedOverview() string {
 }
 
 func speedResultStatusHTML(result speedtest.Result, threshold float64) string {
+	effective := resultThreshold(result, threshold)
 	switch {
 	case result.Offline:
 		return "🔴 <b>недоступна</b>"
 	case result.Error != "":
 		return "❌ <b>ошибка</b>"
-	case threshold > 0 && result.Mbps < threshold:
+	case effective > 0 && result.Mbps < effective:
 		return fmt.Sprintf("⚠️ <b>%.2f Mbps</b>", result.Mbps)
 	default:
 		return fmt.Sprintf("✅ <b>%.2f Mbps</b>", result.Mbps)
@@ -197,7 +198,12 @@ func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, fail
 		"<b>Speed-test завершён</b>",
 		fmt.Sprintf("%s · %s", htmlEscape(reportSourceLabel(report.Source)), htmlEscape(formatCheckedAt(report.FinishedAt))),
 		"",
-		fmt.Sprintf("Проверено: <b>%d</b> · Успешно: <b>%d</b> · Низкая скорость: <b>%d</b> · Ошибки: <b>%d</b>", report.Selected, successful, slow, failed),
+		fmt.Sprintf("Проверено: <b>%d</b> · Успешно: <b>%d</b> · Низкая скорость: <b>%d</b> · Ошибки: <b>%d</b>", len(report.Results), successful, slow, failed),
+	}
+	// Skipped nodes are named separately rather than folded into the checked
+	// count, so the breakdown always adds up to what is listed below it.
+	if report.Skipped > 0 {
+		lines = append(lines, fmt.Sprintf("Пропущено без замера: <b>%d</b> · нода стала недоступна до своей очереди", report.Skipped))
 	}
 	if cfg.LowSpeedThresholdMbps > 0 {
 		lines = append(lines, fmt.Sprintf("Порог низкой скорости: <b>%.2f Mbps</b>", cfg.LowSpeedThresholdMbps))
@@ -230,7 +236,10 @@ func (s *Service) formatSpeedReportMessage(report speedtest.RunReport, cfg Confi
 	fmt.Fprintf(&rich, "<h2>%s</h2>", htmlEscape(title))
 	fmt.Fprintf(&rich, "<p>%s · %s</p>", htmlEscape(reportSourceLabel(report.Source)), htmlEscape(formatCheckedAt(report.FinishedAt)))
 	rich.WriteString("<table bordered><tr><th>Проверено</th><th>Успешно</th><th>Низкая</th><th>Ошибки</th></tr>")
-	fmt.Fprintf(&rich, "<tr><td>%d</td><td>%d</td><td>%d</td><td>%d</td></tr></table>", report.Selected, len(successful), slow, failed)
+	fmt.Fprintf(&rich, "<tr><td>%d</td><td>%d</td><td>%d</td><td>%d</td></tr></table>", len(report.Results), len(successful), slow, failed)
+	if report.Skipped > 0 {
+		fmt.Fprintf(&rich, "<p>Пропущено без замера: <b>%d</b> — нода стала недоступна до своей очереди.</p>", report.Skipped)
+	}
 	if cfg.LowSpeedThresholdMbps > 0 {
 		fmt.Fprintf(&rich, "<footer>Порог низкой скорости: %.2f Mbps</footer>", cfg.LowSpeedThresholdMbps)
 	}
@@ -268,7 +277,7 @@ func speedIssuesHTML(results []speedtest.Result, threshold float64) []string {
 			lines = appendSpeedAgentDiagnostic(lines, result)
 			continue
 		}
-		if threshold > 0 && result.Mbps < threshold {
+		if effective := resultThreshold(result, threshold); effective > 0 && result.Mbps < effective {
 			lines = append(lines, fmt.Sprintf("• ⚠️ <b>%s</b> · <b>%.2f Mbps</b>", htmlEscape(result.Name), result.Mbps))
 			lines = appendSpeedAgentDiagnostic(lines, result)
 		}
@@ -283,7 +292,20 @@ const (
 	speedClassHealthy
 )
 
+// resultThreshold answers "what counted as slow for this measurement". The
+// result carries the threshold it was judged against — the node's own override
+// when it has one — so a later reader reaches the same verdict as the run did.
+// The passed threshold is the fallback for history written before results
+// recorded one.
+func resultThreshold(result speedtest.Result, threshold float64) float64 {
+	if result.LowSpeedThresholdMbps > 0 {
+		return result.LowSpeedThresholdMbps
+	}
+	return threshold
+}
+
 func speedResultClass(result speedtest.Result, threshold float64) int {
+	threshold = resultThreshold(result, threshold)
 	switch {
 	case result.Offline || result.Error != "":
 		return speedClassFailed
@@ -326,7 +348,7 @@ func orderedSpeedResults(results []speedtest.Result, threshold float64) []speedt
 func speedIssueResults(results []speedtest.Result, threshold float64) []speedtest.Result {
 	issues := make([]speedtest.Result, 0)
 	for _, result := range results {
-		if result.Offline || result.Error != "" || (threshold > 0 && result.Mbps < threshold) {
+		if effective := resultThreshold(result, threshold); result.Offline || result.Error != "" || (effective > 0 && result.Mbps < effective) {
 			issues = append(issues, result)
 		}
 	}
@@ -344,7 +366,7 @@ func formatSpeedStatusRich(result speedtest.Result, threshold float64) string {
 	if result.Error != "" {
 		return "❌ " + htmlEscape(compactText(result.Error, 120))
 	}
-	if threshold > 0 && result.Mbps < threshold {
+	if effective := resultThreshold(result, threshold); effective > 0 && result.Mbps < effective {
 		return fmt.Sprintf("⚠️ <b>%.2f Mbps</b>", result.Mbps)
 	}
 	return fmt.Sprintf("✅ <b>%.2f Mbps</b>", result.Mbps)
@@ -549,12 +571,10 @@ func successfulResults(results []speedtest.Result) []speedtest.Result {
 
 func healthySpeedResults(results []speedtest.Result, threshold float64) []speedtest.Result {
 	healthy := successfulResults(results)
-	if threshold <= 0 {
-		return healthy
-	}
 	result := healthy[:0]
 	for _, item := range healthy {
-		if item.Mbps >= threshold {
+		effective := resultThreshold(item, threshold)
+		if effective <= 0 || item.Mbps >= effective {
 			result = append(result, item)
 		}
 	}
@@ -580,7 +600,7 @@ func formatSpeedResultHTML(result speedtest.Result, threshold float64) string {
 		return fmt.Sprintf("• ❌ <b>%s</b> · %s", htmlEscape(result.Name), htmlEscape(compactText(result.Error, 120)))
 	}
 
-	if threshold <= 0 || result.Mbps >= threshold {
+	if effective := resultThreshold(result, threshold); effective <= 0 || result.Mbps >= effective {
 		return fmt.Sprintf("• ✅ <b>%s</b> · <b>%.2f Mbps</b>", htmlEscape(result.Name), result.Mbps)
 	}
 	return fmt.Sprintf("• ⚠️ <b>%s</b> · <b>%.2f Mbps</b>", htmlEscape(result.Name), result.Mbps)
@@ -627,7 +647,7 @@ func formatSpeedHistoryLine(result speedtest.Result, threshold float64) string {
 		return fmt.Sprintf("• %s · ❌ %s", htmlCode(prefix), htmlEscape(compactText(result.Error, 120)))
 	}
 	marker := "✅"
-	if threshold > 0 && result.Mbps < threshold {
+	if effective := resultThreshold(result, threshold); effective > 0 && result.Mbps < effective {
 		marker = "⚠️"
 	}
 	ttfb := ""

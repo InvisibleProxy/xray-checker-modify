@@ -1810,6 +1810,18 @@ components:
           additionalProperties:
             type: string
             format: uri
+        nodeMaxBytes:
+          type: object
+          description: Per-node download size in bytes, keyed by StableID. A node without an entry uses the global size.
+          additionalProperties:
+            type: integer
+            minimum: 1
+        nodeLowSpeedThresholdsMbps:
+          type: object
+          description: Per-node low-speed threshold in Mbps, keyed by StableID. A node without an entry uses the global threshold.
+          additionalProperties:
+            type: number
+            minimum: 0
         historyRetentionDays:
           type: integer
           minimum: 1
@@ -1840,13 +1852,32 @@ components:
 
     NodeTestURLRequest:
       type: object
-      required: [stableId, url]
+      required: [stableId]
       properties:
         stableId:
           type: string
         url:
           type: string
-          description: Empty string clears the per-node override.
+          description: >-
+            Legacy field for callers that only set the Test URL. Ignored when `testUrl` is present. An empty
+            string clears the per-node override, but only in a body that carries no other override.
+        testUrl:
+          type: string
+          description: Per-node Test URL. An empty string clears the override and returns the node to the global URL.
+        maxBytes:
+          type: integer
+          minimum: 0
+          maximum: 104857600
+          description: >-
+            Per-node download size in bytes, at least 65536 when set. Zero clears the override and returns the
+            node to the global download size; omit the field to leave it unchanged.
+        lowSpeedThresholdMbps:
+          type: number
+          minimum: 0
+          description: >-
+            Per-node low-speed threshold in Mbps. It decides country fallback, the confirmation retry and how the
+            result reads in reports. Zero clears the override and returns the node to the global threshold; omit
+            the field to leave it unchanged.
 
     SpeedTestRunInfo:
       type: object
@@ -1914,6 +1945,12 @@ components:
         fallbackCountryCode:
           type: string
           description: ISO 3166-1 alpha-2 code inferred from the node declaration, never GeoIP.
+        lowSpeedThresholdMbps:
+          type: number
+          description: >-
+            The threshold this measurement was judged against — the node's own override when it has one, the
+            global setting otherwise. Recorded with the result so reports, confirmation retries and history views
+            reach the same verdict the run did. Absent in results stored before this field existed.
         telegramAlertSuppressed:
           type: boolean
           description: Fallback result at or above the configured low-speed threshold is omitted from automated Telegram reports and alerts.
@@ -1965,6 +2002,14 @@ components:
           type: object
           additionalProperties:
             type: string
+        nodeMaxBytes:
+          type: object
+          additionalProperties:
+            type: integer
+        nodeLowSpeedThresholdsMbps:
+          type: object
+          additionalProperties:
+            type: number
         nextScheduledRunAt:
           type: string
           format: date-time

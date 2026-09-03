@@ -222,7 +222,7 @@ func (s *Service) NotifyNodeStatuses() bool {
 		}
 	}
 
-	massGroups, remainingDownAlerts := partitionMassNodeDownAlerts(downAlerts, proxies, muted)
+	massGroups, remainingDownAlerts := partitionMassNodeDownAlerts(downAlerts, proxies, active, muted)
 	for _, group := range massGroups {
 		if err := s.sendNodeAlertMessage(cfg, formatMassNodeDownMessage(group, now)); err == nil {
 			if s.confirmNodeDownAlertsSent(group.Alerts, time.Now(), cfg) {

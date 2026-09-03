@@ -454,6 +454,15 @@ func (s *Service) refreshHostDiagnosticsForStillOffline(stableIDs map[string]boo
 		return
 	}
 
+	// Serialised against the alert pass, like every other writer of alert state.
+	// Without this, an operator refreshing statuses could flip a node between
+	// offline and proxy_failure between the moment a down-alert is rendered and
+	// the moment its delivery is confirmed. confirmNodeDownAlertsSent refuses to
+	// confirm across a status change, so the reminder schedule would not move
+	// and the next pass would send the same alert again.
+	s.nodeNotifyMu.Lock()
+	defer s.nodeNotifyMu.Unlock()
+
 	requests := make([]diagnosticsRefreshRequest, 0, len(stableIDs))
 	for stableID := range stableIDs {
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(stableID)

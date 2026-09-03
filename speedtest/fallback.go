@@ -271,8 +271,7 @@ func (m *Manager) persistFallbackHealth() error {
 
 func (m *Manager) testProxyWithFallback(proxy *models.ProxyConfig, cfg TestConfig, source string) Result {
 	primary := m.executeTestAttempt(proxy, cfg, source)
-	threshold := m.fallbackLowSpeedThreshold()
-	return m.testFallbackForPrimary(proxy, cfg, source, primary, threshold)
+	return m.testFallbackForPrimary(proxy, cfg, source, primary, m.LowSpeedThresholdFor(primary.StableID))
 }
 
 func (m *Manager) testFallbackForPrimary(proxy *models.ProxyConfig, cfg TestConfig, source string, primary Result, threshold float64) Result {
@@ -359,10 +358,18 @@ func successfulSpeedResult(result Result) bool {
 }
 
 func (m *Manager) executeTestAttempt(proxy *models.ProxyConfig, cfg TestConfig, source string) Result {
+	var result Result
 	if m.testAttempt != nil {
-		return m.testAttempt(proxy, cfg, source)
+		result = m.testAttempt(proxy, cfg, source)
+	} else {
+		result = m.testProxy(proxy, cfg, source)
 	}
-	return m.testProxy(proxy, cfg, source)
+	// Stamp the threshold that judged this attempt, so the report and the
+	// confirmation retry cannot reach a different verdict later.
+	if result.LowSpeedThresholdMbps == 0 {
+		result.LowSpeedThresholdMbps = m.LowSpeedThresholdFor(result.StableID)
+	}
+	return result
 }
 
 func (m *Manager) resolveClaimedCountry(proxy *models.ProxyConfig) string {

@@ -172,10 +172,22 @@ func formatNodeDownMessage(proxy *models.ProxyConfig, state nodeAlertState, now 
 	return formattedMessage{HTML: fallback, RichHTML: rich.String()}
 }
 
-func partitionMassNodeDownAlerts(alerts []nodeDownAlert, proxies []*models.ProxyConfig, muted map[string]bool) ([]nodeDownIncidentGroup, []nodeDownAlert) {
+// partitionMassNodeDownAlerts groups alerts that share a cause into one mass
+// incident. `monitored` is the denominator: a node the checker does not watch
+// cannot fail, so counting it raises the bar for correlation with nothing
+// behind it. Maintenance is the case that matters — with half the fleet paused,
+// three real failures out of the remaining five would never reach the 50%
+// threshold, and the operator would get three separate alerts instead of one
+// incident naming the shared cause.
+func partitionMassNodeDownAlerts(alerts []nodeDownAlert, proxies []*models.ProxyConfig, monitored map[string]bool, muted map[string]bool) ([]nodeDownIncidentGroup, []nodeDownAlert) {
 	alertable := make([]*models.ProxyConfig, 0, len(proxies))
 	for _, proxy := range proxies {
 		if proxy == nil || muted[proxy.StableID] {
+			continue
+		}
+		// An empty set means the caller had no monitoring view to offer; the
+		// proxy list is then the best denominator available.
+		if len(monitored) > 0 && !monitored[proxy.StableID] {
 			continue
 		}
 		alertable = append(alertable, proxy)

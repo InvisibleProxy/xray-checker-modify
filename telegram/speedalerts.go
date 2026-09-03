@@ -183,9 +183,10 @@ func speedConfirmationRetryIDs(results []speedtest.Result, threshold float64) []
 	var ids []string
 	for _, result := range results {
 		stableID := strings.TrimSpace(result.StableID)
-		lowSpeed := threshold > 0 && !result.Offline && result.Error == "" && result.Mbps < threshold
+		effective := resultThreshold(result, threshold)
+		lowSpeed := effective > 0 && !result.Offline && result.Error == "" && result.Mbps < effective
 		unresolvedDeadline := resultHasContextDeadlineExceeded(result) &&
-			(result.Offline || result.Error != "" || (threshold > 0 && result.Mbps < threshold))
+			(result.Offline || result.Error != "" || (effective > 0 && result.Mbps < effective))
 		if stableID == "" || (!lowSpeed && !unresolvedDeadline) || seen[stableID] {
 			continue
 		}
@@ -217,7 +218,8 @@ func successfulSpeedResultIDs(results []speedtest.Result, threshold float64) []s
 	var ids []string
 	for _, result := range results {
 		stableID := strings.TrimSpace(result.StableID)
-		if stableID == "" || result.Offline || result.Error != "" || (threshold > 0 && result.Mbps < threshold) || seen[stableID] {
+		effective := resultThreshold(result, threshold)
+		if stableID == "" || result.Offline || result.Error != "" || (effective > 0 && result.Mbps < effective) || seen[stableID] {
 			continue
 		}
 		seen[stableID] = true
@@ -542,7 +544,7 @@ func countSpeedIssues(results []speedtest.Result, threshold float64) (failed int
 			failed++
 			continue
 		}
-		if threshold > 0 && result.Mbps < threshold {
+		if effective := resultThreshold(result, threshold); effective > 0 && result.Mbps < effective {
 			slow++
 		}
 	}

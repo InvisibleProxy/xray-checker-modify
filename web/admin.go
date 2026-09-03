@@ -59,9 +59,17 @@ type AdminProxyInfo struct {
 	FailureDetail      string `json:"failureDetail,omitempty"`
 }
 
+// AdminNodeTestURLRequest carries the per-node speed-test overrides. Each
+// override is a pointer so an omitted field keeps its stored value: the admin
+// UI edits one field at a time, and a plain zero would otherwise read as
+// "clear it". An explicit empty string or zero is how an override is removed.
+// `url` remains for callers that only ever set the Test URL.
 type AdminNodeTestURLRequest struct {
-	StableID string `json:"stableId"`
-	URL      string `json:"url"`
+	StableID              string   `json:"stableId"`
+	URL                   string   `json:"url"`
+	TestURL               *string  `json:"testUrl,omitempty"`
+	MaxBytes              *int64   `json:"maxBytes,omitempty"`
+	LowSpeedThresholdMbps *float64 `json:"lowSpeedThresholdMbps,omitempty"`
 }
 
 type AdminProxyCheckRequest struct {
@@ -615,7 +623,21 @@ func AdminSpeedTestNodeURLHandler(manager *speedtest.Manager) http.HandlerFunc {
 			writeError(w, "Invalid JSON body", http.StatusBadRequest)
 			return
 		}
-		if err := manager.UpdateNodeTestURL(req.StableID, req.URL); err != nil {
+		settings := speedtest.NodeSettings{
+			MaxBytes:              req.MaxBytes,
+			LowSpeedThresholdMbps: req.LowSpeedThresholdMbps,
+		}
+		switch {
+		case req.TestURL != nil:
+			settings.TestURL = req.TestURL
+		case req.MaxBytes == nil && req.LowSpeedThresholdMbps == nil:
+			// A body with neither override is the original request shape, where
+			// an absent `url` means "clear the Test URL".
+			settings.TestURL = &req.URL
+		case req.URL != "":
+			settings.TestURL = &req.URL
+		}
+		if err := manager.UpdateNodeSettings(req.StableID, settings); err != nil {
 			writeError(w, err.Error(), http.StatusBadRequest)
 			return
 		}

@@ -27,6 +27,8 @@ const (
 	defaultTimeoutSec           = 120
 	defaultConcurrency          = 2
 	maxBytesLimit               = int64(100 * 1024 * 1024)
+	minNodeMaxBytes             = int64(64 * 1024)
+	maxLowSpeedThresholdMbps    = float64(100000)
 	maxTimeoutSec               = 300
 	maxConcurrency              = 10
 	defaultHistoryRetentionDays = 60
@@ -83,15 +85,23 @@ type RunRequest struct {
 }
 
 type ScheduleConfig struct {
-	Enabled              bool              `json:"enabled"`
-	IntervalSec          int               `json:"intervalSec"`
-	ProxyIDs             []string          `json:"proxyIds"`
-	OnlyOnline           bool              `json:"onlyOnline"`
-	SubName              string            `json:"subName"`
-	Protocol             string            `json:"protocol"`
-	Config               TestConfig        `json:"config"`
-	NodeTestURLs         map[string]string `json:"nodeTestUrls,omitempty"`
-	HistoryRetentionDays int               `json:"historyRetentionDays,omitempty"`
+	Enabled      bool              `json:"enabled"`
+	IntervalSec  int               `json:"intervalSec"`
+	ProxyIDs     []string          `json:"proxyIds"`
+	OnlyOnline   bool              `json:"onlyOnline"`
+	SubName      string            `json:"subName"`
+	Protocol     string            `json:"protocol"`
+	Config       TestConfig        `json:"config"`
+	NodeTestURLs map[string]string `json:"nodeTestUrls,omitempty"`
+	// NodeMaxBytes and NodeLowSpeedThresholds override the global download size
+	// and low-speed threshold for one node. Both are keyed by StableID and
+	// absent by default: a node with no entry uses the global value, which is
+	// what every node did before these existed, so older schedule files need no
+	// migration. Stored in bytes and Mbps respectively — the same units as the
+	// global settings they replace.
+	NodeMaxBytes           map[string]int64   `json:"nodeMaxBytes,omitempty"`
+	NodeLowSpeedThresholds map[string]float64 `json:"nodeLowSpeedThresholdsMbps,omitempty"`
+	HistoryRetentionDays   int                `json:"historyRetentionDays,omitempty"`
 }
 
 // scheduleStateFile keeps runtime scheduling metadata out of the admin API
@@ -103,36 +113,44 @@ type scheduleStateFile struct {
 }
 
 type Result struct {
-	StableID                string                    `json:"stableId"`
-	Name                    string                    `json:"name"`
-	SubName                 string                    `json:"subName"`
-	Protocol                string                    `json:"protocol"`
-	URL                     string                    `json:"url"`
-	PrimaryURL              string                    `json:"primaryUrl,omitempty"`
-	PrimaryError            string                    `json:"primaryError,omitempty"`
-	PrimaryMbps             float64                   `json:"primaryMbps,omitempty"`
-	FallbackAttempted       bool                      `json:"fallbackAttempted,omitempty"`
-	FallbackAttempts        int                       `json:"fallbackAttempts,omitempty"`
-	FallbackExhausted       bool                      `json:"fallbackExhausted,omitempty"`
-	FallbackUsed            bool                      `json:"fallbackUsed,omitempty"`
-	FallbackID              string                    `json:"fallbackId,omitempty"`
-	FallbackProvider        string                    `json:"fallbackProvider,omitempty"`
-	FallbackCity            string                    `json:"fallbackCity,omitempty"`
-	FallbackCountryCode     string                    `json:"fallbackCountryCode,omitempty"`
-	TelegramAlertSuppressed bool                      `json:"telegramAlertSuppressed,omitempty"`
-	MaintenanceProbe        bool                      `json:"maintenanceProbe,omitempty"`
-	ProjectMaintenanceProbe bool                      `json:"projectMaintenanceProbe,omitempty"`
-	StatusCode              int                       `json:"statusCode"`
-	DownloadedBytes         int64                     `json:"downloadedBytes"`
-	DurationMs              int64                     `json:"durationMs"`
-	TTFBMs                  int64                     `json:"ttfbMs"`
-	Mbps                    float64                   `json:"mbps"`
-	Error                   string                    `json:"error"`
-	Offline                 bool                      `json:"offline"`
-	HostCheck               *checker.HostCheckDetails `json:"hostCheck,omitempty"`
-	PingCheck               *checker.PingCheckDetails `json:"pingCheck,omitempty"`
-	CheckedAt               time.Time                 `json:"checkedAt"`
-	Source                  string                    `json:"source"`
+	StableID                string  `json:"stableId"`
+	Name                    string  `json:"name"`
+	SubName                 string  `json:"subName"`
+	Protocol                string  `json:"protocol"`
+	URL                     string  `json:"url"`
+	PrimaryURL              string  `json:"primaryUrl,omitempty"`
+	PrimaryError            string  `json:"primaryError,omitempty"`
+	PrimaryMbps             float64 `json:"primaryMbps,omitempty"`
+	FallbackAttempted       bool    `json:"fallbackAttempted,omitempty"`
+	FallbackAttempts        int     `json:"fallbackAttempts,omitempty"`
+	FallbackExhausted       bool    `json:"fallbackExhausted,omitempty"`
+	FallbackUsed            bool    `json:"fallbackUsed,omitempty"`
+	FallbackID              string  `json:"fallbackId,omitempty"`
+	FallbackProvider        string  `json:"fallbackProvider,omitempty"`
+	FallbackCity            string  `json:"fallbackCity,omitempty"`
+	FallbackCountryCode     string  `json:"fallbackCountryCode,omitempty"`
+	TelegramAlertSuppressed bool    `json:"telegramAlertSuppressed,omitempty"`
+	MaintenanceProbe        bool    `json:"maintenanceProbe,omitempty"`
+	ProjectMaintenanceProbe bool    `json:"projectMaintenanceProbe,omitempty"`
+	StatusCode              int     `json:"statusCode"`
+	DownloadedBytes         int64   `json:"downloadedBytes"`
+	DurationMs              int64   `json:"durationMs"`
+	TTFBMs                  int64   `json:"ttfbMs"`
+	Mbps                    float64 `json:"mbps"`
+	// LowSpeedThresholdMbps is the threshold this measurement was judged
+	// against — the node's own override when it has one, the global setting
+	// otherwise. Recorded with the result so every later reader reaches the
+	// same verdict: the report, the confirmation retry and the history view all
+	// used to re-read the current global setting, which silently reclassified
+	// past results whenever an operator changed it. Zero means "no threshold
+	// was in force", including in files written before this field existed.
+	LowSpeedThresholdMbps float64                   `json:"lowSpeedThresholdMbps,omitempty"`
+	Error                 string                    `json:"error"`
+	Offline               bool                      `json:"offline"`
+	HostCheck             *checker.HostCheckDetails `json:"hostCheck,omitempty"`
+	PingCheck             *checker.PingCheckDetails `json:"pingCheck,omitempty"`
+	CheckedAt             time.Time                 `json:"checkedAt"`
+	Source                string                    `json:"source"`
 	// AgentDiagnostic is ephemeral alert enrichment. It is deliberately absent
 	// from persisted speed history, admin API snapshots and backup state.
 	AgentDiagnostic *AgentDiagnostic `json:"-"`
@@ -180,19 +198,29 @@ type RunInfo struct {
 }
 
 type Snapshot struct {
-	Defaults           TestConfig        `json:"defaults"`
-	Schedule           ScheduleConfig    `json:"schedule"`
-	NodeTestURLs       map[string]string `json:"nodeTestUrls"`
-	NextScheduledRunAt *time.Time        `json:"nextScheduledRunAt,omitempty"`
-	LastRun            RunInfo           `json:"lastRun"`
-	Results            []Result          `json:"results"`
+	Defaults     TestConfig        `json:"defaults"`
+	Schedule     ScheduleConfig    `json:"schedule"`
+	NodeTestURLs map[string]string `json:"nodeTestUrls"`
+	// NodeMaxBytes and NodeLowSpeedThresholds are surfaced beside NodeTestURLs
+	// so the admin UI can show which nodes deviate from the global settings.
+	NodeMaxBytes           map[string]int64   `json:"nodeMaxBytes,omitempty"`
+	NodeLowSpeedThresholds map[string]float64 `json:"nodeLowSpeedThresholdsMbps,omitempty"`
+	NextScheduledRunAt     *time.Time         `json:"nextScheduledRunAt,omitempty"`
+	LastRun                RunInfo            `json:"lastRun"`
+	Results                []Result           `json:"results"`
 }
 
 type RunReport struct {
-	Source             string
-	StartedAt          time.Time
-	FinishedAt         time.Time
-	Selected           int
+	Source     string
+	StartedAt  time.Time
+	FinishedAt time.Time
+	Selected   int
+	// Skipped counts nodes that were selected but produced no result, which is
+	// what SkipOffline does to a node that lost availability between selection
+	// and its turn. It is recorded here, before any reporting filter rewrites
+	// Selected, so a report can say "8 measured, 2 skipped" instead of claiming
+	// ten were checked and then listing eight.
+	Skipped            int
 	Config             TestConfig
 	Results            []Result
 	RequestedStableIDs []string
@@ -328,7 +356,7 @@ func (m *Manager) Load() error {
 	}
 	schedule := state.ScheduleConfig
 	schedule.Config = m.normalizeConfig(schedule.Config)
-	schedule.NodeTestURLs = normalizeNodeTestURLs(schedule.NodeTestURLs, m.activeProxiesByID())
+	schedule = m.normalizeNodeOverrides(schedule)
 	schedule.HistoryRetentionDays = normalizeHistoryRetentionDays(schedule.HistoryRetentionDays)
 	if schedule.IntervalSec < 60 {
 		schedule.IntervalSec = 3600
@@ -424,7 +452,7 @@ func (m *Manager) Snapshot() Snapshot {
 	defer m.mu.RUnlock()
 
 	schedule := m.schedule
-	schedule.NodeTestURLs = copyStringMap(m.schedule.NodeTestURLs)
+	schedule = withCopiedNodeOverrides(schedule, m.schedule)
 	schedule.HistoryRetentionDays = normalizeHistoryRetentionDays(schedule.HistoryRetentionDays)
 
 	latest := make(map[string]Result, len(m.results)+len(m.probeResults))
@@ -452,12 +480,14 @@ func (m *Manager) Snapshot() Snapshot {
 	}
 
 	return Snapshot{
-		Defaults:           m.defaults,
-		Schedule:           schedule,
-		NodeTestURLs:       copyStringMap(schedule.NodeTestURLs),
-		NextScheduledRunAt: nextScheduledRunAt,
-		LastRun:            m.lastRun,
-		Results:            results,
+		Defaults:               m.defaults,
+		Schedule:               schedule,
+		NodeTestURLs:           copyStringMap(schedule.NodeTestURLs),
+		NodeMaxBytes:           copyInt64Map(schedule.NodeMaxBytes),
+		NodeLowSpeedThresholds: copyFloat64Map(schedule.NodeLowSpeedThresholds),
+		NextScheduledRunAt:     nextScheduledRunAt,
+		LastRun:                m.lastRun,
+		Results:                results,
 	}
 }
 
@@ -527,7 +557,7 @@ func (m *Manager) Schedule() ScheduleConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	schedule := m.schedule
-	schedule.NodeTestURLs = copyStringMap(m.schedule.NodeTestURLs)
+	schedule = withCopiedNodeOverrides(schedule, m.schedule)
 	schedule.HistoryRetentionDays = normalizeHistoryRetentionDays(schedule.HistoryRetentionDays)
 	return schedule
 }
@@ -566,15 +596,23 @@ func (m *Manager) UpdateSchedule(schedule ScheduleConfig) error {
 
 	m.mu.RLock()
 	existingSchedule := m.schedule
-	existingNodeTestURLs := copyStringMap(m.schedule.NodeTestURLs)
+	existingOverrides := withCopiedNodeOverrides(ScheduleConfig{}, m.schedule)
 	existingNextRun := m.nextRun
 	m.mu.RUnlock()
 
 	schedule.Config = m.normalizeConfig(schedule.Config)
+	// Per-node overrides are owned by their own endpoint. A schedule save that
+	// omits them must keep them, exactly as it already did for Test URLs.
 	if schedule.NodeTestURLs == nil {
-		schedule.NodeTestURLs = existingNodeTestURLs
+		schedule.NodeTestURLs = existingOverrides.NodeTestURLs
 	}
-	schedule.NodeTestURLs = normalizeNodeTestURLs(schedule.NodeTestURLs, m.activeProxiesByID())
+	if schedule.NodeMaxBytes == nil {
+		schedule.NodeMaxBytes = existingOverrides.NodeMaxBytes
+	}
+	if schedule.NodeLowSpeedThresholds == nil {
+		schedule.NodeLowSpeedThresholds = existingOverrides.NodeLowSpeedThresholds
+	}
+	schedule = m.normalizeNodeOverrides(schedule)
 	schedule.HistoryRetentionDays = normalizeHistoryRetentionDays(schedule.HistoryRetentionDays)
 	if schedule.Enabled && schedule.IntervalSec < 60 {
 		return fmt.Errorf("intervalSec must be at least 60 when schedule is enabled")
@@ -607,7 +645,24 @@ func (m *Manager) UpdateSchedule(schedule ScheduleConfig) error {
 	return nil
 }
 
+// NodeSettings are the per-node overrides an operator can set. A nil field is
+// "leave as it is", which lets the admin API send one of them without having to
+// resend the others. Clearing an override is an explicit empty string or zero.
+type NodeSettings struct {
+	TestURL               *string  `json:"testUrl,omitempty"`
+	MaxBytes              *int64   `json:"maxBytes,omitempty"`
+	LowSpeedThresholdMbps *float64 `json:"lowSpeedThresholdMbps,omitempty"`
+}
+
 func (m *Manager) UpdateNodeTestURL(stableID string, testURL string) error {
+	return m.UpdateNodeSettings(stableID, NodeSettings{TestURL: &testURL})
+}
+
+// UpdateNodeSettings stores the per-node Test URL, download size and low-speed
+// threshold. All three live in the schedule beside the global values they
+// override, so one save keeps them consistent and a restart restores them
+// together.
+func (m *Manager) UpdateNodeSettings(stableID string, input NodeSettings) error {
 	m.schedulePersistMu.Lock()
 	defer m.schedulePersistMu.Unlock()
 
@@ -621,14 +676,36 @@ func (m *Manager) UpdateNodeTestURL(stableID string, testURL string) error {
 		return fmt.Errorf("proxy not found")
 	}
 
-	normalizedURL, err := normalizeNodeTestURL(testURL)
-	if err != nil {
-		return err
+	normalizedURL := ""
+	if input.TestURL != nil {
+		var err error
+		normalizedURL, err = normalizeNodeTestURL(*input.TestURL)
+		if err != nil {
+			return err
+		}
+	}
+	if input.MaxBytes != nil && *input.MaxBytes != 0 {
+		if *input.MaxBytes < minNodeMaxBytes {
+			return fmt.Errorf("download size must be at least %d bytes", minNodeMaxBytes)
+		}
+		if *input.MaxBytes > maxBytesLimit {
+			return fmt.Errorf("download size must not exceed %d bytes", maxBytesLimit)
+		}
+	}
+	if input.LowSpeedThresholdMbps != nil && *input.LowSpeedThresholdMbps != 0 {
+		if *input.LowSpeedThresholdMbps < 0 {
+			return fmt.Errorf("low-speed threshold must not be negative")
+		}
+		if *input.LowSpeedThresholdMbps > maxLowSpeedThresholdMbps {
+			return fmt.Errorf("low-speed threshold must not exceed %.0f Mbps", maxLowSpeedThresholdMbps)
+		}
 	}
 
 	m.mu.RLock()
 	schedule := m.schedule
-	schedule.NodeTestURLs = copyStringMap(m.schedule.NodeTestURLs)
+	schedule = withCopiedNodeOverrides(schedule, m.schedule)
+	schedule.NodeMaxBytes = copyInt64Map(m.schedule.NodeMaxBytes)
+	schedule.NodeLowSpeedThresholds = copyFloat64Map(m.schedule.NodeLowSpeedThresholds)
 	nextRun := m.nextRun
 	m.mu.RUnlock()
 
@@ -638,15 +715,40 @@ func (m *Manager) UpdateNodeTestURL(stableID string, testURL string) error {
 		schedule.IntervalSec = 3600
 	}
 
-	if normalizedURL == "" {
-		delete(schedule.NodeTestURLs, stableID)
-	} else {
-		if schedule.NodeTestURLs == nil {
-			schedule.NodeTestURLs = make(map[string]string)
+	if input.TestURL != nil {
+		if normalizedURL == "" {
+			delete(schedule.NodeTestURLs, stableID)
+		} else {
+			if schedule.NodeTestURLs == nil {
+				schedule.NodeTestURLs = make(map[string]string)
+			}
+			schedule.NodeTestURLs[stableID] = normalizedURL
 		}
-		schedule.NodeTestURLs[stableID] = normalizedURL
 	}
+	if input.MaxBytes != nil {
+		if *input.MaxBytes <= 0 {
+			delete(schedule.NodeMaxBytes, stableID)
+		} else {
+			if schedule.NodeMaxBytes == nil {
+				schedule.NodeMaxBytes = make(map[string]int64)
+			}
+			schedule.NodeMaxBytes[stableID] = *input.MaxBytes
+		}
+	}
+	if input.LowSpeedThresholdMbps != nil {
+		if *input.LowSpeedThresholdMbps <= 0 {
+			delete(schedule.NodeLowSpeedThresholds, stableID)
+		} else {
+			if schedule.NodeLowSpeedThresholds == nil {
+				schedule.NodeLowSpeedThresholds = make(map[string]float64)
+			}
+			schedule.NodeLowSpeedThresholds[stableID] = *input.LowSpeedThresholdMbps
+		}
+	}
+
 	schedule.NodeTestURLs = normalizeNodeTestURLs(schedule.NodeTestURLs, active)
+	schedule.NodeMaxBytes = normalizeNodeMaxBytes(schedule.NodeMaxBytes, active)
+	schedule.NodeLowSpeedThresholds = normalizeNodeLowSpeedThresholds(schedule.NodeLowSpeedThresholds, active)
 
 	if err := m.saveSchedule(schedule, nextRun); err != nil {
 		return err
@@ -669,7 +771,7 @@ func (m *Manager) updateScheduleTestURL(testURL string) error {
 
 	m.mu.RLock()
 	schedule := m.schedule
-	schedule.NodeTestURLs = copyStringMap(m.schedule.NodeTestURLs)
+	schedule = withCopiedNodeOverrides(schedule, m.schedule)
 	nextRun := m.nextRun
 	m.mu.RUnlock()
 
@@ -858,7 +960,7 @@ func (m *Manager) ensureSchedulerDeadline(now time.Time) (ScheduleConfig, time.T
 
 	m.mu.Lock()
 	schedule := m.schedule
-	schedule.NodeTestURLs = copyStringMap(m.schedule.NodeTestURLs)
+	schedule = withCopiedNodeOverrides(schedule, m.schedule)
 	nextRun := m.nextRun
 	changed := schedule.Enabled && nextRun.IsZero()
 	if changed {
@@ -885,7 +987,7 @@ func (m *Manager) advanceSchedulerDeadline(expected, now time.Time) (ScheduleCon
 		return ScheduleConfig{}, false
 	}
 	schedule := m.schedule
-	schedule.NodeTestURLs = copyStringMap(m.schedule.NodeTestURLs)
+	schedule = withCopiedNodeOverrides(schedule, m.schedule)
 	nextRun := nextScheduledRunAfterTick(expected, time.Duration(schedule.IntervalSec)*time.Second, now)
 	m.nextRun = nextRun
 	m.mu.Unlock()
@@ -968,11 +1070,16 @@ func (m *Manager) run(
 	}
 
 	finishedAt := time.Now()
+	skipped := len(proxies) - len(runResults)
+	if skipped < 0 {
+		skipped = 0
+	}
 	report := RunReport{
 		Source:             source,
 		StartedAt:          startedAt,
 		FinishedAt:         finishedAt,
 		Selected:           len(proxies),
+		Skipped:            skipped,
 		Config:             cfg,
 		Results:            runResults,
 		RequestedStableIDs: requestedStableIDs,
@@ -1012,7 +1119,6 @@ func (m *Manager) runManualTestPhases(
 	sem chan struct{},
 	recordResult func(Result),
 ) {
-	threshold := m.fallbackLowSpeedThreshold()
 	primaryResults := make(chan manualPrimaryResult, len(proxies))
 	var primaryWG sync.WaitGroup
 	for _, proxy := range proxies {
@@ -1038,9 +1144,11 @@ func (m *Manager) runManualTestPhases(
 		close(primaryResults)
 	}()
 
+	// The threshold is read per node rather than once per run, so a node with
+	// its own threshold decides its own fallback.
 	fallbackQueue := make([]manualPrimaryResult, 0)
 	for primary := range primaryResults {
-		if shouldAttemptFallback(primary.result, threshold) {
+		if shouldAttemptFallback(primary.result, m.LowSpeedThresholdFor(primary.result.StableID)) {
 			fallbackQueue = append(fallbackQueue, primary)
 			continue
 		}
@@ -1055,7 +1163,7 @@ func (m *Manager) runManualTestPhases(
 			defer fallbackWG.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			fallbackResults <- m.testFallbackForPrimary(task.proxy, task.config, source, task.result, threshold)
+			fallbackResults <- m.testFallbackForPrimary(task.proxy, task.config, source, task.result, m.LowSpeedThresholdFor(task.result.StableID))
 		}(queued)
 	}
 	go func() {
@@ -1186,11 +1294,38 @@ func (m *Manager) configForProxy(cfg TestConfig, proxy *models.ProxyConfig) Test
 
 	m.mu.RLock()
 	testURL := strings.TrimSpace(m.schedule.NodeTestURLs[proxy.StableID])
+	maxBytes := m.schedule.NodeMaxBytes[proxy.StableID]
 	m.mu.RUnlock()
 	if testURL != "" {
 		cfg.URL = testURL
 	}
+	// A per-node size is useful in both directions: a small one keeps a metered
+	// or slow link from burning the global budget, a larger one gives a fast
+	// node enough transfer to measure honestly.
+	if maxBytes > 0 {
+		cfg.MaxBytes = maxBytes
+	}
 	return cfg
+}
+
+// LowSpeedThresholdFor returns the threshold that applies to one node: its own
+// override when set, the global Telegram threshold otherwise. It is the single
+// place that answers "what counts as slow for this node", so the fallback
+// decision, the alert decision and the report all agree.
+func (m *Manager) LowSpeedThresholdFor(stableID string) float64 {
+	if m == nil {
+		return 0
+	}
+	stableID = strings.TrimSpace(stableID)
+	if stableID != "" {
+		m.mu.RLock()
+		threshold, ok := m.schedule.NodeLowSpeedThresholds[stableID]
+		m.mu.RUnlock()
+		if ok && threshold > 0 {
+			return threshold
+		}
+	}
+	return m.fallbackLowSpeedThreshold()
 }
 
 func (m *Manager) selectProxies(req RunRequest, allowMaintenance bool) []*models.ProxyConfig {
@@ -1396,6 +1531,104 @@ func normalizeNodeTestURL(value string) (string, error) {
 		return "", fmt.Errorf("test URL must use http or https")
 	}
 	return value, nil
+}
+
+// normalizeNodeMaxBytes and normalizeNodeLowSpeedThresholds drop entries for
+// nodes that are gone and clamp the rest to the same limits the global
+// settings use, so a stale or malformed schedule file cannot make one node
+// download more than the global ceiling allows.
+func normalizeNodeMaxBytes(values map[string]int64, active map[string]*models.ProxyConfig) map[string]int64 {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make(map[string]int64, len(values))
+	for stableID, maxBytes := range values {
+		stableID = strings.TrimSpace(stableID)
+		if stableID == "" || maxBytes <= 0 {
+			continue
+		}
+		if active != nil {
+			if _, ok := active[stableID]; !ok {
+				continue
+			}
+		}
+		if maxBytes > maxBytesLimit {
+			maxBytes = maxBytesLimit
+		}
+		result[stableID] = maxBytes
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func normalizeNodeLowSpeedThresholds(values map[string]float64, active map[string]*models.ProxyConfig) map[string]float64 {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make(map[string]float64, len(values))
+	for stableID, threshold := range values {
+		stableID = strings.TrimSpace(stableID)
+		// A zero threshold is not an override: it is how "use the global
+		// setting" is expressed, and clearing an entry is how it is removed.
+		if stableID == "" || threshold <= 0 {
+			continue
+		}
+		if active != nil {
+			if _, ok := active[stableID]; !ok {
+				continue
+			}
+		}
+		if threshold > maxLowSpeedThresholdMbps {
+			threshold = maxLowSpeedThresholdMbps
+		}
+		result[stableID] = threshold
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// withCopiedNodeOverrides detaches a schedule's per-node maps from the live
+// ones. Without it a snapshot and the manager would share the same maps, and a
+// later save would mutate what a caller is already reading.
+func withCopiedNodeOverrides(schedule ScheduleConfig, source ScheduleConfig) ScheduleConfig {
+	schedule.NodeTestURLs = copyStringMap(source.NodeTestURLs)
+	schedule.NodeMaxBytes = copyInt64Map(source.NodeMaxBytes)
+	schedule.NodeLowSpeedThresholds = copyFloat64Map(source.NodeLowSpeedThresholds)
+	return schedule
+}
+
+func (m *Manager) normalizeNodeOverrides(schedule ScheduleConfig) ScheduleConfig {
+	active := m.activeProxiesByID()
+	schedule.NodeTestURLs = normalizeNodeTestURLs(schedule.NodeTestURLs, active)
+	schedule.NodeMaxBytes = normalizeNodeMaxBytes(schedule.NodeMaxBytes, active)
+	schedule.NodeLowSpeedThresholds = normalizeNodeLowSpeedThresholds(schedule.NodeLowSpeedThresholds, active)
+	return schedule
+}
+
+func copyInt64Map(values map[string]int64) map[string]int64 {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make(map[string]int64, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
+}
+
+func copyFloat64Map(values map[string]float64) map[string]float64 {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make(map[string]float64, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
 }
 
 func normalizeNodeTestURLs(values map[string]string, active map[string]*models.ProxyConfig) map[string]string {

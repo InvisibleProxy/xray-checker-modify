@@ -1792,15 +1792,23 @@
 
           <div class="control-group">
             <div class="group-title">
-              <h3>Node Test URL</h3>
+              <h3>Node speed-test settings</h3>
               <span id="node-url-state" class="muted">Select one node</span>
             </div>
             <label>
               Selected node URL
               <input id="node-url" type="url" autocomplete="off" disabled />
             </label>
+            <label>
+              Download size, MB
+              <input id="node-max-mb" type="number" min="0.06" max="100" step="0.1" autocomplete="off" placeholder="Global size" disabled />
+            </label>
+            <label>
+              Low-speed threshold, Mbps
+              <input id="node-threshold" type="number" min="0" step="0.1" autocomplete="off" placeholder="Global threshold" disabled />
+            </label>
             <div class="row">
-              <button id="save-node-url" class="secondary" type="button" disabled>Save Node URL</button>
+              <button id="save-node-url" class="secondary" type="button" disabled>Save node settings</button>
               <button id="clear-node-url" class="secondary" type="button" disabled>Clear</button>
             </div>
           </div>
@@ -4172,6 +4180,25 @@
         return (state.snapshot && state.snapshot.nodeTestUrls) || {};
       }
 
+      // Per-node overrides. An absent entry means the node follows the global
+      // setting, which is what an empty input field represents.
+      function nodeMaxBytes(stableId) {
+        const values = (state.snapshot && state.snapshot.nodeMaxBytes) || {};
+        return Number(values[stableId]) || 0;
+      }
+
+      function nodeThreshold(stableId) {
+        const values = (state.snapshot && state.snapshot.nodeLowSpeedThresholdsMbps) || {};
+        return Number(values[stableId]) || 0;
+      }
+
+      function bytesToMB(bytes) {
+        if (!bytes) return "";
+        // Trim the trailing zeros a plain division leaves behind, so 10 MB reads
+        // as "10" rather than "10.000".
+        return String(Number((bytes / (1024 * 1024)).toFixed(3)));
+      }
+
       function nodeTestURL(stableId) {
         return nodeTestURLs()[stableId] || "";
       }
@@ -6438,11 +6465,15 @@
       function renderNodeURLForm() {
         const ids = selectedIDs();
         const input = $("node-url");
+        const sizeInput = $("node-max-mb");
+        const thresholdInput = $("node-threshold");
         const save = $("save-node-url");
         const clear = $("clear-node-url");
         if (ids.length !== 1) {
-          input.value = "";
-          input.disabled = true;
+          [input, sizeInput, thresholdInput].forEach((field) => {
+            field.value = "";
+            field.disabled = true;
+          });
           save.disabled = true;
           clear.disabled = true;
           state.nodeURLDraftID = "";
@@ -6453,19 +6484,31 @@
 
         const stableId = ids[0];
         const currentURL = nodeTestURL(stableId);
-        if (state.nodeURLDraftID !== stableId) {
+        const currentSize = bytesToMB(nodeMaxBytes(stableId));
+        const currentThreshold = nodeThreshold(stableId) ? String(nodeThreshold(stableId)) : "";
+        // A refresh must not overwrite what the operator is typing, so stored
+        // values are only re-applied while the form is clean.
+        if (state.nodeURLDraftID !== stableId || !state.nodeURLDirty) {
           state.nodeURLDraftID = stableId;
           state.nodeURLDirty = false;
           input.value = currentURL;
-        } else if (!state.nodeURLDirty) {
-          input.value = currentURL;
+          sizeInput.value = currentSize;
+          thresholdInput.value = currentThreshold;
         }
-        input.disabled = false;
+        [input, sizeInput, thresholdInput].forEach((field) => {
+          field.disabled = false;
+        });
         save.disabled = false;
-        clear.disabled = !currentURL && !input.value.trim();
+        const hasOverride = Boolean(currentURL || currentSize || currentThreshold);
+        clear.disabled = !hasOverride && !input.value.trim() && !sizeInput.value.trim() && !thresholdInput.value.trim();
+
+        const active = [];
+        if (currentURL) active.push(tr("URL"));
+        if (currentSize) active.push(`${currentSize} ${tr("MB")}`);
+        if (currentThreshold) active.push(`${currentThreshold} Mbps`);
         $("node-url-state").textContent = state.nodeURLDirty
-          ? "Unsaved changes"
-          : (currentURL ? "Custom URL active" : "Using global Test URL");
+          ? tr("Unsaved changes")
+          : (active.length > 0 ? `${tr("Custom")}: ${active.join(" · ")}` : tr("Using global settings"));
       }
 
       function applyDefaults() {
@@ -7979,17 +8022,37 @@
           return;
         }
         const url = $("node-url").value.trim();
+        const sizeText = $("node-max-mb").value.trim();
+        const thresholdText = $("node-threshold").value.trim();
+
+        // An empty field clears that override, so every field is sent
+        // explicitly — including the zeros that mean "fall back to global".
+        const maxBytes = sizeText === "" ? 0 : Math.round(Number(sizeText) * 1024 * 1024);
+        const threshold = thresholdText === "" ? 0 : Number(thresholdText);
+        if (!Number.isFinite(maxBytes) || maxBytes < 0) {
+          $("message").textContent = tr("Download size must be a positive number of megabytes");
+          return;
+        }
+        if (!Number.isFinite(threshold) || threshold < 0) {
+          $("message").textContent = tr("Low-speed threshold must not be negative");
+          return;
+        }
+
         try {
           state.snapshot = await request("/speed-tests/node-url", {
             method: "PUT",
             body: JSON.stringify({
               stableId: ids[0],
-              url,
+              testUrl: url,
+              maxBytes,
+              lowSpeedThresholdMbps: threshold,
             }),
           });
           state.nodeURLDraftID = ids[0];
           state.nodeURLDirty = false;
-          $("message").textContent = url ? "Node Test URL saved" : "Node Test URL cleared";
+          $("message").textContent = url || maxBytes || threshold
+            ? tr("Node speed-test settings saved")
+            : tr("Node speed-test settings cleared");
           renderAll();
         } catch (err) {
           $("message").textContent = err.message;
@@ -7998,6 +8061,8 @@
 
       async function clearNodeURL() {
         $("node-url").value = "";
+        $("node-max-mb").value = "";
+        $("node-threshold").value = "";
         state.nodeURLDirty = true;
         await saveNodeURL();
       }
@@ -8598,11 +8663,13 @@
       $("selection-history").addEventListener("click", openSelectedHistory);
       $("save-node-url").addEventListener("click", saveNodeURL);
       $("clear-node-url").addEventListener("click", clearNodeURL);
-      $("node-url").addEventListener("input", () => {
-        const ids = selectedIDs();
-        state.nodeURLDraftID = ids.length === 1 ? ids[0] : "";
-        state.nodeURLDirty = ids.length === 1;
-        renderNodeURLForm();
+      ["node-url", "node-max-mb", "node-threshold"].forEach((id) => {
+        $(id).addEventListener("input", () => {
+          const ids = selectedIDs();
+          state.nodeURLDraftID = ids.length === 1 ? ids[0] : "";
+          state.nodeURLDirty = ids.length === 1;
+          renderNodeURLForm();
+        });
       });
       $("save-schedule").addEventListener("click", saveSchedule);
       $("load-schedule-scope").addEventListener("click", applyScheduleScope);
