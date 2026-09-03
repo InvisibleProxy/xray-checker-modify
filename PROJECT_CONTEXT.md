@@ -260,7 +260,8 @@ Recovery alert хранит `RecoveryPending`, время и latency до усп
 - `/admin` и `/api/v1/admin/*` всегда должны оставаться за Basic Auth.
 - В server-mode `METRICS_USERNAME` и `METRICS_PASSWORD` обязательны; публичных встроенных credentials нет. `RUN_ONCE=true` не поднимает HTTP-сервер и является единственным исключением.
 - `WEB_PUBLIC=true` разрешён только вместе с `METRICS_PROTECTED=true`.
-- `Caddyfile.example` — версионируемый источник шаблона; локальный `Caddyfile` создаётся копированием, игнорируется Git и публикует только status page, `/static`, `/config` и публичный список прокси.
+- `Caddyfile.example` — версионируемый источник закрытого шаблона; локальный `Caddyfile` игнорируется Git. Caddy пропускает только `GET /metrics` с `BEDOLAGA_PUBLIC_IP` (Basic Auth проверяет controller при обязательном `METRICS_PROTECTED=true`) и четыре агентских `POST` endpoint с собственными IP-bound credentials. Все остальные запросы получают `404`; dashboard, admin и API доступны через host loopback `127.0.0.1:2112`. Шаблон рассчитан на прямое подключение к Caddy, без CDN/reverse proxy перед ним.
+- `WEB_PUBLIC=false` переводит dashboard под Basic Auth при `METRICS_PROTECTED=true`, но не отключает HTTP-маршруты; `/api/v1/public/proxies` остаётся вне Basic Auth. Внешнюю границу закрытого deployment обеспечивает allowlist Caddy, а не этот флаг.
 - Нельзя писать Telegram token, Remnawave API token, chat ID, admin IDs, subscription URL с credentials или Basic Auth password в логи, API и backup.
 - Restore принимает только известные пути, ограничивает размер архива, проверяет manifest/hash/JSON-схемы и не следует symlink/reparse-point вместо state-файлов.
 

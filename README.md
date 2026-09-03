@@ -49,7 +49,7 @@ docker run --rm `
 
 Язык dashboard и админки переключается кнопками `EN`/`RU` в верхней панели. Выбор хранится в `localStorage` браузера и применяется к обоим экранам; технические названия (`StableID`, `Test URL`, `Remnawave Host`, `Internal Squad`, `External Squad`, `announce`, `reconcile` и подобные) остаются без смыслового перевода.
 
-### Docker Compose и публичная status page
+### Docker Compose: закрытый интерфейс, Bedolaga и агенты
 
 ```powershell
 Copy-Item docker-compose.yaml.example docker-compose.yaml
@@ -59,7 +59,7 @@ Copy-Item .env.example .env
 
 `Caddyfile` — локальная конфигурация и игнорируется Git. Версионируемый шаблон находится в `Caddyfile.example`, поэтому доменные или инфраструктурные правки не засоряют `git status`.
 
-Отредактируйте `.env`: это единственный операторский файл с runtime-настройками основного stack-а. `xray-checker` читает его целиком через `env_file`, поэтому добавление или изменение настройки приложения не требует правки Compose. Полный шаблон настроек и прежних Compose-defaults находится в `.env.example`. Caddy получает из `.env` только явный allowlist `PUBLIC_DOMAIN`, `ACME_EMAIL` и `PROBE_TRUSTED_PROXY_SECRET`; Telegram, Remnawave и subscription-секреты в reverse proxy не передаются.
+Отредактируйте `.env`: это единственный операторский файл с runtime-настройками основного stack-а. `xray-checker` читает его целиком через `env_file`, поэтому добавление или изменение настройки приложения не требует правки Compose. Полный шаблон настроек и прежних Compose-defaults находится в `.env.example`. Caddy получает из `.env` только явный allowlist `PUBLIC_DOMAIN`, `ACME_EMAIL`, `BEDOLAGA_PUBLIC_IP` и `PROBE_TRUSTED_PROXY_SECRET`; Basic Auth password, Telegram, Remnawave и subscription-секреты в reverse proxy не передаются.
 
 При обновлении существующей установки сначала сравните её `.env` с актуальным `.env.example` и перенесите недостающие параметры, не затирая реальные секреты. Особенно проверьте `WEB_PUBLIC`, `METRICS_PROTECTED`, `METRICS_USERNAME` и `PROXY_CHECK_METHOD`: раньше пример Compose подставлял их самостоятельно.
 
@@ -68,13 +68,15 @@ CONTROLLER_IMAGE=ghcr.io/invisibleproxy/xray-checker-controller:main
 SUBSCRIPTION_URL="https://example.com/subscription"
 # Для нескольких источников перечислите URL через запятую внутри кавычек:
 # SUBSCRIPTION_URL="https://one.example.com/subscription,https://two.example.com/subscription"
-WEB_PUBLIC=true
+WEB_PUBLIC=false
 WEB_SHOW_DETAILS=false
 METRICS_PROTECTED=true
 METRICS_USERNAME=admin
 METRICS_PASSWORD=replace-with-a-long-password
 PUBLIC_DOMAIN=status.example.com
 ACME_EMAIL=admin@example.com
+# Замените пример на публичный исходящий IP сервера Bedolaga:
+BEDOLAGA_PUBLIC_IP=203.0.113.10
 ```
 
 Controller image публикуется workflow-ом [`controller-image.yml`](.github/workflows/controller-image.yml) для `linux/amd64` и `linux/arm64`. Push в `main` создаёт теги `main` и `sha-<short>`, а тег `controller-vX.Y.Z` — `X.Y.Z` и `latest`. `:main` удобен для первого запуска, но в production после успешного workflow замените его в `.env` на напечатанный в summary immutable digest:
@@ -100,7 +102,25 @@ docker compose up -d --no-deps --force-recreate xray-checker
 
 Локальная сборка из checkout-а остаётся отдельным сценарием из раздела «Локально через Docker»; build-аргумент `ENABLE_UPX` задаётся непосредственно команде `docker build` и не относится к production `.env`.
 
-В примере Caddy публикует только status page и публичные endpoints. Админка, метрики и приватный API снаружи возвращают `404` и остаются доступны через локальный порт `127.0.0.1:2112`.
+В примере Caddy разрешает только `GET /metrics` с `BEDOLAGA_PUBLIC_IP` и четыре агентских `POST` endpoint из следующего раздела. Все остальные запросы, включая `/`, `/static/*`, `/config/*`, `/api/v1/public/proxies`, `/admin`, приватный API и `/health`, снаружи получают `404` без запроса пароля. Сам checker опубликован только на `127.0.0.1:2112`; внутренний Docker healthcheck продолжает работать.
+
+Bedolaga в режиме `SERVER_STATUS_MODE=xray` использует `SERVER_STATUS_METRICS_URL=https://<PUBLIC_DOMAIN>/metrics` и `SERVER_STATUS_METRICS_USERNAME`/`SERVER_STATUS_METRICS_PASSWORD`, совпадающие с `METRICS_USERNAME`/`METRICS_PASSWORD` checker-а. Caddy проверяет IP источника и передаёт Authorization controller-у, который проверяет Basic Auth: `METRICS_PROTECTED=true` обязателен, отдельный `METRICS_PASSWORD_HASH` Caddy не нужен. Запрос метрик с другого IP получает `404`, с разрешённого IP без правильных credentials — `401`. `BEDOLAGA_PUBLIC_IP` — фактический исходящий IPv4 или IPv6 сервера бота. Шаблон предполагает прямое подключение к Caddy: за CDN или другим reverse proxy `remote_ip` будет адресом этого посредника.
+
+`WEB_PUBLIC=false` сам по себе не выключает HTTP-страницу: при включённой защите она требует Basic Auth, а `/api/v1/public/proxies` зарегистрирован вне этой защиты. Доступ снаружи закрывает именно Caddy. Для администрирования с рабочего компьютера откройте SSH-туннель и перейдите на `http://127.0.0.1:2112/admin`:
+
+```powershell
+ssh -N -L 2112:127.0.0.1:2112 user@SERVER_IP
+```
+
+При переходе существующей установки на закрытый шаблон перенесите изменения в локальные `Caddyfile`, `docker-compose.yaml` и `.env`, сохраняя свои domain, credentials, mounts и image digest. Compose должен передавать Caddy новый `BEDOLAGA_PUBLIC_IP`. Проверьте конфигурацию и пересоздайте сервисы, чтобы применить environment:
+
+```powershell
+docker compose config --quiet
+docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+docker compose up -d --no-deps --force-recreate xray-checker caddy
+```
+
+После применения проверьте `404` на главной странице и публичном API, получение метрик из Bedolaga и обновление heartbeat агентов.
 
 ### Remote Diagnostics и отдельный Compose probe-agent-а
 

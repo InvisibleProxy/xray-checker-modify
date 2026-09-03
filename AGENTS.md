@@ -86,6 +86,7 @@
 - Backup restore и node merge не должны одновременно находиться в pending/applied/rollback state; их web staging обязан удерживать общий transaction gate до публикации операции.
 - Backup не должен включать environment, geo-файлы, `xray_config.json`, Telegram secrets/admin IDs, Remnawave API token и `remnawave_announce_state.json`. Versioned v5 `remnawave_announce_config.json` с non-secret policy/pairs/locations входит в typed backup; legacy node mappings мигрируют при чтении.
 - `Caddyfile.example` является источником шаблона reverse proxy; локальный `Caddyfile` игнорируется и не должен попадать в коммиты.
+- Закрытый Compose/Caddy-шаблон пропускает снаружи только `GET /metrics` с `BEDOLAGA_PUBLIC_IP` и четыре точных агентских `POST` endpoint. Остальные запросы, включая публичный API, получают `404`; порт checker-а публикуется только на host loopback. Сохраняйте `METRICS_PROTECTED=true`: Basic Auth метрик проверяет controller, Caddy не получает пароль. Не добавляйте общую Basic Auth поверх агентских маршрутов; сохраняйте их proxy-secret/source-IP headers.
 - Автоматические backup: максимум один за UTC-день, максимум 7 файлов и максимум 7 суток.
 - Restore всегда проходит типизированную JSON-валидацию и staging; применение — только на следующем startup с rollback. Commit допустим лишь после успешного `Load` у всех владельцев restored state.
 - Restore transaction должна различать оборванное применение, неподтверждённое состояние и оборванную очистку подтверждённого commit; не удаляйте rollback-копию без commit marker.
