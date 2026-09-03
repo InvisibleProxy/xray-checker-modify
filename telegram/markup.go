@@ -2,11 +2,11 @@ package telegram
 
 import (
 	"encoding/json"
-	"sort"
 	"strconv"
 	"strings"
 
 	"xray-checker/checker"
+	"xray-checker/speedtest"
 )
 
 func mainMenuMarkup(isAdmin bool) string {
@@ -163,10 +163,10 @@ func issuesMarkup() string {
 }
 
 func (s *Service) speedHistoryMarkup(page int) string {
-	results := s.activeSpeedResults(s.speedManager.Snapshot().Results)
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].CheckedAt.After(results[j].CheckedAt)
-	})
+	// Same order as the message above: problems first, so the buttons line up
+	// with what the operator just read.
+	threshold := s.Config().LowSpeedThresholdMbps
+	results := orderedSpeedResults(s.activeSpeedResults(s.speedManager.Snapshot().Results), threshold)
 	pageResults, page, totalPages := pageSlice(results, page, speedListPageSize)
 
 	var rows [][]inlineKeyboardButton
@@ -176,7 +176,7 @@ func (s *Service) speedHistoryMarkup(page int) string {
 			continue
 		}
 		row = append(row, inlineKeyboardButton{
-			Text:         shortButtonText(result.Name),
+			Text:         speedButtonPrefix(result, threshold) + shortButtonText(result.Name),
 			CallbackData: "speed:" + result.StableID,
 		})
 		if len(row) == 2 {
@@ -246,6 +246,19 @@ func encodeMarkup(rows [][]inlineKeyboardButton) string {
 		return ""
 	}
 	return string(data)
+}
+
+// speedButtonPrefix marks only the buttons worth looking at. Node names already
+// carry a flag emoji, so a healthy result gets no extra badge and stays short.
+func speedButtonPrefix(result speedtest.Result, threshold float64) string {
+	switch speedResultClass(result, threshold) {
+	case speedClassFailed:
+		return "❌ "
+	case speedClassSlow:
+		return "⚠️ "
+	default:
+		return ""
+	}
 }
 
 func shortButtonText(text string) string {

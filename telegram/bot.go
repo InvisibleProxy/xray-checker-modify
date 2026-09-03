@@ -241,8 +241,10 @@ func (s *Service) handleCallback(cb *callbackQuery) {
 		s.editFormattedCommandMessage(cb.Message, s.formatHelpMessage(cfg), backToMenuMarkup())
 	case data == "speed:list" || strings.HasPrefix(data, "speed:list:"):
 		s.answerCallback(cb.ID, "")
+		// The message lists every node grouped by status; only the keyboard
+		// pages, so the text stays the same across pages.
 		page := parsePage(strings.TrimPrefix(strings.TrimPrefix(data, "speed:list"), ":"))
-		s.editFormattedCommandMessage(cb.Message, s.formatRecentSpeedOverviewMessage(page), s.speedHistoryMarkup(page))
+		s.editFormattedCommandMessage(cb.Message, s.formatRecentSpeedOverviewMessage(), s.speedHistoryMarkup(page))
 	case data == "noop":
 		s.answerCallback(cb.ID, "")
 	case strings.HasPrefix(data, "node:check:"):

@@ -37,7 +37,7 @@ const (
 	// Inline keyboards are paged because one button per node stops being usable
 	// well before any API limit.
 	nodeListPageSize  = 8
-	speedListPageSize = 8
+	speedListPageSize = 24
 
 	// Long polling needs its own budget: the send timeout is far too short to
 	// hold a poll open, and a client cut mid-poll wastes the whole cycle.

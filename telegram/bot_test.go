@@ -12,6 +12,7 @@ import (
 
 	"xray-checker/checker"
 	"xray-checker/models"
+	"xray-checker/speedtest"
 )
 
 func testProxies(names ...string) []*models.ProxyConfig {
@@ -299,6 +300,60 @@ func TestNodeListMarkupPagesLongLists(t *testing.T) {
 	}
 	if nav[2].CallbackData != "nodes:list:2" {
 		t.Fatalf("expected a next-page button, got %+v", nav[2])
+	}
+}
+
+func TestSpeedOverviewGroupsByStatus(t *testing.T) {
+	now := time.Now()
+	results := []speedtest.Result{
+		{StableID: "ok-old", Name: "healthy-old", Mbps: 500, CheckedAt: now.Add(-time.Hour)},
+		{StableID: "slow", Name: "slow-node", Mbps: 5, CheckedAt: now.Add(-2 * time.Hour)},
+		{StableID: "ok-new", Name: "healthy-new", Mbps: 400, CheckedAt: now},
+		{StableID: "err", Name: "broken-node", Error: "dial timeout", CheckedAt: now.Add(-3 * time.Hour)},
+	}
+
+	failed, slow, healthy := groupSpeedResults(results, 100)
+	if len(failed) != 1 || failed[0].StableID != "err" {
+		t.Fatalf("unexpected failed group: %+v", failed)
+	}
+	if len(slow) != 1 || slow[0].StableID != "slow" {
+		t.Fatalf("unexpected slow group: %+v", slow)
+	}
+	// Recency still orders within a group.
+	if len(healthy) != 2 || healthy[0].StableID != "ok-new" {
+		t.Fatalf("unexpected healthy group: %+v", healthy)
+	}
+
+	// Problems come first, so the keyboard's first page never hides them
+	// behind a screen of nodes that are fine.
+	ordered := orderedSpeedResults(results, 100)
+	gotOrder := make([]string, 0, len(ordered))
+	for _, result := range ordered {
+		gotOrder = append(gotOrder, result.StableID)
+	}
+	want := []string{"err", "slow", "ok-new", "ok-old"}
+	for i := range want {
+		if gotOrder[i] != want[i] {
+			t.Fatalf("ordered results = %v, want %v", gotOrder, want)
+		}
+	}
+
+	// A zero threshold disables the low-speed class entirely.
+	_, slow, healthy = groupSpeedResults(results, 0)
+	if len(slow) != 0 || len(healthy) != 3 {
+		t.Fatalf("a zero threshold must not classify anything as slow: slow=%d healthy=%d", len(slow), len(healthy))
+	}
+}
+
+func TestSpeedButtonPrefixMarksOnlyProblems(t *testing.T) {
+	if got := speedButtonPrefix(speedtest.Result{Mbps: 500}, 100); got != "" {
+		t.Fatalf("a healthy node must not get an extra badge, got %q", got)
+	}
+	if got := speedButtonPrefix(speedtest.Result{Mbps: 5}, 100); got != "⚠️ " {
+		t.Fatalf("slow prefix = %q", got)
+	}
+	if got := speedButtonPrefix(speedtest.Result{Error: "boom"}, 100); got != "❌ " {
+		t.Fatalf("error prefix = %q", got)
 	}
 }
 

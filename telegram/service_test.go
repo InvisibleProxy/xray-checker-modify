@@ -2010,7 +2010,7 @@ func TestRecentMeasurementsUseRichFormattedTable(t *testing.T) {
 	}
 
 	service := NewService("", proxyChecker, manager, 10000)
-	message := service.formatRecentSpeedOverviewMessage(1)
+	message := service.formatRecentSpeedOverviewMessage()
 	for _, want := range []string{"<h2>Замеры</h2>", "<table bordered striped>", "<th>Результат</th>", "&lt;Node &amp; one&gt;"} {
 		if !strings.Contains(message.RichHTML, want) {
 			t.Fatalf("rich measurements do not contain %q:\n%s", want, message.RichHTML)
@@ -2073,8 +2073,8 @@ func TestTelegramInteractiveSpeedViewsExcludeInactiveResults(t *testing.T) {
 	views := map[string]string{
 		"issues compact": service.formatIssuesSummary(),
 		"issues rich":    service.formatIssuesSummaryMessage().RichHTML,
-		"recent compact": service.formatRecentSpeedOverview(1),
-		"recent rich":    service.formatRecentSpeedOverviewMessage(1).RichHTML,
+		"recent compact": service.formatRecentSpeedOverview(),
+		"recent rich":    service.formatRecentSpeedOverviewMessage().RichHTML,
 		"recent buttons": service.speedHistoryMarkup(1),
 	}
 	for name, view := range views {

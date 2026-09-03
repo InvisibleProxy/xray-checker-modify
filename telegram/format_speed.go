@@ -75,76 +75,100 @@ func (s *Service) formatSpeedHistoryMessage(query string) formattedMessage {
 	return formattedMessage{HTML: fallback, RichHTML: rich}
 }
 
-func (s *Service) formatRecentSpeedOverview(page int) string {
+func (s *Service) formatRecentSpeedOverview() string {
 	results := s.activeSpeedResults(s.speedManager.Snapshot().Results)
 	if len(results) == 0 {
 		return "<b>Замеры</b>\n\nПока нет результатов speed-test."
 	}
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].CheckedAt.After(results[j].CheckedAt)
-	})
-	visible, page, totalPages := pageSlice(results, page, speedListPageSize)
 
 	cfg := s.Config()
-	header := "Последний результат speed-test для каждой ноды:"
-	if totalPages > 1 {
-		header = fmt.Sprintf("Последний результат speed-test · страница %d из %d:", page, totalPages)
-	}
+	failed, slow, healthy := groupSpeedResults(results, cfg.LowSpeedThresholdMbps)
 	lines := []string{
 		"<b>Замеры</b>",
-		header,
-		"",
+		fmt.Sprintf("✅ В норме: <b>%d</b> · ⚠️ Низкая: <b>%d</b> · ❌ Ошибки: <b>%d</b>", len(healthy), len(slow), len(failed)),
 	}
-	for _, result := range visible {
-		status := fmt.Sprintf("<b>%.2f Mbps</b>", result.Mbps)
-		if result.Offline {
-			status = "🔴 <b>недоступна</b>"
-		} else if result.Error != "" {
-			status = "❌ <b>ошибка</b>"
-		} else if cfg.LowSpeedThresholdMbps > 0 && result.Mbps < cfg.LowSpeedThresholdMbps {
-			status = fmt.Sprintf("⚠️ <b>%.2f Mbps</b>", result.Mbps)
+	appendGroup := func(title string, group []speedtest.Result) {
+		if len(group) == 0 {
+			return
 		}
-		lines = append(lines, fmt.Sprintf("• <b>%s</b> · %s · %s", htmlEscape(result.Name), status, htmlEscape(formatCheckedAt(result.CheckedAt))))
+		lines = append(lines, "", title)
+		for _, result := range group {
+			lines = append(lines, fmt.Sprintf("• <b>%s</b> · %s · %s",
+				htmlEscape(result.Name),
+				speedResultStatusHTML(result, cfg.LowSpeedThresholdMbps),
+				htmlEscape(formatCheckedAt(result.CheckedAt)),
+			))
+		}
 	}
+	appendGroup("<b>Ошибки</b>", failed)
+	appendGroup("<b>Низкая скорость</b>", slow)
+	appendGroup("<b>В норме</b>", healthy)
+
 	lines = append(lines, "", "Нажмите на ноду ниже, чтобы открыть историю.")
 	return trimHTMLMessage(strings.Join(lines, "\n"))
 }
 
-func (s *Service) formatRecentSpeedOverviewMessage(page int) formattedMessage {
-	fallback := s.formatRecentSpeedOverview(page)
+func speedResultStatusHTML(result speedtest.Result, threshold float64) string {
+	switch {
+	case result.Offline:
+		return "🔴 <b>недоступна</b>"
+	case result.Error != "":
+		return "❌ <b>ошибка</b>"
+	case threshold > 0 && result.Mbps < threshold:
+		return fmt.Sprintf("⚠️ <b>%.2f Mbps</b>", result.Mbps)
+	default:
+		return fmt.Sprintf("✅ <b>%.2f Mbps</b>", result.Mbps)
+	}
+}
+
+func (s *Service) formatRecentSpeedOverviewMessage() formattedMessage {
+	fallback := s.formatRecentSpeedOverview()
 	results := s.activeSpeedResults(s.speedManager.Snapshot().Results)
 	if len(results) == 0 {
 		return formattedMessage{HTML: fallback, RichHTML: "<h2>Замеры</h2><p>Результатов пока нет.</p>"}
 	}
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].CheckedAt.After(results[j].CheckedAt)
-	})
+
 	cfg := s.Config()
-	visible, page, totalPages := pageSlice(results, page, speedListPageSize)
-	failed, slow := countSpeedIssues(visible, cfg.LowSpeedThresholdMbps)
-	healthy := len(healthySpeedResults(visible, cfg.LowSpeedThresholdMbps))
+	failed, slow, healthy := groupSpeedResults(results, cfg.LowSpeedThresholdMbps)
 
 	var rich strings.Builder
 	rich.WriteString("<h2>Замеры</h2>")
-	if totalPages > 1 {
-		fmt.Fprintf(&rich, "<p>Страница <b>%d</b> из %d · всего нод: %d</p>", page, totalPages, len(results))
+	fmt.Fprintf(&rich, "<p>✅ В норме: <b>%d</b> · ⚠️ Низкая: <b>%d</b> · ❌ Ошибки: <b>%d</b></p>", len(healthy), len(slow), len(failed))
+	writeSpeedGroupTable(&rich, "Ошибки", failed, cfg.LowSpeedThresholdMbps)
+	writeSpeedGroupTable(&rich, "Низкая скорость", slow, cfg.LowSpeedThresholdMbps)
+	// Nodes that are simply fine are the bulk of the list and the least worth
+	// scrolling past, so they stay collapsed behind their own count.
+	if len(healthy) > 0 {
+		fmt.Fprintf(&rich, "<details><summary>В норме: %d</summary>", len(healthy))
+		writeSpeedResultRows(&rich, healthy, cfg.LowSpeedThresholdMbps)
+		rich.WriteString("</details>")
 	}
-	fmt.Fprintf(&rich, "<p>✅ В норме: <b>%d</b> · ⚠️ Низкая: <b>%d</b> · ❌ Ошибки: <b>%d</b></p>", healthy, slow, failed)
-	rich.WriteString("<table bordered striped><tr><th>Нода</th><th>Результат</th><th>Время</th></tr>")
-	for _, result := range visible {
-		fmt.Fprintf(&rich, "<tr><td>%s</td><td>%s</td><td>%s</td></tr>",
-			htmlEscape(result.Name),
-			formatSpeedStatusRich(result, cfg.LowSpeedThresholdMbps),
-			htmlEscape(formatCheckedAt(result.CheckedAt)),
-		)
-	}
-	rich.WriteString("</table>")
 	if cfg.LowSpeedThresholdMbps > 0 {
 		fmt.Fprintf(&rich, "<footer>Порог: %.2f Mbps. Откройте ноду ниже, чтобы посмотреть историю.</footer>", cfg.LowSpeedThresholdMbps)
 	} else {
 		rich.WriteString("<footer>Откройте ноду ниже, чтобы посмотреть историю.</footer>")
 	}
 	return formattedMessage{HTML: fallback, RichHTML: rich.String()}
+}
+
+func writeSpeedGroupTable(rich *strings.Builder, title string, group []speedtest.Result, threshold float64) {
+	if len(group) == 0 {
+		return
+	}
+	fmt.Fprintf(rich, "<h3>%s</h3>", htmlEscape(title))
+	writeSpeedResultRows(rich, group, threshold)
+}
+
+func writeSpeedResultRows(rich *strings.Builder, group []speedtest.Result, threshold float64) {
+	rich.WriteString("<table bordered striped><tr><th>Нода</th><th>Результат</th><th>Время</th></tr>")
+	for _, result := range group {
+		fmt.Fprintf(rich, "<tr><td>%s</td><td>%s</td><td>%s</td></tr>",
+			htmlEscape(result.Name),
+			formatSpeedStatusRich(result, threshold),
+			htmlEscape(formatCheckedAt(result.CheckedAt)),
+		)
+	}
+	rich.WriteString("</table>")
 }
 
 func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, failed int, slow int, issuesOnly bool) string {
@@ -250,6 +274,53 @@ func speedIssuesHTML(results []speedtest.Result, threshold float64) []string {
 		}
 	}
 	return lines
+}
+
+// Speed result classes, ordered so the worst reads first.
+const (
+	speedClassFailed = iota
+	speedClassSlow
+	speedClassHealthy
+)
+
+func speedResultClass(result speedtest.Result, threshold float64) int {
+	switch {
+	case result.Offline || result.Error != "":
+		return speedClassFailed
+	case threshold > 0 && result.Mbps < threshold:
+		return speedClassSlow
+	default:
+		return speedClassHealthy
+	}
+}
+
+// groupSpeedResults orders results by what needs attention rather than by
+// clock time, so the problems are on screen — and on the first page of
+// buttons — before the nodes that are simply fine.
+func groupSpeedResults(results []speedtest.Result, threshold float64) (failed []speedtest.Result, slow []speedtest.Result, healthy []speedtest.Result) {
+	byRecency := append([]speedtest.Result(nil), results...)
+	sort.SliceStable(byRecency, func(i, j int) bool {
+		return byRecency[i].CheckedAt.After(byRecency[j].CheckedAt)
+	})
+	for _, result := range byRecency {
+		switch speedResultClass(result, threshold) {
+		case speedClassFailed:
+			failed = append(failed, result)
+		case speedClassSlow:
+			slow = append(slow, result)
+		default:
+			healthy = append(healthy, result)
+		}
+	}
+	return failed, slow, healthy
+}
+
+func orderedSpeedResults(results []speedtest.Result, threshold float64) []speedtest.Result {
+	failed, slow, healthy := groupSpeedResults(results, threshold)
+	ordered := make([]speedtest.Result, 0, len(results))
+	ordered = append(ordered, failed...)
+	ordered = append(ordered, slow...)
+	return append(ordered, healthy...)
 }
 
 func speedIssueResults(results []speedtest.Result, threshold float64) []speedtest.Result {
