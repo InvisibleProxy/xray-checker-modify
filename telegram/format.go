@@ -117,14 +117,18 @@ func (s *Service) formatMenuMessage(cfg Config, isAdmin bool) formattedMessage {
 	return formattedMessage{HTML: fallback, RichHTML: rich}
 }
 
-func (s *Service) formatNodeList() string {
+func (s *Service) formatNodeList(page int) string {
 	proxies := s.sortedProxies()
 	total, online, proxyFailures, offline := s.nodeCounts()
+	_, page, totalPages := pageSlice(proxies, page, nodeListPageSize)
 	lines := []string{
 		"<b>Ноды</b>",
 		fmt.Sprintf("🟢 <b>%d</b> из %d · 🟡 <b>%d</b> · 🔴 <b>%d</b>", online, total, proxyFailures, offline),
 		"",
 		"Выберите ноду кнопкой ниже, чтобы открыть статус, последние замеры и действия.",
+	}
+	if totalPages > 1 {
+		lines = append(lines, fmt.Sprintf("Страница <b>%d</b> из %d.", page, totalPages))
 	}
 	if len(proxies) == 0 {
 		lines = append(lines, "", "Ноды не найдены.")
@@ -132,20 +136,86 @@ func (s *Service) formatNodeList() string {
 	return trimHTMLMessage(strings.Join(lines, "\n"))
 }
 
-func (s *Service) formatNodeListMessage() formattedMessage {
-	fallback := s.formatNodeList()
+func (s *Service) formatNodeListMessage(page int) formattedMessage {
+	fallback := s.formatNodeList(page)
 	total, online, proxyFailures, offline := s.nodeCounts()
+	_, page, totalPages := pageSlice(s.sortedProxies(), page, nodeListPageSize)
+	pageLine := ""
+	if totalPages > 1 {
+		pageLine = fmt.Sprintf("<p>Страница <b>%d</b> из %d.</p>", page, totalPages)
+	}
 	rich := fmt.Sprintf(
-		"<h2>Ноды</h2><p>🟢 <b>%d</b> из %d · 🟡 <b>%d</b> · 🔴 <b>%d</b></p><footer>Откройте ноду кнопкой ниже — там статус, замеры и действия.</footer>",
+		"<h2>Ноды</h2><p>🟢 <b>%d</b> из %d · 🟡 <b>%d</b> · 🔴 <b>%d</b></p>%s<footer>Откройте ноду кнопкой ниже — там статус, замеры и действия.</footer>",
 		online,
 		total,
 		proxyFailures,
 		offline,
+		pageLine,
 	)
 	if total == 0 {
 		rich = "<h2>Ноды</h2><p>Список пуст.</p>"
 	}
 	return formattedMessage{HTML: fallback, RichHTML: rich}
+}
+
+func formatSpeedTestStartingMessage(nodeName string) formattedMessage {
+	if strings.TrimSpace(nodeName) == "" {
+		return formattedMessage{
+			HTML:     "<b>Speed-test запускается</b>\n\nСначала проверяю доступность нод…",
+			RichHTML: "<h2>Speed-test запускается</h2><p>Сначала проверяю доступность нод…</p>",
+		}
+	}
+	return formattedMessage{
+		HTML:     fmt.Sprintf("<b>Speed-test запускается</b>\n\nНода: <b>%s</b>\nСначала проверяю доступность…", htmlEscape(nodeName)),
+		RichHTML: fmt.Sprintf("<h2>Speed-test запускается</h2><p>Нода: <b>%s</b></p><p>Сначала проверяю доступность…</p>", htmlEscape(nodeName)),
+	}
+}
+
+func formatSpeedTestStartedMessage(nodeName string) formattedMessage {
+	if strings.TrimSpace(nodeName) == "" {
+		return formattedMessage{
+			HTML:     "<b>Speed-test запущен</b>\n\nОтчёт придёт после завершения проверки.",
+			RichHTML: "<h2>Speed-test запущен</h2><p>Отчёт придёт после завершения проверки.</p>",
+		}
+	}
+	return formattedMessage{
+		HTML:     fmt.Sprintf("<b>Speed-test запущен</b>\n\nНода: <b>%s</b>\nОтчёт придёт после завершения проверки.", htmlEscape(nodeName)),
+		RichHTML: fmt.Sprintf("<h2>Speed-test запущен</h2><p>Нода: <b>%s</b></p><p>Отчёт придёт после завершения проверки.</p>", htmlEscape(nodeName)),
+	}
+}
+
+func formatNodeMuteMenuMessage(proxy *models.ProxyConfig, status nodeMuteStatus) formattedMessage {
+	name := "Нода"
+	if proxy != nil && strings.TrimSpace(proxy.Name) != "" {
+		name = proxy.Name
+	}
+	state := "уведомления включены"
+	switch {
+	case status.Permanent:
+		state = "заглушена без срока · " + muteScopeLabel(status.Scope)
+	case status.Muted():
+		state = fmt.Sprintf("тишина до %s · %s", formatCheckedAt(status.Until), muteScopeLabel(status.Scope))
+	}
+
+	return formattedMessage{
+		HTML: fmt.Sprintf("<b>Уведомления · %s</b>\n\nСейчас: <b>%s</b>\n\nВыберите срок тишины кнопкой ниже.",
+			htmlEscape(name), htmlEscape(state)),
+		RichHTML: fmt.Sprintf("<h2>Уведомления</h2><p><b>%s</b></p><table bordered><tr><th>Сейчас</th><td>%s</td></tr></table><footer>Выберите срок тишины кнопкой ниже.</footer>",
+			htmlEscape(name), htmlEscape(state)),
+	}
+}
+
+func muteScopeLabel(scope string) string {
+	switch scope {
+	case muteScopeAlerts:
+		return "только алерты"
+	case muteScopeSpeed:
+		return "только замеры"
+	case muteScopeAll:
+		return "алерты и замеры"
+	default:
+		return "—"
+	}
 }
 
 func (s *Service) formatNodeDetails(stableID string) string {
@@ -412,7 +482,7 @@ func formatNodeAvailabilityCheckStartedMessage(proxy *models.ProxyConfig) format
 
 func (s *Service) formatIssuesSummary() string {
 	cfg := s.Config()
-	muted := mutedAlertNodeSet(cfg)
+	muted := s.alertMuteSet(cfg)
 	var issueLines []string
 	for _, proxy := range s.sortedProxies() {
 		if proxy.StableID == "" {
@@ -430,7 +500,7 @@ func (s *Service) formatIssuesSummary() string {
 		}
 	}
 
-	speedLines := speedIssuesHTML(filterMutedSpeedResults(s.activeSpeedResults(s.speedManager.Snapshot().Results), cfg), cfg.LowSpeedThresholdMbps)
+	speedLines := speedIssuesHTML(filterSpeedResultsByMuteSet(s.activeSpeedResults(s.speedManager.Snapshot().Results), s.speedMuteSet(cfg)), cfg.LowSpeedThresholdMbps)
 	lines := []string{
 		"<b>Проблемные ноды</b>",
 	}
@@ -452,7 +522,7 @@ func (s *Service) formatIssuesSummary() string {
 func (s *Service) formatIssuesSummaryMessage() formattedMessage {
 	fallback := s.formatIssuesSummary()
 	cfg := s.Config()
-	muted := mutedAlertNodeSet(cfg)
+	muted := s.alertMuteSet(cfg)
 	var issueItems []string
 	for _, proxy := range s.sortedProxies() {
 		if muted[proxy.StableID] {
@@ -466,7 +536,7 @@ func (s *Service) formatIssuesSummaryMessage() formattedMessage {
 			issueItems = append(issueItems, formatProxyRichItem(proxy, details))
 		}
 	}
-	speedResults := speedIssueResults(filterMutedSpeedResults(s.activeSpeedResults(s.speedManager.Snapshot().Results), cfg), cfg.LowSpeedThresholdMbps)
+	speedResults := speedIssueResults(filterSpeedResultsByMuteSet(s.activeSpeedResults(s.speedManager.Snapshot().Results), s.speedMuteSet(cfg)), cfg.LowSpeedThresholdMbps)
 
 	var rich strings.Builder
 	rich.WriteString("<h2>Проблемные ноды</h2>")

@@ -22,7 +22,6 @@ const (
 	defaultAlertMaxReminderMinutes     = 1440
 	defaultAlertReminderScheduleString = "15,60,180,360,720"
 	maxSpeedReportLimit                = 50
-	menuSpeedButtonLimit               = 8
 	maxDiagnosticsRefreshConcurrency   = 4
 	maxRichMessageRunes                = 32768
 	speedConfirmationRetryDelay        = 30 * time.Minute
@@ -34,6 +33,28 @@ const (
 	legacySpeedRetryKindLowSpeed = "low-speed"
 	legacySpeedRetryKindDeadline = "deadline"
 	legacyDeadlineRetryDelay     = 5 * time.Minute
+
+	// Inline keyboards are paged because one button per node stops being usable
+	// well before any API limit.
+	nodeListPageSize  = 8
+	speedListPageSize = 8
+
+	// Long polling needs its own budget: the send timeout is far too short to
+	// hold a poll open, and a client cut mid-poll wastes the whole cycle.
+	pollTimeoutSec       = 25
+	pollNetworkBackoff   = 10 * time.Second
+	pollConflictBackoff  = 30 * time.Second
+	pollDisabledInterval = 5 * time.Second
+	maxPollBackoff       = 5 * time.Minute
+
+	// An unauthenticated /id reply still costs a request through a monitored
+	// node, so strangers are answered at most this often.
+	idReplyPerUserInterval = 30 * time.Second
+	idReplyGlobalInterval  = 3 * time.Second
+
+	muteScopeAll    = "all"
+	muteScopeAlerts = "alerts"
+	muteScopeSpeed  = "speed"
 )
 
 var defaultAlertReminderScheduleMinutes = parseMinuteSchedule(defaultAlertReminderScheduleString)

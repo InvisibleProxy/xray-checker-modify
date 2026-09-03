@@ -70,7 +70,7 @@ func (s *Service) NotifyNodeStatuses() bool {
 			active[proxy.StableID] = true
 		}
 	}
-	muted := mutedAlertNodeSet(cfg)
+	muted := s.alertMuteSet(cfg)
 
 	stateChanged := false
 	s.mu.Lock()
@@ -215,7 +215,7 @@ func (s *Service) NotifyNodeStatuses() bool {
 	}
 
 	for _, alert := range recoveryAlerts {
-		if err := s.sendNodeAlertMessage(cfg, alert.Message); err == nil {
+		if err := s.sendNodeAlertMessageWithMarkup(cfg, alert.Message, nodeAlertMarkup(alert.StableID)); err == nil {
 			if s.confirmNodeRecoverySent(alert.StableID, alert.RecoveredAt) {
 				stateChanged = true
 			}
@@ -238,7 +238,11 @@ func (s *Service) NotifyNodeStatuses() bool {
 		}
 	} else {
 		for _, alert := range remainingDownAlerts {
-			if err := s.sendNodeAlertMessage(cfg, formatNodeDownMessage(alert.Proxy, alert.State, now)); err == nil {
+			markup := issuesMarkup()
+			if alert.Proxy != nil {
+				markup = nodeAlertMarkup(alert.Proxy.StableID)
+			}
+			if err := s.sendNodeAlertMessageWithMarkup(cfg, formatNodeDownMessage(alert.Proxy, alert.State, now), markup); err == nil {
 				if s.confirmNodeDownAlertsSent([]nodeDownAlert{alert}, time.Now(), cfg) {
 					stateChanged = true
 				}
@@ -267,7 +271,7 @@ func (s *Service) NotifyNodeRecoveries(stableIDs []string) {
 		return
 	}
 
-	muted := mutedAlertNodeSet(cfg)
+	muted := s.alertMuteSet(cfg)
 	seen := make(map[string]bool, len(stableIDs))
 	recoveryAlerts := make([]nodeRecoveryAlert, 0, len(stableIDs))
 	stateChanged := false
@@ -300,7 +304,7 @@ func (s *Service) NotifyNodeRecoveries(stableIDs []string) {
 	}
 
 	for _, alert := range recoveryAlerts {
-		if err := s.sendNodeAlertMessage(cfg, alert.Message); err == nil {
+		if err := s.sendNodeAlertMessageWithMarkup(cfg, alert.Message, nodeAlertMarkup(alert.StableID)); err == nil {
 			if s.confirmNodeRecoverySent(alert.StableID, alert.RecoveredAt) {
 				stateChanged = true
 			}
@@ -347,6 +351,13 @@ func (s *Service) prepareNodeRecovery(proxy *models.ProxyConfig, details checker
 }
 
 func (s *Service) sendNodeAlertMessage(cfg Config, content formattedMessage) error {
+	return s.sendNodeAlertMessageWithMarkup(cfg, content, issuesMarkup())
+}
+
+// sendNodeAlertMessageWithMarkup attaches the actions that belong to an alert.
+// Without them, the only way to react to a node going down at night is to open
+// the menu and find it by hand.
+func (s *Service) sendNodeAlertMessageWithMarkup(cfg Config, content formattedMessage, replyMarkup string) error {
 	if content.HTML == "" && content.RichHTML == "" {
 		return nil
 	}
@@ -355,7 +366,7 @@ func (s *Service) sendNodeAlertMessage(cfg Config, content formattedMessage) err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
 	defer cancel()
-	if _, err := s.sendFormattedToWithMarkup(ctx, cfg.ChatID, cfg.MessageThreadID, content, ""); err != nil {
+	if _, err := s.sendFormattedToWithMarkup(ctx, cfg.ChatID, cfg.MessageThreadID, content, replyMarkup); err != nil {
 		logger.Warn("Failed to send Telegram node alert: %v", err)
 		return err
 	}

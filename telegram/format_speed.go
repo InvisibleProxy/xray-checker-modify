@@ -75,7 +75,7 @@ func (s *Service) formatSpeedHistoryMessage(query string) formattedMessage {
 	return formattedMessage{HTML: fallback, RichHTML: rich}
 }
 
-func (s *Service) formatRecentSpeedOverview() string {
+func (s *Service) formatRecentSpeedOverview(page int) string {
 	results := s.activeSpeedResults(s.speedManager.Snapshot().Results)
 	if len(results) == 0 {
 		return "<b>Замеры</b>\n\nПока нет результатов speed-test."
@@ -83,14 +83,19 @@ func (s *Service) formatRecentSpeedOverview() string {
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].CheckedAt.After(results[j].CheckedAt)
 	})
+	visible, page, totalPages := pageSlice(results, page, speedListPageSize)
 
 	cfg := s.Config()
+	header := "Последний результат speed-test для каждой ноды:"
+	if totalPages > 1 {
+		header = fmt.Sprintf("Последний результат speed-test · страница %d из %d:", page, totalPages)
+	}
 	lines := []string{
 		"<b>Замеры</b>",
-		"Последний результат speed-test для каждой ноды:",
+		header,
 		"",
 	}
-	for _, result := range limitResults(results, 10) {
+	for _, result := range visible {
 		status := fmt.Sprintf("<b>%.2f Mbps</b>", result.Mbps)
 		if result.Offline {
 			status = "🔴 <b>недоступна</b>"
@@ -105,8 +110,8 @@ func (s *Service) formatRecentSpeedOverview() string {
 	return trimHTMLMessage(strings.Join(lines, "\n"))
 }
 
-func (s *Service) formatRecentSpeedOverviewMessage() formattedMessage {
-	fallback := s.formatRecentSpeedOverview()
+func (s *Service) formatRecentSpeedOverviewMessage(page int) formattedMessage {
+	fallback := s.formatRecentSpeedOverview(page)
 	results := s.activeSpeedResults(s.speedManager.Snapshot().Results)
 	if len(results) == 0 {
 		return formattedMessage{HTML: fallback, RichHTML: "<h2>Замеры</h2><p>Результатов пока нет.</p>"}
@@ -115,12 +120,15 @@ func (s *Service) formatRecentSpeedOverviewMessage() formattedMessage {
 		return results[i].CheckedAt.After(results[j].CheckedAt)
 	})
 	cfg := s.Config()
-	visible := limitResults(results, 10)
+	visible, page, totalPages := pageSlice(results, page, speedListPageSize)
 	failed, slow := countSpeedIssues(visible, cfg.LowSpeedThresholdMbps)
 	healthy := len(healthySpeedResults(visible, cfg.LowSpeedThresholdMbps))
 
 	var rich strings.Builder
 	rich.WriteString("<h2>Замеры</h2>")
+	if totalPages > 1 {
+		fmt.Fprintf(&rich, "<p>Страница <b>%d</b> из %d · всего нод: %d</p>", page, totalPages, len(results))
+	}
 	fmt.Fprintf(&rich, "<p>✅ В норме: <b>%d</b> · ⚠️ Низкая: <b>%d</b> · ❌ Ошибки: <b>%d</b></p>", healthy, slow, failed)
 	rich.WriteString("<table bordered striped><tr><th>Нода</th><th>Результат</th><th>Время</th></tr>")
 	for _, result := range visible {

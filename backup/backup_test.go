@@ -257,6 +257,9 @@ func TestPrepareDataFileRejectsMalformedPersistedSchemas(t *testing.T) {
 		{name: "trailing garbage", file: "node_registry.json", data: `{"version":1,"nodes":{}} garbage`},
 		{name: "nested duplicate", file: "node_registry.json", data: `{"version":1,"nodes":{"node":{"name":"first","Name":"second"}}}`},
 		{name: "unknown speed retry kind", file: "node_alert_state.json", data: `{"version":1,"nodes":{},"speedRetries":[{"kind":"unknown","stableIds":["node-1"],"config":{},"dueAt":"2026-08-22T12:00:00Z"}]}`},
+		{name: "unknown mute scope", file: "node_alert_state.json", data: `{"version":1,"nodes":{},"mutes":[{"stableId":"node-1","scope":"everything","until":"2026-08-22T12:00:00Z"}]}`},
+		{name: "mute without deadline", file: "node_alert_state.json", data: `{"version":1,"nodes":{},"mutes":[{"stableId":"node-1","scope":"all"}]}`},
+		{name: "mute without node", file: "node_alert_state.json", data: `{"version":1,"nodes":{},"mutes":[{"scope":"all","until":"2026-08-22T12:00:00Z"}]}`},
 	}
 
 	for _, tt := range tests {
@@ -276,6 +279,20 @@ func TestPrepareDataFileAcceptsCurrentAndLegacySpeedRetries(t *testing.T) {
 	} {
 		if _, err := prepareDataFile("node_alert_state.json", []byte(data)); err != nil {
 			t.Fatalf("valid speed retry state was rejected: %v\n%s", err, data)
+		}
+	}
+}
+
+func TestPrepareDataFileAcceptsAlertStateWithAndWithoutMutes(t *testing.T) {
+	for _, data := range []string{
+		// A file written before timed mutes existed must still restore.
+		`{"version":1,"nodes":{}}`,
+		`{"version":1,"nodes":{},"mutes":[]}`,
+		`{"version":1,"nodes":{},"mutes":[{"stableId":"node-1","scope":"all","until":"2026-08-22T12:00:00Z"}]}`,
+		`{"version":1,"nodes":{},"mutes":[{"stableId":"node-1","scope":"alerts","until":"2026-08-22T12:00:00Z"},{"stableId":"node-2","scope":"speed","until":"2026-08-22T13:00:00Z"}]}`,
+	} {
+		if _, err := prepareDataFile("node_alert_state.json", []byte(data)); err != nil {
+			t.Fatalf("valid alert state was rejected: %v\n%s", err, data)
 		}
 	}
 }

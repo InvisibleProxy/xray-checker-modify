@@ -28,6 +28,7 @@ type nodeAlertStateSchema struct {
 	UpdatedAt    time.Time                           `json:"updatedAt"`
 	Nodes        map[string]persistedNodeAlertSchema `json:"nodes"`
 	SpeedRetries []persistedSpeedRetrySchema         `json:"speedRetries,omitempty"`
+	Mutes        []persistedNodeMuteSchema           `json:"mutes,omitempty"`
 }
 
 type persistedSpeedRetrySchema struct {
@@ -35,6 +36,12 @@ type persistedSpeedRetrySchema struct {
 	StableIDs []string             `json:"stableIds"`
 	Config    speedtest.TestConfig `json:"config"`
 	DueAt     time.Time            `json:"dueAt"`
+}
+
+type persistedNodeMuteSchema struct {
+	StableID string    `json:"stableId"`
+	Scope    string    `json:"scope"`
+	Until    time.Time `json:"until"`
 }
 
 type persistedNodeAlertSchema struct {
@@ -82,6 +89,12 @@ func validateDataFile(name string, data []byte) error {
 		for _, retry := range state.SpeedRetries {
 			if (retry.Kind != "" && retry.Kind != "speed-confirmation" && retry.Kind != "low-speed" && retry.Kind != "deadline") || len(retry.StableIDs) == 0 || retry.DueAt.IsZero() {
 				return fmt.Errorf("backup file %s has an invalid pending speed retry", name)
+			}
+		}
+		for _, mute := range state.Mutes {
+			if mute.StableID == "" || mute.Until.IsZero() ||
+				(mute.Scope != "all" && mute.Scope != "alerts" && mute.Scope != "speed") {
+				return fmt.Errorf("backup file %s has an invalid node mute", name)
 			}
 		}
 	case "node_registry.json":

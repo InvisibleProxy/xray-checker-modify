@@ -37,6 +37,22 @@ type nodeAlertStateFile struct {
 	UpdatedAt    time.Time                          `json:"updatedAt"`
 	Nodes        map[string]persistedNodeAlertState `json:"nodes"`
 	SpeedRetries []persistedSpeedRetry              `json:"speedRetries,omitempty"`
+	Mutes        []persistedNodeMute                `json:"mutes,omitempty"`
+}
+
+// nodeMute is an expiring silence an admin set from the bot. Permanent mutes
+// stay in the editable config, where the admin UI can see and clear them; these
+// live beside the alert counters because they are runtime state that expires on
+// its own and must not outlive the node it belongs to.
+type nodeMute struct {
+	Scope string
+	Until time.Time
+}
+
+type persistedNodeMute struct {
+	StableID string    `json:"stableId"`
+	Scope    string    `json:"scope"`
+	Until    time.Time `json:"until"`
 }
 
 type pendingSpeedRetry struct {
@@ -150,12 +166,34 @@ func (s *Service) loadAlertState() error {
 		s.mu.Unlock()
 	}
 
+	loadNow := time.Now()
+	restoredMutes := make(map[string]nodeMute)
+	for _, persisted := range stateFile.Mutes {
+		stableID := strings.TrimSpace(persisted.StableID)
+		scope := normalizeMuteScope(persisted.Scope)
+		// An expired or unknown mute is simply dropped: silence must never
+		// outlive its deadline, and a node that is gone has nothing to silence.
+		if stableID == "" || scope == "" || !active[stableID] || !persisted.Until.After(loadNow) {
+			continue
+		}
+		restoredMutes[stableID] = nodeMute{Scope: scope, Until: persisted.Until}
+	}
+	if len(restoredMutes) > 0 {
+		s.mu.Lock()
+		if s.mutes == nil {
+			s.mutes = make(map[string]nodeMute, len(restoredMutes))
+		}
+		for stableID, mute := range restoredMutes {
+			s.mutes[stableID] = mute
+		}
+		s.mu.Unlock()
+	}
+
 	type restoredSpeedRetry struct {
 		stableIDs []string
 		config    speedtest.TestConfig
 		dueAt     time.Time
 	}
-	loadNow := time.Now()
 	retryStateMigrated := false
 	normalizedRetries := make([]restoredSpeedRetry, 0, len(stateFile.SpeedRetries))
 	for _, persisted := range stateFile.SpeedRetries {
@@ -304,7 +342,19 @@ func (s *Service) saveAlertState() error {
 	s.speedRetryMu.Unlock()
 	sort.Slice(retries, func(i, j int) bool { return retries[i].DueAt.Before(retries[j].DueAt) })
 
-	if len(nodes) == 0 && len(retries) == 0 {
+	saveNow := time.Now()
+	var mutes []persistedNodeMute
+	s.mu.RLock()
+	for stableID, mute := range s.mutes {
+		if !active[stableID] || !mute.Until.After(saveNow) {
+			continue
+		}
+		mutes = append(mutes, persistedNodeMute{StableID: stableID, Scope: mute.Scope, Until: mute.Until})
+	}
+	s.mu.RUnlock()
+	sort.Slice(mutes, func(i, j int) bool { return mutes[i].StableID < mutes[j].StableID })
+
+	if len(nodes) == 0 && len(retries) == 0 && len(mutes) == 0 {
 		if err := os.Remove(s.alertStatePath); err != nil && !os.IsNotExist(err) {
 			return err
 		}
@@ -316,9 +366,10 @@ func (s *Service) saveAlertState() error {
 	}
 	data, err := json.MarshalIndent(nodeAlertStateFile{
 		Version:      1,
-		UpdatedAt:    time.Now(),
+		UpdatedAt:    saveNow,
 		Nodes:        nodes,
 		SpeedRetries: retries,
+		Mutes:        mutes,
 	}, "", "  ")
 	if err != nil {
 		return err

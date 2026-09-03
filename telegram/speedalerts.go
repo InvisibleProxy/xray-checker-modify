@@ -42,7 +42,8 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 		s.completeSpeedRetry(kind, report.RequestedStableIDs, report.Results)
 	}
 
-	report = filterMutedRunReport(report, cfg)
+	speedMuted := s.speedMuteSet(cfg)
+	report = filterRunReportByMuteSet(report, speedMuted)
 	var diagnosticHandles map[string]agentautomation.Handle
 	if automaticSpeedReportsEnabled(cfg) {
 		diagnosticHandles = s.startSpeedDiagnostics(report, cfg)
@@ -54,7 +55,7 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 		}
 	}
 	report = filterTelegramAlertSuppressedRunReport(report)
-	failed, slow, issuesOnly, shouldSend := speedReportDecision(report, cfg)
+	failed, slow, issuesOnly, shouldSend := speedReportDecisionWithMutes(report, cfg, speedMuted)
 	if !shouldSend {
 		return
 	}
@@ -510,11 +511,15 @@ func (s *Service) runSpeedTest(req speedtest.RunRequest, source string) error {
 }
 
 func speedReportDecision(report speedtest.RunReport, cfg Config) (failed int, slow int, issuesOnly bool, shouldSend bool) {
+	return speedReportDecisionWithMutes(report, cfg, mutedSpeedNodeSet(cfg))
+}
+
+func speedReportDecisionWithMutes(report speedtest.RunReport, cfg Config, muted map[string]bool) (failed int, slow int, issuesOnly bool, shouldSend bool) {
 	if !cfg.Enabled || cfg.ChatID == "" || !cfg.SpeedReportsEnabled || cfg.SpeedReportMode == "disabled" {
 		return 0, 0, false, false
 	}
 
-	results := filterMutedSpeedResults(report.Results, cfg)
+	results := filterSpeedResultsByMuteSet(report.Results, muted)
 	if len(results) == 0 {
 		return 0, 0, false, false
 	}
@@ -545,7 +550,11 @@ func countSpeedIssues(results []speedtest.Result, threshold float64) (failed int
 }
 
 func filterMutedRunReport(report speedtest.RunReport, cfg Config) speedtest.RunReport {
-	report.Results = filterMutedSpeedResults(report.Results, cfg)
+	return filterRunReportByMuteSet(report, mutedSpeedNodeSet(cfg))
+}
+
+func filterRunReportByMuteSet(report speedtest.RunReport, muted map[string]bool) speedtest.RunReport {
+	report.Results = filterSpeedResultsByMuteSet(report.Results, muted)
 	report.Selected = len(report.Results)
 	return report
 }
@@ -564,10 +573,13 @@ func filterTelegramAlertSuppressedRunReport(report speedtest.RunReport) speedtes
 }
 
 func filterMutedSpeedResults(results []speedtest.Result, cfg Config) []speedtest.Result {
-	if len(results) == 0 || (len(cfg.MutedNodeIDs) == 0 && len(cfg.MutedSpeedNodeIDs) == 0) {
+	return filterSpeedResultsByMuteSet(results, mutedSpeedNodeSet(cfg))
+}
+
+func filterSpeedResultsByMuteSet(results []speedtest.Result, muted map[string]bool) []speedtest.Result {
+	if len(results) == 0 || len(muted) == 0 {
 		return results
 	}
-	muted := mutedSpeedNodeSet(cfg)
 	filtered := make([]speedtest.Result, 0, len(results))
 	for _, result := range results {
 		if result.StableID != "" && muted[result.StableID] {

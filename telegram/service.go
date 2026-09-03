@@ -7,14 +7,14 @@
 //
 //	service.go       Service, its dependencies and lifecycle
 //	config.go        Config/AdminConfig, defaults, env overrides
-//	state.go         node alert state and its on-disk representation
+//	state.go         node alert state, timed mutes and their on-disk form
 //	nodealerts.go    availability alerts: down, reminders, recovery
 //	speedalerts.go   speed-test reports and their confirmation retries
 //	bot.go           update polling, commands, callbacks, authorization
-//	transport.go     Telegram API wire types and send/edit calls
-//	nodes.go         node lookup, mute sets and result filtering
+//	transport.go     Telegram API wire types, error classes and send/edit calls
+//	nodes.go         node lookup, candidate ordering, mute scopes and filtering
 //	format*.go       message rendering, one file per family of messages
-//	markup.go        inline keyboards
+//	markup.go        inline keyboards and their paging
 //	text.go          escaping, truncation and unit formatting
 package telegram
 
@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +33,7 @@ import (
 	"xray-checker/agentautomation"
 	"xray-checker/checker"
 	"xray-checker/logger"
+	"xray-checker/models"
 	"xray-checker/speedtest"
 )
 
@@ -42,16 +44,30 @@ type Service struct {
 	statePath      string
 	alertStatePath string
 
-	mu           sync.RWMutex
-	nodeNotifyMu sync.Mutex
-	stateSaveMu  sync.Mutex
-	config       Config
-	alerts       map[string]nodeAlertState
-	menuMessages map[string]int
-	statusCheck  bool
-	lastAlertRun time.Time
-	lastUpdateID int
-	richMessages int
+	mu                 sync.RWMutex
+	nodeNotifyMu       sync.Mutex
+	stateSaveMu        sync.Mutex
+	config             Config
+	alerts             map[string]nodeAlertState
+	mutes              map[string]nodeMute
+	menuMessages       map[string]int
+	statusCheck        bool
+	lastAlertRun       time.Time
+	lastUpdateID       int
+	richMessages       int
+	lastWorkingProxyID string
+
+	clientMu sync.Mutex
+	clients  map[int]*http.Client
+
+	// Test seams for the API transport. Empty values keep the production path:
+	// api.telegram.org reached through each node's SOCKS inbound.
+	apiBaseURL string
+	clientFunc func(*models.ProxyConfig) (*http.Client, error)
+
+	throttleMu   sync.Mutex
+	lastIDReply  map[int64]time.Time
+	lastAnyReply time.Time
 
 	stopCh   chan struct{}
 	stopOnce sync.Once
@@ -94,7 +110,10 @@ func NewService(statePath string, proxyChecker *checker.ProxyChecker, speedManag
 		alertStatePath:    alertStatePath,
 		config:            DefaultConfig(),
 		alerts:            make(map[string]nodeAlertState),
+		mutes:             make(map[string]nodeMute),
 		menuMessages:      make(map[string]int),
+		clients:           make(map[int]*http.Client),
+		lastIDReply:       make(map[int64]time.Time),
 		stopCh:            make(chan struct{}),
 		speedRetryPending: make(map[speedRetryKey]bool),
 		speedRetryTimers:  make(map[uint64]*time.Timer),
@@ -253,6 +272,19 @@ func (s *Service) PruneInactiveMutedNodes() error {
 			}
 		}
 	}
+	// Expiring mutes are keyed by StableID too, so a node that left the
+	// subscription must not leave a silence behind for whoever inherits its ID.
+	now := time.Now()
+	mutesChanged := false
+	s.mu.Lock()
+	for stableID, mute := range s.mutes {
+		if !active[stableID] || !mute.Until.After(now) {
+			delete(s.mutes, stableID)
+			mutesChanged = true
+		}
+	}
+	s.mu.Unlock()
+
 	var inactiveRetries []string
 	s.speedRetryMu.Lock()
 	for key := range s.speedRetryPending {
@@ -263,6 +295,8 @@ func (s *Service) PruneInactiveMutedNodes() error {
 	s.speedRetryMu.Unlock()
 	if len(inactiveRetries) > 0 {
 		s.clearSpeedRetry(speedRetryKindConfirmation, inactiveRetries)
+	}
+	if len(inactiveRetries) > 0 || mutesChanged {
 		if err := s.saveAlertState(); err != nil {
 			return err
 		}
