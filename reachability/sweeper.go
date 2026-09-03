@@ -198,15 +198,25 @@ func (s *Sweeper) sweep(ctx context.Context, stableID string) Summary {
 		for _, target := range all {
 			names[target.StableID] = target.Name
 		}
-		known := make(map[string]bool, len(agents))
-		for _, agent := range agents {
-			known[agent.AgentID] = true
+		// Every registered agent, not only the ones that can answer right now:
+		// an agent that is merely offline keeps the last thing it saw, and the
+		// matrix marks those cells stale instead of deleting them. Only a
+		// revoked or removed agent loses its column, because it has stopped
+		// being a vantage point at all.
+		known := make(map[string]bool)
+		for _, agent := range s.agents.Snapshot() {
+			if !agent.Revoked {
+				known[agent.AgentID] = true
+			}
 		}
 		// Retaining before the pass, not after, keeps a node deleted mid-sweep
 		// from being re-added by a result that is already meaningless. Only a
 		// full pass may do this: a single-node pass knows nothing about the
 		// other rows and would delete every one of them.
 		s.matrix.Retain(names, known)
+		// Staleness is measured from the start of this pass: whatever it does
+		// not refresh from here on is last-known rather than current.
+		s.matrix.BeginSweep()
 	}
 	if len(targets) == 0 || len(agents) == 0 {
 		empty := Summary{Agents: len(agents), Nodes: len(targets)}

@@ -3074,6 +3074,16 @@ components:
           description: Fixed phrase explaining an unknown verdict. Never a raw transport error.
         since: {type: string, format: date-time}
         streak: {type: integer, minimum: 0, description: Consecutive sweeps that reached this verdict.}
+        stale:
+          type: boolean
+          description: >-
+            Derived on read, never stored. True when the latest full sweep did not refresh this cell, which is
+            what an agent that stopped answering leaves behind. The cell is kept so the last thing that vantage
+            point saw stays readable, but it takes no part in `unreachable`, row liveness or findings.
+        generation:
+          type: integer
+          minimum: 0
+          description: The full sweep that wrote this cell. Stored; `stale` is derived by comparing it with the current sweep.
 
     DiagnosticSession:
       type: object

@@ -107,6 +107,15 @@ type Cell struct {
 	// other agent that also cannot reach it, which buries the finding those
 	// agents are reporting.
 	Unreachable bool `json:"unreachable,omitempty"`
+	// Stale marks an observation the last full pass did not refresh, which is
+	// what an agent that goes away leaves behind. The cell is kept because the
+	// last thing a vantage point saw is still worth reading, but it stops being
+	// evidence about now: it takes no part in Alive, Unreachable or findings.
+	// Derived on read like Unreachable, never stored.
+	Stale bool `json:"stale,omitempty"`
+	// Generation is the full pass that wrote this cell. Stored, unlike Stale,
+	// because it is the fact from which staleness is derived.
+	Generation int `json:"generation,omitempty"`
 }
 
 // NodeRow is one node's answers, ordered by agent for stable presentation.
@@ -160,10 +169,16 @@ type Agent struct {
 }
 
 type stateFile struct {
-	Version     int                        `json:"version"`
-	UpdatedAt   time.Time                  `json:"updatedAt"`
-	LastSweepAt time.Time                  `json:"lastSweepAt,omitempty"`
-	Nodes       map[string]map[string]Cell `json:"nodes"`
+	Version     int       `json:"version"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+	LastSweepAt time.Time `json:"lastSweepAt,omitempty"`
+	// SweepGeneration counts full passes. A cell carries the generation that
+	// wrote it, so "did the last pass refresh this?" is an equality check rather
+	// than a comparison of timestamps that were taken moments apart. Absent in
+	// files written before staleness was tracked, which reads as zero and marks
+	// nothing stale until the first pass of the new build.
+	SweepGeneration int                        `json:"sweepGeneration,omitempty"`
+	Nodes           map[string]map[string]Cell `json:"nodes"`
 	// Names labels the rows. Without it a restart shows a matrix of StableIDs
 	// until the next full sweep repopulates them, which is a whole interval of
 	// unreadable output. It is a cache of the subscription's own names, so a
@@ -177,10 +192,11 @@ type Matrix struct {
 	path string
 	now  func() time.Time
 
-	mu          sync.RWMutex
-	cells       map[string]map[string]Cell
-	names       map[string]string
-	lastSweepAt time.Time
+	mu              sync.RWMutex
+	cells           map[string]map[string]Cell
+	names           map[string]string
+	lastSweepAt     time.Time
+	sweepGeneration int
 }
 
 func NewMatrix(path string) *Matrix {
@@ -243,6 +259,7 @@ func (m *Matrix) Load() error {
 	m.cells = cells
 	m.names = names
 	m.lastSweepAt = state.LastSweepAt
+	m.sweepGeneration = state.SweepGeneration
 	m.mu.Unlock()
 	return nil
 }
@@ -268,6 +285,7 @@ func (m *Matrix) Record(stableID string, cell Cell) Cell {
 	}
 	cell.CheckedAt = cell.CheckedAt.UTC()
 	m.mu.Lock()
+	cell.Generation = m.sweepGeneration
 	row, ok := m.cells[stableID]
 	if !ok {
 		row = make(map[string]Cell)
@@ -297,10 +315,28 @@ func (m *Matrix) Record(stableID string, cell Cell) Cell {
 	return cell
 }
 
+// BeginSweep opens a new full pass. Cells that this pass does not rewrite keep
+// the previous generation, which is how an agent that stopped answering is told
+// apart from one that answered a moment ago.
+func (m *Matrix) BeginSweep() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.sweepGeneration++
+	m.mu.Unlock()
+}
+
 // Retain drops rows and cells for nodes and agents that no longer exist, and
 // remembers the display names so a row can be labelled without the caller
 // holding the proxy list. Without it a deleted node keeps a stale verdict
 // forever, which reads as a live finding.
+//
+// The agent set is every agent still registered, not the ones that can answer
+// right now. An agent that is merely offline keeps its cells: the last thing it
+// saw is the only record of that vantage point, and deleting it would erase the
+// history exactly when an operator wants to look at it. Rows marks those cells
+// stale so they stop counting as evidence.
 func (m *Matrix) Retain(nodes map[string]string, agents map[string]bool) {
 	if m == nil {
 		return
@@ -350,11 +386,13 @@ func (m *Matrix) Rows() []NodeRow {
 		stableIDs = append(stableIDs, stableID)
 	}
 	sort.Strings(stableIDs)
+	generation := m.sweepGeneration
 	rows := make([]NodeRow, 0, len(stableIDs))
 	for _, stableID := range stableIDs {
 		row := m.cells[stableID]
 		cells := make([]Cell, 0, len(row))
 		for _, cell := range row {
+			cell.Stale = generation > 0 && cell.Generation != generation
 			cells = append(cells, cell)
 		}
 		sort.Slice(cells, func(i, j int) bool { return cells[i].AgentID < cells[j].AgentID })
@@ -372,8 +410,11 @@ func deriveRow(row NodeRow) NodeRow {
 	localUp := false
 	for _, cell := range row.Cells {
 		// An unknown cell is not evidence in either direction: its agent could
-		// not answer, or could not vouch for its own connectivity.
-		if cell.Verdict == VerdictUnknown {
+		// not answer, or could not vouch for its own connectivity. A stale one
+		// describes a moment that has passed, so it says nothing about now
+		// either — otherwise an agent that left would keep its last failure
+		// alive as a finding forever.
+		if cell.Verdict == VerdictUnknown || cell.Stale {
 			continue
 		}
 		if cell.LocalStatus == diagnostics.ProbeStatusOnline {
@@ -388,7 +429,7 @@ func deriveRow(row NodeRow) NodeRow {
 		return row
 	}
 	for i, cell := range row.Cells {
-		if cell.Verdict == VerdictUnknown {
+		if cell.Verdict == VerdictUnknown || cell.Stale {
 			continue
 		}
 		row.Cells[i].Unreachable = cell.AgentStatus != diagnostics.ProbeStatusOnline
@@ -480,7 +521,7 @@ func (m *Matrix) Findings() []Finding {
 // carries identically.
 func localStatusOf(row NodeRow) diagnostics.ProbeStatus {
 	for _, cell := range row.Cells {
-		if cell.Verdict != VerdictUnknown {
+		if cell.Verdict != VerdictUnknown && !cell.Stale {
 			return cell.LocalStatus
 		}
 	}
@@ -512,11 +553,12 @@ func (m *Matrix) Save() error {
 	}
 	m.mu.RLock()
 	state := stateFile{
-		Version:     StateVersion,
-		UpdatedAt:   m.currentTime(),
-		LastSweepAt: m.lastSweepAt,
-		Nodes:       make(map[string]map[string]Cell, len(m.cells)),
-		Names:       make(map[string]string, len(m.names)),
+		Version:         StateVersion,
+		UpdatedAt:       m.currentTime(),
+		LastSweepAt:     m.lastSweepAt,
+		SweepGeneration: m.sweepGeneration,
+		Nodes:           make(map[string]map[string]Cell, len(m.cells)),
+		Names:           make(map[string]string, len(m.names)),
 	}
 	for stableID, row := range m.cells {
 		copied := make(map[string]Cell, len(row))

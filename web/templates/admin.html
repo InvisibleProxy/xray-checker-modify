@@ -180,6 +180,11 @@
       .settings-pane[hidden] {
         display: none;
       }
+      /* .panel.stack sets an explicit display, which otherwise wins over the
+         hidden attribute and leaves a "hidden" panel on screen. */
+      .panel[hidden] {
+        display: none;
+      }
       #message:empty {
         display: none;
       }
@@ -639,6 +644,11 @@
       .chip.neutral {
         background: var(--panel-2);
         color: var(--muted);
+      }
+      /* A reachability cell the latest sweep did not refresh. Kept readable as
+         history, dimmed so it never competes with a current observation. */
+      .reachability-stale {
+        opacity: 0.55;
       }
       .chip.blue {
         border-color: rgba(110, 168, 254, 0.38);
@@ -2388,7 +2398,13 @@
           <div id="remnawave-state" class="muted" role="status" aria-live="polite"></div>
         </section>
 
-        <section class="panel stack">
+        <nav class="settings-tabs" aria-label="Remnawave sections" role="tablist">
+          <button id="remnawave-tab-settings" class="settings-tab active" type="button" role="tab" aria-selected="true" aria-controls="remnawave-policy-panel" tabindex="0">Settings</button>
+          <button id="remnawave-tab-messages" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="remnawave-message-constructor" tabindex="-1">Message constructor</button>
+          <button id="remnawave-tab-locations" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="remnawave-locations-panel" tabindex="-1">Locations</button>
+        </nav>
+
+        <section id="remnawave-policy-panel" class="panel stack">
           <div>
             <h2>Policy</h2>
             <div class="muted">Both the duration and full-check confirmation threshold must be reached.</div>
@@ -2627,7 +2643,7 @@
           </div>
         </section>
 
-        <section class="panel stack">
+        <section id="remnawave-pairs-panel" class="panel stack">
           <div class="panel-actions">
             <div>
               <h2>Audience pairs</h2>
@@ -2653,7 +2669,7 @@
           </div>
         </section>
 
-        <section class="panel stack">
+        <section id="remnawave-locations-panel" class="panel stack">
           <div class="panel-actions">
             <div>
               <h2>Announce locations</h2>
@@ -2673,7 +2689,7 @@
           </div>
         </section>
 
-        <section class="panel stack">
+        <section id="remnawave-announce-state-panel" class="panel stack">
           <div>
             <h2>Current announce state</h2>
             <div class="muted">Only a status shown as managed may later be changed or removed automatically; the preserved first line remains operator-owned.</div>
@@ -2792,6 +2808,21 @@
             Node
             <select id="history-node"></select>
           </label>
+          <div class="chart-ranges" id="history-ranges" aria-label="Speed history period">
+            <button class="chart-range" type="button" data-history-range="1h">1 h</button>
+            <button class="chart-range" type="button" data-history-range="3h">3 h</button>
+            <button class="chart-range" type="button" data-history-range="1d">24 h</button>
+            <button class="chart-range" type="button" data-history-range="3d">3 d</button>
+            <button class="chart-range" type="button" data-history-range="7d">7 d</button>
+            <button class="chart-range" type="button" data-history-range="14d">14 d</button>
+            <button class="chart-range" type="button" data-history-range="30d">30 d</button>
+            <button class="chart-range" type="button" data-history-range="all">All</button>
+            <button class="chart-range" type="button" data-history-range="custom">Dates</button>
+          </div>
+          <div class="custom-range" id="history-custom-range" hidden>
+            <label>From<input type="date" id="history-from"></label>
+            <label>To<input type="date" id="history-to"></label>
+          </div>
           <div class="row">
             <button id="refresh-history" class="secondary" type="button">Refresh History</button>
             <span id="history-state" class="muted"></span>
@@ -2934,8 +2965,10 @@
         activeTab: "dashboard",
         settingsPane: "run",
         globalSettingsPane: "project",
+        remnawavePane: "settings",
         lastUpdatedAt: null,
         historyStableId: "",
+        historyRange: "7d",
         historyResults: [],
         nodesOverview: [],
         incidents: [],
@@ -6673,17 +6706,72 @@
         }
       }
 
+      // The same presets the dashboard charts offer, so a period means the same
+      // thing wherever it is chosen. "all" asks for everything the retention
+      // window still holds and therefore sends no bounds at all.
+      function historyRangeBounds() {
+        if (state.historyRange === "all") return {};
+        if (state.historyRange === "custom") {
+          const from = $("history-from").value;
+          const to = $("history-to").value;
+          if (!from || !to) return { error: "Choose both start and end dates" };
+          const start = new Date(`${from}T00:00:00`);
+          const end = new Date(`${to}T00:00:00`);
+          // The API treats `to` as exclusive, so a single-day pick has to cover
+          // that whole day rather than collapsing to an empty range.
+          end.setDate(end.getDate() + 1);
+          if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || start >= end) {
+            return { error: "Start date must be before or equal to end date" };
+          }
+          return { from: start, to: end };
+        }
+        const durations = {
+          "1h": 60 * 60 * 1000,
+          "3h": 3 * 60 * 60 * 1000,
+          "1d": 24 * 60 * 60 * 1000,
+          "3d": 3 * 24 * 60 * 60 * 1000,
+          "7d": 7 * 24 * 60 * 60 * 1000,
+          "14d": 14 * 24 * 60 * 60 * 1000,
+          "30d": 30 * 24 * 60 * 60 * 1000,
+        };
+        const now = new Date();
+        return { from: new Date(now.getTime() - (durations[state.historyRange] || durations["7d"])), to: now };
+      }
+
+      function renderHistoryRanges() {
+        document.querySelectorAll("[data-history-range]").forEach((button) => {
+          const active = button.dataset.historyRange === state.historyRange;
+          button.classList.toggle("active", active);
+          button.setAttribute("aria-pressed", String(active));
+        });
+        $("history-custom-range").hidden = state.historyRange !== "custom";
+      }
+
       async function loadHistory() {
         renderHistoryNodeOptions();
+        renderHistoryRanges();
         if (!state.historyStableId) {
           state.historyResults = [];
           renderHistoryResults();
           return;
         }
 
+        const bounds = historyRangeBounds();
+        if (bounds.error) {
+          state.historyResults = [];
+          renderHistoryResults();
+          $("history-state").textContent = tr(bounds.error);
+          return;
+        }
+
+        const query = new URLSearchParams({ stableId: state.historyStableId });
+        if (bounds.from && bounds.to) {
+          query.set("from", bounds.from.toISOString());
+          query.set("to", bounds.to.toISOString());
+        }
         $("history-state").textContent = "Loading";
         try {
-          state.historyResults = await request(`/speed-tests/history?stableId=${encodeURIComponent(state.historyStableId)}`);
+          state.historyResults = await request(`/speed-tests/history?${query.toString()}`);
           renderHistoryResults();
           $("history-state").textContent = state.historyStableId;
         } catch (err) {
@@ -7034,6 +7122,11 @@
       function reachabilityCellState(cell) {
         if (!cell || cell.verdict === "unknown") return "unknown";
         if (cell.agentStatus === "online") return "reached";
+        // A stale cell has no `unreachable`: that flag is derived from the
+        // current sweep, which by definition did not include this observation.
+        // Its own stored verdict is what it saw, so read that instead of
+        // reporting every stale failure as agreed-down.
+        if (cell.stale) return cell.verdict === "agent_only_failure" ? "unreachable" : "down";
         return cell.unreachable ? "unreachable" : "down";
       }
 
@@ -7061,12 +7154,21 @@
       function reachabilityCellHtml(cell) {
         if (!cell) return `<td class="muted">—</td>`;
         const state = REACHABILITY_STATES[reachabilityCellState(cell)];
+        // A stale cell is the last thing an agent saw before it stopped
+        // answering. It stays on screen because that history is the only record
+        // of that vantage point, but it is dimmed and dated so it cannot be
+        // mistaken for a current observation.
         const tooltip = [
-          tr(state.label),
+          cell.stale ? tr("Stale: the last sweep did not refresh this") : tr(state.label),
+          cell.stale ? `${tr("Last seen")}: ${formatTime(cell.checkedAt) || "n/a"}` : "",
+          cell.stale ? `${tr("Last verdict")}: ${tr(state.label)}` : "",
           `${tr("Agent")}: ${cell.agentStatus || "unknown"} · ${tr("Checker")}: ${cell.localStatus || "unknown"}`,
           ...reachabilityEvidence(cell),
           `${tr("Since")}: ${formatTime(cell.since) || "n/a"} · ${tr("Streak")}: ${Number(cell.streak || 0)}`,
-        ].join("\n");
+        ].filter(Boolean).join("\n");
+        if (cell.stale) {
+          return `<td class="reachability-stale" title="${escapeHtml(tooltip)}"><span class="chip neutral">${state.mark}</span><span class="muted"> ⧗</span></td>`;
+        }
         // An unconfirmed finding is deliberately shown differently from a
         // confirmed one: acting on a single sample is the mistake this whole
         // feature is trying to avoid.
@@ -7159,20 +7261,33 @@
 
         $("reachability-legend").innerHTML = Object.values(REACHABILITY_STATES).map((state) =>
           `<span class="chip ${state.chip}">${state.mark}</span> ${escapeHtml(tr(state.label))}`
-        ).join(" &nbsp; ");
+        ).concat([`<span class="reachability-stale"><span class="chip neutral">✓</span><span class="muted"> ⧗</span></span> ${escapeHtml(tr("Last known, not refreshed by the latest sweep"))}`])
+          .join(" &nbsp; ");
       }
 
       // The checker gets its own column. Leaving it out was what made the matrix
       // read as though the checker were the arbiter rather than one more vantage
       // point that can be the odd one out.
       function localCellHtml(node) {
-        const cell = (node.cells || []).find((candidate) => candidate.verdict !== "unknown");
+        const usable = (node.cells || []).filter((candidate) => candidate.verdict !== "unknown");
+        // The checker's own status is read from whichever cell carries it, but a
+        // refreshed cell has to win: falling back to a stale one would report an
+        // old local sample as the checker's current state.
+        const cell = usable.find((candidate) => !candidate.stale) || usable[0];
         if (!cell) return `<td class="muted">—</td>`;
         let key = "reached";
         if (cell.localStatus !== "online") key = node.localUnreachable ? "unreachable" : "down";
         const state = REACHABILITY_STATES[key];
-        const tooltip = [tr(state.label), `${tr("Checker")}: ${cell.localStatus || "unknown"}`,
-          `${tr("Since")}: ${formatTime(node.localSince) || "n/a"}`].join("\n");
+        const stale = Boolean(cell.stale);
+        const tooltip = [
+          stale ? tr("Stale: the last sweep did not refresh this") : tr(state.label),
+          stale ? `${tr("Last seen")}: ${formatTime(cell.checkedAt) || "n/a"}` : "",
+          `${tr("Checker")}: ${cell.localStatus || "unknown"}`,
+          `${tr("Since")}: ${formatTime(node.localSince) || "n/a"}`,
+        ].filter(Boolean).join("\n");
+        if (stale) {
+          return `<td class="reachability-stale" title="${escapeHtml(tooltip)}"><span class="chip neutral">${state.mark}</span><span class="muted"> ⧗</span></td>`;
+        }
         const provisional = node.localUnreachable && Number(node.localStreak || 0) < 2;
         return `<td title="${escapeHtml(tooltip)}"><span class="chip ${state.chip}">${state.mark}</span>${provisional ? `<span class="muted"> ?</span>` : ""}</td>`;
       }
@@ -7292,6 +7407,32 @@
           tabButton.tabIndex = active ? 0 : -1;
         });
         if (pane === "agents") loadDiagnosticAgents();
+      }
+
+      // The Remnawave panes are groups of existing panels rather than one
+      // wrapper each: the message constructor sits between the settings panels
+      // in the document, and toggling visibility by group keeps that order
+      // intact instead of moving blocks around to satisfy the tabs.
+      const REMNAWAVE_PANES = {
+        settings: ["remnawave-policy-panel", "remnawave-pairs-panel", "remnawave-announce-state-panel"],
+        messages: ["remnawave-message-constructor"],
+        locations: ["remnawave-locations-panel"],
+      };
+
+      function switchRemnawavePane(pane) {
+        state.remnawavePane = pane;
+        Object.entries(REMNAWAVE_PANES).forEach(([name, panels]) => {
+          const active = name === pane;
+          panels.forEach((id) => {
+            const panel = $(id);
+            if (panel) panel.hidden = !active;
+          });
+          const tabButton = $(`remnawave-tab-${name}`);
+          if (!tabButton) return;
+          tabButton.classList.toggle("active", active);
+          tabButton.setAttribute("aria-selected", String(active));
+          tabButton.tabIndex = active ? 0 : -1;
+        });
       }
 
       function bindTabListKeyboardNavigation() {
@@ -8257,6 +8398,10 @@
       ["project", "history", "telegram", "agents", "backup"].forEach((pane) => {
         $(`global-settings-tab-${pane}`).addEventListener("click", () => switchGlobalSettingsPane(pane));
       });
+      Object.keys(REMNAWAVE_PANES).forEach((pane) => {
+        $(`remnawave-tab-${pane}`).addEventListener("click", () => switchRemnawavePane(pane));
+      });
+      switchRemnawavePane("settings");
       $("create-diagnostic-agent").addEventListener("click", createDiagnosticAgent);
       // Once the operator types into a prefilled field, a later render must not
       // overwrite it with the controller default.
@@ -8422,6 +8567,19 @@
       $("dismiss-node-merge-notice").addEventListener("click", () => {
         clearPendingNodeMerge();
         renderNodeMergeNotice();
+      });
+      document.querySelectorAll("[data-history-range]").forEach((button) => {
+        button.addEventListener("click", () => {
+          state.historyRange = button.dataset.historyRange;
+          renderHistoryRanges();
+          // A custom range is not a request yet: it needs both dates first.
+          if (state.historyRange !== "custom") loadHistory();
+        });
+      });
+      ["history-from", "history-to"].forEach((id) => {
+        $(id).addEventListener("change", () => {
+          if (state.historyRange === "custom") loadHistory();
+        });
       });
       $("refresh-history").addEventListener("click", loadHistory);
       $("history-node").addEventListener("change", () => {
