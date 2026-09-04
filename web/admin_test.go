@@ -64,8 +64,14 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`speedRunRequestIDs: new Set()`,
 		`runDisabled: state.speedRunStarting || Boolean(run && run.running) || maintenanceUpdating`,
 		`run.textContent = view.runStarting ? "Starting…" : (view.runRunning ? "Running…" : "Run")`,
-		`$("run-state").textContent = "Starting…"`,
-		`$("selection-run").textContent = state.speedRunStarting ? "Starting…" : ((run && run.running) ? "Running…" : "Run")`,
+		`function speedRunActive()`,
+		`$("run").textContent = cancelButtonLabel(state.speedRunCancelling)`,
+		`$("selection-run").textContent = speedRunActive() ? cancelButtonLabel(state.speedRunCancelling) : "Run"`,
+		`$("selection-check").textContent = state.availabilityCheckRunning`,
+		`async function cancelSpeedRun()`,
+		`async function cancelAvailabilityCheck()`,
+		`request("/speed-tests/cancel"`,
+		`request("/proxies/check/cancel"`,
 		`state.speedRunRequestIDs = new Set(proxyIds)`,
 		`const ids = [...new Set(stableIds.filter(Boolean))]`,
 		`request("/nodes-overview/maintenance"`,
@@ -1184,5 +1190,67 @@ func TestAdminRetiredNodeDeleteRollsBackArchiveWhenSpeedHistorySaveFails(t *test
 	}
 	if history := manager.ResultHistory("retired"); len(history) != 1 {
 		t.Fatalf("speed history was not rolled back: %+v", history)
+	}
+}
+
+// A manual speed test spends its first phase in an availability check, before
+// the manager is running at all. A cancel arriving then has to stop that check,
+// otherwise the only cancellable window is the one the operator cannot see.
+func TestAdminSpeedTestCancelFallsBackToTheAvailabilityPhase(t *testing.T) {
+	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
+	manager := speedtest.NewManager(proxyChecker, 10000, "", speedtest.TestConfig{})
+	availabilityCancelled := false
+	handler := AdminSpeedTestCancelHandler(manager, func() bool {
+		availabilityCancelled = true
+		return true
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/admin/speed-tests/cancel", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if !availabilityCancelled {
+		t.Fatal("cancel did not reach the availability phase")
+	}
+	if !strings.Contains(rec.Body.String(), `"cancelled":true`) {
+		t.Fatalf("body = %s, want cancelled:true", rec.Body.String())
+	}
+}
+
+func TestAdminCancelHandlersReportWhenNothingIsRunning(t *testing.T) {
+	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
+	manager := speedtest.NewManager(proxyChecker, 10000, "", speedtest.TestConfig{})
+	for name, handler := range map[string]http.HandlerFunc{
+		"proxy check": AdminProxyCheckCancelHandler(proxyChecker.CancelCheck),
+		"speed test":  AdminSpeedTestCancelHandler(manager, proxyChecker.CancelCheck),
+	} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/cancel", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want 200: %s", name, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"cancelled":false`) {
+			t.Fatalf("%s body = %s, want cancelled:false", name, rec.Body.String())
+		}
+
+		rejected := httptest.NewRecorder()
+		handler.ServeHTTP(rejected, httptest.NewRequest(http.MethodGet, "/cancel", nil))
+		if rejected.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s GET status = %d, want 405", name, rejected.Code)
+		}
+	}
+}
+
+// The panel cancelled it on purpose, so the answer must not read like a
+// malformed request the operator has to debug.
+func TestAdminProxyCheckReportsACancelledRunAsAConflict(t *testing.T) {
+	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
+	handler := AdminProxyCheckHandler(func([]string) error { return checker.ErrCheckCancelled }, proxyChecker, 10000)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/proxies/check", strings.NewReader(`{"stableIds":["node-1"]}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", rec.Code, rec.Body.String())
 	}
 }

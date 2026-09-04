@@ -3,6 +3,7 @@ package speedtest
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -647,4 +648,95 @@ func TestUpdateSchedulePrunesHistoryOutsideRetention(t *testing.T) {
 	if got := len(manager.ResultHistory("node-1")); got != 1 {
 		t.Fatalf("history length after pruning = %d, want 1", got)
 	}
+}
+
+// Cancelling keeps what was already measured and stops the rest. A run that
+// covered two nodes out of six is not a measurement of the other four, so it is
+// not announced either.
+func TestCancelStopsTheRunAndKeepsMeasuredResults(t *testing.T) {
+	proxies := make([]*models.ProxyConfig, 0, 6)
+	stableIDs := make([]string, 0, 6)
+	for index := 0; index < 6; index++ {
+		proxy := &models.ProxyConfig{
+			StableID: fmt.Sprintf("node-%d", index),
+			Name:     fmt.Sprintf("Node %d", index),
+		}
+		proxies = append(proxies, proxy)
+		stableIDs = append(stableIDs, proxy.StableID)
+	}
+	proxyChecker := checker.NewProxyChecker(proxies, 10000, "", 1, "", "", 1, 0, "status")
+	manager := NewManager(proxyChecker, 10000, filepath.Join(t.TempDir(), "speedtest_schedule.json"), TestConfig{})
+	reports := make(reportRecorder, 1)
+	manager.SetReporter(reports)
+
+	var mu sync.Mutex
+	attempts := 0
+	manager.testAttempt = func(proxy *models.ProxyConfig, cfg TestConfig, source string) Result {
+		mu.Lock()
+		attempts++
+		first := attempts == 1
+		mu.Unlock()
+		if first {
+			manager.Cancel()
+		}
+		return Result{StableID: proxy.StableID, Name: proxy.Name, URL: cfg.URL, Mbps: 42, CheckedAt: time.Now(), Source: source}
+	}
+
+	// One node at a time, so "stopped early" is exact rather than a race.
+	if err := manager.Run(RunRequest{ProxyIDs: stableIDs, Config: TestConfig{Concurrency: 1}}, ManualSource); err != nil {
+		t.Fatalf("manual run: %v", err)
+	}
+	waitForSpeedRunToFinish(t, manager)
+
+	mu.Lock()
+	measured := attempts
+	mu.Unlock()
+	if measured != 1 {
+		t.Fatalf("measured %d nodes, want the run to stop after the first", measured)
+	}
+
+	snapshot := manager.Snapshot()
+	if !snapshot.LastRun.Cancelled || snapshot.LastRun.Running {
+		t.Fatalf("last run = %+v, want a finished cancelled run", snapshot.LastRun)
+	}
+	// Which node won the single slot is the scheduler's business; that exactly
+	// one kept its measurement is not.
+	withHistory := 0
+	for _, stableID := range stableIDs {
+		switch got := len(manager.ResultHistory(stableID)); got {
+		case 0:
+		case 1:
+			withHistory++
+		default:
+			t.Fatalf("history for %s = %d entries, want at most one", stableID, got)
+		}
+	}
+	if withHistory != 1 {
+		t.Fatalf("%d nodes kept history, want only the one that was measured", withHistory)
+	}
+	select {
+	case report := <-reports:
+		t.Fatalf("cancelled run announced a report: %+v", report)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestCancelReportsWhetherATestWasRunning(t *testing.T) {
+	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
+	manager := NewManager(proxyChecker, 10000, "", TestConfig{})
+	if manager.Cancel() {
+		t.Fatal("cancel reported a test while nothing was running")
+	}
+}
+
+func waitForSpeedRunToFinish(t *testing.T, manager *Manager) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !manager.Snapshot().LastRun.Running {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("speed test did not finish")
 }

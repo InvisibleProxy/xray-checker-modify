@@ -51,13 +51,31 @@ type ProxyChecker struct {
 	generation         uint64
 	projectMaintenance atomic.Bool
 
+	// Every check registers here before it queues for the gate, and the one
+	// holding checkMu is also published as the active run: the workers, the
+	// proxy probes and the host diagnostics read its context, so cancelling
+	// stops a run that has started and one that is still waiting to.
+	runsMu    sync.Mutex
+	runs      map[*checkRun]struct{}
+	activeRun *checkRun
+
 	checkProxyFunc      func(*models.ProxyConfig, uint64, bool, bool)
 	hostDiagnosticsFunc func(*models.ProxyConfig) (HostCheckDetails, PingCheckDetails)
 }
 
 const maxAvailabilityCheckConcurrency = 4
 
+type checkRun struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
 var ErrMaintenanceMode = errors.New("node is in maintenance mode")
+
+// ErrCheckCancelled reports a run an operator stopped from the panel. A node
+// the run never reached, and a probe it aborted mid-flight, keep the status
+// they had before: an interrupted probe is not evidence that a node is down.
+var ErrCheckCancelled = errors.New("availability check cancelled")
 
 var pingProbeCounter uint64
 
@@ -369,6 +387,13 @@ func (pc *ProxyChecker) CheckProxy(proxy *models.ProxyConfig) {
 }
 
 func (pc *ProxyChecker) withCheckRun(allowProjectMaintenance bool, run func() error) error {
+	// Registering before the gate is what makes a queued check cancellable. An
+	// operator who starts a check while another one is still finishing waits on
+	// this gate, and their cancel has to reach the run they are waiting for
+	// rather than only the one currently holding it.
+	handle := pc.registerRun()
+	defer pc.releaseRun(handle)
+
 	if pc.runGate != nil {
 		pc.runGate.Lock()
 		defer pc.runGate.Unlock()
@@ -378,7 +403,83 @@ func (pc *ProxyChecker) withCheckRun(allowProjectMaintenance bool, run func() er
 	}
 	pc.checkMu.Lock()
 	defer pc.checkMu.Unlock()
-	return run()
+
+	pc.setActiveRun(handle)
+	defer pc.clearActiveRun(handle)
+	if handle.ctx.Err() != nil {
+		return ErrCheckCancelled
+	}
+	err := run()
+	if err == nil && handle.ctx.Err() != nil {
+		return ErrCheckCancelled
+	}
+	return err
+}
+
+func (pc *ProxyChecker) registerRun() *checkRun {
+	ctx, cancel := context.WithCancel(context.Background())
+	handle := &checkRun{ctx: ctx, cancel: cancel}
+	pc.runsMu.Lock()
+	if pc.runs == nil {
+		pc.runs = make(map[*checkRun]struct{})
+	}
+	pc.runs[handle] = struct{}{}
+	pc.runsMu.Unlock()
+	return handle
+}
+
+func (pc *ProxyChecker) releaseRun(handle *checkRun) {
+	pc.runsMu.Lock()
+	delete(pc.runs, handle)
+	pc.runsMu.Unlock()
+	handle.cancel()
+}
+
+func (pc *ProxyChecker) setActiveRun(handle *checkRun) {
+	pc.runsMu.Lock()
+	pc.activeRun = handle
+	pc.runsMu.Unlock()
+}
+
+func (pc *ProxyChecker) clearActiveRun(handle *checkRun) {
+	pc.runsMu.Lock()
+	if pc.activeRun == handle {
+		pc.activeRun = nil
+	}
+	pc.runsMu.Unlock()
+}
+
+// runContext returns the context of the check running now, or a background
+// context outside a run so probe helpers never have to nil-check it.
+func (pc *ProxyChecker) runContext() context.Context {
+	pc.runsMu.Lock()
+	defer pc.runsMu.Unlock()
+	if pc.activeRun == nil {
+		return context.Background()
+	}
+	return pc.activeRun.ctx
+}
+
+// CancelCheck stops every availability check in flight — the one running and
+// any queued behind it — and reports whether there was anything to stop.
+func (pc *ProxyChecker) CancelCheck() bool {
+	pc.runsMu.Lock()
+	handles := make([]*checkRun, 0, len(pc.runs))
+	for handle := range pc.runs {
+		handles = append(handles, handle)
+	}
+	pc.runsMu.Unlock()
+	for _, handle := range handles {
+		handle.cancel()
+	}
+	return len(handles) > 0
+}
+
+// CheckRunning reports whether an availability check is running or queued.
+func (pc *ProxyChecker) CheckRunning() bool {
+	pc.runsMu.Lock()
+	defer pc.runsMu.Unlock()
+	return len(pc.runs) > 0
 }
 
 func (pc *ProxyChecker) runProxyCheck(proxy *models.ProxyConfig, expectedGeneration uint64, checkGeneration bool, quiet bool, allowMaintenance bool) {
@@ -394,6 +495,11 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 		proxy.StableID = proxy.GenerateStableID()
 	}
 	if !allowMaintenance && !pc.MonitoringEnabled(proxy.StableID) {
+		return
+	}
+
+	ctx := pc.runContext()
+	if ctx.Err() != nil {
 		return
 	}
 
@@ -414,6 +520,10 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 	}
 
 	setFailedStatus := func(failure FailureDetails) {
+		if ctx.Err() != nil {
+			logger.Debug("%s | Skipping metric update: check cancelled", proxy.Name)
+			return
+		}
 		if !isGenerationValid() {
 			logger.Debug("%s | Skipping metric update: generation changed", proxy.Name)
 			return
@@ -433,6 +543,9 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 	}
 
 	setFailedLatency := func() {
+		if ctx.Err() != nil {
+			return
+		}
 		if !isGenerationValid() {
 			return
 		}
@@ -472,15 +585,23 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 	var latency time.Duration
 
 	if pc.checkMethod == "ip" {
-		checkSuccess, logMessage, latency, checkErr = pc.checkByIP(client)
+		checkSuccess, logMessage, latency, checkErr = pc.checkByIP(ctx, client)
 	} else if pc.checkMethod == "status" {
-		checkSuccess, logMessage, latency, checkErr = pc.checkByGen(client)
+		checkSuccess, logMessage, latency, checkErr = pc.checkByGen(ctx, client)
 	} else if pc.checkMethod == "download" {
-		checkSuccess, logMessage, latency, checkErr = pc.checkByDownload(client)
+		checkSuccess, logMessage, latency, checkErr = pc.checkByDownload(ctx, client)
 	} else {
 		logger.Error("Invalid check method: %s", pc.checkMethod)
 		setFailedStatus(failureDetails(FailureCodeConfiguration, "invalid check method: "+pc.checkMethod))
 		setFailedLatency()
+		return
+	}
+
+	if ctx.Err() != nil {
+		// The operator stopped the run mid-probe. Whatever the aborted request
+		// returned is not a verdict about the node, so it is neither stored nor
+		// reported as a failure.
+		logger.Debug("%s | Check cancelled", proxy.Name)
 		return
 	}
 
@@ -532,7 +653,7 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 	}
 }
 
-func (pc *ProxyChecker) checkByIP(client *http.Client) (bool, string, time.Duration, error) {
+func (pc *ProxyChecker) checkByIP(ctx context.Context, client *http.Client) (bool, string, time.Duration, error) {
 	req, err := http.NewRequest("GET", pc.ipCheck, nil)
 	if err != nil {
 		return false, "", 0, err
@@ -545,7 +666,7 @@ func (pc *ProxyChecker) checkByIP(client *http.Client) (bool, string, time.Durat
 			ttfb = time.Since(start)
 		},
 	}
-	req = req.WithContext(httptrace.WithClientTrace(context.Background(), trace))
+	req = req.WithContext(httptrace.WithClientTrace(ctx, trace))
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -563,7 +684,7 @@ func (pc *ProxyChecker) checkByIP(client *http.Client) (bool, string, time.Durat
 	return proxyIP != pc.currentIP, logMessage, ttfb, nil
 }
 
-func (pc *ProxyChecker) checkByGen(client *http.Client) (bool, string, time.Duration, error) {
+func (pc *ProxyChecker) checkByGen(ctx context.Context, client *http.Client) (bool, string, time.Duration, error) {
 	req, err := http.NewRequest("GET", pc.genMethodURL, nil)
 	if err != nil {
 		return false, "", 0, err
@@ -576,7 +697,7 @@ func (pc *ProxyChecker) checkByGen(client *http.Client) (bool, string, time.Dura
 			ttfb = time.Since(start)
 		},
 	}
-	req = req.WithContext(httptrace.WithClientTrace(context.Background(), trace))
+	req = req.WithContext(httptrace.WithClientTrace(ctx, trace))
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -588,7 +709,7 @@ func (pc *ProxyChecker) checkByGen(client *http.Client) (bool, string, time.Dura
 	return resp.StatusCode >= 200 && resp.StatusCode < 300, logMessage, ttfb, nil
 }
 
-func (pc *ProxyChecker) checkByDownload(client *http.Client) (bool, string, time.Duration, error) {
+func (pc *ProxyChecker) checkByDownload(ctx context.Context, client *http.Client) (bool, string, time.Duration, error) {
 	if pc.downloadURL == "" {
 		return false, "Download URL not configured", 0, fmt.Errorf("download URL not configured")
 	}
@@ -605,7 +726,7 @@ func (pc *ProxyChecker) checkByDownload(client *http.Client) (bool, string, time
 			ttfb = time.Since(start)
 		},
 	}
-	req = req.WithContext(httptrace.WithClientTrace(context.Background(), trace))
+	req = req.WithContext(httptrace.WithClientTrace(ctx, trace))
 
 	downloadClient := &http.Client{
 		Transport: client.Transport,
@@ -929,7 +1050,7 @@ func (pc *ProxyChecker) tcpCheckHost(host string, port int) HostCheckDetails {
 
 	timeout := pc.hostDiagnosticsTimeout()
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout+time.Second)
+	ctx, cancel := context.WithTimeout(pc.runContext(), timeout+time.Second)
 	defer cancel()
 
 	start := time.Now()
@@ -963,7 +1084,7 @@ func (pc *ProxyChecker) pingHost(host string) PingCheckDetails {
 	}
 
 	timeout := pc.hostDiagnosticsTimeout()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(pc.runContext(), timeout)
 	defer cancel()
 
 	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
@@ -978,6 +1099,11 @@ func (pc *ProxyChecker) pingHost(host string) PingCheckDetails {
 
 	var lastErr error
 	for _, ipAddr := range ips {
+		// pingIP has no context of its own, so a cancelled run stops between
+		// addresses rather than pinging every one of them first.
+		if ctx.Err() != nil {
+			break
+		}
 		ip := ipAddr.IP
 		if ip == nil {
 			continue
@@ -1411,18 +1537,25 @@ func (pc *ProxyChecker) checkAvailabilityCandidates(candidates []availabilityChe
 		return report, nil
 	}
 
+	ctx := pc.runContext()
 	needsProxyCheck := make([]bool, len(candidates))
 	var diagnosticErrors []error
 	var diagnosticErrorsMu sync.Mutex
 	pc.runAvailabilityWorkers(len(candidates), func(index int) {
 		candidate := candidates[index]
 		report.Results[index].StableID = candidate.Proxy.StableID
+		if ctx.Err() != nil {
+			return
+		}
 		if !candidate.WasUnavailable {
 			needsProxyCheck[index] = true
 			return
 		}
 
 		hostCheck, pingCheck := pc.checkHostDiagnostics(candidate.Proxy)
+		if ctx.Err() != nil {
+			return
+		}
 		if atomic.LoadUint64(&pc.generation) != generation {
 			diagnosticErrorsMu.Lock()
 			diagnosticErrors = append(diagnosticErrors, fmt.Errorf("%s: proxy configuration changed during diagnostics", candidate.Proxy.StableID))
@@ -1433,6 +1566,10 @@ func (pc *ProxyChecker) checkAvailabilityCandidates(candidates []availabilityChe
 		needsProxyCheck[index] = hostCheck.Online
 	})
 
+	if ctx.Err() != nil {
+		pc.populateAvailabilityResults(&report, candidates)
+		return report, ErrCheckCancelled
+	}
 	if len(diagnosticErrors) > 0 {
 		pc.populateAvailabilityResults(&report, candidates)
 		return report, errors.Join(diagnosticErrors...)
@@ -1453,7 +1590,7 @@ func (pc *ProxyChecker) checkAvailabilityCandidates(candidates []availabilityChe
 	}
 
 	pc.runAvailabilityWorkers(len(candidates), func(index int) {
-		if !needsProxyCheck[index] {
+		if !needsProxyCheck[index] || ctx.Err() != nil {
 			return
 		}
 		candidate := candidates[index]
@@ -1461,6 +1598,9 @@ func (pc *ProxyChecker) checkAvailabilityCandidates(candidates []availabilityChe
 		report.Results[index].ProxyChecked = true
 	})
 	pc.populateAvailabilityResults(&report, candidates)
+	if ctx.Err() != nil {
+		return report, ErrCheckCancelled
+	}
 	return report, nil
 }
 

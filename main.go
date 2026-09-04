@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -465,7 +466,13 @@ func main() {
 		projectProbe := projectMaintenance.Enabled()
 		unavailableBefore := unavailableStableIDSet(proxyChecker)
 		if err := proxyChecker.CheckAllProxies(); err != nil {
-			logger.Warn("Proxy check iteration skipped: %v", err)
+			// A cancel from the panel stops every check in flight, this one
+			// included. That is what was asked for, not a failure to report.
+			if errors.Is(err, checker.ErrCheckCancelled) {
+				logger.Info("Proxy check iteration cancelled")
+			} else {
+				logger.Warn("Proxy check iteration skipped: %v", err)
+			}
 			return
 		}
 		projectProbe = projectProbe || projectMaintenance.Enabled()
@@ -541,7 +548,9 @@ func main() {
 						notifyRecoveredNodes(recovered)
 						remnawaveService.Trigger()
 					}
-					if err != nil {
+					if errors.Is(err, checker.ErrCheckCancelled) {
+						logger.Info("Fast recovery check cancelled")
+					} else if err != nil {
 						logger.Warn("Fast recovery check failed: %v", err)
 					}
 				case <-recoveryStop:
@@ -703,6 +712,7 @@ func main() {
 	protectedHandler.Handle("/admin/", web.AdminHandler())
 	protectedHandler.Handle("/api/v1/admin/proxies", web.AdminProxiesHandler(proxyChecker, config.CLIConfig.Xray.StartPort))
 	protectedHandler.Handle("/api/v1/admin/proxies/check", web.AdminProxyCheckHandler(runAdminAvailabilityCheck, proxyChecker, config.CLIConfig.Xray.StartPort))
+	protectedHandler.Handle("/api/v1/admin/proxies/check/cancel", web.AdminProxyCheckCancelHandler(proxyChecker.CancelCheck))
 	protectedHandler.Handle("/api/v1/admin/subscription/refresh/progress", web.AdminSubscriptionRefreshProgressHandler(refreshProgress))
 	protectedHandler.Handle("/api/v1/admin/subscription/refresh", web.AdminSubscriptionRefreshHandler(func(request web.AdminSubscriptionRefreshRequest) (web.AdminSubscriptionRefreshResult, error) {
 		return refreshSubscription("manual", request.Force, request.ConfirmationToken)
@@ -712,6 +722,7 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/backup", web.AdminBackupHandler(backupCreator))
 	protectedHandler.Handle("/api/v1/admin/backup/restore", web.AdminBackupRestoreHandler(backupRestorer, nodeMergeCoordinator.AcquireRestoreGuard))
 	protectedHandler.Handle("/api/v1/admin/speed-tests/run", web.AdminSpeedTestRunHandler(speedTestManager, runAdminAvailabilityCheck))
+	protectedHandler.Handle("/api/v1/admin/speed-tests/cancel", web.AdminSpeedTestCancelHandler(speedTestManager, proxyChecker.CancelCheck))
 	protectedHandler.Handle("/api/v1/admin/speed-tests/node-url", web.AdminSpeedTestNodeURLHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/speed-tests/history", web.AdminSpeedTestHistoryHandler(speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/speed-tests", web.AdminSpeedTestSnapshotHandler(speedTestManager))

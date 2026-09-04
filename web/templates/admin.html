@@ -3077,8 +3077,10 @@
         loadRunning: false,
         speedRunStarting: false,
         speedRunRequestIDs: new Set(),
+        speedRunCancelling: false,
         availabilityCheckRunning: false,
         availabilityCheckIDs: new Set(),
+        availabilityCheckCancelling: false,
         maintenanceUpdatingIDs: new Set(),
         nodeURLDraftID: "",
         nodeURLDirty: false,
@@ -6515,31 +6517,39 @@
         }).join("") || `<tr><td colspan="8" class="muted">No speed history for this node</td></tr>`;
       }
 
+      // A run is "active" from the moment the request leaves the browser: a
+      // manual run spends its first phase in an availability check, before the
+      // snapshot reports it as running, and that phase has to be cancellable too.
+      function speedRunActive() {
+        const run = state.snapshot && state.snapshot.lastRun;
+        return state.speedRunStarting || !!(run && run.running);
+      }
+
+      function cancelButtonLabel(cancelling) {
+        return cancelling ? "Cancelling…" : "Cancel";
+      }
+
       function renderRunState() {
         const run = state.snapshot && state.snapshot.lastRun;
-        if (state.speedRunStarting) {
-          $("run-state").textContent = "Starting…";
+        if (speedRunActive()) {
+          $("run-state").textContent = state.speedRunStarting
+            ? "Starting…"
+            : `Running ${run.completed}/${run.selected}`;
           $("run-state").className = "pill state-chip running";
-          $("run").textContent = "Starting…";
-          $("run").disabled = true;
+          $("run").textContent = cancelButtonLabel(state.speedRunCancelling);
+          $("run").disabled = state.speedRunCancelling;
           return;
         }
-        if (!run || !run.running) {
-          $("run-state").textContent = "Idle";
-          $("run-state").className = "pill state-chip idle";
-          $("run").textContent = "Run Check";
-          $("run").disabled = false;
-          return;
-        }
-        $("run-state").textContent = `Running ${run.completed}/${run.selected}`;
-        $("run-state").className = "pill state-chip running";
-        $("run").textContent = "Running…";
-        $("run").disabled = true;
+        // The run this cancel was aimed at is over, whichever way it ended.
+        state.speedRunCancelling = false;
+        $("run-state").textContent = run && run.cancelled ? "Cancelled" : "Idle";
+        $("run-state").className = "pill state-chip idle";
+        $("run").textContent = "Run Check";
+        $("run").disabled = false;
       }
 
       function renderSelectionCount() {
         const count = state.selected.size;
-        const run = state.snapshot && state.snapshot.lastRun;
         const muted = telegramMuteNodeSet("all");
         const anyMuted = telegramAnyMutedNodeSet();
         const ids = selectedIDs();
@@ -6550,8 +6560,11 @@
         selectAll.checked = visibleIDs.length > 0 && selectedVisible === visibleIDs.length;
         selectAll.indeterminate = selectedVisible > 0 && selectedVisible < visibleIDs.length;
         selectAll.title = selectAll.checked ? "Clear visible node selection" : "Select all visible nodes";
+        // The bar carries the only Cancel button on this screen, so clearing the
+        // selection mid-run must not take it away.
+        const runActive = state.availabilityCheckRunning || speedRunActive();
         $("selection-count").textContent = `${count} selected`;
-        $("selection-action-bar").hidden = count === 0;
+        $("selection-action-bar").hidden = count === 0 && !runActive;
         $("nodes-summary").hidden = count > 0;
         // Naming the hidden nodes and their state stops a filter from reading as
         // "this node no longer exists" when it is only filtered out.
@@ -6563,10 +6576,16 @@
           ? `${visibleIDs.length} shown · ${hidden} hidden by filters${hiddenIssues > 0 ? ` · ${hiddenIssues} with issues` : ""}`
           : `${visibleIDs.length} shown · ${state.proxies.length} total`;
         $("nodes-summary").className = hiddenIssues > 0 ? "table-meta warn" : "table-meta";
-        $("selection-check").textContent = state.availabilityCheckRunning ? "Checking…" : "Check";
-        $("selection-check").disabled = count === 0 || state.availabilityCheckRunning;
-        $("selection-run").textContent = state.speedRunStarting ? "Starting…" : ((run && run.running) ? "Running…" : "Run");
-        $("selection-run").disabled = count === 0 || state.speedRunStarting || !!(run && run.running);
+        // While a run is on, its button stops it instead of starting another —
+        // that is the only way out of a check that takes minutes.
+        $("selection-check").textContent = state.availabilityCheckRunning
+          ? cancelButtonLabel(state.availabilityCheckCancelling)
+          : "Check";
+        $("selection-check").disabled = state.availabilityCheckRunning
+          ? state.availabilityCheckCancelling
+          : count === 0;
+        $("selection-run").textContent = speedRunActive() ? cancelButtonLabel(state.speedRunCancelling) : "Run";
+        $("selection-run").disabled = speedRunActive() ? state.speedRunCancelling : count === 0;
         $("selection-mute").disabled = count === 0 || ids.every((id) => muted.has(id));
         $("selection-unmute").disabled = count === 0 || !ids.some((id) => anyMuted.has(id));
         $("selection-history").disabled = count !== 1;
@@ -8255,11 +8274,13 @@
           $("message").textContent = "Select at least one node";
           return;
         }
-        if (state.speedRunStarting || (state.snapshot?.lastRun && state.snapshot.lastRun.running)) return;
+        if (speedRunActive()) return;
         state.speedRunStarting = true;
+        state.speedRunCancelling = false;
         state.speedRunRequestIDs = new Set(proxyIds);
         renderRunState();
         renderNodes();
+        renderSelectionCount();
         try {
           saveSpeedDraft();
           state.snapshot = await request("/speed-tests/run", {
@@ -8274,14 +8295,24 @@
           renderAll();
           await load();
         } catch (err) {
-          $("message").textContent = err.message;
+          // A cancel during the availability phase fails the start request; the
+          // operator asked for that, so it is not reported as a failure.
+          if (state.speedRunCancelling) {
+            state.speedRunStarting = false;
+            await load();
+            $("message").textContent = "Speed test cancelled";
+          } else {
+            $("message").textContent = err.message;
+          }
         } finally {
           state.speedRunStarting = false;
+          state.speedRunCancelling = false;
           if (!(state.snapshot?.lastRun && state.snapshot.lastRun.running)) {
             state.speedRunRequestIDs.clear();
           }
           renderRunState();
           renderNodes();
+          renderSelectionCount();
         }
       }
 
@@ -8289,13 +8320,31 @@
         await runNodes(selectedIDs());
       }
 
+      async function cancelSpeedRun() {
+        if (!speedRunActive() || state.speedRunCancelling) return;
+        state.speedRunCancelling = true;
+        renderRunState();
+        renderSelectionCount();
+        try {
+          await request("/speed-tests/cancel", { method: "POST" });
+          $("message").textContent = "Stopping the speed test…";
+        } catch (err) {
+          state.speedRunCancelling = false;
+          $("message").textContent = err.message;
+        }
+        renderRunState();
+        renderSelectionCount();
+      }
+
       async function checkAvailability(stableIds) {
         $("message").textContent = "";
         const ids = [...new Set(stableIds.filter(Boolean))];
         if (ids.length === 0 || state.availabilityCheckRunning) return;
         state.availabilityCheckRunning = true;
+        state.availabilityCheckCancelling = false;
         state.availabilityCheckIDs = new Set(ids);
         renderNodes();
+        renderSelectionCount();
         try {
           await request("/proxies/check", {
             method: "POST",
@@ -8306,16 +8355,39 @@
             ? "Node availability checked"
             : `${ids.length} nodes checked`;
         } catch (err) {
-          $("message").textContent = err.message;
+          if (state.availabilityCheckCancelling) {
+            // The nodes it did reach were updated, so the table still needs the
+            // refresh the success path would have done.
+            await load();
+            $("message").textContent = "Availability check cancelled";
+          } else {
+            $("message").textContent = err.message;
+          }
         } finally {
           state.availabilityCheckRunning = false;
+          state.availabilityCheckCancelling = false;
           state.availabilityCheckIDs.clear();
           renderNodes();
+          renderSelectionCount();
         }
       }
 
       async function checkSelectedAvailability() {
         await checkAvailability(selectedIDs());
+      }
+
+      async function cancelAvailabilityCheck() {
+        if (!state.availabilityCheckRunning || state.availabilityCheckCancelling) return;
+        state.availabilityCheckCancelling = true;
+        renderSelectionCount();
+        try {
+          await request("/proxies/check/cancel", { method: "POST" });
+          $("message").textContent = "Stopping the availability check…";
+        } catch (err) {
+          state.availabilityCheckCancelling = false;
+          $("message").textContent = err.message;
+        }
+        renderSelectionCount();
       }
 
       async function saveNodeURL() {
@@ -8958,13 +9030,15 @@
         state.historyStableId = $("history-node").value;
         loadHistory();
       });
-      $("run").addEventListener("click", runSelected);
+      $("run").addEventListener("click", () => (speedRunActive() ? cancelSpeedRun() : runSelected()));
       $("toggle-maintenance").addEventListener("click", (event) => {
         const button = event.currentTarget;
         updateMaintenance(button.dataset.maintenanceId, button.dataset.maintenanceEnabled === "true");
       });
-      $("selection-check").addEventListener("click", checkSelectedAvailability);
-      $("selection-run").addEventListener("click", runSelected);
+      $("selection-check").addEventListener("click", () => (
+        state.availabilityCheckRunning ? cancelAvailabilityCheck() : checkSelectedAvailability()
+      ));
+      $("selection-run").addEventListener("click", () => (speedRunActive() ? cancelSpeedRun() : runSelected()));
       $("selection-mute").addEventListener("click", () => updateTelegramMute("all", true));
       $("selection-unmute").addEventListener("click", () => updateTelegramMute("all", false));
       $("selection-history").addEventListener("click", openSelectedHistory);

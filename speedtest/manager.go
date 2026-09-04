@@ -193,8 +193,11 @@ type RunInfo struct {
 	FinishedAt *time.Time `json:"finishedAt,omitempty"`
 	Selected   int        `json:"selected"`
 	Completed  int        `json:"completed"`
-	Error      string     `json:"error"`
-	Config     TestConfig `json:"config"`
+	// Cancelled marks a run an operator stopped from the panel. Nodes it never
+	// reached keep their previous result, and no report goes out for it.
+	Cancelled bool       `json:"cancelled,omitempty"`
+	Error     string     `json:"error"`
+	Config    TestConfig `json:"config"`
 }
 
 type Snapshot struct {
@@ -246,8 +249,12 @@ type Manager struct {
 	resultPath   string
 	defaults     TestConfig
 
-	mu                 sync.RWMutex
-	running            bool
+	mu      sync.RWMutex
+	running bool
+	// runCtx is the running test's context; Cancel closes it so queued nodes are
+	// skipped and the download in flight is aborted.
+	runCtx             context.Context
+	runCancel          context.CancelFunc
 	lastRun            RunInfo
 	results            map[string]Result
 	probeResults       map[string]Result
@@ -843,7 +850,10 @@ func (m *Manager) Run(req RunRequest, source string) error {
 		m.mu.Unlock()
 		return fmt.Errorf("speed test is already running")
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	m.running = true
+	m.runCtx = ctx
+	m.runCancel = cancel
 	m.lastRun = RunInfo{
 		Running:   true,
 		Source:    source,
@@ -854,6 +864,8 @@ func (m *Manager) Run(req RunRequest, source string) error {
 	m.mu.Unlock()
 
 	go m.run(
+		ctx,
+		cancel,
 		proxies,
 		req.Config,
 		source,
@@ -866,6 +878,30 @@ func (m *Manager) Run(req RunRequest, source string) error {
 	)
 	gateHeld = false
 	return nil
+}
+
+// Cancel stops the speed test that is running now and reports whether there was
+// one to stop. Results already measured stay; the rest are simply not measured.
+func (m *Manager) Cancel() bool {
+	m.mu.RLock()
+	cancel := m.runCancel
+	m.mu.RUnlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
+}
+
+// runContext returns the running test's context, or a background context
+// outside a run so a probe never has to nil-check it.
+func (m *Manager) runContext() context.Context {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.runCtx == nil {
+		return context.Background()
+	}
+	return m.runCtx
 }
 
 func (m *Manager) schedulerLoop() {
@@ -999,6 +1035,8 @@ func (m *Manager) advanceSchedulerDeadline(expected, now time.Time) (ScheduleCon
 }
 
 func (m *Manager) run(
+	ctx context.Context,
+	cancel context.CancelFunc,
 	proxies []*models.ProxyConfig,
 	cfg TestConfig,
 	source string,
@@ -1009,6 +1047,7 @@ func (m *Manager) run(
 	runGate sync.Locker,
 	projectMaintenanceProbe bool,
 ) {
+	defer cancel()
 	if runGate != nil {
 		defer runGate.Unlock()
 	}
@@ -1020,6 +1059,11 @@ func (m *Manager) run(
 	}
 
 	recordResult := func(result Result) {
+		// A measurement the cancellation aborted says nothing about the node, so
+		// it must not overwrite the result the node already has.
+		if ctx.Err() != nil && result.Error != "" {
+			return
+		}
 		result.MaintenanceProbe = maintenanceProbes[result.StableID]
 		result.ProjectMaintenanceProbe = projectMaintenanceProbe
 		runResults = append(runResults, result)
@@ -1041,7 +1085,7 @@ func (m *Manager) run(
 	}
 
 	if usesSequencedFallback(source) {
-		m.runManualTestPhases(proxies, cfg, source, skipOffline, sem, recordResult)
+		m.runManualTestPhases(ctx, proxies, cfg, source, skipOffline, sem, recordResult)
 	} else {
 		var wg sync.WaitGroup
 		results := make(chan Result, len(proxies))
@@ -1051,6 +1095,9 @@ func (m *Manager) run(
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
+				if ctx.Err() != nil {
+					return
+				}
 				proxyCfg := m.configForProxy(cfg, p)
 				if skipOffline && !m.proxyReadyForSpeedTest(p, false) {
 					return
@@ -1070,6 +1117,7 @@ func (m *Manager) run(
 	}
 
 	finishedAt := time.Now()
+	cancelled := ctx.Err() != nil
 	skipped := len(proxies) - len(runResults)
 	if skipped < 0 {
 		skipped = 0
@@ -1088,7 +1136,10 @@ func (m *Manager) run(
 
 	m.mu.Lock()
 	m.running = false
+	m.runCtx = nil
+	m.runCancel = nil
 	m.lastRun.Running = false
+	m.lastRun.Cancelled = cancelled
 	m.lastRun.FinishedAt = &finishedAt
 	reporter := m.reporter
 	m.mu.Unlock()
@@ -1100,6 +1151,12 @@ func (m *Manager) run(
 		logger.Warn("Failed to save Test URL health: %v", err)
 	}
 
+	if cancelled {
+		// A half-finished run is not a measurement of anything, so announcing it
+		// would only read as an outage that never happened.
+		logger.Info("Speed test cancelled after %d of %d nodes", len(runResults), len(proxies))
+		return
+	}
 	if reporter != nil {
 		go reporter.NotifySpeedTest(report)
 	}
@@ -1112,6 +1169,7 @@ type manualPrimaryResult struct {
 }
 
 func (m *Manager) runManualTestPhases(
+	ctx context.Context,
 	proxies []*models.ProxyConfig,
 	cfg TestConfig,
 	source string,
@@ -1128,6 +1186,9 @@ func (m *Manager) runManualTestPhases(
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			if ctx.Err() != nil {
+				return
+			}
 			proxyCfg := m.configForProxy(cfg, p)
 			if skipOffline && !m.proxyReadyForSpeedTest(p, true) {
 				return
@@ -1148,7 +1209,7 @@ func (m *Manager) runManualTestPhases(
 	// its own threshold decides its own fallback.
 	fallbackQueue := make([]manualPrimaryResult, 0)
 	for primary := range primaryResults {
-		if shouldAttemptFallback(primary.result, m.LowSpeedThresholdFor(primary.result.StableID)) {
+		if ctx.Err() == nil && shouldAttemptFallback(primary.result, m.LowSpeedThresholdFor(primary.result.StableID)) {
 			fallbackQueue = append(fallbackQueue, primary)
 			continue
 		}
@@ -1163,6 +1224,11 @@ func (m *Manager) runManualTestPhases(
 			defer fallbackWG.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			if ctx.Err() != nil {
+				// The primary measurement is real; only its fallback is dropped.
+				fallbackResults <- task.result
+				return
+			}
 			fallbackResults <- m.testFallbackForPrimary(task.proxy, task.config, source, task.result, m.LowSpeedThresholdFor(task.result.StableID))
 		}(queued)
 	}
@@ -1203,7 +1269,7 @@ func (m *Manager) testProxy(proxy *models.ProxyConfig, cfg TestConfig, source st
 		Timeout:   time.Duration(cfg.TimeoutSec) * time.Second,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
+	ctx, cancel := context.WithTimeout(m.runContext(), time.Duration(cfg.TimeoutSec)*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.URL, nil)

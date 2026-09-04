@@ -225,6 +225,40 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: The check was cancelled while it was running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIResponse'
+
+  /api/v1/admin/proxies/check/cancel:
+    post:
+      summary: Cancel the availability check that is running
+      description: >-
+        Stops the running check. Nodes it never reached, and probes it aborted
+        in flight, keep the status they had: an interrupted probe is not
+        evidence that a node is down. `cancelled` is false when nothing was
+        running.
+      tags: [Admin]
+      responses:
+        '200':
+          description: Whether a running check was stopped
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          cancelled: {type: boolean}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '405':
+          description: Method not allowed
 
   /api/v1/admin/subscription/sources:
     get:
@@ -496,6 +530,35 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '409':
           $ref: '#/components/responses/Conflict'
+
+  /api/v1/admin/speed-tests/cancel:
+    post:
+      summary: Cancel the speed test that is running
+      description: >-
+        Stops the running test. Measurements already taken are kept; the
+        remaining nodes are simply not measured, and no Telegram report is sent
+        for a cancelled run. A manual run spends its first phase in an
+        availability check, so a cancel that finds no test running stops that
+        check instead. `cancelled` is false when nothing was running.
+      tags: [Admin]
+      responses:
+        '200':
+          description: Whether a running test or its availability phase was stopped
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          cancelled: {type: boolean}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '405':
+          description: Method not allowed
 
   /api/v1/admin/speed-tests/node-url:
     put:
@@ -2051,6 +2114,9 @@ components:
           type: integer
         completed:
           type: integer
+        cancelled:
+          type: boolean
+          description: The last run was stopped by an operator, so it covers only the nodes it reached.
         error:
           type: string
         config:

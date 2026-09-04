@@ -2,17 +2,24 @@ package checker
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 
+	"xray-checker/metrics"
 	"xray-checker/models"
 	"xray-checker/projectmaintenance"
 )
+
+// checkProxyInternal records Prometheus gauges, which panic on an uninitialised
+// registry. Only the tests that drive the real probe need them.
+var initTestMetrics = sync.OnceFunc(func() { metrics.InitMetrics("") })
 
 func TestGetProxyStatusByStableIDFallsBackToStatusDetails(t *testing.T) {
 	proxy := &models.ProxyConfig{
@@ -505,6 +512,168 @@ func TestAdminMixedMaintenanceBatchPreservesPerNodeRecoverySemantics(t *testing.
 	}
 	if len(report.Results) != 2 || !report.Results[0].Recovered || report.Results[1].Recovered {
 		t.Fatalf("mixed recovery report = %+v", report.Results)
+	}
+}
+
+// An operator who stops a check gets a run that ends early, and the nodes it
+// never reached keep the status they had.
+func TestCancelStopsTheAvailabilityCheckEarly(t *testing.T) {
+	proxies := make([]*models.ProxyConfig, 0, 12)
+	stableIDs := make([]string, 0, 12)
+	for index := 0; index < 12; index++ {
+		proxy := testProxy(fmt.Sprintf("node-%d", index), fmt.Sprintf("Node %d", index))
+		proxies = append(proxies, proxy)
+		stableIDs = append(stableIDs, proxy.StableID)
+	}
+	proxyChecker := newTestProxyChecker(proxies)
+	for _, proxy := range proxies {
+		proxyChecker.storeStatusDetails(proxy.StableID, true, 10*time.Millisecond, nil, nil)
+	}
+
+	var mu sync.Mutex
+	checked := 0
+	proxyChecker.checkProxyFunc = func(candidate *models.ProxyConfig, _ uint64, _ bool, _ bool) {
+		mu.Lock()
+		checked++
+		first := checked == 1
+		mu.Unlock()
+		if first {
+			proxyChecker.CancelCheck()
+		}
+		proxyChecker.storeStatusDetails(candidate.StableID, true, 12*time.Millisecond, nil, nil)
+	}
+
+	_, err := proxyChecker.CheckProxiesByStableIDs(stableIDs)
+	if !errors.Is(err, ErrCheckCancelled) {
+		t.Fatalf("cancelled check error = %v, want ErrCheckCancelled", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if checked == 0 || checked >= len(proxies) {
+		// Workers already inside a probe finish it, so only "fewer than all" is
+		// guaranteed here.
+		t.Fatalf("checked %d of %d nodes, want the run to stop early", checked, len(proxies))
+	}
+	if proxyChecker.CheckRunning() {
+		t.Fatal("the run context outlived the run")
+	}
+}
+
+// Aborting a probe is not evidence that the node is down, so a cancelled check
+// must not flip an online node to offline.
+func TestCancelledProbeKeepsTheStatusItHad(t *testing.T) {
+	initTestMetrics()
+
+	// Nothing listens on the SOCKS port, so an ordinary probe fails. That is the
+	// control: it proves the cancelled probe below is not passing for free.
+	control := testProxy("node-1", "Node one")
+	controlChecker := newTestProxyChecker([]*models.ProxyConfig{control})
+	controlChecker.storeStatusDetails(control.StableID, true, 10*time.Millisecond, nil, nil)
+	controlChecker.hostDiagnosticsFunc = func(*models.ProxyConfig) (HostCheckDetails, PingCheckDetails) {
+		return HostCheckDetails{Checked: true}, PingCheckDetails{Checked: true}
+	}
+	controlChecker.checkProxyInternal(control, 0, false, false, false)
+	if details, ok := controlChecker.statusDetailsByStableID(control.StableID); !ok || details.Online {
+		t.Fatalf("control probe should have marked the node offline, got %+v", details)
+	}
+
+	proxy := testProxy("node-1", "Node one")
+	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{proxy})
+	proxyChecker.storeStatusDetails(proxy.StableID, true, 10*time.Millisecond, nil, nil)
+	proxyChecker.hostDiagnosticsFunc = func(*models.ProxyConfig) (HostCheckDetails, PingCheckDetails) {
+		return HostCheckDetails{Checked: true}, PingCheckDetails{Checked: true}
+	}
+
+	handle := proxyChecker.registerRun()
+	proxyChecker.setActiveRun(handle)
+	handle.cancel()
+	proxyChecker.checkProxyInternal(proxy, 0, false, false, false)
+	proxyChecker.clearActiveRun(handle)
+	proxyChecker.releaseRun(handle)
+
+	details, ok := proxyChecker.statusDetailsByStableID(proxy.StableID)
+	if !ok || !details.Online {
+		t.Fatalf("cancelled probe rewrote the stored status: %+v", details)
+	}
+}
+
+// Checks are serialised, so an operator who starts one while another is
+// finishing is really waiting in a queue. Their cancel has to reach that queued
+// run — otherwise it kills the run they cannot see and theirs starts anyway.
+func TestCancelAlsoStopsAQueuedCheck(t *testing.T) {
+	first := testProxy("node-1", "Node one")
+	second := testProxy("node-2", "Node two")
+	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{first, second})
+	proxyChecker.storeStatusDetails(first.StableID, true, time.Millisecond, nil, nil)
+	proxyChecker.storeStatusDetails(second.StableID, true, time.Millisecond, nil, nil)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var mu sync.Mutex
+	checked := make(map[string]bool)
+	proxyChecker.checkProxyFunc = func(candidate *models.ProxyConfig, _ uint64, _ bool, _ bool) {
+		mu.Lock()
+		checked[candidate.StableID] = true
+		mu.Unlock()
+		if candidate.StableID == first.StableID {
+			close(started)
+			<-release
+		}
+	}
+
+	go func() { _, _ = proxyChecker.CheckProxiesByStableIDs([]string{first.StableID}) }()
+	<-started
+
+	queued := make(chan error, 1)
+	go func() {
+		_, err := proxyChecker.CheckProxiesByStableIDs([]string{second.StableID})
+		queued <- err
+	}()
+	waitForCondition(t, "the second check to queue", func() bool {
+		proxyChecker.runsMu.Lock()
+		defer proxyChecker.runsMu.Unlock()
+		return len(proxyChecker.runs) == 2
+	})
+
+	if !proxyChecker.CancelCheck() {
+		t.Fatal("cancel found nothing to stop")
+	}
+	close(release)
+
+	select {
+	case err := <-queued:
+		if !errors.Is(err, ErrCheckCancelled) {
+			t.Fatalf("queued check error = %v, want ErrCheckCancelled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("queued check did not return")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if checked[second.StableID] {
+		t.Fatal("the queued check ran after it was cancelled")
+	}
+}
+
+func waitForCondition(t *testing.T, what string, done func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if done() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+func TestCancelReportsWhetherAnythingWasRunning(t *testing.T) {
+	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{testProxy("node-1", "Node one")})
+	if proxyChecker.CancelCheck() {
+		t.Fatal("cancel reported a run while nothing was running")
+	}
+	if proxyChecker.CheckRunning() {
+		t.Fatal("no run should be reported outside a check")
 	}
 }
 

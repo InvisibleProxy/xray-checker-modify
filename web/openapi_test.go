@@ -43,11 +43,13 @@ func TestOpenAPISpecDocumentsEveryForkAdminRoute(t *testing.T) {
 	want := []string{
 		"/api/v1/admin/proxies",
 		"/api/v1/admin/proxies/check",
+		"/api/v1/admin/proxies/check/cancel",
 		"/api/v1/admin/subscription/refresh",
 		"/api/v1/admin/backup",
 		"/api/v1/admin/backup/restore",
 		"/api/v1/admin/speed-tests",
 		"/api/v1/admin/speed-tests/run",
+		"/api/v1/admin/speed-tests/cancel",
 		"/api/v1/admin/speed-tests/node-url",
 		"/api/v1/admin/speed-tests/history",
 		"/api/v1/admin/nodes-overview",

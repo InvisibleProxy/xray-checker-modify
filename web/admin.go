@@ -448,7 +448,11 @@ func AdminProxyCheckHandler(check AdminProxyCheckFunc, proxyChecker *checker.Pro
 			return
 		}
 		if err := check(req.StableIDs); err != nil {
-			writeError(w, err.Error(), http.StatusBadRequest)
+			status := http.StatusBadRequest
+			if errors.Is(err, checker.ErrCheckCancelled) {
+				status = http.StatusConflict
+			}
+			writeError(w, err.Error(), status)
 			return
 		}
 
@@ -474,6 +478,38 @@ func AdminProxyCheckHandler(check AdminProxyCheckFunc, proxyChecker *checker.Pro
 			result = append(result, adminProxyInfo(&proxyCopy, details, startPort, !proxyChecker.MonitoringEnabled(stableID)))
 		}
 		writeJSON(w, result)
+	}
+}
+
+// AdminCancelFunc stops the run that is in progress and reports whether there
+// was one to stop.
+type AdminCancelFunc func() bool
+
+func AdminProxyCheckCancelHandler(cancel AdminCancelFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSON(w, map[string]bool{"cancelled": cancel()})
+	}
+}
+
+// AdminSpeedTestCancelHandler stops a running speed test. A manual run spends
+// its first phase in an availability check, while the manager itself is not
+// running yet, so a cancel that finds no test running stops that check
+// instead: the two never run at the same time — both hold the same run gate.
+func AdminSpeedTestCancelHandler(manager *speedtest.Manager, cancelAvailability AdminCancelFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		cancelled := manager.Cancel()
+		if !cancelled && cancelAvailability != nil {
+			cancelled = cancelAvailability()
+		}
+		writeJSON(w, map[string]bool{"cancelled": cancelled})
 	}
 }
 
