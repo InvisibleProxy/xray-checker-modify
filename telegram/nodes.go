@@ -42,6 +42,23 @@ func (s *Service) speaksAbout(stableID string) bool {
 	return s.proxyChecker.EnvironmentSourced(stableID)
 }
 
+// labelled returns the node under the name it should be read by — the
+// operator's own label when they set one. It is a copy, so every formatter
+// downstream keeps printing proxy.Name and the shared list keeps the name the
+// subscription actually sent.
+func (s *Service) labelled(proxy *models.ProxyConfig) *models.ProxyConfig {
+	if proxy == nil || s.proxyChecker == nil {
+		return proxy
+	}
+	label := s.proxyChecker.Label(proxy)
+	if label == proxy.Name {
+		return proxy
+	}
+	renamed := *proxy
+	renamed.Name = label
+	return &renamed
+}
+
 func (s *Service) sortedProxies() []*models.ProxyConfig {
 	all := s.proxyChecker.GetProxies()
 	proxies := make([]*models.ProxyConfig, 0, len(all))
@@ -52,7 +69,7 @@ func (s *Service) sortedProxies() []*models.ProxyConfig {
 		if !s.proxyChecker.MonitoringEnabled(proxy.StableID) || !s.speaksAbout(proxy.StableID) {
 			continue
 		}
-		proxies = append(proxies, proxy)
+		proxies = append(proxies, s.labelled(proxy))
 	}
 	sort.Slice(proxies, func(i, j int) bool {
 		return strings.ToLower(proxies[i].Name) < strings.ToLower(proxies[j].Name)
@@ -161,13 +178,15 @@ func (s *Service) findProxy(query string) (*models.ProxyConfig, []*models.ProxyC
 		if !s.proxyChecker.MonitoringEnabled(proxy.StableID) || !s.speaksAbout(proxy.StableID) {
 			continue
 		}
+		labelled := s.labelled(proxy)
 		stableID := strings.ToLower(proxy.StableID)
-		name := strings.ToLower(proxy.Name)
 		if stableID == query || strings.HasPrefix(stableID, query) {
-			return proxy, []*models.ProxyConfig{proxy}
+			return labelled, []*models.ProxyConfig{labelled}
 		}
-		if strings.Contains(name, query) {
-			matches = append(matches, proxy)
+		// Both names are searchable: an operator may remember either the label
+		// they gave a node or the string the subscription calls it by.
+		if strings.Contains(strings.ToLower(labelled.Name), query) || strings.Contains(strings.ToLower(proxy.Name), query) {
+			matches = append(matches, labelled)
 		}
 	}
 

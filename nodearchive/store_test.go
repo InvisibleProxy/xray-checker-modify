@@ -828,3 +828,80 @@ func TestLoadAvailabilityHistoryWithoutMaintenanceFlag(t *testing.T) {
 		t.Fatalf("old sample was not normalized as a monitored check: %+v", history[0])
 	}
 }
+
+// The operator's label is theirs; the subscription's name stays exactly as it
+// arrived, because identity, the refresh comparison and the archive all rest on
+// it. Renaming may only change what is read.
+func TestDisplayNameNeverReplacesTheSubscriptionName(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "node_registry.json")
+	proxy := &models.ProxyConfig{
+		StableID:  "node-1",
+		Name:      "proxy-01-nl-edge-host-01",
+		GroupName: "Auto-select",
+		Protocol:  "vless",
+		Server:    "node.example",
+		Port:      443,
+	}
+	store := NewStore(path, nil)
+	if err := store.SyncProxies([]*models.ProxyConfig{proxy}); err != nil {
+		t.Fatal(err)
+	}
+
+	record, err := store.SetDisplayName(proxy.StableID, "  Нидерланды · узел 1  ")
+	if err != nil {
+		t.Fatalf("set display name: %v", err)
+	}
+	if record.DisplayName != "Нидерланды · узел 1" {
+		t.Fatalf("display name = %q, want it trimmed", record.DisplayName)
+	}
+	if record.Name != proxy.Name {
+		t.Fatalf("subscription name = %q, want it untouched", record.Name)
+	}
+	if record.GroupName != "Auto-select" {
+		t.Fatalf("group name = %q, want the config remarks kept", record.GroupName)
+	}
+	if names := store.DisplayNames(); names[proxy.StableID] != record.DisplayName {
+		t.Fatalf("display names = %+v, want the label listed", names)
+	}
+
+	// A refresh re-syncs the same node; the label has to survive it.
+	if err := store.SyncProxies([]*models.ProxyConfig{proxy}); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := NewStore(path, nil)
+	if err := reloaded.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.nodes[proxy.StableID]; got.DisplayName != "Нидерланды · узел 1" || got.Name != proxy.Name {
+		t.Fatalf("record after refresh and restart = %+v", got)
+	}
+
+	cleared, err := reloaded.SetDisplayName(proxy.StableID, "   ")
+	if err != nil {
+		t.Fatalf("clear display name: %v", err)
+	}
+	if cleared.DisplayName != "" {
+		t.Fatalf("display name = %q, want it cleared", cleared.DisplayName)
+	}
+	if len(reloaded.DisplayNames()) != 0 {
+		t.Fatal("a cleared label is still listed")
+	}
+}
+
+func TestDisplayNameRejectsAnOverlongLabel(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "node_registry.json"), nil)
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "Node", Protocol: "vless", Server: "node.example", Port: 443}
+	if err := store.SyncProxies([]*models.ProxyConfig{proxy}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetDisplayName("node-1", strings.Repeat("я", maxDisplayNameRunes+1)); err == nil {
+		t.Fatal("an overlong label must be rejected")
+	}
+	// Counted in runes, so a Cyrillic name of the allowed length still fits.
+	if _, err := store.SetDisplayName("node-1", strings.Repeat("я", maxDisplayNameRunes)); err != nil {
+		t.Fatalf("a label of the allowed length was rejected: %v", err)
+	}
+	if _, err := store.SetDisplayName("missing", "Name"); err == nil {
+		t.Fatal("renaming an unknown node must fail")
+	}
+}

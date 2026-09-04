@@ -135,3 +135,46 @@ func TestUnlistedSourceStaysOffThePublicSurfaces(t *testing.T) {
 		t.Fatalf("status page endpoints = %+v, want only the deployment's own node", registered)
 	}
 }
+
+// The panel gets both names: the one it shows and the one the subscription
+// sends, so a renamed node still says where it came from.
+func TestAdminProxyInfoCarriesBothNames(t *testing.T) {
+	proxy := &models.ProxyConfig{
+		StableID: "node-1", Name: "proxy-01-nl-edge-host-01", GroupName: "Auto-select",
+		Protocol: "vless", Server: "node.example", Port: 443, UUID: "a",
+	}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "", "", 1, 0, "status")
+
+	decode := func(t *testing.T) AdminProxyInfo {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		AdminProxiesHandler(proxyChecker, 10000).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/proxies", nil))
+		var envelope struct {
+			Data []AdminProxyInfo `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(envelope.Data) != 1 {
+			t.Fatalf("proxies = %+v, want one", envelope.Data)
+		}
+		return envelope.Data[0]
+	}
+
+	unnamed := decode(t)
+	if unnamed.Name != proxy.Name || unnamed.DisplayName != "" || unnamed.SourceName != "" {
+		t.Fatalf("unnamed node = %+v, want only the subscription name", unnamed)
+	}
+	if unnamed.GroupName != "Auto-select" {
+		t.Fatalf("group name = %q, want the config remarks surfaced", unnamed.GroupName)
+	}
+
+	proxyChecker.ApplyDisplayNames(map[string]string{proxy.StableID: "Нидерланды · узел 1"})
+	named := decode(t)
+	if named.Name != "Нидерланды · узел 1" {
+		t.Fatalf("name = %q, want the operator's label", named.Name)
+	}
+	if named.DisplayName != "Нидерланды · узел 1" || named.SourceName != proxy.Name {
+		t.Fatalf("renamed node = %+v, want both names returned", named)
+	}
+}

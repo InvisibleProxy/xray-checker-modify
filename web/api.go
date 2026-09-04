@@ -100,11 +100,14 @@ func writeError(w http.ResponseWriter, message string, code int) {
 	})
 }
 
-func toProxyInfo(proxy *models.ProxyConfig, details checker.ProxyStatusDetails, maintenance bool, startPort int) ProxyInfo {
+func toProxyInfo(proxy *models.ProxyConfig, details checker.ProxyStatusDetails, maintenance bool, startPort int, label string) ProxyInfo {
+	if label == "" {
+		label = proxy.Name
+	}
 	return ProxyInfo{
 		Index:        proxy.Index,
 		StableID:     proxy.StableID,
-		Name:         proxy.Name,
+		Name:         label,
 		SubName:      proxy.SubName,
 		Server:       proxy.Server,
 		Port:         proxy.Port,
@@ -143,7 +146,7 @@ func APIPublicProxiesHandler(proxyChecker *checker.ProxyChecker) http.HandlerFun
 			maintenance := !proxyChecker.MonitoringEnabled(proxy.StableID)
 			result = append(result, PublicProxyInfo{
 				StableID:     proxy.StableID,
-				Name:         proxy.Name,
+				Name:         proxyChecker.Label(proxy),
 				Online:       !details.IsOffline(),
 				Status:       string(details.EffectiveStatus()),
 				ProxyHealthy: details.Online,
@@ -173,7 +176,7 @@ func APIProxiesHandler(proxyChecker *checker.ProxyChecker, startPort int) http.H
 				proxy.StableID = proxy.GenerateStableID()
 			}
 			details, _ := proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
-			result = append(result, toProxyInfo(proxy, details, !proxyChecker.MonitoringEnabled(proxy.StableID), startPort))
+			result = append(result, toProxyInfo(proxy, details, !proxyChecker.MonitoringEnabled(proxy.StableID), startPort, proxyChecker.Label(proxy)))
 		}
 
 		writeJSON(w, result)
@@ -211,7 +214,7 @@ func APIProxyHandler(proxyChecker *checker.ProxyChecker, startPort int) http.Han
 		}
 
 		details, _ := proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
-		writeJSON(w, toProxyInfo(proxy, details, !proxyChecker.MonitoringEnabled(proxy.StableID), startPort))
+		writeJSON(w, toProxyInfo(proxy, details, !proxyChecker.MonitoringEnabled(proxy.StableID), startPort, proxyChecker.Label(proxy)))
 	}
 }
 

@@ -26,6 +26,10 @@ const (
 	maxAvailabilityHistoryRetentionDays     = 3650
 )
 
+// A label an operator types has to fit a node card and a Telegram line; past
+// this length it stops being a name and starts being a description.
+const maxDisplayNameRunes = 64
+
 const (
 	incidentKindNode       = "node"
 	incidentKindMass       = "mass"
@@ -100,9 +104,21 @@ type IncidentRecord struct {
 }
 
 type NodeRecord struct {
-	StableID                 string    `json:"stableId"`
-	Name                     string    `json:"name"`
-	SubName                  string    `json:"subName"`
+	StableID string `json:"stableId"`
+	// Name is what the subscription calls the node, kept exactly as it arrived.
+	Name string `json:"name"`
+	// DisplayName is the operator's own label for the node, shown wherever the
+	// name is. A subscription that names its outbounds by routing tag —
+	// "proxy-01-nl-edge-host-01" — is describing its own topology, not
+	// anything a human wants to read in a list, and this is the answer to that.
+	// It never replaces Name: the source keeps saying what it says, and an
+	// empty value means the node is shown under it.
+	DisplayName string `json:"displayName,omitempty"`
+	// GroupName is the remarks of the config the node came from, set when that
+	// config held several outbounds and its remarks could not name any of them
+	// on its own.
+	GroupName string `json:"groupName,omitempty"`
+	SubName   string `json:"subName"`
 	Server                   string    `json:"server"`
 	Port                     int       `json:"port"`
 	Protocol                 string    `json:"protocol"`
@@ -410,6 +426,54 @@ func (s *Store) SetMaintenance(stableID string, enabled bool) (NodeRecord, error
 		return NodeRecord{}, err
 	}
 	return record, nil
+}
+
+// SetDisplayName gives a node the operator's own label, or clears it when the
+// value is empty. The subscription's own name is untouched: it stays in the
+// record, in the effective config the refresh compares, and in everything keyed
+// on identity. Only what people read changes.
+func (s *Store) SetDisplayName(stableID string, displayName string) (NodeRecord, error) {
+	stableID = strings.TrimSpace(stableID)
+	if stableID == "" {
+		return NodeRecord{}, fmt.Errorf("stableId is required")
+	}
+	displayName = strings.TrimSpace(displayName)
+	if len([]rune(displayName)) > maxDisplayNameRunes {
+		return NodeRecord{}, fmt.Errorf("a node name is limited to %d characters", maxDisplayNameRunes)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.nodes[stableID]
+	if !ok {
+		return NodeRecord{}, fmt.Errorf("node not found")
+	}
+	if record.DisplayName == displayName {
+		return record, nil
+	}
+
+	previous := record
+	record.DisplayName = displayName
+	s.nodes[stableID] = record
+	if err := s.saveLocked(); err != nil {
+		s.nodes[stableID] = previous
+		return NodeRecord{}, err
+	}
+	return record, nil
+}
+
+// DisplayNames lists the operator's labels by StableID, for handing to the
+// checker after startup and after every refresh.
+func (s *Store) DisplayNames() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	names := make(map[string]string, len(s.nodes))
+	for stableID, record := range s.nodes {
+		if record.DisplayName != "" {
+			names[stableID] = record.DisplayName
+		}
+	}
+	return names
 }
 
 // PauseProjectMonitoring closes live accounting at the project maintenance
@@ -1220,6 +1284,7 @@ func applyProxy(record NodeRecord, proxy *models.ProxyConfig, now time.Time) Nod
 	}
 	record.LastSeenAt = now
 	record.Name = proxy.Name
+	record.GroupName = proxy.GroupName
 	record.SubName = proxy.SubName
 	record.Server = proxy.Server
 	record.Port = proxy.Port

@@ -94,6 +94,8 @@ func (s *Service) NotifyNodeStatuses() bool {
 		if !s.proxyChecker.AvailabilityAccounted(proxy.StableID) || !s.speaksAbout(proxy.StableID) {
 			continue
 		}
+		// An alert names the node the way the operator reads it everywhere else.
+		proxy = s.labelled(proxy)
 		isMuted := muted[proxy.StableID]
 
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
@@ -288,6 +290,7 @@ func (s *Service) NotifyNodeRecoveries(stableIDs []string) {
 		if !ok || !s.speaksAbout(stableID) {
 			continue
 		}
+		proxy = s.labelled(proxy)
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(stableID)
 		if err != nil || !details.Online {
 			continue

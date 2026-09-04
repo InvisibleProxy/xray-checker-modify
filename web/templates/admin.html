@@ -1819,6 +1819,23 @@
 
           <div class="control-group">
             <div class="group-title">
+              <h3>Node name</h3>
+              <span id="node-name-state" class="muted">Select exactly one node</span>
+            </div>
+            <label>
+              Displayed name
+              <input id="node-display-name" type="text" maxlength="64" autocomplete="off" placeholder="Name from the subscription" disabled />
+            </label>
+            <div id="node-name-source" class="hint"></div>
+            <div class="row">
+              <button id="save-node-name" class="secondary" type="button" disabled>Save name</button>
+              <button id="clear-node-name" class="secondary" type="button" disabled>Reset</button>
+            </div>
+            <div class="hint">A panel that names its outbounds after its own routing — <code>proxy-01-nl-edge-host-01</code> — is describing where a tunnel goes, not naming a server. Your name is shown everywhere: cards, status page, Telegram. The subscription's own name is kept and stays searchable.</div>
+          </div>
+
+          <div class="control-group">
+            <div class="group-title">
               <h3>Maintenance</h3>
               <span id="maintenance-node-state" class="muted">Select one node</span>
             </div>
@@ -3099,6 +3116,8 @@
         maintenanceUpdatingIDs: new Set(),
         nodeURLDraftID: "",
         nodeURLDirty: false,
+        nodeNameDraftID: "",
+        nodeNameSavingID: "",
         openNodeStableIds: new Set(),
         dashboardCardHistory: new Map(),
         dashboardCardsAnimated: false,
@@ -6346,7 +6365,11 @@
         // The transport is what separates two nodes on one server, so it sits next
         // to the protocol rather than being left to a name suffix from the panel.
         const transport = proxy.transport ? transportLabel(proxy.transport) : "";
-        const prefix = [proxy.subName, proxy.protocol, transport].filter(Boolean).map(escapeHtml).join(" · ");
+        // A renamed node shows what its subscription calls it, and a node named
+        // after a routing tag shows the group whose human name the tag replaced.
+        // Both answer the same question: where did this thing come from?
+        const origin = proxy.sourceName || proxy.groupName || "";
+        const prefix = [proxy.subName, origin, proxy.protocol, transport].filter(Boolean).map(escapeHtml).join(" · ");
         const address = copyIPButton(proxy.server);
         return prefix ? `${prefix} · ${address}` : address;
       }
@@ -6665,8 +6688,67 @@
         $("selection-unmute").disabled = count === 0 || !ids.some((id) => anyMuted.has(id));
         $("selection-history").disabled = count !== 1;
         renderNodeURLForm();
+        renderNodeNameForm();
         renderMaintenanceControl();
         renderTelegramMuteControls();
+      }
+
+      function renderNodeNameForm() {
+        const ids = selectedIDs();
+        const input = $("node-display-name");
+        const proxy = ids.length === 1
+          ? state.proxies.find((item) => item.stableId === ids[0])
+          : null;
+        const saving = Boolean(proxy && state.nodeNameSavingID === proxy.stableId);
+        input.disabled = !proxy || saving;
+        $("save-node-name").disabled = !proxy || saving;
+        $("clear-node-name").disabled = !proxy || saving || !proxy.displayName;
+        if (!proxy) {
+          input.value = "";
+          input.placeholder = "";
+          $("node-name-state").textContent = "Select exactly one node";
+          $("node-name-source").textContent = "";
+          state.nodeNameDraftID = "";
+          return;
+        }
+        $("node-name-state").textContent = saving ? tr("Saving…") : proxy.stableId;
+        // The field shows the subscription's name as a placeholder, so leaving
+        // it empty reads as "use the name the source gives" rather than as a
+        // blank waiting to be filled.
+        const sourceName = proxy.sourceName || proxy.name;
+        input.placeholder = sourceName;
+        $("node-name-source").textContent = proxy.groupName
+          ? `${tr("From the subscription")}: ${sourceName} · ${proxy.groupName}`
+          : `${tr("From the subscription")}: ${sourceName}`;
+        // Typing must survive the 30-second refresh, so the field is only
+        // rewritten when the selection moves to another node.
+        if (state.nodeNameDraftID !== proxy.stableId) {
+          state.nodeNameDraftID = proxy.stableId;
+          input.value = proxy.displayName || "";
+        }
+      }
+
+      async function saveNodeDisplayName(name) {
+        const ids = selectedIDs();
+        if (ids.length !== 1) return;
+        const stableId = ids[0];
+        state.nodeNameSavingID = stableId;
+        renderNodeNameForm();
+        try {
+          await request("/nodes-overview/name", {
+            method: "PUT",
+            body: JSON.stringify({ stableId, name }),
+          });
+          state.nodeNameSavingID = "";
+          state.nodeNameDraftID = "";
+          await load();
+          $("message").textContent = name ? tr("Node name saved") : tr("Node name reset to the subscription name");
+        } catch (err) {
+          $("message").textContent = err.message;
+        } finally {
+          state.nodeNameSavingID = "";
+          renderNodeNameForm();
+        }
       }
 
       function renderMaintenanceControl() {
@@ -9168,6 +9250,14 @@
       $("selection-history").addEventListener("click", openSelectedHistory);
       $("save-node-url").addEventListener("click", saveNodeURL);
       $("clear-node-url").addEventListener("click", clearNodeURL);
+      $("save-node-name").addEventListener("click", () => saveNodeDisplayName($("node-display-name").value.trim()));
+      $("clear-node-name").addEventListener("click", () => {
+        $("node-display-name").value = "";
+        saveNodeDisplayName("");
+      });
+      $("node-display-name").addEventListener("keydown", (event) => {
+        if (event.key === "Enter") saveNodeDisplayName($("node-display-name").value.trim());
+      });
       ["node-url", "node-max-mb", "node-threshold"].forEach((id) => {
         $(id).addEventListener("input", () => {
           const ids = selectedIDs();

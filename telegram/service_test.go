@@ -2200,3 +2200,37 @@ func TestBotListsOnlyEnvironmentNodesButStillTunnelsThroughAddedOnes(t *testing.
 		t.Fatalf("speed report = %+v, want only the environment's own node", report)
 	}
 }
+
+// The bot reads nodes under the operator's own labels, and finds them by either
+// name — the one they gave and the one the subscription sends.
+func TestBotUsesTheOperatorLabelAndSearchesBothNames(t *testing.T) {
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "proxy-01-nl-edge-host-01"}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "", "", 1, 0, "status")
+	proxyChecker.ApplyDisplayNames(map[string]string{proxy.StableID: "Нидерланды · узел 1"})
+	service := NewService("", proxyChecker, nil, 10000)
+
+	proxies := service.sortedProxies()
+	if len(proxies) != 1 || proxies[0].Name != "Нидерланды · узел 1" {
+		t.Fatalf("bot list = %+v, want the operator's label", proxies)
+	}
+	if proxy.Name != "proxy-01-nl-edge-host-01" {
+		t.Fatalf("the shared proxy was renamed: %q", proxy.Name)
+	}
+
+	for _, query := range []string{"нидерланды", "host-01", "node-1"} {
+		found, _ := service.findProxy(query)
+		if found == nil || found.StableID != proxy.StableID {
+			t.Fatalf("searching %q found %+v", query, found)
+		}
+		if found.Name != "Нидерланды · узел 1" {
+			t.Fatalf("search result name = %q, want the label", found.Name)
+		}
+	}
+
+	report := service.labelSpeedResults(speedtest.RunReport{
+		Results: []speedtest.Result{{StableID: proxy.StableID, Name: proxy.Name, Mbps: 50}},
+	})
+	if report.Results[0].Name != "Нидерланды · узел 1" {
+		t.Fatalf("speed report name = %q, want the label", report.Results[0].Name)
+	}
+}

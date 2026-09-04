@@ -26,11 +26,21 @@ import (
 
 type AdminProxyInfo struct {
 	StableID string `json:"stableId"`
-	Name     string `json:"name"`
-	SubName  string `json:"subName"`
-	Server   string `json:"server"`
-	Port     int    `json:"port"`
-	Protocol string `json:"protocol"`
+	// Name is what the node is called on screen: the operator's own label when
+	// they set one, and the subscription's name otherwise.
+	Name string `json:"name"`
+	// SourceName is always the subscription's own name, so the panel can show
+	// what the source calls a node the operator renamed, and DisplayName says
+	// whether a label was set at all.
+	SourceName  string `json:"sourceName,omitempty"`
+	DisplayName string `json:"displayName,omitempty"`
+	// GroupName is the remarks of the config a node came from when that config
+	// held several outbounds — the human name a routing tag replaced.
+	GroupName string `json:"groupName,omitempty"`
+	SubName   string `json:"subName"`
+	Server    string `json:"server"`
+	Port      int    `json:"port"`
+	Protocol  string `json:"protocol"`
 	// Transport is what tells two nodes on one server apart: a host published
 	// over both TCP and xHTTP differs only by this and by the port.
 	Transport          string `json:"transport,omitempty"`
@@ -122,6 +132,15 @@ type AdminNodeMaintenanceRequest struct {
 }
 
 type AdminNodeMaintenanceFunc func(string, bool) (nodearchive.NodeRecord, error)
+
+// AdminNodeDisplayNameRequest renames a node for display. An empty name clears
+// the label and puts the node back under the name its subscription gives it.
+type AdminNodeDisplayNameRequest struct {
+	StableID string `json:"stableId"`
+	Name     string `json:"name"`
+}
+
+type AdminNodeDisplayNameFunc func(string, string) (nodearchive.NodeRecord, error)
 
 type AdminNodesOverviewMergeRequest struct {
 	SourceStableID    string `json:"sourceStableId"`
@@ -430,7 +449,7 @@ func AdminProxiesHandler(proxyChecker *checker.ProxyChecker, startPort int) http
 				details.Online = online
 				details.Latency = latency
 			}
-			result = append(result, adminProxyInfo(proxy, details, startPort, !proxyChecker.MonitoringEnabled(proxy.StableID)))
+			result = append(result, adminProxyInfo(proxy, details, startPort, !proxyChecker.MonitoringEnabled(proxy.StableID), proxyChecker.DisplayName(proxy.StableID)))
 		}
 		writeJSON(w, result)
 	}
@@ -480,7 +499,7 @@ func AdminProxyCheckHandler(check AdminProxyCheckFunc, proxyChecker *checker.Pro
 			details, _ := proxyChecker.GetProxyStatusDetailsIncludingMaintenance(stableID)
 			proxyCopy := *proxy
 			proxyCopy.StableID = stableID
-			result = append(result, adminProxyInfo(&proxyCopy, details, startPort, !proxyChecker.MonitoringEnabled(stableID)))
+			result = append(result, adminProxyInfo(&proxyCopy, details, startPort, !proxyChecker.MonitoringEnabled(stableID), proxyChecker.DisplayName(stableID)))
 		}
 		writeJSON(w, result)
 	}
@@ -721,6 +740,31 @@ func AdminNodeMaintenanceHandler(update AdminNodeMaintenanceFunc) http.HandlerFu
 	}
 }
 
+func AdminNodeDisplayNameHandler(update AdminNodeDisplayNameFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req AdminNodeDisplayNameRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, "Invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		req.StableID = strings.TrimSpace(req.StableID)
+		if req.StableID == "" {
+			writeError(w, "stableId is required", http.StatusBadRequest)
+			return
+		}
+		record, err := update(req.StableID, req.Name)
+		if err != nil {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, record)
+	}
+}
+
 func AdminIncidentsHandler(store *nodearchive.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -924,7 +968,15 @@ func AdminTelegramTestHandler(service *telegram.Service) http.HandlerFunc {
 	}
 }
 
-func adminProxyInfo(proxy *models.ProxyConfig, details checker.ProxyStatusDetails, startPort int, maintenance bool) AdminProxyInfo {
+func adminProxyInfo(proxy *models.ProxyConfig, details checker.ProxyStatusDetails, startPort int, maintenance bool, displayName string) AdminProxyInfo {
+	name := proxy.Name
+	sourceName := ""
+	if displayName != "" {
+		// Both are returned so the panel can show the operator's label without
+		// losing the string the subscription actually sent.
+		name = displayName
+		sourceName = proxy.Name
+	}
 	downSince := ""
 	downtimeSec := int64(0)
 	if !details.DownSince.IsZero() {
@@ -944,7 +996,10 @@ func adminProxyInfo(proxy *models.ProxyConfig, details checker.ProxyStatusDetail
 
 	return AdminProxyInfo{
 		StableID:           proxy.StableID,
-		Name:               proxy.Name,
+		Name:               name,
+		SourceName:         sourceName,
+		DisplayName:        displayName,
+		GroupName:          proxy.GroupName,
 		SubName:            proxy.SubName,
 		Server:             proxy.Server,
 		Port:               proxy.Port,

@@ -264,6 +264,7 @@ func main() {
 		logger.Warn("Failed to sync node registry: %v", err)
 	}
 	proxyChecker.ReplaceMaintenanceModes(nodeArchive.ActiveMaintenanceStableIDs())
+	proxyChecker.ApplyDisplayNames(nodeArchive.DisplayNames())
 	if err := nodeArchive.SyncSpeedHistory(speedTestManager.AllResultHistory()); err != nil {
 		logger.Warn("Failed to sync speed history into node registry: %v", err)
 	}
@@ -396,6 +397,16 @@ func main() {
 		return runAvailabilityCheck(stableIDs, true)
 	}
 	telegramService.SetAvailabilityCheckFunc(runManualAvailabilityCheck)
+	// Renaming touches nothing but what is read, so it applies at once and needs
+	// none of the Xray lifecycle locking a maintenance change does.
+	setNodeDisplayName := func(stableID string, name string) (nodearchive.NodeRecord, error) {
+		record, err := nodeArchive.SetDisplayName(stableID, name)
+		if err != nil {
+			return nodearchive.NodeRecord{}, err
+		}
+		proxyChecker.ApplyDisplayNames(nodeArchive.DisplayNames())
+		return record, nil
+	}
 	setNodeMaintenance := func(stableID string, enabled bool) (nodearchive.NodeRecord, error) {
 		xrayLifecycle.Lock()
 		defer xrayLifecycle.Unlock()
@@ -659,6 +670,7 @@ func main() {
 			logger.Warn("Failed to sync node registry after subscription update: %v", err)
 		}
 		proxyChecker.ReplaceMaintenanceModes(nodeArchive.ActiveMaintenanceStableIDs())
+		proxyChecker.ApplyDisplayNames(nodeArchive.DisplayNames())
 		xrayLifecycle.Unlock()
 		refreshProgress.Phase(web.RefreshPhaseFinishing)
 		if err := telegramService.PruneInactiveMutedNodes(); err != nil {
@@ -738,6 +750,7 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/nodes-overview/merge", web.AdminNodesOverviewMergeHandler(nodeMergeCoordinator))
 	protectedHandler.Handle("/api/v1/admin/nodes-overview/delete", web.AdminNodesOverviewDeleteHandler(nodeArchive, speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/nodes-overview/maintenance", web.AdminNodeMaintenanceHandler(setNodeMaintenance))
+	protectedHandler.Handle("/api/v1/admin/nodes-overview/name", web.AdminNodeDisplayNameHandler(setNodeDisplayName))
 	protectedHandler.Handle("/api/v1/admin/nodes-overview", web.AdminNodesOverviewHandler(nodeArchive, speedTestManager))
 	protectedHandler.Handle("/api/v1/admin/incidents", web.AdminIncidentsHandler(nodeArchive))
 	protectedHandler.Handle("/api/v1/admin/schedules", web.AdminScheduleHandler(speedTestManager, nodeArchive))

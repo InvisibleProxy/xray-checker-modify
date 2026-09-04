@@ -71,7 +71,13 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`speedRunRequestIDs: new Set()`,
 		`runDisabled: state.speedRunStarting || Boolean(run && run.running) || maintenanceUpdating`,
 		`run.textContent = view.runStarting ? "Starting…" : (view.runRunning ? "Running…" : "Run")`,
-		// A source's observation mode and its two switches.
+		// The operator's own name for a node, kept apart from the source's.
+		`id="node-display-name"`,
+		`function renderNodeNameForm()`,
+		`async function saveNodeDisplayName(name)`,
+		`request("/nodes-overview/name"`,
+		`const origin = proxy.sourceName || proxy.groupName || ""`,
+		// A source's observation mode and its switch.
 		`id="subscription-source-mode"`,
 		`function subscriptionSourceObservationHTML(source)`,
 		`mode: $("subscription-source-mode").value`,

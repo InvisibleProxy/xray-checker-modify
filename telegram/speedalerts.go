@@ -17,6 +17,7 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 		return
 	}
 	cfg := s.Config()
+	report = s.labelSpeedResults(report)
 	if report.Source == "manual" {
 		report = s.excludeUnreportableSpeedResults(report)
 	}
@@ -134,6 +135,24 @@ func attachSpeedDiagnostics(report speedtest.RunReport, annotations map[string]s
 		}
 		copyValue := annotation
 		results[index].AgentDiagnostic = &copyValue
+	}
+	report.Results = results
+	return report
+}
+
+// labelSpeedResults renames results to the operator's labels for the report.
+// A result carries the name the node had when it was measured, which is the
+// right thing to persist and the wrong thing to read months later under a name
+// the operator has since replaced.
+func (s *Service) labelSpeedResults(report speedtest.RunReport) speedtest.RunReport {
+	if s.proxyChecker == nil || len(report.Results) == 0 {
+		return report
+	}
+	results := append([]speedtest.Result(nil), report.Results...)
+	for index := range results {
+		if label := s.proxyChecker.DisplayName(results[index].StableID); label != "" {
+			results[index].Name = label
+		}
 	}
 	report.Results = results
 	return report

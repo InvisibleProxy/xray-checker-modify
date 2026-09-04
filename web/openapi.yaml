@@ -724,6 +724,45 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /api/v1/admin/nodes-overview/name:
+    put:
+      summary: Rename a node for display
+      description: >-
+        Gives the node the operator's own label, shown wherever its name is: admin cards, the status page, the
+        Telegram bot and its reports. An empty `name` clears the label. The subscription's own name is untouched —
+        it stays in the archive, in the effective config a refresh compares and in everything keyed on identity,
+        and both names stay searchable in the bot. Applied at once; no refresh is involved.
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stableId]
+              properties:
+                stableId: {type: string}
+                name:
+                  type: string
+                  maxLength: 64
+                  description: Up to 64 characters, counted in runes. Empty clears the label.
+      responses:
+        '200':
+          description: Updated persisted node record
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/NodeSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /api/v1/admin/incidents:
     get:
       summary: Get persisted node and correlated mass incidents
@@ -1796,6 +1835,19 @@ components:
         - $ref: '#/components/schemas/ProxyInfo'
         - type: object
           properties:
+            sourceName:
+              type: string
+              description: >-
+                What the subscription calls the node. Returned only when the operator gave it a name of their own;
+                `name` then carries that label and this stays as the source's own string.
+            displayName:
+              type: string
+              description: The operator's own label, absent when they set none.
+            groupName:
+              type: string
+              description: >-
+                The remarks of the config the node came from, present when that config held several outbounds and
+                each node had to keep its routing tag as a name.
             checkedAt:
               type: string
               format: date-time
@@ -2452,6 +2504,13 @@ components:
             type: string
         name:
           type: string
+          description: What the subscription calls the node, kept exactly as it arrived.
+        displayName:
+          type: string
+          description: The operator's own label, absent when they set none.
+        groupName:
+          type: string
+          description: Remarks of the config the node came from, when that config held several outbounds.
         subName:
           type: string
         server:

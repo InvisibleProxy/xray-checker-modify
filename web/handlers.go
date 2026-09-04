@@ -217,7 +217,7 @@ func RegisterConfigEndpoints(proxies []*models.ProxyConfig, proxyChecker *checke
 		details, _ := proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
 
 		endpoints = append(endpoints, EndpointInfo{
-			Name:               proxy.Name,
+			Name:               proxyChecker.Label(proxy),
 			GroupName:          proxy.GroupName,
 			ServerInfo:         fmt.Sprintf("%s:%d", proxy.Server, proxy.Port),
 			Server:             proxy.Server,

@@ -60,6 +60,12 @@ type ProxyChecker struct {
 	runs      map[*checkRun]struct{}
 	activeRun *checkRun
 
+	// The operator's own labels live beside the proxy list rather than on it:
+	// the parsed name belongs to the subscription and must stay untouched, and
+	// mutating a shared ProxyConfig under readers would be a race besides.
+	displayNamesMu sync.RWMutex
+	displayNames   map[string]string
+
 	// The observation policy of a node is a property of the source it came
 	// from, so it is resolved through the node index rather than stored per
 	// node: an operator changing a source's mode must not have to wait for the
