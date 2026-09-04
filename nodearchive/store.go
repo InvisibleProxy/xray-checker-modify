@@ -38,6 +38,10 @@ type Store struct {
 	path         string
 	proxyChecker *checker.ProxyChecker
 	httpClient   *http.Client
+	// resolveHost turns a hostname into an address for the geo lookups. It is a
+	// field so a test can answer without a live DNS server, the same reason
+	// httpClient is one.
+	resolveHost func(context.Context, string) (string, error)
 
 	mu                               sync.RWMutex
 	nodes                            map[string]NodeRecord
@@ -1056,6 +1060,27 @@ func (s *Store) lookupGeo(ctx context.Context, record NodeRecord) (NodeRecord, i
 		return record, 0, []error{fmt.Errorf("server is empty")}
 	}
 
+	// Both geo services answer about an address, not a name. A subscription is
+	// free to publish a hostname, and until it is resolved every such node came
+	// back as a lookup failure with nothing to show for it.
+	// An address is already answerable; only a name needs resolving.
+	if net.ParseIP(target) == nil {
+		resolve := s.resolveHost
+		if resolve == nil {
+			resolve = resolveGeoTarget
+		}
+		resolved, resolveErr := resolve(ctx, target)
+		if resolveErr != nil {
+			failedAt := time.Now()
+			record.GeoError = resolveErr.Error()
+			record.GeoUpdatedAt = failedAt
+			record.IfconfigError = resolveErr.Error()
+			record.IfconfigUpdatedAt = failedAt
+			return record, 0, []error{resolveErr}
+		}
+		target = resolved
+	}
+
 	now := time.Now()
 	successes := 0
 	var errors []error
@@ -1832,6 +1857,36 @@ func countryCodeFromName(name string) string {
 		}
 	}
 	return ""
+}
+
+// resolveGeoTarget turns whatever the subscription published into an address a
+// geo service can answer about. An address passes through untouched.
+//
+// IPv4 wins when a name has both: the geo databases are far better populated
+// for it, and a node reachable over v6 is nearly always reachable over v4 too.
+// A name with several addresses is reported by its first — the services have
+// nothing better to say about a rotating record anyway, and the alternative,
+// querying each, would multiply the rate limit for no extra certainty.
+func resolveGeoTarget(ctx context.Context, target string) (string, error) {
+	if ip := net.ParseIP(target); ip != nil {
+		return target, nil
+	}
+
+	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, target)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", target, err)
+	}
+	for _, address := range addresses {
+		if ipv4 := address.IP.To4(); ipv4 != nil {
+			return ipv4.String(), nil
+		}
+	}
+	for _, address := range addresses {
+		if address.IP != nil {
+			return address.IP.String(), nil
+		}
+	}
+	return "", fmt.Errorf("resolve %s: no addresses", target)
 }
 
 func serverHost(server string) string {

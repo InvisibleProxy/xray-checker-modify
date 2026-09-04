@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"xray-checker/config"
 	"xray-checker/logger"
@@ -35,19 +36,34 @@ type subscriptionResult struct {
 	Error   error
 }
 
-func InitializeConfiguration(configFile string, version string) (*[]*models.ProxyConfig, error) {
-	configs, err := ReadFromMultipleSources(config.CLIConfig.Subscription.URLs)
-	if err != nil {
-		return nil, err
+func InitializeConfiguration(configFile string, version string, feeds []Feed) (*[]*models.ProxyConfig, error) {
+	if len(feeds) == 0 {
+		feeds = FeedsFromURLs(config.CLIConfig.Subscription.URLs)
+	}
+
+	var configs []*models.ProxyConfig
+	if len(feeds) == 0 {
+		// Neither the environment nor the panel has a source yet. Starting with
+		// no nodes is better than refusing to start: the panel comes up, and the
+		// first subscription can be added there. Anything else would make the
+		// admin UI reachable only once a subscription already exists.
+		logger.Warn("No subscription sources configured; starting with no nodes. Add one in the admin panel under Settings → Subscriptions.")
+	} else {
+		var err error
+		configs, err = ReadFromFeeds(feeds)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	proxyConfigs := configs
 
-	if config.CLIConfig.Proxy.ResolveDomains {
-		proxyConfigs, err = ResolveDomainsForConfigs(configs)
+	if config.CLIConfig.Proxy.ResolveDomains && len(configs) > 0 {
+		resolved, err := ResolveDomainsForConfigs(configs)
 		if err != nil {
 			return nil, err
 		}
+		proxyConfigs = resolved
 	}
 
 	if deduplicated, dropped := xray.DeduplicateByStableID(proxyConfigs); dropped > 0 {
@@ -73,13 +89,37 @@ func InitializeConfiguration(configFile string, version string) (*[]*models.Prox
 	return &proxyConfigs, nil
 }
 
+// Feed is one subscription to fetch, together with the client identity to
+// fetch it as. A feed from the environment uses the checker's own identity; a
+// feed added from the panel may impersonate Happ or INCY to reach a panel that
+// answers only known clients or enforces an HWID device limit.
+type Feed struct {
+	URL     string
+	Profile ClientProfile
+	// Name overrides the name the subscription reports about itself. It is the
+	// label the operator gave the source in the panel.
+	Name string
+}
+
+func FeedsFromURLs(urls []string) []Feed {
+	feeds := make([]Feed, 0, len(urls))
+	for _, url := range urls {
+		feeds = append(feeds, Feed{URL: url})
+	}
+	return feeds
+}
+
 func ReadFromMultipleSources(urls []string) ([]*models.ProxyConfig, error) {
-	if len(urls) == 0 {
+	return ReadFromFeeds(FeedsFromURLs(urls))
+}
+
+func ReadFromFeeds(feeds []Feed) ([]*models.ProxyConfig, error) {
+	if len(feeds) == 0 {
 		return nil, fmt.Errorf("no subscription URLs provided")
 	}
 
-	if len(urls) == 1 {
-		configs, name, err := ReadFromSource(urls[0])
+	if len(feeds) == 1 {
+		configs, name, err := ReadFromFeed(feeds[0])
 		if err != nil {
 			return nil, err
 		}
@@ -92,29 +132,29 @@ func ReadFromMultipleSources(urls []string) ([]*models.ProxyConfig, error) {
 		return configs, nil
 	}
 
-	logger.Debug("Fetching %d subscriptions in parallel", len(urls))
+	logger.Debug("Fetching %d subscriptions in parallel", len(feeds))
 
 	resultMap := make(map[string]subscriptionResult)
 	var resultMu sync.Mutex
 
 	var wg sync.WaitGroup
-	for _, url := range urls {
+	for _, feed := range feeds {
 		wg.Add(1)
-		go func(u string) {
+		go func(f Feed) {
 			defer wg.Done()
-			configs, name, err := ReadFromSource(u)
+			configs, name, err := ReadFromFeed(f)
 			for _, cfg := range configs {
 				cfg.SubName = name
 			}
 			resultMu.Lock()
-			resultMap[u] = subscriptionResult{
-				URL:     u,
+			resultMap[f.URL] = subscriptionResult{
+				URL:     f.URL,
 				Name:    name,
 				Configs: configs,
 				Error:   err,
 			}
 			resultMu.Unlock()
-		}(url)
+		}(feed)
 	}
 
 	wg.Wait()
@@ -124,8 +164,8 @@ func ReadFromMultipleSources(urls []string) ([]*models.ProxyConfig, error) {
 	var firstName string
 	successCount := 0
 
-	for _, url := range urls {
-		result := resultMap[url]
+	for _, feed := range feeds {
+		result := resultMap[feed.URL]
 		if result.Error != nil {
 			logger.Warn("Failed to fetch subscription %s: %v", result.URL, result.Error)
 			errors = append(errors, fmt.Errorf("%s: %v", result.URL, result.Error))
@@ -151,17 +191,39 @@ func ReadFromMultipleSources(urls []string) ([]*models.ProxyConfig, error) {
 		allConfigs[i].Index = i
 	}
 
-	logger.Debug("Total: %d proxies from %d/%d subscriptions", len(allConfigs), successCount, len(urls))
+	logger.Debug("Total: %d proxies from %d/%d subscriptions", len(allConfigs), successCount, len(feeds))
 	return allConfigs, nil
 }
 
 func ReadFromSource(source string) ([]*models.ProxyConfig, string, error) {
-	parser := NewParser()
-	result, err := parser.Parse(source)
+	return ReadFromFeed(Feed{URL: source})
+}
+
+// ReadFromFeed fetches one subscription as the client its profile names. An
+// operator-supplied name wins over the one the subscription reports, because it
+// is what labels the source in the panel.
+func ReadFromFeed(feed Feed) ([]*models.ProxyConfig, string, error) {
+	parser := NewParserForProfile(feed.Profile)
+	result, err := parser.Parse(feed.URL)
 	if err != nil {
 		return nil, "", err
 	}
-	return result.Configs, result.Name, nil
+	name := result.Name
+	if trimmed := strings.TrimSpace(feed.Name); trimmed != "" {
+		name = trimmed
+	}
+
+	configs, dropped := dropPlaceholderNodes(result.Configs)
+	logDroppedPlaceholders(feed.URL, dropped)
+	if len(configs) == 0 && len(dropped) > 0 {
+		// The panel answered, but with notices instead of nodes. Saying so
+		// beats reporting an empty subscription the operator cannot explain.
+		return nil, "", fmt.Errorf(
+			"subscription returned only placeholder entries (%d), which usually means the panel refused it — most often an exhausted HWID device limit",
+			len(dropped),
+		)
+	}
+	return configs, name, nil
 }
 
 func ResolveDomainsForConfigs(configs []*models.ProxyConfig) ([]*models.ProxyConfig, error) {

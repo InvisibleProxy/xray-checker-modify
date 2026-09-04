@@ -33,6 +33,7 @@ var excludedData = []string{
 	"Telegram credentials and administrator IDs",
 	"Remnawave API token and announce ownership runtime",
 	"diagnostic agent registry, enrollment state and controller-bound public identities",
+	"subscription sources, whose URLs carry the subscription's own access token",
 }
 
 type FileInfo struct {

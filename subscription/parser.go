@@ -12,14 +12,17 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"xray-checker/config"
 	"xray-checker/logger"
 	"xray-checker/models"
 
 	libXrayShare "github.com/xtls/libxray/share"
 )
 
-type Parser struct{}
+type Parser struct {
+	// profile decides which client this parser impersonates when it fetches a
+	// subscription over HTTP. The zero value is the checker's own identity.
+	profile ClientProfile
+}
 
 type fetchResult struct {
 	Content []byte
@@ -28,6 +31,11 @@ type fetchResult struct {
 
 func NewParser() *Parser {
 	return &Parser{}
+}
+
+// NewParserForProfile returns a parser that fetches as the given client.
+func NewParserForProfile(profile ClientProfile) *Parser {
+	return &Parser{profile: profile}
 }
 
 type libXrayOutbound struct {
@@ -489,12 +497,13 @@ func (p *Parser) fetchURLContent(source string) (*fetchResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "Xray-Checker")
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("X-Device-OS", "CheckerOS")
-	req.Header.Set("X-Ver-OS", config.Version)
-	req.Header.Set("X-Device-Model", "Xray-Checker Pro Max")
-	req.Header.Set("X-Hwid", "0JLQq9Ca0JvQrtCn0Jgg0JHQm9Cp0KLQrCBIV0lE")
+	// The headers say which client this request impersonates. The default is
+	// the checker's own identity, which response rules on the operator's panel
+	// are keyed on; a source overrides it to reach a panel that only answers
+	// known clients, or one that enforces an HWID device limit.
+	for name, value := range p.profile.Headers() {
+		req.Header.Set(name, value)
+	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
@@ -504,6 +513,12 @@ func (p *Parser) fetchURLContent(source string) (*fetchResult, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		// A panel with the device limit on answers 404 and names the reason in
+		// a header. Reporting that verbatim saves an operator from hunting a
+		// plain "HTTP 404" that has nothing to do with the URL being wrong.
+		if resp.Header.Get("x-hwid-not-supported") == "true" {
+			return nil, fmt.Errorf("HTTP %d: the panel requires an HWID header (device limit is enabled); set a client profile with an HWID for this subscription", resp.StatusCode)
+		}
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 

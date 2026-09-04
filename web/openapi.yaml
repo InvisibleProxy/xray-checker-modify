@@ -226,6 +226,82 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /api/v1/admin/subscription/sources:
+    get:
+      summary: List subscription sources managed from the panel
+      description: >-
+        Environment sources are listed read-only beside them. Every URL is masked: a subscription URL carries the
+        access token of the subscription itself, so it is never returned in full.
+      tags: [Admin]
+      responses:
+        '200':
+          description: Subscription sources
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/SubscriptionSources'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      summary: Add or update a subscription source
+      description: >-
+        Omit `id` to add, supply it to update. On update an empty `url` keeps the stored one, because the API only
+        ever shows a masked URL. An HWID is generated when the chosen client profile needs one and none is given;
+        the value then stays fixed, since the remote panel ties a device slot to it. Changes take effect on the
+        next subscription refresh.
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubscriptionSourceRequest'
+      responses:
+        '200':
+          description: Updated source list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/SubscriptionSources'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    delete:
+      summary: Remove a subscription source
+      tags: [Admin]
+      parameters:
+        - in: query
+          name: id
+          schema: {type: string}
+          required: true
+      responses:
+        '200':
+          description: Updated source list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/SubscriptionSources'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /api/v1/admin/subscription/refresh:
     post:
       summary: Refresh all subscription sources
@@ -1849,6 +1925,85 @@ components:
           type: string
         config:
           $ref: '#/components/schemas/SpeedTestConfig'
+
+    SubscriptionSources:
+      type: object
+      required: [sources, environmentSources, profiles]
+      properties:
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/SubscriptionSource'
+        environmentSources:
+          type: array
+          description: Masked URLs of the sources supplied by SUBSCRIPTION_URL. They cannot be edited through this API.
+          items: {type: string}
+        profiles:
+          type: array
+          items:
+            $ref: '#/components/schemas/SubscriptionClientProfile'
+
+    SubscriptionSource:
+      type: object
+      required: [id, url, enabled, profile]
+      properties:
+        id: {type: string}
+        url:
+          type: string
+          description: Masked. Scheme and host stay; the path is reduced to its first and last characters.
+        name: {type: string}
+        enabled: {type: boolean}
+        profile:
+          type: string
+          enum: [checker, happ, incy, custom]
+        userAgent: {type: string}
+        hwid:
+          type: string
+          description: >-
+            Returned in full. It is not a credential but the identifier the remote panel stores against this
+            subscription, and it names the device slot the source occupies.
+        deviceOs: {type: string}
+        osVersion: {type: string}
+        deviceModel: {type: string}
+        createdAt: {type: string}
+
+    SubscriptionClientProfile:
+      type: object
+      description: What a profile sends, so the panel can show the headers rather than only a label.
+      properties:
+        id: {type: string}
+        label: {type: string}
+        userAgent: {type: string}
+        deviceOs: {type: string}
+        osVersion: {type: string}
+        deviceModel: {type: string}
+        sendsHwid: {type: boolean}
+
+    SubscriptionSourceRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Absent or empty to add a new source.
+        url:
+          type: string
+          description: Required when adding. On update an empty value keeps the stored URL.
+        name: {type: string}
+        enabled: {type: boolean}
+        profile:
+          type: string
+          enum: [checker, happ, incy, custom]
+          description: >-
+            checker keeps the checker's own identity, which the operator's own response rules match on. happ and
+            incy impersonate those iOS clients, which is what a third-party panel with an HWID device limit
+            expects. custom requires an explicit userAgent.
+        userAgent: {type: string}
+        hwid:
+          type: string
+          description: 10-64 characters of latin letters, digits, '=' or '-'. Generated when empty and the profile needs one.
+        deviceOs: {type: string}
+        osVersion: {type: string}
+        deviceModel: {type: string}
 
     NodeTestURLRequest:
       type: object

@@ -29,6 +29,7 @@
 | `nodearchive/` | долгоживущий реестр активных/выбывших нод, downtime, persisted incident journal, GeoIP активных нод и speedtest summary |
 | `nodemerge/` | preview и crash-safe перенос persisted identity/history с retired StableID в active StableID |
 | `remnawave/` | безопасный API client, topology model, audience-aware policy, ownership и reconciliation subscription `announce` |
+| `subsource/` | источники подписок, добавленные из панели: persisted URL, профиль имитируемого клиента и его HWID; окружение остаётся владельцем стартовых подписок |
 | `telegram/` | компактный HTML и Rich Messages, команды, отчёты, алерты, recovery и настройки mute; разложен по темам (alerts, bot, transport, format), карта — в package doc `telegram/service.go` |
 | `backup/` | создание ZIP, автоматическая ротация, типизированная проверка и транзакционный staged restore |
 | `web/` | dashboard, admin UI, REST API, OpenAPI и Basic Auth middleware |
@@ -263,6 +264,7 @@ Recovery alert хранит `RecoveryPending`, время и latency до усп
 | `data/remnawave_announce_config.json` | `remnawave` | versioned policy, Internal/External pairs и location-first members (`location key → StableID → Host UUID`); входит в backup |
 | `data/remnawave_announce_state.json` | `remnawave` | последнее exact managed value и announced locations; не входит в backup |
 | `data/reachability.json` | `reachability` | последний вердикт на пару «нода × агент», момент его появления и streak; кэш наблюдений, восстанавливаемый следующим sweep |
+| `data/subscription_sources.json` | `subsource` | источники подписок, добавленные из панели: URL, профиль клиента и его HWID; **не** входит в backup, потому что URL подписки является токеном доступа |
 | `data/project_state.json` | `projectmaintenance` | глобальный режим обслуживания и момент его включения; отсутствие файла означает выключенный режим; входит в backup |
 | `data/backups/*.zip` | `backup` | до 7 автоматических архивов за последние 7 суток |
 | `data/.node-merge-{pending,applied,rollback}` | `nodemerge` | временная crash-safe транзакция переноса identity/history |
@@ -285,7 +287,7 @@ Recovery alert хранит `RecoveryPending`, время и latency до усп
 - Retired-ноды сохраняются в Nodes Overview до ручного удаления либо подтверждённого merge в однозначно совпавшую active-ноду.
 - Восстановление требует перезапуска приложения.
 - Rich Messages зависят от версии Telegram Bot API; при отсутствии метода бот использует менее выразительный компактный HTML.
-- GeoIP refresh выполняется только для active-нод, использует внешние сервисы и может быть недоступен из-за сети или rate limit.
+- GeoIP refresh выполняется только для active-нод, использует внешние сервисы и может быть недоступен из-за сети или rate limit. Ноды, опубликованные под DNS-именем, резолвятся перед запросом: geo относится к первому адресу имени, поэтому для записи с несколькими или ротирующимися адресами результат описывает одну из точек, а не все.
 - `check_endpoint` является корреляционным выводом по нескольким нодам; он не доказывает отказ внешнего сервиса без отдельной проверки с другой точки.
 - Remnawave `external-squads:update` не ограничен одним полем; компрометация token позволяет менять и другие настройки External Squad. Минимальные scopes и сетевое ограничение остаются обязательными.
 - User-specific Remnawave Response Rule имеет более высокий приоритет, чем External Squad header override, поэтому может скрыть управляемый `announce` для отдельного пользователя.

@@ -693,6 +693,12 @@ func TestRefreshGeoSkipsRetiredNodes(t *testing.T) {
 		Active:   false,
 	}
 
+	// The geo services answer about addresses, not names, so a hostname is
+	// resolved first. This stands in for DNS to keep the test offline.
+	store.resolveHost = func(_ context.Context, _ string) (string, error) {
+		return "198.51.100.7", nil
+	}
+
 	var requested []string
 	store.httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		requested = append(requested, request.URL.String())

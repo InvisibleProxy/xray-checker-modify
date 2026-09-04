@@ -24,6 +24,7 @@ import (
 	"xray-checker/remoteprobe"
 	"xray-checker/speedtest"
 	"xray-checker/subscription"
+	"xray-checker/subsource"
 	"xray-checker/telegram"
 	"xray-checker/web"
 	"xray-checker/xray"
@@ -97,8 +98,17 @@ func main() {
 		logger.Fatal("Failed to ensure geo files: %v", err)
 	}
 
+	// Sources added from the panel load before the first fetch, so they take
+	// part in startup exactly like the ones the environment provides. A failure
+	// here is not fatal: the environment sources alone must still be enough to
+	// start, which is what every existing deployment relies on.
+	subscriptionSources := subsource.NewStore("data/subscription_sources.json")
+	if err := subscriptionSources.Load(); err != nil {
+		logger.Warn("Failed to load subscription sources added from the panel: %v", err)
+	}
+
 	configFile := "xray_config.json"
-	proxyConfigs, err := subscription.InitializeConfiguration(configFile, version)
+	proxyConfigs, err := subscription.InitializeConfiguration(configFile, version, allSubscriptionFeeds(subscriptionSources))
 	if err != nil {
 		logger.Fatal("Error initializing configuration: %v", err)
 	}
@@ -565,7 +575,7 @@ func main() {
 		defer func() { refreshProgress.Done(refreshFailed) }()
 
 		refreshProgress.Phase(web.RefreshPhaseFetching)
-		newConfigs, err := subscription.ReadFromMultipleSources(config.CLIConfig.Subscription.URLs)
+		newConfigs, err := subscription.ReadFromFeeds(allSubscriptionFeeds(subscriptionSources))
 		if err != nil {
 			return web.AdminSubscriptionRefreshResult{}, fmt.Errorf("fetch subscriptions: %w", err)
 		}
@@ -697,6 +707,7 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/subscription/refresh", web.AdminSubscriptionRefreshHandler(func(request web.AdminSubscriptionRefreshRequest) (web.AdminSubscriptionRefreshResult, error) {
 		return refreshSubscription("manual", request.Force, request.ConfirmationToken)
 	}))
+	protectedHandler.Handle("/api/v1/admin/subscription/sources", web.AdminSubscriptionSourcesHandler(subscriptionSources, config.CLIConfig.Subscription.URLs))
 	protectedHandler.Handle("/api/v1/admin/project-maintenance", web.AdminProjectMaintenanceHandler(projectMaintenance.Snapshot, setProjectMaintenance))
 	protectedHandler.Handle("/api/v1/admin/backup", web.AdminBackupHandler(backupCreator))
 	protectedHandler.Handle("/api/v1/admin/backup/restore", web.AdminBackupRestoreHandler(backupRestorer, nodeMergeCoordinator.AcquireRestoreGuard))
@@ -841,6 +852,23 @@ func unavailableStableIDSet(proxyChecker *checker.ProxyChecker) map[string]bool 
 		}
 	}
 	return unavailable
+}
+
+// allSubscriptionFeeds lists what to fetch: the environment's own subscriptions
+// first, then the ones an operator added from the panel. Environment sources
+// keep the checker's own client identity — response rules on the operator's
+// panel are keyed on that User-Agent — while a panel-added source carries the
+// client profile chosen for it.
+func allSubscriptionFeeds(sources *subsource.Store) []subscription.Feed {
+	feeds := subscription.FeedsFromURLs(config.CLIConfig.Subscription.URLs)
+	for _, source := range sources.EnabledSources() {
+		feeds = append(feeds, subscription.Feed{
+			URL:     source.URL,
+			Profile: source.Profile,
+			Name:    source.Name,
+		})
+	}
+	return feeds
 }
 
 func activeStableIDSet(proxies []*models.ProxyConfig) map[string]bool {

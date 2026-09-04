@@ -1916,6 +1916,9 @@
               <button id="refresh-subscription" class="secondary small" type="button">Update Subscription</button>
             </div>
           </div>
+          <!-- Shown only with more than one subscription: with a single feed it
+               would be a row with one button and nothing to switch between. -->
+          <nav id="subscription-switch" class="chart-ranges" aria-label="Subscription" hidden></nav>
           <div class="overview-grid">
             <div class="kpi-card ok">
               <span>Servers online</span>
@@ -2006,6 +2009,7 @@
 
           <nav class="settings-nav global-settings-nav" aria-label="Global settings" role="tablist">
             <button id="global-settings-tab-project" class="settings-tab active" type="button" role="tab" aria-selected="true" aria-controls="global-settings-pane-project" tabindex="0">Project</button>
+            <button id="global-settings-tab-subscriptions" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="global-settings-pane-subscriptions" tabindex="-1">Subscriptions</button>
             <button id="global-settings-tab-history" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="global-settings-pane-history" tabindex="-1">History</button>
             <button id="global-settings-tab-telegram" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="global-settings-pane-telegram" tabindex="-1">Telegram</button>
             <button id="global-settings-tab-agents" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="global-settings-pane-agents" tabindex="-1">Agents</button>
@@ -2020,6 +2024,86 @@
               </div>
               <div class="hint">Pauses automatic monitoring, alerts, scheduled speed tests and subscription updates, without stopping Xray traffic or admin probes.</div>
               <button id="toggle-project-maintenance" class="secondary" type="button">Enable Project Maintenance</button>
+            </div>
+          </section>
+
+          <section id="global-settings-pane-subscriptions" class="settings-pane stack" role="tabpanel" aria-labelledby="global-settings-tab-subscriptions" hidden>
+            <div class="control-group">
+              <div class="group-title">
+                <h3>Subscription sources</h3>
+                <span id="subscription-sources-state" class="muted">Loading</span>
+              </div>
+              <div class="hint">Sources from the environment are listed read-only: the checker starts from them and their client identity must stay as it is. Sources added here are fetched in addition, each as the client you choose. Changes apply on the next subscription refresh.</div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Source</th>
+                      <th>Client</th>
+                      <th>HWID</th>
+                      <th>State</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="subscription-sources-list"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="control-group">
+              <div class="group-title">
+                <h3 id="subscription-source-form-title">Add a source</h3>
+                <span id="subscription-source-form-state" class="muted"></span>
+              </div>
+              <input id="subscription-source-id" type="hidden" />
+              <label>
+                Subscription URL
+                <input id="subscription-source-url" type="url" autocomplete="off" placeholder="https://panel.example/sub/xxxx" />
+              </label>
+              <label>
+                Name
+                <input id="subscription-source-name" type="text" autocomplete="off" placeholder="Optional label" />
+              </label>
+              <label>
+                Client to impersonate
+                <select id="subscription-source-profile"></select>
+              </label>
+              <div id="subscription-source-profile-hint" class="hint"></div>
+              <label>
+                HWID
+                <input id="subscription-source-hwid" type="text" autocomplete="off" placeholder="Generated automatically" />
+              </label>
+              <div class="hint">The panel ties one device slot to this value, so it stays fixed once saved. Leave empty to generate one.</div>
+              <div class="hint">A source with an impersonated client occupies a device slot on the remote panel, exactly as a phone would. On a subscription limited to one device that slot is the only one, so the checker will take the place of your own device. Reuse an existing HWID to update that device instead of claiming another.</div>
+              <details>
+                <summary>Override device headers</summary>
+                <div class="stack">
+                  <label>
+                    User-Agent
+                    <input id="subscription-source-user-agent" type="text" autocomplete="off" placeholder="Profile default" />
+                  </label>
+                  <label>
+                    X-Device-OS
+                    <input id="subscription-source-device-os" type="text" autocomplete="off" placeholder="Profile default" />
+                  </label>
+                  <label>
+                    X-Ver-OS
+                    <input id="subscription-source-os-version" type="text" autocomplete="off" placeholder="Profile default" />
+                  </label>
+                  <label>
+                    X-Device-Model
+                    <input id="subscription-source-device-model" type="text" autocomplete="off" placeholder="Profile default" />
+                  </label>
+                  <label>
+                    X-Device-Locale
+                    <input id="subscription-source-locale" type="text" autocomplete="off" placeholder="Profile default" />
+                  </label>
+                </div>
+              </details>
+              <div class="row">
+                <button id="save-subscription-source" class="primary" type="button">Save source</button>
+                <button id="reset-subscription-source" class="secondary" type="button">Clear form</button>
+              </div>
             </div>
           </section>
 
@@ -5847,15 +5931,65 @@
         </div>`;
       }
 
+      // The subscription currently in scope, or "" for all of them. It is read
+      // from the existing filter rather than kept separately, so the switch
+      // above the KPIs and the Subscription filter in Controls can never
+      // disagree about what is on screen.
+      function selectedSubscription() {
+        const select = $("sub-filter");
+        return select ? select.value : "";
+      }
+
+      function subscriptionScopedProxies() {
+        const subscription = selectedSubscription();
+        if (!subscription) return state.proxies;
+        return state.proxies.filter((proxy) => (proxy.subName || "") === subscription);
+      }
+
+      // One row of buttons per subscription. Without it a fleet spread over
+      // several feeds reads as a single pool, and "18 of 24 online" says nothing
+      // about which provider is down.
+      function renderSubscriptionSwitch() {
+        const container = $("subscription-switch");
+        if (!container) return;
+        const subscriptions = [...new Set(state.proxies.map((proxy) => proxy.subName).filter(Boolean))].sort();
+        if (subscriptions.length < 2) {
+          container.hidden = true;
+          container.innerHTML = "";
+          return;
+        }
+
+        const active = selectedSubscription();
+        const button = (value, label, count) =>
+          `<button class="chart-range ${value === active ? "active" : ""}" type="button" data-subscription="${escapeHtml(value)}">${escapeHtml(label)} <span class="muted">${count}</span></button>`;
+
+        container.hidden = false;
+        container.innerHTML = button("", tr("All subscriptions"), state.proxies.length) + subscriptions.map((name) =>
+          button(name, name, state.proxies.filter((proxy) => proxy.subName === name).length)
+        ).join("");
+
+        container.querySelectorAll("[data-subscription]").forEach((element) => {
+          element.addEventListener("click", () => {
+            const select = $("sub-filter");
+            if (!select) return;
+            select.value = element.dataset.subscription;
+            select.dispatchEvent(new Event("change"));
+          });
+        });
+      }
+
       function renderOverview() {
-        const total = state.proxies.length;
-        const maintenance = state.proxies.filter((proxy) => proxy.maintenance).length;
+        renderSubscriptionSwitch();
+        const scoped = subscriptionScopedProxies();
+        const scopedIDs = new Set(scoped.map((proxy) => proxy.stableId));
+        const total = scoped.length;
+        const maintenance = scoped.filter((proxy) => proxy.maintenance).length;
         const monitored = total - maintenance;
-        const online = state.proxies.filter((proxy) => !proxy.maintenance && proxyAvailabilityStatus(proxy) === "online").length;
-        const proxyFailures = state.proxies.filter((proxy) => !proxy.maintenance && proxyAvailabilityStatus(proxy) === "proxy_failure").length;
-        const offline = state.proxies.filter((proxy) => !proxy.maintenance && proxyAvailabilityStatus(proxy) === "offline").length;
-        const muted = telegramAnyMutedNodeSet().size;
-        const results = monitoringSpeedResults();
+        const online = scoped.filter((proxy) => !proxy.maintenance && proxyAvailabilityStatus(proxy) === "online").length;
+        const proxyFailures = scoped.filter((proxy) => !proxy.maintenance && proxyAvailabilityStatus(proxy) === "proxy_failure").length;
+        const offline = scoped.filter((proxy) => !proxy.maintenance && proxyAvailabilityStatus(proxy) === "offline").length;
+        const muted = [...telegramAnyMutedNodeSet()].filter((id) => scopedIDs.has(id)).length;
+        const results = monitoringSpeedResults().filter((result) => scopedIDs.has(result.stableId));
         const successful = results.filter(isSuccessfulResult);
         const avgMbps = successful.length
           ? successful.reduce((sum, result) => sum + Number(result.mbps || 0), 0) / successful.length
@@ -5879,9 +6013,10 @@
             ? "All monitored systems operational"
             : `${proxyFailures} proxy failure · ${offline} offline`;
           $("overall-status").className = `chip ${monitored > 0 && proxyFailures === 0 && offline === 0 ? "ok" : offline > 0 ? "error" : proxyFailures > 0 ? "warn" : "neutral"}`;
+          const scope = selectedSubscription() ? `${selectedSubscription()} · ` : "";
           $("overview-state").textContent = nextRun
-            ? `${results.length} latest results · next test ${formatTimeUntil(nextRun)}`
-            : `${results.length} latest results`;
+            ? `${scope}${results.length} latest results · next test ${formatTimeUntil(nextRun)}`
+            : `${scope}${results.length} latest results`;
         }
         $("last-updated").textContent = state.lastUpdatedAt
           ? `Last updated: ${state.lastUpdatedAt.toLocaleTimeString()}`
@@ -7441,7 +7576,7 @@
 
       function switchGlobalSettingsPane(pane) {
         state.globalSettingsPane = pane;
-        ["project", "history", "telegram", "agents", "backup"].forEach((name) => {
+        ["project", "subscriptions", "history", "telegram", "agents", "backup"].forEach((name) => {
           const active = name === pane;
           $(`global-settings-pane-${name}`).hidden = !active;
           const tabButton = $(`global-settings-tab-${name}`);
@@ -7450,6 +7585,175 @@
           tabButton.tabIndex = active ? 0 : -1;
         });
         if (pane === "agents") loadDiagnosticAgents();
+        if (pane === "subscriptions") loadSubscriptionSources();
+      }
+
+      // Subscription sources added from the panel. Environment sources are shown
+      // read-only beside them: the checker boots from those, and their client
+      // identity is what the operator's own response rules match on.
+      async function loadSubscriptionSources() {
+        try {
+          state.subscriptionSources = await request("/subscription/sources");
+          renderSubscriptionSources();
+          $("subscription-sources-state").textContent = "";
+        } catch (err) {
+          $("subscription-sources-state").textContent = err.message;
+        }
+      }
+
+      function renderSubscriptionSourceProfiles() {
+        const select = $("subscription-source-profile");
+        const profiles = (state.subscriptionSources && state.subscriptionSources.profiles) || [];
+        if (profiles.length === 0) return;
+        const current = select.value;
+        select.innerHTML = profiles.map((profile) =>
+          `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.label)}</option>`
+        ).join("");
+        if (current && profiles.some((profile) => profile.id === current)) {
+          select.value = current;
+        }
+        renderSubscriptionSourceProfileHint();
+      }
+
+      function renderSubscriptionSourceProfileHint() {
+        const profiles = (state.subscriptionSources && state.subscriptionSources.profiles) || [];
+        const selected = profiles.find((profile) => profile.id === $("subscription-source-profile").value);
+        if (!selected) {
+          $("subscription-source-profile-hint").textContent = "";
+          return;
+        }
+        const parts = [`User-Agent: ${selected.userAgent || tr("set your own")}`];
+        if (selected.deviceOs) parts.push(`X-Device-OS: ${selected.deviceOs}`);
+        if (selected.osVersion) parts.push(`X-Ver-OS: ${selected.osVersion}`);
+        if (selected.deviceModel) parts.push(`X-Device-Model: ${selected.deviceModel}`);
+        $("subscription-source-profile-hint").textContent = parts.join(" · ");
+      }
+
+      function renderSubscriptionSources() {
+        const data = state.subscriptionSources || {};
+        const sources = Array.isArray(data.sources) ? data.sources : [];
+        const environment = Array.isArray(data.environmentSources) ? data.environmentSources : [];
+        renderSubscriptionSourceProfiles();
+
+        const environmentRows = environment.map((url) => `<tr>
+          <td>${escapeHtml(url)}<div class="muted">${escapeHtml(tr("from environment"))}</div></td>
+          <td>Xray-Checker</td>
+          <td class="muted">—</td>
+          <td>${escapeHtml(tr("Read-only"))}</td>
+          <td></td>
+        </tr>`).join("");
+
+        const rows = sources.map((source) => `<tr>
+          <td>${escapeHtml(source.name || source.url)}${source.name ? `<div class="muted">${escapeHtml(source.url)}</div>` : ""}</td>
+          <td>${escapeHtml(source.profile)}</td>
+          <td class="mono">${escapeHtml(source.hwid || "—")}</td>
+          <td>${escapeHtml(source.enabled ? tr("Enabled") : tr("Disabled"))}</td>
+          <td>
+            <button class="secondary edit-subscription-source" type="button" data-id="${escapeHtml(source.id)}">${escapeHtml(tr("Edit"))}</button>
+            <button class="secondary toggle-subscription-source" type="button" data-id="${escapeHtml(source.id)}">${escapeHtml(source.enabled ? tr("Disable") : tr("Enable"))}</button>
+            <button class="secondary delete-subscription-source" type="button" data-id="${escapeHtml(source.id)}">${escapeHtml(tr("Delete"))}</button>
+          </td>
+        </tr>`).join("");
+
+        $("subscription-sources-list").innerHTML = environmentRows + rows ||
+          `<tr><td colspan="5" class="muted">${escapeHtml(tr("No subscription sources"))}</td></tr>`;
+
+        document.querySelectorAll(".edit-subscription-source").forEach((button) => {
+          button.addEventListener("click", () => fillSubscriptionSourceForm(button.dataset.id));
+        });
+        document.querySelectorAll(".toggle-subscription-source").forEach((button) => {
+          button.addEventListener("click", () => toggleSubscriptionSource(button.dataset.id));
+        });
+        document.querySelectorAll(".delete-subscription-source").forEach((button) => {
+          button.addEventListener("click", () => deleteSubscriptionSource(button.dataset.id));
+        });
+      }
+
+      function subscriptionSourceById(id) {
+        const sources = (state.subscriptionSources && state.subscriptionSources.sources) || [];
+        return sources.find((source) => source.id === id) || null;
+      }
+
+      function fillSubscriptionSourceForm(id) {
+        const source = subscriptionSourceById(id);
+        if (!source) return;
+        $("subscription-source-id").value = source.id;
+        $("subscription-source-url").value = source.url || "";
+        $("subscription-source-name").value = source.name || "";
+        $("subscription-source-profile").value = source.profile || "checker";
+        $("subscription-source-hwid").value = source.hwid || "";
+        $("subscription-source-user-agent").value = source.userAgent || "";
+        $("subscription-source-device-os").value = source.deviceOs || "";
+        $("subscription-source-os-version").value = source.osVersion || "";
+        $("subscription-source-device-model").value = source.deviceModel || "";
+        $("subscription-source-locale").value = source.locale || "";
+        $("subscription-source-form-title").textContent = tr("Edit source");
+        renderSubscriptionSourceProfileHint();
+      }
+
+      function resetSubscriptionSourceForm() {
+        ["subscription-source-id", "subscription-source-url", "subscription-source-name", "subscription-source-hwid",
+          "subscription-source-user-agent", "subscription-source-device-os", "subscription-source-os-version",
+          "subscription-source-device-model", "subscription-source-locale"].forEach((id) => { $(id).value = ""; });
+        $("subscription-source-form-title").textContent = tr("Add a source");
+        $("subscription-source-form-state").textContent = "";
+        renderSubscriptionSourceProfileHint();
+      }
+
+      async function saveSubscriptionSource(overrides) {
+        const body = Object.assign({
+          id: $("subscription-source-id").value.trim(),
+          url: $("subscription-source-url").value.trim(),
+          name: $("subscription-source-name").value.trim(),
+          profile: $("subscription-source-profile").value,
+          hwid: $("subscription-source-hwid").value.trim(),
+          userAgent: $("subscription-source-user-agent").value.trim(),
+          deviceOs: $("subscription-source-device-os").value.trim(),
+          osVersion: $("subscription-source-os-version").value.trim(),
+          deviceModel: $("subscription-source-device-model").value.trim(),
+          locale: $("subscription-source-locale").value.trim(),
+          enabled: true,
+        }, overrides || {});
+
+        try {
+          state.subscriptionSources = await request("/subscription/sources", {
+            method: "POST",
+            body: JSON.stringify(body),
+          });
+          renderSubscriptionSources();
+          resetSubscriptionSourceForm();
+          $("message").textContent = tr("Subscription source saved. Refresh the subscription to apply it.");
+        } catch (err) {
+          $("subscription-source-form-state").textContent = err.message;
+        }
+      }
+
+      async function toggleSubscriptionSource(id) {
+        const source = subscriptionSourceById(id);
+        if (!source) return;
+        await saveSubscriptionSource({
+          id: source.id,
+          url: source.url,
+          name: source.name || "",
+          profile: source.profile,
+          hwid: source.hwid || "",
+          userAgent: source.userAgent || "",
+          deviceOs: source.deviceOs || "",
+          osVersion: source.osVersion || "",
+          deviceModel: source.deviceModel || "",
+          locale: source.locale || "",
+          enabled: !source.enabled,
+        });
+      }
+
+      async function deleteSubscriptionSource(id) {
+        try {
+          state.subscriptionSources = await request(`/subscription/sources?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+          renderSubscriptionSources();
+          $("message").textContent = tr("Subscription source removed. Refresh the subscription to apply it.");
+        } catch (err) {
+          $("subscription-sources-state").textContent = err.message;
+        }
       }
 
       // The Remnawave panes are groups of existing panels rather than one
@@ -8460,13 +8764,16 @@
       ["run", "filters", "schedule"].forEach((pane) => {
         $(`settings-tab-${pane}`).addEventListener("click", () => switchSettingsPane(pane));
       });
-      ["project", "history", "telegram", "agents", "backup"].forEach((pane) => {
+      ["project", "subscriptions", "history", "telegram", "agents", "backup"].forEach((pane) => {
         $(`global-settings-tab-${pane}`).addEventListener("click", () => switchGlobalSettingsPane(pane));
       });
       Object.keys(REMNAWAVE_PANES).forEach((pane) => {
         $(`remnawave-tab-${pane}`).addEventListener("click", () => switchRemnawavePane(pane));
       });
       switchRemnawavePane("settings");
+      $("save-subscription-source").addEventListener("click", () => saveSubscriptionSource());
+      $("reset-subscription-source").addEventListener("click", resetSubscriptionSourceForm);
+      $("subscription-source-profile").addEventListener("change", renderSubscriptionSourceProfileHint);
       $("create-diagnostic-agent").addEventListener("click", createDiagnosticAgent);
       // Once the operator types into a prefilled field, a later render must not
       // overwrite it with the controller default.
@@ -8726,6 +9033,9 @@
         $(id).addEventListener("change", () => {
           saveFilterState();
           renderNodes();
+          // The subscription filter also scopes the KPIs, so the summary above
+          // has to be recomputed rather than left describing the whole fleet.
+          if (id === "sub-filter") renderOverview();
         });
       });
       ["nodes-overview-search", "nodes-overview-status", "nodes-overview-country", "nodes-overview-sub", "nodes-overview-geo", "nodes-overview-sort"].forEach((id) => {

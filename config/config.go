@@ -25,7 +25,11 @@ func Parse(version string) {
 
 type CLI struct {
 	Subscription struct {
-		URLs           []string `name:"subscription-url" help:"URL(s) of the subscription (can be specified multiple times)" required:"true" env:"SUBSCRIPTION_URL"`
+		// Optional, because sources can also be added from the admin panel. With
+		// neither, the checker starts with no nodes and serves the panel, so the
+		// first subscription can be entered in a browser instead of being baked
+		// into the environment.
+		URLs           []string `name:"subscription-url" help:"URL(s) of the subscription (repeatable; optional when sources are added from the admin panel)" env:"SUBSCRIPTION_URL"`
 		Update         bool     `name:"subscription-update" help:"Whether to recheck the subscription" default:"true" env:"SUBSCRIPTION_UPDATE"`
 		UpdateInterval int      `name:"subscription-update-interval" help:"Interval for subscription updates in seconds" default:"300" env:"SUBSCRIPTION_UPDATE_INTERVAL"`
 	} `embed:"" prefix:""`
