@@ -66,7 +66,7 @@ func (s *Service) NotifyNodeStatuses() bool {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
-		if s.proxyChecker.MonitoringEnabled(proxy.StableID) {
+		if s.proxyChecker.AvailabilityAccounted(proxy.StableID) {
 			active[proxy.StableID] = true
 		}
 	}
@@ -89,7 +89,11 @@ func (s *Service) NotifyNodeStatuses() bool {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
-		if !s.proxyChecker.MonitoringEnabled(proxy.StableID) {
+		// Alerting needs a verdict to alert about and a source that allows
+		// speaking. A silent source is skipped whole rather than having its
+		// sends suppressed: turning notifications back on should report what is
+		// broken then, not replay everything that was missed.
+		if !s.proxyChecker.AvailabilityAccounted(proxy.StableID) || !s.proxyChecker.AlertsEnabled(proxy.StableID) {
 			continue
 		}
 		isMuted := muted[proxy.StableID]

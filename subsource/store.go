@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"xray-checker/observation"
 	"xray-checker/subscription"
 )
 
@@ -35,9 +36,26 @@ type Source struct {
 	Name    string `json:"name,omitempty"`
 	Enabled bool   `json:"enabled"`
 	// Profile carries the client identity and HWID used to fetch this source.
-	Profile   subscription.ClientProfile `json:"profile"`
-	CreatedAt time.Time                  `json:"createdAt"`
-	UpdatedAt time.Time                  `json:"updatedAt"`
+	Profile subscription.ClientProfile `json:"profile"`
+	// Mode, Silent and Unlisted say how this source's nodes are watched. They
+	// are absent from state written before observation modes existed, and that
+	// state described sources watched in full — which is what the zero values
+	// mean here.
+	Mode observation.Mode `json:"mode,omitempty"`
+	// Silent keeps Telegram quiet about this source without changing what is
+	// measured: a panel still being evaluated should not wake anyone at night.
+	Silent bool `json:"silent,omitempty"`
+	// Unlisted keeps the source's nodes off the public dashboard, out of
+	// Prometheus and without their own /config endpoint. Somebody else's panel
+	// is not the service this deployment publishes as its own.
+	Unlisted  bool      `json:"unlisted,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// Policy is how this source's nodes are watched.
+func (s Source) Policy() observation.Policy {
+	return observation.PolicyFor(s.Mode, s.Silent, s.Unlisted)
 }
 
 type stateFile struct {
@@ -296,6 +314,7 @@ func normalize(source Source) (Source, error) {
 	source.ID = strings.TrimSpace(source.ID)
 	source.URL = strings.TrimSpace(source.URL)
 	source.Name = strings.TrimSpace(source.Name)
+	source.Mode = observation.NormalizeMode(source.Mode)
 	if source.URL == "" {
 		return Source{}, fmt.Errorf("subscription URL is required")
 	}

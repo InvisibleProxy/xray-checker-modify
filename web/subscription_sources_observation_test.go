@@ -1,0 +1,137 @@
+package web
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"xray-checker/checker"
+	"xray-checker/models"
+	"xray-checker/observation"
+	"xray-checker/subsource"
+)
+
+func decodeSourcesResponse(t *testing.T, body []byte) AdminSubscriptionSourcesResponse {
+	t.Helper()
+	var envelope struct {
+		Data AdminSubscriptionSourcesResponse `json:"data"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatalf("decode: %v (%s)", err, body)
+	}
+	return envelope.Data
+}
+
+// The API never returns a real subscription URL, so a client that saves a row
+// back — toggling a source re-sends the whole thing — would otherwise store the
+// mask as the URL and leave a source that can never be fetched again.
+func TestSavingASourceWithAMaskedURLKeepsTheStoredOne(t *testing.T) {
+	store := subsource.NewStore(filepath.Join(t.TempDir(), "subscription_sources.json"))
+	handler := AdminSubscriptionSourcesHandler(store, nil, nil)
+
+	rec := httptest.NewRecorder()
+	body := `{"url":"https://panel.example/sub/super-secret-token","name":"Third-party panel","profile":"happ","enabled":true}`
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/admin/subscription/sources", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("add status = %d: %s", rec.Code, rec.Body.String())
+	}
+	created := decodeSourcesResponse(t, rec.Body.Bytes())
+	if len(created.Sources) != 1 {
+		t.Fatalf("sources = %+v, want one", created.Sources)
+	}
+	masked := created.Sources[0].URL
+	if masked == "" || !strings.Contains(masked, "…") {
+		t.Fatalf("URL %q was not masked", masked)
+	}
+
+	// Exactly what the panel holds for that row: the mask it was shown.
+	rec = httptest.NewRecorder()
+	toggle := `{"id":"` + created.Sources[0].ID + `","url":"` + masked + `","profile":"happ","enabled":false}`
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/v1/admin/subscription/sources", strings.NewReader(toggle)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("toggle status = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	stored := store.List()
+	if len(stored) != 1 {
+		t.Fatalf("stored = %+v, want one", stored)
+	}
+	if stored[0].URL != "https://panel.example/sub/super-secret-token" {
+		t.Fatalf("stored URL = %q, want the original one kept", stored[0].URL)
+	}
+	if stored[0].Enabled {
+		t.Fatal("the toggle did not apply")
+	}
+}
+
+// A mode change does not alter what is fetched, so it must reach the checker at
+// once instead of waiting for the next subscription refresh.
+func TestSavingASourceAppliesItsObservationPolicyImmediately(t *testing.T) {
+	store := subsource.NewStore(filepath.Join(t.TempDir(), "subscription_sources.json"))
+	applied := 0
+	handler := AdminSubscriptionSourcesHandler(store, nil, func() { applied++ })
+
+	rec := httptest.NewRecorder()
+	body := `{"url":"https://panel.example/sub/token","profile":"happ","enabled":true,"mode":"availability","silent":true,"unlisted":true}`
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/admin/subscription/sources", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if applied != 1 {
+		t.Fatalf("policy was applied %d times, want once", applied)
+	}
+
+	response := decodeSourcesResponse(t, rec.Body.Bytes())
+	if len(response.Sources) != 1 {
+		t.Fatalf("sources = %+v", response.Sources)
+	}
+	source := response.Sources[0]
+	if source.Mode != string(observation.ModeAvailability) || !source.Silent || !source.Unlisted {
+		t.Fatalf("source = %+v, want the observation settings echoed back", source)
+	}
+	if len(response.Modes) == 0 {
+		t.Fatal("the panel was given no modes to choose from")
+	}
+	for _, mode := range response.Modes {
+		if mode.ID == "" || mode.Label == "" {
+			t.Fatalf("mode %+v is missing its identity or label", mode)
+		}
+	}
+}
+
+// An unlisted source is watched for the operator, not published as their own
+// service: it belongs neither on the public list nor behind a /config endpoint
+// an external uptime check could bind to.
+func TestUnlistedSourceStaysOffThePublicSurfaces(t *testing.T) {
+	own := &models.ProxyConfig{StableID: "own", Name: "Own", Protocol: "vless", Server: "own.example", Port: 443, UUID: "a"}
+	foreign := &models.ProxyConfig{StableID: "foreign", Name: "Foreign", Protocol: "vless", Server: "foreign.example", Port: 443, UUID: "b", SourceID: "src-foreign"}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{own, foreign}, 10000, "", 1, "", "", 1, 0, "status")
+	proxyChecker.SetSourcePolicies(map[string]observation.Policy{
+		"src-foreign": observation.PolicyFor(observation.ModeFull, false, true),
+	})
+
+	rec := httptest.NewRecorder()
+	APIPublicProxiesHandler(proxyChecker).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/public/proxies", nil))
+	if body := rec.Body.String(); strings.Contains(body, "Foreign") {
+		t.Fatalf("public list exposed an unlisted source: %s", body)
+	} else if !strings.Contains(body, "Own") {
+		t.Fatalf("public list lost the deployment's own node: %s", body)
+	}
+
+	rec = httptest.NewRecorder()
+	ConfigStatusHandler(proxyChecker).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/config/foreign", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("/config for an unlisted node = %d, want 404", rec.Code)
+	}
+
+	RegisterConfigEndpoints([]*models.ProxyConfig{own, foreign}, proxyChecker, 10000)
+	endpointsMu.RLock()
+	registered := append([]EndpointInfo(nil), registeredEndpoints...)
+	endpointsMu.RUnlock()
+	if len(registered) != 1 || registered[0].StableID != "own" {
+		t.Fatalf("status page endpoints = %+v, want only the deployment's own node", registered)
+	}
+}

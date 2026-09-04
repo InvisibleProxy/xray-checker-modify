@@ -63,12 +63,18 @@ type StateFile struct {
 // AvailabilitySample is one real proxy availability check retained for the
 // admin card latency graph. Non-online checks deliberately carry no latency.
 type AvailabilitySample struct {
-	CheckedAt      time.Time `json:"checkedAt"`
-	Online         bool      `json:"online"`
-	Status         string    `json:"status,omitempty"`
-	LatencyMs      int64     `json:"latencyMs"`
-	FailureCode    string    `json:"failureCode,omitempty"`
-	FailureSummary string    `json:"failureSummary,omitempty"`
+	CheckedAt time.Time `json:"checkedAt"`
+	Online    bool      `json:"online"`
+	Status    string    `json:"status,omitempty"`
+	LatencyMs int64     `json:"latencyMs"`
+	// Maintenance marks a sample taken while the node was paused. The probe is
+	// a real one, so its latency is real and the graph stays continuous across
+	// a maintenance window; downtime, incidents and every global count still
+	// ignore the node, exactly as they ignore its probe elsewhere. Files
+	// written before this field read as false, which is what they were.
+	Maintenance    bool   `json:"maintenance,omitempty"`
+	FailureCode    string `json:"failureCode,omitempty"`
+	FailureSummary string `json:"failureSummary,omitempty"`
 }
 
 // IncidentRecord is an append-oriented operational journal entry. Node
@@ -545,12 +551,26 @@ func (s *Store) recordAvailability(recordHistory bool) error {
 		active[proxy.StableID] = true
 		record := applyProxy(s.nodes[proxy.StableID], proxy, now)
 		previous := record
-		if record.Maintenance {
+		// A node whose source is not watched for availability is accounted for
+		// exactly like a paused one: the probe still happens, but it is not a
+		// verdict, so it opens no downtime and no incident.
+		if record.Maintenance || !s.proxyChecker.AvailabilityAccounted(proxy.StableID) {
 			record = closeDowntime(record, now)
 			record = closeProxyFailure(record, now)
 			if incidentIndex := s.findActiveIncidentLocked(incidentKindNode, "node:"+proxy.StableID); incidentIndex >= 0 {
 				s.resolveIncidentLocked(incidentIndex, now)
 				changed = true
+			}
+			// The slow full sweep keeps probing such a node, so its latency is
+			// still being measured. Keeping those samples is what lets the card
+			// graph run through a pause instead of breaking at it; downtime,
+			// incidents and availability stats above stay untouched.
+			if recordHistory {
+				if probe, err := s.proxyChecker.GetProxyStatusDetailsIncludingMaintenance(proxy.StableID); err == nil {
+					if s.recordAvailabilitySampleLocked(proxy.StableID, probe, now, true) {
+						changed = true
+					}
+				}
 			}
 			if previous != record || s.nodes[proxy.StableID] != record {
 				s.nodes[proxy.StableID] = record
@@ -563,7 +583,7 @@ func (s *Store) recordAvailability(recordHistory bool) error {
 		if err == nil {
 			detailsByStableID[proxy.StableID] = details
 			record = applyAvailability(record, details, now)
-			if recordHistory && s.recordAvailabilitySampleLocked(proxy.StableID, details, now) {
+			if recordHistory && s.recordAvailabilitySampleLocked(proxy.StableID, details, now, false) {
 				changed = true
 			}
 			if s.updateNodeIncidentLocked(proxy, details, now) {
@@ -634,7 +654,7 @@ func (s *Store) AvailabilityHistory(stableID string, from, to time.Time) []Avail
 	return result
 }
 
-func (s *Store) recordAvailabilitySampleLocked(stableID string, details checker.ProxyStatusDetails, now time.Time) bool {
+func (s *Store) recordAvailabilitySampleLocked(stableID string, details checker.ProxyStatusDetails, now time.Time, maintenance bool) bool {
 	if details.CheckedAt.IsZero() {
 		return false
 	}
@@ -647,6 +667,7 @@ func (s *Store) recordAvailabilitySampleLocked(stableID string, details checker.
 		CheckedAt:      details.CheckedAt,
 		Online:         !details.IsOffline(),
 		Status:         string(details.EffectiveStatus()),
+		Maintenance:    maintenance,
 		FailureCode:    strings.TrimSpace(details.Failure.Code),
 		FailureSummary: strings.TrimSpace(details.Failure.Summary),
 	}

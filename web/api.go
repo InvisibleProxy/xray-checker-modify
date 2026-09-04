@@ -134,6 +134,11 @@ func APIPublicProxiesHandler(proxyChecker *checker.ProxyChecker) http.HandlerFun
 			if proxy.StableID == "" {
 				proxy.StableID = proxy.GenerateStableID()
 			}
+			// This list is public by definition, so an unlisted source stays
+			// out of it.
+			if !proxyChecker.ListedPublicly(proxy.StableID) {
+				continue
+			}
 			details, _ := proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
 			maintenance := !proxyChecker.MonitoringEnabled(proxy.StableID)
 			result = append(result, PublicProxyInfo{

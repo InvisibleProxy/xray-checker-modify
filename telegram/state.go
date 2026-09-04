@@ -140,7 +140,7 @@ func (s *Service) loadAlertState() error {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
-		if s.proxyChecker.MonitoringEnabled(proxy.StableID) {
+		if s.proxyChecker.AvailabilityAccounted(proxy.StableID) {
 			active[proxy.StableID] = true
 		}
 	}
@@ -300,7 +300,7 @@ func (s *Service) saveAlertState() error {
 			if proxy.StableID == "" {
 				proxy.StableID = proxy.GenerateStableID()
 			}
-			if s.proxyChecker.MonitoringEnabled(proxy.StableID) {
+			if s.proxyChecker.AvailabilityAccounted(proxy.StableID) {
 				active[proxy.StableID] = true
 			}
 		}

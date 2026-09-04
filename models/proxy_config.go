@@ -42,6 +42,13 @@ type ProxyConfig struct {
 	RawXhttpSettings string
 	SubName          string
 	GroupName        string
+	// SourceID names the panel-added subscription source this node came from,
+	// and is empty for a node from an environment subscription. It carries that
+	// source's observation policy to the node, is rebuilt on every refresh, and
+	// deliberately takes no part in StableID. A node offered by two sources is
+	// kept once, from the first feed that offered it — environment feeds are
+	// read first, so the deployment's own source stays authoritative.
+	SourceID string
 }
 
 func (pc *ProxyConfig) Validate() error {

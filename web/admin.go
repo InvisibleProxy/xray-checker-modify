@@ -40,6 +40,11 @@ type AdminProxyInfo struct {
 	ProxyHealthy       bool   `json:"proxyHealthy"`
 	Maintenance        bool   `json:"maintenance"`
 	LatencyMs          int64  `json:"latencyMs"`
+	// CheckedAt is when the stored status was written. Pausing a node clears
+	// its state, so an empty value is what tells "paused, not probed since"
+	// apart from "paused and genuinely offline" — both otherwise look like a
+	// zero latency.
+	CheckedAt string `json:"checkedAt,omitempty"`
 	DownSince          string `json:"downSince,omitempty"`
 	DowntimeSec        int64  `json:"downtimeSec"`
 	ProxyFailureSince  string `json:"proxyFailureSince,omitempty"`
@@ -932,6 +937,10 @@ func adminProxyInfo(proxy *models.ProxyConfig, details checker.ProxyStatusDetail
 		proxyFailureSince = details.ProxyFailureSince.Format(time.RFC3339)
 		proxyFailureSec = int64(time.Since(details.ProxyFailureSince).Seconds())
 	}
+	checkedAt := ""
+	if !details.CheckedAt.IsZero() {
+		checkedAt = details.CheckedAt.Format(time.RFC3339)
+	}
 
 	return AdminProxyInfo{
 		StableID:           proxy.StableID,
@@ -947,6 +956,7 @@ func adminProxyInfo(proxy *models.ProxyConfig, details checker.ProxyStatusDetail
 		ProxyHealthy:       details.Online,
 		Maintenance:        maintenance,
 		LatencyMs:          details.Latency.Milliseconds(),
+		CheckedAt:          checkedAt,
 		DownSince:          downSince,
 		DowntimeSec:        downtimeSec,
 		ProxyFailureSince:  proxyFailureSince,

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"xray-checker/observation"
 	"xray-checker/subscription"
 )
 
@@ -226,5 +227,62 @@ func TestDeleteRemovesTheSource(t *testing.T) {
 	}
 	if strings.Contains(string(data), "panel.example") {
 		t.Fatal("the deleted URL is still on disk")
+	}
+}
+
+// How a source is watched has to survive a restart alongside its identity.
+func TestObservationSettingsSurviveRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "subscription_sources.json")
+	store := NewStore(path)
+	added, err := store.Add(Source{
+		URL:      "https://panel.example/sub/token",
+		Enabled:  true,
+		Mode:     observation.ModeAvailability,
+		Silent:   true,
+		Unlisted: true,
+		Profile:  subscription.ClientProfile{Profile: subscription.ClientProfileHapp},
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if policy := added.Policy(); policy.SpeedTest || policy.Alerts || policy.Listed || !policy.AccountAvailability {
+		t.Fatalf("policy = %+v, want availability only, silent and unlisted", policy)
+	}
+
+	restored := NewStore(path)
+	if err := restored.Load(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	sources := restored.List()
+	if len(sources) != 1 {
+		t.Fatalf("sources after restart = %d, want 1", len(sources))
+	}
+	if sources[0].Mode != observation.ModeAvailability || !sources[0].Silent || !sources[0].Unlisted {
+		t.Fatalf("observation settings were lost: %+v", sources[0])
+	}
+}
+
+// A file written before observation modes existed describes sources that were
+// watched in full, and has to keep behaving that way.
+func TestSourcesWithoutAModeReadAsFull(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "subscription_sources.json")
+	state := `{"version":1,"sources":[{"id":"src-1","url":"https://panel.example/sub/token","enabled":true,"profile":{"profile":"happ","hwid":"1A2B3C4D-5E6F-7890-ABCD-1234567890AB"}}]}`
+	if err := os.WriteFile(path, []byte(state), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewStore(path)
+	if err := store.Load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	sources := store.List()
+	if len(sources) != 1 {
+		t.Fatalf("sources = %d, want 1", len(sources))
+	}
+	if sources[0].Mode != observation.ModeFull || sources[0].Silent || sources[0].Unlisted {
+		t.Fatalf("old source was not normalized to full: %+v", sources[0])
+	}
+	if got := sources[0].Policy(); got != observation.Full() {
+		t.Fatalf("policy = %+v, want the full one", got)
 	}
 }

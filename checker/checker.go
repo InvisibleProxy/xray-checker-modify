@@ -23,6 +23,7 @@ import (
 	"xray-checker/logger"
 	"xray-checker/metrics"
 	"xray-checker/models"
+	"xray-checker/observation"
 	"xray-checker/projectmaintenance"
 )
 
@@ -58,6 +59,14 @@ type ProxyChecker struct {
 	runsMu    sync.Mutex
 	runs      map[*checkRun]struct{}
 	activeRun *checkRun
+
+	// The observation policy of a node is a property of the source it came
+	// from, so it is resolved through the node index rather than stored per
+	// node: an operator changing a source's mode must not have to wait for the
+	// next subscription refresh.
+	sourcePolicyMu   sync.RWMutex
+	sourcePolicies   map[string]observation.Policy
+	sourceByStableID map[string]string
 
 	checkProxyFunc      func(*models.ProxyConfig, uint64, bool, bool)
 	hostDiagnosticsFunc func(*models.ProxyConfig) (HostCheckDetails, PingCheckDetails)
@@ -194,7 +203,7 @@ type availabilityCheckCandidate struct {
 }
 
 func NewProxyChecker(proxies []*models.ProxyConfig, startPort int, ipCheckURL string, ipCheckTimeout int, genMethodURL string, downloadURL string, downloadTimeout int, downloadMinSize int64, checkMethod string) *ProxyChecker {
-	return &ProxyChecker{
+	pc := &ProxyChecker{
 		proxies:   proxies,
 		startPort: startPort,
 		ipCheck:   ipCheckURL,
@@ -208,6 +217,8 @@ func NewProxyChecker(proxies []*models.ProxyConfig, startPort int, ipCheckURL st
 		downloadMinSize: downloadMinSize,
 		checkMethod:     checkMethod,
 	}
+	pc.rebuildSourceIndex(proxies)
+	return pc
 }
 
 func (pc *ProxyChecker) SetRunGate(gate sync.Locker) {
@@ -519,6 +530,11 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 		return atomic.LoadUint64(&pc.generation) == expectedGeneration
 	}
 
+	// An unlisted source is watched for the operator, not published as their
+	// own service, so its nodes stay out of Prometheus. The cached values below
+	// are internal and keep being written: the admin panel reads them.
+	exportMetrics := !allowMaintenance && pc.ListedPublicly(proxy.StableID)
+
 	setFailedStatus := func(failure FailureDetails) {
 		if ctx.Err() != nil {
 			logger.Debug("%s | Skipping metric update: check cancelled", proxy.Name)
@@ -529,13 +545,15 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 			return
 		}
 		if !allowMaintenance {
-			metrics.RecordProxyStatus(
-				proxy.Protocol,
-				fmt.Sprintf("%s:%d", proxy.Server, proxy.Port),
-				proxy.Name,
-				proxy.SubName,
-				0,
-			)
+			if exportMetrics {
+				metrics.RecordProxyStatus(
+					proxy.Protocol,
+					fmt.Sprintf("%s:%d", proxy.Server, proxy.Port),
+					proxy.Name,
+					proxy.SubName,
+					0,
+				)
+			}
 			pc.currentMetrics.Store(metricKey, false)
 		}
 		hostCheck, pingCheck := pc.markUnavailableAndCollectDiagnosticsMode(proxy, allowMaintenance, failure)
@@ -550,13 +568,15 @@ func (pc *ProxyChecker) checkProxyInternal(proxy *models.ProxyConfig, expectedGe
 			return
 		}
 		if !allowMaintenance {
-			metrics.RecordProxyLatency(
-				proxy.Protocol,
-				fmt.Sprintf("%s:%d", proxy.Server, proxy.Port),
-				proxy.Name,
-				proxy.SubName,
-				time.Duration(0),
-			)
+			if exportMetrics {
+				metrics.RecordProxyLatency(
+					proxy.Protocol,
+					fmt.Sprintf("%s:%d", proxy.Server, proxy.Port),
+					proxy.Name,
+					proxy.SubName,
+					time.Duration(0),
+				)
+			}
 			pc.latencyMetrics.Store(metricKey, time.Duration(0))
 		}
 	}
@@ -1232,6 +1252,7 @@ func (pc *ProxyChecker) UpdateProxies(newProxies []*models.ProxyConfig) {
 	pc.pruneStatusDetails(newProxies)
 	pc.pruneMaintenanceModes(newProxies)
 	pc.proxies = newProxies
+	pc.rebuildSourceIndex(newProxies)
 }
 
 func (pc *ProxyChecker) pruneMaintenanceModes(proxies []*models.ProxyConfig) {
@@ -1405,7 +1426,7 @@ func (pc *ProxyChecker) checkAllProxies() error {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
-		probeOnly := !pc.MonitoringEnabled(proxy.StableID)
+		probeOnly := !pc.AvailabilityAccounted(proxy.StableID)
 		wg.Add(1)
 		go func(p *models.ProxyConfig, gen uint64, maintenanceProbe bool) {
 			defer wg.Done()
@@ -1485,7 +1506,7 @@ func (pc *ProxyChecker) availabilityCheckCandidates(stableIDs []string, unavaila
 		if !allowMaintenance && !pc.MonitoringEnabled(stableID) {
 			continue
 		}
-		probeOnly := !pc.MonitoringEnabled(stableID)
+		probeOnly := !pc.AvailabilityAccounted(stableID)
 		details, hasDetails := pc.statusDetailsByStableID(stableID)
 		wasUnavailable := hasDetails && !details.Online
 		if unavailableOnly && !wasUnavailable {

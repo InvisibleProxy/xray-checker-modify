@@ -2,6 +2,7 @@ package nodearchive
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -254,11 +255,14 @@ func TestAvailabilityHistoryNormalizesDeduplicatesAndFiltersRange(t *testing.T) 
 	}
 
 	details := checker.ProxyStatusDetails{Online: true, Latency: 15 * time.Millisecond, CheckedAt: now}
-	if !store.recordAvailabilitySampleLocked("node-1", details, now) {
+	if !store.recordAvailabilitySampleLocked("node-1", details, now, false) {
 		t.Fatal("new availability sample was not recorded")
 	}
-	if store.recordAvailabilitySampleLocked("node-1", details, now) {
+	if store.recordAvailabilitySampleLocked("node-1", details, now, false) {
 		t.Fatal("duplicate availability sample was recorded")
+	}
+	if store.availabilityHistory["node-1"][0].Maintenance {
+		t.Fatal("a monitored check must not be marked as a maintenance probe")
 	}
 }
 
@@ -737,5 +741,90 @@ func TestRefreshGeoSkipsRetiredNodes(t *testing.T) {
 	}
 	if result.Updated != 0 || result.Failed != 0 || len(requested) != 0 {
 		t.Fatalf("explicit retired refresh was not ignored: result=%+v requests=%v", result, requested)
+	}
+}
+
+// The slow full sweep keeps probing a paused node, and those probes are what
+// lets the card graph run through a maintenance window. They belong in the
+// availability history and nowhere else: downtime, incidents and the node's
+// accounting must not notice them.
+func TestMaintenanceProbeReachesAvailabilityHistoryAndNothingElse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "node_registry.json")
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "Node 1", Protocol: "vless", Server: "node.example", Port: 443}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "", "", 1, 0, "status")
+	store := NewStore(path, proxyChecker)
+	if err := store.SyncProxies([]*models.ProxyConfig{proxy}); err != nil {
+		t.Fatal(err)
+	}
+	downSince := time.Now().Add(-time.Minute).Truncate(time.Second)
+	if !proxyChecker.RestoreOfflineStatus(proxy.StableID, downSince, checker.HostCheckDetails{Checked: true}, checker.PingCheckDetails{Checked: true}) {
+		t.Fatal("failed to seed a probe result")
+	}
+	if _, err := store.SetMaintenance(proxy.StableID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.RecordAvailability(); err != nil {
+		t.Fatal(err)
+	}
+
+	history := store.AvailabilityHistory(proxy.StableID, time.Time{}, time.Time{})
+	if len(history) != 1 {
+		t.Fatalf("history = %+v, want the maintenance probe recorded", history)
+	}
+	if !history[0].Maintenance {
+		t.Fatalf("probe was not marked as taken during maintenance: %+v", history[0])
+	}
+	record := store.nodes[proxy.StableID]
+	if !record.CurrentDownSince.IsZero() || record.IncidentCount != 0 || record.TotalDowntimeSec != 0 {
+		t.Fatalf("maintenance probe leaked into node accounting: %+v", record)
+	}
+	if len(store.Incidents(10)) != 0 {
+		t.Fatalf("maintenance probe opened an incident: %+v", store.Incidents(10))
+	}
+}
+
+// The point of keeping the probe is the number it carries.
+func TestMaintenanceSampleKeepsItsLatency(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	store := NewStore("", nil)
+	details := checker.ProxyStatusDetails{
+		Online:    true,
+		Status:    checker.AvailabilityStateOnline,
+		Latency:   512 * time.Millisecond,
+		CheckedAt: now,
+	}
+	if !store.recordAvailabilitySampleLocked("node-1", details, now, true) {
+		t.Fatal("maintenance sample was not recorded")
+	}
+	sample := store.availabilityHistory["node-1"][0]
+	if !sample.Maintenance || sample.LatencyMs != 512 || !sample.Online {
+		t.Fatalf("maintenance sample = %+v, want an online 512 ms probe", sample)
+	}
+}
+
+// A registry written before maintenance probes were kept has no such flag, and
+// every sample in it was a monitored check.
+func TestLoadAvailabilityHistoryWithoutMaintenanceFlag(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "node_registry.json")
+	checkedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	state := fmt.Sprintf(
+		`{"version":1,"nodes":{"one":{"stableId":"one","name":"One","active":true}},"availabilityHistory":{"one":[{"checkedAt":%q,"online":true,"status":"online","latencyMs":42}]}}`,
+		checkedAt.Format(time.RFC3339),
+	)
+	if err := os.WriteFile(path, []byte(state), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewStore(path, nil)
+	if err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+	history := store.AvailabilityHistory("one", time.Time{}, time.Time{})
+	if len(history) != 1 {
+		t.Fatalf("history = %+v, want the stored sample", history)
+	}
+	if history[0].Maintenance || history[0].LatencyMs != 42 || !history[0].Online {
+		t.Fatalf("old sample was not normalized as a monitored check: %+v", history[0])
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"xray-checker/agentautomation"
 	"xray-checker/checker"
 	"xray-checker/models"
+	"xray-checker/observation"
 	"xray-checker/speedtest"
 )
 
@@ -2115,7 +2116,7 @@ func TestTelegramInteractiveViewsAndTransportExcludeMaintenanceNodes(t *testing.
 	if len(results) != 1 || results[0].StableID != active.StableID {
 		t.Fatalf("Telegram speed results = %+v, want only active", results)
 	}
-	report := service.excludeMaintenanceSpeedResults(speedtest.RunReport{
+	report := service.excludeUnreportableSpeedResults(speedtest.RunReport{
 		Selected: 3,
 		Results: []speedtest.Result{
 			{StableID: active.StableID, Name: active.Name, Mbps: 50},
@@ -2146,4 +2147,31 @@ func withLowSpeedThreshold(cfg Config, threshold float64) Config {
 func withMutedNodeIDs(cfg Config, ids []string) Config {
 	cfg.MutedNodeIDs = ids
 	return cfg
+}
+
+// A silent source is measured exactly like any other; what stops is Telegram
+// speaking about it. The speed report is where that is easiest to see.
+func TestSilentSourceIsMeasuredButNotAnnounced(t *testing.T) {
+	own := &models.ProxyConfig{StableID: "own", Name: "Own"}
+	quiet := &models.ProxyConfig{StableID: "quiet", Name: "Quiet", SourceID: "src-quiet"}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{own, quiet}, 10000, "", 1, "", "", 1, 0, "status")
+	proxyChecker.SetSourcePolicies(map[string]observation.Policy{
+		"src-quiet": observation.PolicyFor(observation.ModeFull, true, false),
+	})
+	service := NewService("", proxyChecker, nil, 10000)
+
+	if !proxyChecker.AvailabilityAccounted(quiet.StableID) || !proxyChecker.SpeedTestEnabled(quiet.StableID) {
+		t.Fatal("silence changed what is measured")
+	}
+
+	report := service.excludeUnreportableSpeedResults(speedtest.RunReport{
+		Selected: 2,
+		Results: []speedtest.Result{
+			{StableID: own.StableID, Name: own.Name, Mbps: 50},
+			{StableID: quiet.StableID, Name: quiet.Name, Mbps: 50},
+		},
+	})
+	if report.Selected != 1 || len(report.Results) != 1 || report.Results[0].StableID != own.StableID {
+		t.Fatalf("report = %+v, want the silent source left out", report)
+	}
 }

@@ -14,6 +14,7 @@ import (
 
 	"xray-checker/checker"
 	"xray-checker/models"
+	"xray-checker/observation"
 	"xray-checker/projectmaintenance"
 )
 
@@ -739,4 +740,29 @@ func waitForSpeedRunToFinish(t *testing.T, manager *Manager) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("speed test did not finish")
+}
+
+// A source watched for availability only stays out of scheduled runs, while an
+// explicit manual run still reaches it: the operator asking for a measurement
+// outranks the preset.
+func TestScheduledRunSkipsSourcesWatchedForAvailabilityOnly(t *testing.T) {
+	own := &models.ProxyConfig{StableID: "own", Name: "Own"}
+	availabilityOnly := &models.ProxyConfig{StableID: "availability-only", Name: "Availability only", SourceID: "src-availability"}
+	paused := &models.ProxyConfig{StableID: "paused-source", Name: "Paused source", SourceID: "src-paused"}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{own, availabilityOnly, paused}, 10000, "", 1, "", "", 1, 0, "status")
+	proxyChecker.SetSourcePolicies(map[string]observation.Policy{
+		"src-availability": observation.PolicyFor(observation.ModeAvailability, false, false),
+		"src-paused":       observation.PolicyFor(observation.ModePaused, false, false),
+	})
+	manager := NewManager(proxyChecker, 10000, "", TestConfig{})
+
+	scheduled := manager.selectProxies(RunRequest{}, false)
+	if len(scheduled) != 1 || scheduled[0].StableID != own.StableID {
+		t.Fatalf("scheduled selection = %+v, want only the deployment's own node", scheduled)
+	}
+
+	manual := manager.selectProxies(RunRequest{ProxyIDs: []string{availabilityOnly.StableID}}, true)
+	if len(manual) != 1 || manual[0].StableID != availabilityOnly.StableID {
+		t.Fatalf("manual selection = %+v, want the explicitly chosen node", manual)
+	}
 }

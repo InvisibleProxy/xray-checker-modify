@@ -285,9 +285,11 @@ paths:
       summary: Add or update a subscription source
       description: >-
         Omit `id` to add, supply it to update. On update an empty `url` keeps the stored one, because the API only
-        ever shows a masked URL. An HWID is generated when the chosen client profile needs one and none is given;
-        the value then stays fixed, since the remote panel ties a device slot to it. Changes take effect on the
-        next subscription refresh.
+        ever shows a masked URL; a `url` that still carries the mask is treated the same way, so echoing a listed
+        row back cannot destroy the stored URL. An HWID is generated when the chosen client profile needs one and
+        none is given; the value then stays fixed, since the remote panel ties a device slot to it. Which URLs are
+        fetched changes on the next subscription refresh, but `mode`, `silent` and `unlisted` apply at once — they
+        describe how nodes are watched, not what to fetch.
       tags: [Admin]
       requestBody:
         required: true
@@ -1794,6 +1796,14 @@ components:
         - $ref: '#/components/schemas/ProxyInfo'
         - type: object
           properties:
+            checkedAt:
+              type: string
+              format: date-time
+              description: >-
+                When the stored status was written. Absent for a node whose
+                state was cleared — pausing a node does that — which is what
+                tells "paused, not probed since" apart from "paused and
+                offline".
             downSince:
               type: string
               format: date-time
@@ -2005,6 +2015,20 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/SubscriptionClientProfile'
+        modes:
+          type: array
+          description: The selectable observation modes, so the panel renders the list rather than hard-coding it.
+          items:
+            $ref: '#/components/schemas/ObservationMode'
+
+    ObservationMode:
+      type: object
+      properties:
+        id:
+          type: string
+          enum: [full, availability, paused]
+        label: {type: string}
+        description: {type: string}
 
     SubscriptionSource:
       type: object
@@ -2028,6 +2052,21 @@ components:
         deviceOs: {type: string}
         osVersion: {type: string}
         deviceModel: {type: string}
+        mode:
+          type: string
+          enum: [full, availability, paused]
+          description: >-
+            How this source's nodes are watched. `full` is the deployment's own treatment. `availability` keeps the
+            checks and the alerts but drops the source out of scheduled speed tests. `paused` still probes — a probe
+            is what everything else rests on — but draws no verdict from it: no downtime, no incident, no alert, no
+            speed test. A node an operator paused by hand stays paused whatever the source says.
+        silent:
+          type: boolean
+          description: Telegram says nothing about this source. What is measured does not change.
+        unlisted:
+          type: boolean
+          description: >-
+            The source's nodes stay off the status page, out of Prometheus and without their own /config endpoint.
         createdAt: {type: string}
 
     SubscriptionClientProfile:
@@ -2067,6 +2106,12 @@ components:
         deviceOs: {type: string}
         osVersion: {type: string}
         deviceModel: {type: string}
+        mode:
+          type: string
+          enum: [full, availability, paused]
+          description: Empty or unknown reads as `full`. Applied at once rather than on the next refresh.
+        silent: {type: boolean}
+        unlisted: {type: boolean}
 
     NodeTestURLRequest:
       type: object

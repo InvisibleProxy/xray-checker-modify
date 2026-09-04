@@ -152,6 +152,12 @@ func ConfigStatusHandler(proxyChecker *checker.ProxyChecker, projectSources ...P
 			http.Error(w, "Config not found", http.StatusNotFound)
 			return
 		}
+		// An unlisted source is watched for the operator, not published, so its
+		// nodes have no endpoint an external uptime check could bind to.
+		if !proxyChecker.ListedPublicly(found.StableID) {
+			http.Error(w, "Config not found", http.StatusNotFound)
+			return
+		}
 		if projectMaintenanceSnapshot(projectSources).Enabled {
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("X-Xray-Checker-Status", "project-maintenance")
@@ -198,6 +204,12 @@ func RegisterConfigEndpoints(proxies []*models.ProxyConfig, proxyChecker *checke
 	for _, proxy := range proxies {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
+		}
+		// The status page and the /config endpoints are what this deployment
+		// publishes as its own service. A source the operator marked unlisted
+		// is not that, so its nodes reach neither.
+		if !proxyChecker.ListedPublicly(proxy.StableID) {
+			continue
 		}
 
 		endpoint := fmt.Sprintf("./config/%s", proxy.StableID)

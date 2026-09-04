@@ -2041,6 +2041,7 @@
                       <th>Source</th>
                       <th>Client</th>
                       <th>HWID</th>
+                      <th>Observation</th>
                       <th>State</th>
                       <th></th>
                     </tr>
@@ -2069,6 +2070,20 @@
                 <select id="subscription-source-profile"></select>
               </label>
               <div id="subscription-source-profile-hint" class="hint"></div>
+              <label>
+                Observation mode
+                <select id="subscription-source-mode"></select>
+              </label>
+              <div id="subscription-source-mode-hint" class="hint"></div>
+              <label class="inline">
+                <input id="subscription-source-silent" type="checkbox" />
+                No Telegram notifications
+              </label>
+              <label class="inline">
+                <input id="subscription-source-unlisted" type="checkbox" />
+                Keep off the public status page
+              </label>
+              <div class="hint">Silence changes nothing that is measured, only what is announced. Keeping a source off the status page also removes its nodes from Prometheus and from their own /config endpoints — somebody else's panel is not the service you publish as your own.</div>
               <label>
                 HWID
                 <input id="subscription-source-hwid" type="text" autocomplete="off" placeholder="Generated automatically" />
@@ -4233,6 +4248,19 @@
         return proxy && proxy.online ? "online" : "offline";
       }
 
+      // Pausing a node clears its stored status, so between the pause and the
+      // next sweep there is genuinely nothing measured to show — and a bare
+      // "Offline" there would be a claim the checker has not made.
+      function proxyAvailabilityText(proxy) {
+        if (proxy.maintenance && !proxy.checkedAt) return "Not checked yet";
+        const status = proxyAvailabilityStatus(proxy);
+        if (status === "online") return proxy.latencyMs > 0 ? `${proxy.latencyMs} ms` : "Online";
+        if (status === "proxy_failure") {
+          return `Proxy failure${proxy.proxyFailureSince ? ` · ${formatDurationSec(proxy.proxyFailureSec)}` : ""}`;
+        }
+        return proxy.downSince ? `Offline · ${formatDurationSec(proxy.downtimeSec)}` : "Offline";
+      }
+
       function availabilitySampleStatus(result) {
         if (["online", "proxy_failure", "offline"].includes(result && result.status)) return result.status;
         return result && result.online === true ? "online" : "offline";
@@ -4794,9 +4822,13 @@
                <div class="speed-chart-tooltip-row">TTFB: <strong>${Number(result.ttfbMs || 0)} ms</strong></div>
                <div class="speed-chart-tooltip-row">Downloaded: <strong>${escapeHtml(formatBytes(result.downloadedBytes))}</strong></div>`)
           : "";
+        // Without this, a paused node's probe reads as an outage nobody caused.
+        const paused = view === "availability" && result.maintenance
+          ? `<div class="speed-chart-tooltip-row">Measured during maintenance</div>`
+          : "";
         return `<div class="speed-chart-tooltip-time">${escapeHtml(formatTime(result.checkedAt))}</div>
           <div class="speed-chart-tooltip-row">Result: <strong class="${statusClass}">${escapeHtml(status)}</strong></div>
-          ${measurement}`;
+          ${measurement}${paused}`;
       }
 
       function bindMetricChartInteractions(root = $("nodes")) {
@@ -6243,13 +6275,11 @@
           availabilityClass: state.projectMaintenance?.enabled || proxy.maintenance || availabilityStatus === "proxy_failure" ? "warn" : (availabilityStatus === "online" ? "ok" : "error"),
           availabilityText: state.projectMaintenance?.enabled
             ? "Project maintenance"
-            : (proxy.maintenance
-            ? "Maintenance"
-            : (availabilityStatus === "online"
-            ? (proxy.latencyMs > 0 ? `${proxy.latencyMs} ms` : "Online")
-            : (availabilityStatus === "proxy_failure"
-              ? `Proxy failure${proxy.proxyFailureSince ? ` · ${formatDurationSec(proxy.proxyFailureSec)}` : ""}`
-              : (proxy.downSince ? `Offline · ${formatDurationSec(proxy.downtimeSec)}` : "Offline")))),
+            : proxyAvailabilityText(proxy),
+          // A paused node keeps being probed, so it keeps a real latency. The
+          // label carries the pause instead, which is why the value no longer
+          // has to spend itself saying "Maintenance".
+          availabilityLabel: state.projectMaintenance?.enabled || proxy.maintenance ? "Maintenance" : "Availability",
           speedClass: result ? speedStatusClass(result) : "",
           speedText: result ? formatSpeedStatus(result) : "No result",
           speedChecked: result ? formatShortTime(result.checkedAt) : "Last speed test",
@@ -6308,7 +6338,7 @@
               </div>
               <div class="node-current">
                 <strong class="${view.availabilityClass}" data-node-availability>${escapeHtml(view.availabilityText)}</strong>
-                <div class="node-summary-label">Availability</div>
+                <div class="node-summary-label" data-node-availability-label>${escapeHtml(view.availabilityLabel)}</div>
               </div>
               <div class="node-speed-summary">
                 <strong class="${view.speedClass}" data-node-speed>${escapeHtml(view.speedText)}</strong>
@@ -6379,6 +6409,7 @@
         const availability = card.querySelector("[data-node-availability]");
         availability.className = view.availabilityClass;
         availability.textContent = view.availabilityText;
+        card.querySelector("[data-node-availability-label]").textContent = view.availabilityLabel;
         const speed = card.querySelector("[data-node-speed]");
         speed.className = view.speedClass;
         speed.textContent = view.speedText;
@@ -7653,11 +7684,13 @@
         const sources = Array.isArray(data.sources) ? data.sources : [];
         const environment = Array.isArray(data.environmentSources) ? data.environmentSources : [];
         renderSubscriptionSourceProfiles();
+        renderSubscriptionSourceModes();
 
         const environmentRows = environment.map((url) => `<tr>
           <td>${escapeHtml(url)}<div class="muted">${escapeHtml(tr("from environment"))}</div></td>
           <td>Xray-Checker</td>
           <td class="muted">—</td>
+          <td>${escapeHtml(tr("Full"))}</td>
           <td>${escapeHtml(tr("Read-only"))}</td>
           <td></td>
         </tr>`).join("");
@@ -7666,6 +7699,7 @@
           <td>${escapeHtml(source.name || source.url)}${source.name ? `<div class="muted">${escapeHtml(source.url)}</div>` : ""}</td>
           <td>${escapeHtml(source.profile)}</td>
           <td class="mono">${escapeHtml(source.hwid || "—")}</td>
+          <td>${subscriptionSourceObservationHTML(source)}</td>
           <td>${escapeHtml(source.enabled ? tr("Enabled") : tr("Disabled"))}</td>
           <td>
             <button class="secondary edit-subscription-source" type="button" data-id="${escapeHtml(source.id)}">${escapeHtml(tr("Edit"))}</button>
@@ -7675,7 +7709,7 @@
         </tr>`).join("");
 
         $("subscription-sources-list").innerHTML = environmentRows + rows ||
-          `<tr><td colspan="5" class="muted">${escapeHtml(tr("No subscription sources"))}</td></tr>`;
+          `<tr><td colspan="6" class="muted">${escapeHtml(tr("No subscription sources"))}</td></tr>`;
 
         document.querySelectorAll(".edit-subscription-source").forEach((button) => {
           button.addEventListener("click", () => fillSubscriptionSourceForm(button.dataset.id));
@@ -7688,6 +7722,35 @@
         });
       }
 
+      function subscriptionObservationModes() {
+        const modes = (state.subscriptionSources && state.subscriptionSources.modes) || [];
+        return modes.length ? modes : [{ id: "full", label: "Full", description: "" }];
+      }
+
+      function subscriptionSourceObservationHTML(source) {
+        const mode = subscriptionObservationModes().find((entry) => entry.id === (source.mode || "full"));
+        const chips = [`<span class="chip ${source.mode && source.mode !== "full" ? "warn" : "neutral"}">${escapeHtml(tr(mode ? mode.label : source.mode || "Full"))}</span>`];
+        if (source.silent) chips.push(`<span class="chip warn">${escapeHtml(tr("Silent"))}</span>`);
+        if (source.unlisted) chips.push(`<span class="chip warn">${escapeHtml(tr("Unlisted"))}</span>`);
+        return `<div class="status-chips">${chips.join("")}</div>`;
+      }
+
+      function renderSubscriptionSourceModes() {
+        const select = $("subscription-source-mode");
+        const selected = select.value;
+        const modes = subscriptionObservationModes();
+        select.innerHTML = modes
+          .map((mode) => `<option value="${escapeHtml(mode.id)}">${escapeHtml(tr(mode.label))}</option>`)
+          .join("");
+        select.value = modes.some((mode) => mode.id === selected) ? selected : "full";
+        renderSubscriptionSourceModeHint();
+      }
+
+      function renderSubscriptionSourceModeHint() {
+        const mode = subscriptionObservationModes().find((entry) => entry.id === $("subscription-source-mode").value);
+        $("subscription-source-mode-hint").textContent = mode ? tr(mode.description) : "";
+      }
+
       function subscriptionSourceById(id) {
         const sources = (state.subscriptionSources && state.subscriptionSources.sources) || [];
         return sources.find((source) => source.id === id) || null;
@@ -7697,9 +7760,17 @@
         const source = subscriptionSourceById(id);
         if (!source) return;
         $("subscription-source-id").value = source.id;
-        $("subscription-source-url").value = source.url || "";
+        // The API only ever returns a masked URL, so the field starts empty and
+        // an untouched one keeps the stored URL. Echoing the mask back would
+        // save it as the real URL and leave a source that cannot be fetched.
+        $("subscription-source-url").value = "";
+        $("subscription-source-url").placeholder = source.url || "";
         $("subscription-source-name").value = source.name || "";
         $("subscription-source-profile").value = source.profile || "checker";
+        $("subscription-source-mode").value = source.mode || "full";
+        $("subscription-source-silent").checked = Boolean(source.silent);
+        $("subscription-source-unlisted").checked = Boolean(source.unlisted);
+        renderSubscriptionSourceModeHint();
         $("subscription-source-hwid").value = source.hwid || "";
         $("subscription-source-user-agent").value = source.userAgent || "";
         $("subscription-source-device-os").value = source.deviceOs || "";
@@ -7714,9 +7785,14 @@
         ["subscription-source-id", "subscription-source-url", "subscription-source-name", "subscription-source-hwid",
           "subscription-source-user-agent", "subscription-source-device-os", "subscription-source-os-version",
           "subscription-source-device-model", "subscription-source-locale"].forEach((id) => { $(id).value = ""; });
+        $("subscription-source-url").placeholder = "https://panel.example/sub/xxxx";
+        $("subscription-source-mode").value = "full";
+        $("subscription-source-silent").checked = false;
+        $("subscription-source-unlisted").checked = false;
         $("subscription-source-form-title").textContent = tr("Add a source");
         $("subscription-source-form-state").textContent = "";
         renderSubscriptionSourceProfileHint();
+        renderSubscriptionSourceModeHint();
       }
 
       async function saveSubscriptionSource(overrides) {
@@ -7731,6 +7807,9 @@
           osVersion: $("subscription-source-os-version").value.trim(),
           deviceModel: $("subscription-source-device-model").value.trim(),
           locale: $("subscription-source-locale").value.trim(),
+          mode: $("subscription-source-mode").value,
+          silent: $("subscription-source-silent").checked,
+          unlisted: $("subscription-source-unlisted").checked,
           enabled: true,
         }, overrides || {});
 
@@ -7752,7 +7831,9 @@
         if (!source) return;
         await saveSubscriptionSource({
           id: source.id,
-          url: source.url,
+          // Empty keeps the stored URL. The row only ever held a masked one,
+          // and saving that would replace the real URL with the mask.
+          url: "",
           name: source.name || "",
           profile: source.profile,
           hwid: source.hwid || "",
@@ -7761,6 +7842,9 @@
           osVersion: source.osVersion || "",
           deviceModel: source.deviceModel || "",
           locale: source.locale || "",
+          mode: source.mode || "full",
+          silent: Boolean(source.silent),
+          unlisted: Boolean(source.unlisted),
           enabled: !source.enabled,
         });
       }
@@ -8846,6 +8930,7 @@
       $("save-subscription-source").addEventListener("click", () => saveSubscriptionSource());
       $("reset-subscription-source").addEventListener("click", resetSubscriptionSourceForm);
       $("subscription-source-profile").addEventListener("change", renderSubscriptionSourceProfileHint);
+      $("subscription-source-mode").addEventListener("change", renderSubscriptionSourceModeHint);
       $("create-diagnostic-agent").addEventListener("click", createDiagnosticAgent);
       // Once the operator types into a prefilled field, a later render must not
       // overwrite it with the controller default.

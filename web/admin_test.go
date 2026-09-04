@@ -59,11 +59,26 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`id="toggle-maintenance"`,
 		`function renderMaintenanceControl()`,
 		`button.dataset.maintenanceId = proxy.stableId`,
+		// A paused node keeps its measured latency in the value; the pause moves
+		// to the label instead of replacing the number.
+		`function proxyAvailabilityText(proxy)`,
+		`if (proxy.maintenance && !proxy.checkedAt) return "Not checked yet"`,
+		`availabilityLabel: state.projectMaintenance?.enabled || proxy.maintenance ? "Maintenance" : "Availability"`,
+		`data-node-availability-label`,
+		`view === "availability" && result.maintenance`,
 		`checkDisabled: state.availabilityCheckRunning || maintenanceUpdating`,
 		`speedRunStarting: false`,
 		`speedRunRequestIDs: new Set()`,
 		`runDisabled: state.speedRunStarting || Boolean(run && run.running) || maintenanceUpdating`,
 		`run.textContent = view.runStarting ? "Starting…" : (view.runRunning ? "Running…" : "Run")`,
+		// A source's observation mode and its two switches.
+		`id="subscription-source-mode"`,
+		`function subscriptionSourceObservationHTML(source)`,
+		`mode: $("subscription-source-mode").value`,
+		`silent: $("subscription-source-silent").checked`,
+		`unlisted: $("subscription-source-unlisted").checked`,
+		// Echoing back a masked URL would store the mask as the real one.
+		`$("subscription-source-url").placeholder = source.url || ""`,
 		`function speedRunActive()`,
 		`$("run").textContent = cancelButtonLabel(state.speedRunCancelling)`,
 		`$("selection-run").textContent = speedRunActive() ? cancelButtonLabel(state.speedRunCancelling) : "Run"`,
@@ -1252,5 +1267,42 @@ func TestAdminProxyCheckReportsACancelledRunAsAConflict(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Pausing a node clears its stored status, so a zero latency alone cannot say
+// whether the node is down or simply has not been probed since the pause. The
+// admin card needs that difference to show a paused node's real latency without
+// inventing an "Offline" the checker never observed.
+func TestAdminProxyInfoReportsWhenTheStatusWasWritten(t *testing.T) {
+	proxy := &models.ProxyConfig{StableID: "node-1", Name: "Node one", Protocol: "vless", Server: "node.example.com", Port: 443, UUID: "uuid"}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "", "", 1, 0, "status")
+
+	rec := httptest.NewRecorder()
+	AdminProxiesHandler(proxyChecker, 10000).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/proxies", nil))
+	var unchecked struct {
+		Data []AdminProxyInfo `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &unchecked); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(unchecked.Data) != 1 || unchecked.Data[0].CheckedAt != "" {
+		t.Fatalf("never-checked node = %+v, want no checkedAt", unchecked.Data)
+	}
+
+	checkedAt := time.Now().Add(-time.Minute).Truncate(time.Second)
+	if !proxyChecker.RestoreOfflineStatus(proxy.StableID, checkedAt, checker.HostCheckDetails{Checked: true}, checker.PingCheckDetails{Checked: true}) {
+		t.Fatal("failed to seed a checked status")
+	}
+	rec = httptest.NewRecorder()
+	AdminProxiesHandler(proxyChecker, 10000).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/proxies", nil))
+	var checked struct {
+		Data []AdminProxyInfo `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &checked); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(checked.Data) != 1 || checked.Data[0].CheckedAt == "" {
+		t.Fatalf("checked node = %+v, want a checkedAt", checked.Data)
 	}
 }

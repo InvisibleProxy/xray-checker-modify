@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 
+	"xray-checker/observation"
 	"xray-checker/subscription"
 	"xray-checker/subsource"
 )
@@ -35,16 +36,30 @@ type AdminSubscriptionSource struct {
 	OSVersion   string `json:"osVersion,omitempty"`
 	DeviceModel string `json:"deviceModel,omitempty"`
 	Locale      string `json:"locale,omitempty"`
-	CreatedAt   string `json:"createdAt,omitempty"`
+	// Mode, Silent and Unlisted say how this source's nodes are watched.
+	Mode      string `json:"mode"`
+	Silent    bool   `json:"silent"`
+	Unlisted  bool   `json:"unlisted"`
+	CreatedAt string `json:"createdAt,omitempty"`
 }
 
 // AdminSubscriptionSourcesResponse also lists the environment sources, so the
 // panel shows the full picture: those cannot be edited here, because they are
 // the deployment's own configuration and the checker starts from them.
 type AdminSubscriptionSourcesResponse struct {
-	Sources            []AdminSubscriptionSource `json:"sources"`
-	EnvironmentSources []string                  `json:"environmentSources"`
-	Profiles           []AdminClientProfileInfo  `json:"profiles"`
+	Sources            []AdminSubscriptionSource  `json:"sources"`
+	EnvironmentSources []string                   `json:"environmentSources"`
+	Profiles           []AdminClientProfileInfo   `json:"profiles"`
+	Modes              []AdminObservationModeInfo `json:"modes"`
+}
+
+// AdminObservationModeInfo describes one selectable observation mode. The panel
+// renders this list rather than hard-coding it, so a mode added to the API
+// reaches the UI with it.
+type AdminObservationModeInfo struct {
+	ID          string `json:"id"`
+	Label       string `json:"label"`
+	Description string `json:"description"`
 }
 
 type AdminClientProfileInfo struct {
@@ -70,13 +85,24 @@ type AdminSubscriptionSourceRequest struct {
 	OSVersion   string `json:"osVersion"`
 	DeviceModel string `json:"deviceModel"`
 	Locale      string `json:"locale"`
+	Mode        string `json:"mode"`
+	Silent      *bool  `json:"silent"`
+	Unlisted    *bool  `json:"unlisted"`
 }
 
 // AdminSubscriptionSourcesHandler lists, adds, edits and removes the sources an
 // operator manages from the panel. Changes take effect on the next subscription
 // refresh rather than immediately: swapping the node set is what refresh is
 // for, and it carries the suspicious-diff guard that protects the archive.
-func AdminSubscriptionSourcesHandler(store *subsource.Store, environmentURLs []string) http.HandlerFunc {
+func AdminSubscriptionSourcesHandler(store *subsource.Store, environmentURLs []string, onChange func()) http.HandlerFunc {
+	applied := func(w http.ResponseWriter) {
+		// The observation mode does not describe what to fetch, so it takes
+		// effect at once rather than waiting for the next refresh.
+		if onChange != nil {
+			onChange()
+		}
+		writeJSON(w, sourcesResponse(store, environmentURLs))
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -87,14 +113,33 @@ func AdminSubscriptionSourcesHandler(store *subsource.Store, environmentURLs []s
 				writeError(w, "Invalid JSON body", http.StatusBadRequest)
 				return
 			}
+			// The API only ever shows a masked URL. A client that echoes back
+			// what it was shown — toggling a source re-sends the whole row —
+			// must not overwrite the stored URL with the mask, which would
+			// leave a source that can never be fetched again. An empty URL
+			// already means "keep the stored one"; a masked one means the same.
+			if isMaskedSubscriptionURL(req.URL) {
+				req.URL = ""
+			}
 			enabled := true
 			if req.Enabled != nil {
 				enabled = *req.Enabled
 			}
+			silent := false
+			if req.Silent != nil {
+				silent = *req.Silent
+			}
+			unlisted := false
+			if req.Unlisted != nil {
+				unlisted = *req.Unlisted
+			}
 			source := subsource.Source{
-				URL:     req.URL,
-				Name:    req.Name,
-				Enabled: enabled,
+				URL:      req.URL,
+				Name:     req.Name,
+				Enabled:  enabled,
+				Mode:     observation.Mode(req.Mode),
+				Silent:   silent,
+				Unlisted: unlisted,
 				Profile: subscription.ClientProfile{
 					Profile:     req.Profile,
 					UserAgent:   req.UserAgent,
@@ -116,7 +161,7 @@ func AdminSubscriptionSourcesHandler(store *subsource.Store, environmentURLs []s
 				writeError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			writeJSON(w, sourcesResponse(store, environmentURLs))
+			applied(w)
 		case http.MethodDelete:
 			id := strings.TrimSpace(r.URL.Query().Get("id"))
 			if id == "" {
@@ -129,7 +174,7 @@ func AdminSubscriptionSourcesHandler(store *subsource.Store, environmentURLs []s
 				writeError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			writeJSON(w, sourcesResponse(store, environmentURLs))
+			applied(w)
 		default:
 			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -152,6 +197,9 @@ func sourcesResponse(store *subsource.Store, environmentURLs []string) AdminSubs
 			OSVersion:   source.Profile.OSVersion,
 			DeviceModel: source.Profile.DeviceModel,
 			Locale:      source.Profile.Locale,
+			Mode:        string(observation.NormalizeMode(source.Mode)),
+			Silent:      source.Silent,
+			Unlisted:    source.Unlisted,
 			CreatedAt:   source.CreatedAt.Format("2006-01-02 15:04:05"),
 		})
 	}
@@ -165,7 +213,35 @@ func sourcesResponse(store *subsource.Store, environmentURLs []string) AdminSubs
 		Sources:            sources,
 		EnvironmentSources: masked,
 		Profiles:           clientProfileCatalog(),
+		Modes:              observationModeCatalog(),
 	}
+}
+
+// isMaskedSubscriptionURL reports whether a value carries the marks
+// MaskSubscriptionURL leaves behind. Neither character can appear unescaped in
+// a real URL, so this cannot reject one an operator actually typed.
+func isMaskedSubscriptionURL(value string) bool {
+	return strings.ContainsAny(value, "…•")
+}
+
+func observationModeCatalog() []AdminObservationModeInfo {
+	catalog := make([]AdminObservationModeInfo, 0, len(observation.Modes()))
+	for _, mode := range observation.Modes() {
+		info := AdminObservationModeInfo{ID: string(mode)}
+		switch mode {
+		case observation.ModeAvailability:
+			info.Label = "Availability only"
+			info.Description = "Checked and alerted on as usual, but scheduled speed tests skip it."
+		case observation.ModePaused:
+			info.Label = "Paused"
+			info.Description = "Nodes stay listed and probed, but nothing is counted: no downtime, no incidents, no alerts, no speed tests."
+		default:
+			info.Label = "Full"
+			info.Description = "Watched like the deployment's own subscription."
+		}
+		catalog = append(catalog, info)
+	}
+	return catalog
 }
 
 // MaskSubscriptionURL keeps a subscription recognisable without publishing the

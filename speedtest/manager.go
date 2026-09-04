@@ -1408,7 +1408,9 @@ func (m *Manager) selectProxies(req RunRequest, allowMaintenance bool) []*models
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
-		if !allowMaintenance && !m.proxyChecker.MonitoringEnabled(proxy.StableID) {
+		// A manual run reaches a paused node deliberately; a scheduled one takes
+		// only what its source and the node's own state allow.
+		if !allowMaintenance && !m.proxyChecker.SpeedTestEnabled(proxy.StableID) {
 			continue
 		}
 		if len(selectedIDs) > 0 && !selectedIDs[proxy.StableID] {

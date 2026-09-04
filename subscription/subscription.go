@@ -99,6 +99,10 @@ type Feed struct {
 	// Name overrides the name the subscription reports about itself. It is the
 	// label the operator gave the source in the panel.
 	Name string
+	// SourceID identifies the panel-added source, and is empty for one from the
+	// environment. Every node the feed yields carries it, which is how the
+	// source's observation policy reaches the node.
+	SourceID string
 }
 
 func FeedsFromURLs(urls []string) []Feed {
@@ -125,6 +129,7 @@ func ReadFromFeeds(feeds []Feed) ([]*models.ProxyConfig, error) {
 		}
 		for _, cfg := range configs {
 			cfg.SubName = name
+			cfg.SourceID = feeds[0].SourceID
 		}
 		if name != "" {
 			SetSubscriptionName(name)
@@ -145,6 +150,7 @@ func ReadFromFeeds(feeds []Feed) ([]*models.ProxyConfig, error) {
 			configs, name, err := ReadFromFeed(f)
 			for _, cfg := range configs {
 				cfg.SubName = name
+				cfg.SourceID = f.SourceID
 			}
 			resultMu.Lock()
 			resultMap[f.URL] = subscriptionResult{

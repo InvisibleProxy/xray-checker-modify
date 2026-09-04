@@ -18,6 +18,7 @@ import (
 	"xray-checker/models"
 	"xray-checker/nodearchive"
 	"xray-checker/nodemerge"
+	"xray-checker/observation"
 	"xray-checker/probeagent"
 	"xray-checker/projectmaintenance"
 	"xray-checker/reachability"
@@ -194,6 +195,7 @@ func main() {
 		config.CLIConfig.Proxy.CheckMethod,
 	)
 	proxyChecker.SetProjectMaintenance(projectMaintenance.Enabled())
+	proxyChecker.SetSourcePolicies(sourceObservationPolicies(subscriptionSources))
 	remoteDiagnosticController, err := remoteprobe.NewController(remoteprobe.Config{
 		Enabled:     config.CLIConfig.RemoteDiagnostics.Enabled,
 		CheckMethod: config.CLIConfig.Proxy.CheckMethod,
@@ -717,7 +719,11 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/subscription/refresh", web.AdminSubscriptionRefreshHandler(func(request web.AdminSubscriptionRefreshRequest) (web.AdminSubscriptionRefreshResult, error) {
 		return refreshSubscription("manual", request.Force, request.ConfirmationToken)
 	}))
-	protectedHandler.Handle("/api/v1/admin/subscription/sources", web.AdminSubscriptionSourcesHandler(subscriptionSources, config.CLIConfig.Subscription.URLs))
+	protectedHandler.Handle("/api/v1/admin/subscription/sources", web.AdminSubscriptionSourcesHandler(
+		subscriptionSources,
+		config.CLIConfig.Subscription.URLs,
+		func() { proxyChecker.SetSourcePolicies(sourceObservationPolicies(subscriptionSources)) },
+	))
 	protectedHandler.Handle("/api/v1/admin/project-maintenance", web.AdminProjectMaintenanceHandler(projectMaintenance.Snapshot, setProjectMaintenance))
 	protectedHandler.Handle("/api/v1/admin/backup", web.AdminBackupHandler(backupCreator))
 	protectedHandler.Handle("/api/v1/admin/backup/restore", web.AdminBackupRestoreHandler(backupRestorer, nodeMergeCoordinator.AcquireRestoreGuard))
@@ -874,12 +880,28 @@ func allSubscriptionFeeds(sources *subsource.Store) []subscription.Feed {
 	feeds := subscription.FeedsFromURLs(config.CLIConfig.Subscription.URLs)
 	for _, source := range sources.EnabledSources() {
 		feeds = append(feeds, subscription.Feed{
-			URL:     source.URL,
-			Profile: source.Profile,
-			Name:    source.Name,
+			URL:      source.URL,
+			Profile:  source.Profile,
+			Name:     source.Name,
+			SourceID: source.ID,
 		})
 	}
 	return feeds
+}
+
+// sourceObservationPolicies is how a source's watching mode reaches the nodes
+// it produced. It is reinstalled whenever the sources change, so a mode edit
+// takes effect immediately instead of waiting for the next refresh.
+func sourceObservationPolicies(sources *subsource.Store) map[string]observation.Policy {
+	list := sources.List()
+	policies := make(map[string]observation.Policy, len(list))
+	for _, source := range list {
+		if source.ID == "" {
+			continue
+		}
+		policies[source.ID] = source.Policy()
+	}
+	return policies
 }
 
 func activeStableIDSet(proxies []*models.ProxyConfig) map[string]bool {

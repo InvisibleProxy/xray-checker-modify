@@ -18,7 +18,7 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 	}
 	cfg := s.Config()
 	if report.Source == "manual" {
-		report = s.excludeMaintenanceSpeedResults(report)
+		report = s.excludeUnreportableSpeedResults(report)
 	}
 	if report.Source == "manual" {
 		ids := successfulSpeedResultIDs(report.Results, cfg.LowSpeedThresholdMbps)
@@ -139,13 +139,20 @@ func attachSpeedDiagnostics(report speedtest.RunReport, annotations map[string]s
 	return report
 }
 
-func (s *Service) excludeMaintenanceSpeedResults(report speedtest.RunReport) speedtest.RunReport {
+// excludeUnreportableSpeedResults drops the measurements Telegram may not speak
+// about: a probe of a paused node, and anything from a source the operator
+// asked to keep silent. The measurements themselves are still taken and stored;
+// this only decides what is announced.
+func (s *Service) excludeUnreportableSpeedResults(report speedtest.RunReport) speedtest.RunReport {
 	if s.proxyChecker == nil || len(report.Results) == 0 {
 		return report
 	}
 	filtered := make([]speedtest.Result, 0, len(report.Results))
 	for _, result := range report.Results {
-		if !result.MaintenanceProbe && s.proxyChecker.MonitoringEnabled(result.StableID) {
+		if result.MaintenanceProbe || !s.proxyChecker.MonitoringEnabled(result.StableID) {
+			continue
+		}
+		if s.proxyChecker.AlertsEnabled(result.StableID) {
 			filtered = append(filtered, result)
 		}
 	}
