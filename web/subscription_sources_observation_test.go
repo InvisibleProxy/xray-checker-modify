@@ -75,7 +75,7 @@ func TestSavingASourceAppliesItsObservationPolicyImmediately(t *testing.T) {
 	handler := AdminSubscriptionSourcesHandler(store, nil, func() { applied++ })
 
 	rec := httptest.NewRecorder()
-	body := `{"url":"https://panel.example/sub/token","profile":"happ","enabled":true,"mode":"availability","silent":true,"unlisted":true}`
+	body := `{"url":"https://panel.example/sub/token","profile":"happ","enabled":true,"mode":"availability","unlisted":true}`
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/admin/subscription/sources", strings.NewReader(body)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
@@ -89,7 +89,7 @@ func TestSavingASourceAppliesItsObservationPolicyImmediately(t *testing.T) {
 		t.Fatalf("sources = %+v", response.Sources)
 	}
 	source := response.Sources[0]
-	if source.Mode != string(observation.ModeAvailability) || !source.Silent || !source.Unlisted {
+	if source.Mode != string(observation.ModeAvailability) || !source.Unlisted {
 		t.Fatalf("source = %+v, want the observation settings echoed back", source)
 	}
 	if len(response.Modes) == 0 {
@@ -110,7 +110,7 @@ func TestUnlistedSourceStaysOffThePublicSurfaces(t *testing.T) {
 	foreign := &models.ProxyConfig{StableID: "foreign", Name: "Foreign", Protocol: "vless", Server: "foreign.example", Port: 443, UUID: "b", SourceID: "src-foreign"}
 	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{own, foreign}, 10000, "", 1, "", "", 1, 0, "status")
 	proxyChecker.SetSourcePolicies(map[string]observation.Policy{
-		"src-foreign": observation.PolicyFor(observation.ModeFull, false, true),
+		"src-foreign": observation.PolicyFor(observation.ModeFull, true),
 	})
 
 	rec := httptest.NewRecorder()

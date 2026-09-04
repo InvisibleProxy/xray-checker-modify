@@ -2149,29 +2149,54 @@ func withMutedNodeIDs(cfg Config, ids []string) Config {
 	return cfg
 }
 
-// A silent source is measured exactly like any other; what stops is Telegram
-// speaking about it. The speed report is where that is easiest to see.
-func TestSilentSourceIsMeasuredButNotAnnounced(t *testing.T) {
+// Telegram speaks only about the subscription the deployment configures itself.
+// A source added from the panel enriches the admin picture and has no business
+// in the bot — but it stays a usable tunnel to Telegram, which is a different
+// question and must not be answered by the same filter.
+func TestBotListsOnlyEnvironmentNodesButStillTunnelsThroughAddedOnes(t *testing.T) {
 	own := &models.ProxyConfig{StableID: "own", Name: "Own"}
-	quiet := &models.ProxyConfig{StableID: "quiet", Name: "Quiet", SourceID: "src-quiet"}
-	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{own, quiet}, 10000, "", 1, "", "", 1, 0, "status")
-	proxyChecker.SetSourcePolicies(map[string]observation.Policy{
-		"src-quiet": observation.PolicyFor(observation.ModeFull, true, false),
-	})
+	added := &models.ProxyConfig{StableID: "added", Name: "Added", SourceID: "src-added"}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{own, added}, 10000, "", 1, "", "", 1, 0, "status")
+	proxyChecker.SetSourcePolicies(map[string]observation.Policy{"src-added": observation.Full()})
 	service := NewService("", proxyChecker, nil, 10000)
 
-	if !proxyChecker.AvailabilityAccounted(quiet.StableID) || !proxyChecker.SpeedTestEnabled(quiet.StableID) {
-		t.Fatal("silence changed what is measured")
+	if proxies := service.sortedProxies(); len(proxies) != 1 || proxies[0].StableID != own.StableID {
+		t.Fatalf("bot node list = %+v, want only the environment's own node", proxies)
+	}
+	if total, _, _, _ := service.nodeCounts(); total != 1 {
+		t.Fatalf("bot node total = %d, want 1", total)
+	}
+	if proxy, matches := service.findProxy(added.StableID); proxy != nil || len(matches) != 0 {
+		t.Fatalf("an added node is reachable from the bot: proxy=%+v matches=%+v", proxy, matches)
+	}
+	if ids := service.monitoredNodeIDs(); ids[added.StableID] {
+		t.Fatalf("an added node can be muted from the bot: %+v", ids)
+	}
+
+	// The transport is the exception: in a blocked network a foreign node may
+	// be the only route left to Telegram.
+	candidates := service.proxyCandidates()
+	if len(candidates) != 2 {
+		t.Fatalf("transport candidates = %d, want both nodes", len(candidates))
+	}
+	foundAdded := false
+	for _, candidate := range candidates {
+		if candidate.Proxy != nil && candidate.Proxy.StableID == added.StableID {
+			foundAdded = true
+		}
+	}
+	if !foundAdded {
+		t.Fatal("an added node was dropped from the transport candidates")
 	}
 
 	report := service.excludeUnreportableSpeedResults(speedtest.RunReport{
 		Selected: 2,
 		Results: []speedtest.Result{
 			{StableID: own.StableID, Name: own.Name, Mbps: 50},
-			{StableID: quiet.StableID, Name: quiet.Name, Mbps: 50},
+			{StableID: added.StableID, Name: added.Name, Mbps: 50},
 		},
 	})
 	if report.Selected != 1 || len(report.Results) != 1 || report.Results[0].StableID != own.StableID {
-		t.Fatalf("report = %+v, want the silent source left out", report)
+		t.Fatalf("speed report = %+v, want only the environment's own node", report)
 	}
 }

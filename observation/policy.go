@@ -33,28 +33,31 @@ const (
 )
 
 // Policy is the effective answer for one node, resolved from its source's mode
-// plus the two independent switches beside it.
+// plus the switch beside it.
 type Policy struct {
 	// AccountAvailability turns a probe into a verdict: downtime, incidents,
 	// node status and the availability side of Telegram.
 	AccountAvailability bool
 	// SpeedTest lets a scheduled run select the node.
 	SpeedTest bool
-	// Alerts lets Telegram speak about the node at all.
-	Alerts bool
 	// Listed puts the node on the public dashboard, into Prometheus and behind
 	// its own /config endpoint.
+	//
+	// Telegram is deliberately not one of these switches. The bot is the
+	// operator's channel about the service they run, and that service is the
+	// subscription the deployment configures itself; a panel-added source never
+	// reaches it at all. See ProxyChecker.EnvironmentSourced.
 	Listed bool
 }
 
 // Full is what a node observes when nothing says otherwise, which includes
 // every node of every environment subscription.
 func Full() Policy {
-	return Policy{AccountAvailability: true, SpeedTest: true, Alerts: true, Listed: true}
+	return Policy{AccountAvailability: true, SpeedTest: true, Listed: true}
 }
 
-// PolicyFor expands a mode and its two switches into the effective policy.
-func PolicyFor(mode Mode, silent bool, unlisted bool) Policy {
+// PolicyFor expands a mode and the switch beside it into the effective policy.
+func PolicyFor(mode Mode, unlisted bool) Policy {
 	policy := Full()
 	switch NormalizeMode(mode) {
 	case ModeAvailability:
@@ -62,9 +65,6 @@ func PolicyFor(mode Mode, silent bool, unlisted bool) Policy {
 	case ModePaused:
 		policy.AccountAvailability = false
 		policy.SpeedTest = false
-	}
-	if silent {
-		policy.Alerts = false
 	}
 	if unlisted {
 		policy.Listed = false

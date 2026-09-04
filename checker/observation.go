@@ -66,9 +66,18 @@ func (pc *ProxyChecker) AvailabilityAccounted(stableID string) bool {
 	return pc.ObservationPolicyFor(stableID).AccountAvailability
 }
 
-// AlertsEnabled reports whether Telegram may speak about the node.
-func (pc *ProxyChecker) AlertsEnabled(stableID string) bool {
-	return pc.ObservationPolicyFor(stableID).Alerts
+// EnvironmentSourced reports whether a node came from a subscription the
+// deployment configures itself, rather than one an operator added from the
+// panel. A node with no source at all is the environment's.
+func (pc *ProxyChecker) EnvironmentSourced(stableID string) bool {
+	stableID = strings.TrimSpace(stableID)
+	if stableID == "" {
+		return true
+	}
+	pc.sourcePolicyMu.RLock()
+	defer pc.sourcePolicyMu.RUnlock()
+	sourceID, ok := pc.sourceByStableID[stableID]
+	return !ok || sourceID == ""
 }
 
 // ListedPublicly reports whether the node belongs on the public dashboard, in

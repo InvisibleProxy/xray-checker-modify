@@ -37,14 +37,14 @@ type Source struct {
 	Enabled bool   `json:"enabled"`
 	// Profile carries the client identity and HWID used to fetch this source.
 	Profile subscription.ClientProfile `json:"profile"`
-	// Mode, Silent and Unlisted say how this source's nodes are watched. They
-	// are absent from state written before observation modes existed, and that
+	// Mode and Unlisted say how this source's nodes are watched. They are
+	// absent from state written before observation modes existed, and that
 	// state described sources watched in full — which is what the zero values
 	// mean here.
+	//
+	// There is no Telegram switch: the bot speaks only about the subscription
+	// the deployment configures itself, so a source added here never reaches it.
 	Mode observation.Mode `json:"mode,omitempty"`
-	// Silent keeps Telegram quiet about this source without changing what is
-	// measured: a panel still being evaluated should not wake anyone at night.
-	Silent bool `json:"silent,omitempty"`
 	// Unlisted keeps the source's nodes off the public dashboard, out of
 	// Prometheus and without their own /config endpoint. Somebody else's panel
 	// is not the service this deployment publishes as its own.
@@ -55,7 +55,7 @@ type Source struct {
 
 // Policy is how this source's nodes are watched.
 func (s Source) Policy() observation.Policy {
-	return observation.PolicyFor(s.Mode, s.Silent, s.Unlisted)
+	return observation.PolicyFor(s.Mode, s.Unlisted)
 }
 
 type stateFile struct {

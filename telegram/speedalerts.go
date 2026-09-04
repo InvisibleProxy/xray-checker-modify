@@ -140,9 +140,9 @@ func attachSpeedDiagnostics(report speedtest.RunReport, annotations map[string]s
 }
 
 // excludeUnreportableSpeedResults drops the measurements Telegram may not speak
-// about: a probe of a paused node, and anything from a source the operator
-// asked to keep silent. The measurements themselves are still taken and stored;
-// this only decides what is announced.
+// about: a probe of a paused node, and anything from a source added in the
+// panel. The measurements themselves are still taken and stored; this only
+// decides what is announced.
 func (s *Service) excludeUnreportableSpeedResults(report speedtest.RunReport) speedtest.RunReport {
 	if s.proxyChecker == nil || len(report.Results) == 0 {
 		return report
@@ -152,7 +152,7 @@ func (s *Service) excludeUnreportableSpeedResults(report speedtest.RunReport) sp
 		if result.MaintenanceProbe || !s.proxyChecker.MonitoringEnabled(result.StableID) {
 			continue
 		}
-		if s.proxyChecker.AlertsEnabled(result.StableID) {
+		if s.speaksAbout(result.StableID) {
 			filtered = append(filtered, result)
 		}
 	}

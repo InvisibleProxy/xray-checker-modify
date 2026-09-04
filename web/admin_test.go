@@ -75,7 +75,6 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`id="subscription-source-mode"`,
 		`function subscriptionSourceObservationHTML(source)`,
 		`mode: $("subscription-source-mode").value`,
-		`silent: $("subscription-source-silent").checked`,
 		`unlisted: $("subscription-source-unlisted").checked`,
 		// Echoing back a masked URL would store the mask as the real one.
 		`$("subscription-source-url").placeholder = source.url || ""`,
@@ -109,7 +108,12 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`class="chart-gap-bridge"`,
 		`ordered.forEach((result) => {`,
 		`const singlePointTimes = new Set(successful.length === 1`,
-		`class="chart-error-band"`,
+		// Failures are drawn as merged runs, not one band per sample: stacked
+		// translucent rects are what smeared a long outage into a grey field.
+		`class="chart-error-band${statusClass}"`,
+		`failureRuns.push(openFailure)`,
+		`const hasMeasuredScale = successful.length > 0`,
+		`class="chart-empty-note"`,
 		`class="chart-last-marker"`,
 		`class="chart-cursor"`,
 		`function availabilityChartScale(results)`,

@@ -1236,6 +1236,10 @@
         transition: fill 0.15s ease;
         animation: chart-layer-enter 0.3s ease-out both;
       }
+      .chart-empty-note {
+        fill: var(--muted);
+        font-size: 12px;
+      }
       .chart-error-band:hover {
         fill: rgba(247, 118, 142, 0.2);
       }
@@ -2076,14 +2080,10 @@
               </label>
               <div id="subscription-source-mode-hint" class="hint"></div>
               <label class="inline">
-                <input id="subscription-source-silent" type="checkbox" />
-                No Telegram notifications
-              </label>
-              <label class="inline">
                 <input id="subscription-source-unlisted" type="checkbox" />
                 Keep off the public status page
               </label>
-              <div class="hint">Silence changes nothing that is measured, only what is announced. Keeping a source off the status page also removes its nodes from Prometheus and from their own /config endpoints — somebody else's panel is not the service you publish as your own.</div>
+              <div class="hint">This also removes the source's nodes from Prometheus and from their own /config endpoints — somebody else's panel is not the service you publish as your own. The Telegram bot never lists a source added here at all: it speaks only about your own subscription. Such a node can still carry the bot's own traffic when a direct connection to Telegram fails.</div>
               <label>
                 HWID
                 <input id="subscription-source-hwid" type="text" autocomplete="off" placeholder="Generated automatically" />
@@ -4628,6 +4628,12 @@
         }
 
         const successful = ordered.filter((result) => chartResultSuccessful(result, view));
+        // Nothing succeeded in this window, so there is no measurement to plot.
+        // Drawing the value axis anyway would label it from an invented maximum,
+        // and filling the whole plot with failure bands makes a wall that reads
+        // as data. The failures become a strip along the baseline instead: still
+        // a record of when they happened, no longer pretending to be a graph.
+        const hasMeasuredScale = successful.length > 0;
         const threshold = view === "speedtest" ? lowSpeedThreshold() : 0;
         const observedMax = successful.reduce((max, result) => Math.max(max, chartResultValue(result, view)), 0);
         const availabilityScale = view === "availability" ? availabilityChartScale(ordered) : null;
@@ -4648,12 +4654,14 @@
         const yOf = (value) => top + plotHeight - Math.max(0, Math.min(1, Number(value || 0) / yMax)) * plotHeight;
 
         const grid = [];
-        [0, 0.5, 1].forEach((ratio) => {
-          const y = top + plotHeight - ratio * plotHeight;
-          grid.push(`<line class="chart-grid-line" x1="${left}" y1="${y}" x2="${width - right}" y2="${y}" />`);
-          const label = ratio === 1 && hasClippedPeaks ? `${Math.round(yMax)}+` : Math.round(yMax * ratio);
-          grid.push(`<text class="chart-axis-label" x="${width - 8}" y="${y + 4}" text-anchor="end">${label}</text>`);
-        });
+        if (hasMeasuredScale) {
+          [0, 0.5, 1].forEach((ratio) => {
+            const y = top + plotHeight - ratio * plotHeight;
+            grid.push(`<line class="chart-grid-line" x1="${left}" y1="${y}" x2="${width - right}" y2="${y}" />`);
+            const label = ratio === 1 && hasClippedPeaks ? `${Math.round(yMax)}+` : Math.round(yMax * ratio);
+            grid.push(`<text class="chart-axis-label" x="${width - 8}" y="${y + 4}" text-anchor="end">${label}</text>`);
+          });
+        }
         for (let index = 0; index < 5; index += 1) {
           const ratio = index / 4;
           const x = left + ratio * plotWidth;
@@ -4752,15 +4760,47 @@
           }).join("")
           : "";
         const errorBandWidth = Math.max(3, Math.min(34, medianInterval > 0 ? (medianInterval / spanMs) * plotWidth : 8));
-        const errors = ordered.filter((result) => !chartResultSuccessful(result, view)).map((result) => {
-          const x = xOf(result.checkedAt);
-          const sampleStatus = availabilitySampleStatus(result);
-          const detail = view === "availability"
-            ? `${formatTime(result.checkedAt)} · ${sampleStatus === "proxy_failure" ? "Proxy failure" : (result.failureSummary || "Offline")}`
-            : `${formatTime(result.checkedAt)} · ${result.offline ? "Offline" : compactReason(result.error) || "Failed"}`;
-          const statusClass = view === "availability" && sampleStatus === "proxy_failure" ? " warn" : "";
-          const errorClass = statusClass ? `class="chart-error-band${statusClass}"` : `class="chart-error-band"`;
-          return `<rect ${errorClass} x="${(x - errorBandWidth / 2).toFixed(1)}" y="${top}" width="${errorBandWidth.toFixed(1)}" height="${plotHeight}" rx="2"><title>${escapeHtml(detail)}</title></rect>`;
+        // One band per failed check overlaps its neighbours at any ordinary
+        // check interval, and translucent rectangles stacked on each other are
+        // what turn a long outage into a smeared field with seams. Consecutive
+        // failures of the same kind become one band, so an outage reads as one
+        // stretch of time and carries one tooltip instead of a hundred.
+        const failureRuns = [];
+        let openFailure = null;
+        ordered.forEach((result) => {
+          if (chartResultSuccessful(result, view)) {
+            openFailure = null;
+            return;
+          }
+          const status = view === "availability"
+            ? availabilitySampleStatus(result)
+            : (result.offline ? "offline" : "error");
+          const continues = openFailure
+            && openFailure.status === status
+            && new Date(result.checkedAt) - new Date(openFailure.last.checkedAt) <= gapLimit;
+          if (continues) {
+            openFailure.last = result;
+            openFailure.count += 1;
+            return;
+          }
+          openFailure = { status, first: result, last: result, count: 1 };
+          failureRuns.push(openFailure);
+        });
+        const failureStripHeight = 16;
+        const failureTop = hasMeasuredScale ? top : top + plotHeight - failureStripHeight;
+        const failureHeight = hasMeasuredScale ? plotHeight : failureStripHeight;
+        const errors = failureRuns.map((run) => {
+          const startX = xOf(run.first.checkedAt) - errorBandWidth / 2;
+          const endX = xOf(run.last.checkedAt) + errorBandWidth / 2;
+          const bandWidth = Math.max(errorBandWidth, endX - startX);
+          const reason = view === "availability"
+            ? (run.status === "proxy_failure" ? "Proxy failure" : (run.first.failureSummary || "Offline"))
+            : (run.first.offline ? "Offline" : compactReason(run.first.error) || "Failed");
+          const when = run.count > 1
+            ? `${formatTime(run.first.checkedAt)} → ${formatShortTime(run.last.checkedAt)} · ${run.count} ×`
+            : formatTime(run.first.checkedAt);
+          const statusClass = view === "availability" && run.status === "proxy_failure" ? " warn" : "";
+          return `<rect class="chart-error-band${statusClass}" x="${startX.toFixed(1)}" y="${failureTop}" width="${bandWidth.toFixed(1)}" height="${failureHeight}" rx="2"><title>${escapeHtml(`${when} · ${reason}`)}</title></rect>`;
         }).join("");
         const thresholdLine = view === "speedtest" && threshold > 0 && threshold < yMax
           ? `<line class="chart-threshold" x1="${left}" y1="${yOf(threshold)}" x2="${width - right}" y2="${yOf(threshold)}"><title>Low-speed threshold: ${escapeHtml(formatMbps(threshold))}</title></line>`
@@ -4769,7 +4809,11 @@
         const latestX = xOf(latest.checkedAt).toFixed(1);
         const latestMarker = `<line class="chart-last-marker" x1="${latestX}" y1="${top}" x2="${latestX}" y2="${top + plotHeight}"><title>${view === "availability" ? "Latest availability check" : "Latest measurement"}: ${escapeHtml(formatTime(latest.checkedAt))}</title></line>`;
         const cursor = `<line class="chart-cursor" x1="${left}" y1="${top}" x2="${left}" y2="${top + plotHeight}" opacity="0" aria-hidden="true" />`;
-        const unit = view === "availability" ? "ms" : "Mbps";
+        // Without a scale there is no unit to name, and the empty plot says so
+        // in words rather than leaving the operator to work it out from a blank.
+        const unitLabel = hasMeasuredScale
+          ? `<text class="chart-axis-label" x="${left}" y="13">${view === "availability" ? "ms" : "Mbps"}</text>`
+          : `<text class="chart-empty-note" x="${left + plotWidth / 2}" y="${top + plotHeight / 2}" text-anchor="middle">${escapeHtml(tr(view === "availability" ? "No successful checks in this period" : "No successful measurements in this period"))}</text>`;
         const ariaLabel = view === "availability" ? "Availability history in milliseconds" : "Speed-test history in Mbps";
         return `<svg class="speed-chart" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${ariaLabel}">
           <defs>
@@ -4784,7 +4828,7 @@
           </defs>
           ${grid.join("")}
           <g clip-path="url(#${clipID})">${areas}${errors}${thresholdLine}${gapBridges}${lines}${latestMarker}${cursor}${points}${outlierMarkers}</g>
-          <text class="chart-axis-label" x="${left}" y="13">${unit}</text>
+          ${unitLabel}
         </svg>`;
       }
 
@@ -7730,7 +7774,6 @@
       function subscriptionSourceObservationHTML(source) {
         const mode = subscriptionObservationModes().find((entry) => entry.id === (source.mode || "full"));
         const chips = [`<span class="chip ${source.mode && source.mode !== "full" ? "warn" : "neutral"}">${escapeHtml(tr(mode ? mode.label : source.mode || "Full"))}</span>`];
-        if (source.silent) chips.push(`<span class="chip warn">${escapeHtml(tr("Silent"))}</span>`);
         if (source.unlisted) chips.push(`<span class="chip warn">${escapeHtml(tr("Unlisted"))}</span>`);
         return `<div class="status-chips">${chips.join("")}</div>`;
       }
@@ -7768,7 +7811,6 @@
         $("subscription-source-name").value = source.name || "";
         $("subscription-source-profile").value = source.profile || "checker";
         $("subscription-source-mode").value = source.mode || "full";
-        $("subscription-source-silent").checked = Boolean(source.silent);
         $("subscription-source-unlisted").checked = Boolean(source.unlisted);
         renderSubscriptionSourceModeHint();
         $("subscription-source-hwid").value = source.hwid || "";
@@ -7787,7 +7829,6 @@
           "subscription-source-device-model", "subscription-source-locale"].forEach((id) => { $(id).value = ""; });
         $("subscription-source-url").placeholder = "https://panel.example/sub/xxxx";
         $("subscription-source-mode").value = "full";
-        $("subscription-source-silent").checked = false;
         $("subscription-source-unlisted").checked = false;
         $("subscription-source-form-title").textContent = tr("Add a source");
         $("subscription-source-form-state").textContent = "";
@@ -7808,7 +7849,6 @@
           deviceModel: $("subscription-source-device-model").value.trim(),
           locale: $("subscription-source-locale").value.trim(),
           mode: $("subscription-source-mode").value,
-          silent: $("subscription-source-silent").checked,
           unlisted: $("subscription-source-unlisted").checked,
           enabled: true,
         }, overrides || {});
@@ -7843,7 +7883,6 @@
           deviceModel: source.deviceModel || "",
           locale: source.locale || "",
           mode: source.mode || "full",
-          silent: Boolean(source.silent),
           unlisted: Boolean(source.unlisted),
           enabled: !source.enabled,
         });

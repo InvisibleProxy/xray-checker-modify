@@ -238,15 +238,14 @@ func TestObservationSettingsSurviveRestart(t *testing.T) {
 		URL:      "https://panel.example/sub/token",
 		Enabled:  true,
 		Mode:     observation.ModeAvailability,
-		Silent:   true,
 		Unlisted: true,
 		Profile:  subscription.ClientProfile{Profile: subscription.ClientProfileHapp},
 	})
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	if policy := added.Policy(); policy.SpeedTest || policy.Alerts || policy.Listed || !policy.AccountAvailability {
-		t.Fatalf("policy = %+v, want availability only, silent and unlisted", policy)
+	if policy := added.Policy(); policy.SpeedTest || policy.Listed || !policy.AccountAvailability {
+		t.Fatalf("policy = %+v, want availability only and unlisted", policy)
 	}
 
 	restored := NewStore(path)
@@ -257,7 +256,7 @@ func TestObservationSettingsSurviveRestart(t *testing.T) {
 	if len(sources) != 1 {
 		t.Fatalf("sources after restart = %d, want 1", len(sources))
 	}
-	if sources[0].Mode != observation.ModeAvailability || !sources[0].Silent || !sources[0].Unlisted {
+	if sources[0].Mode != observation.ModeAvailability || !sources[0].Unlisted {
 		t.Fatalf("observation settings were lost: %+v", sources[0])
 	}
 }
@@ -279,7 +278,7 @@ func TestSourcesWithoutAModeReadAsFull(t *testing.T) {
 	if len(sources) != 1 {
 		t.Fatalf("sources = %d, want 1", len(sources))
 	}
-	if sources[0].Mode != observation.ModeFull || sources[0].Silent || sources[0].Unlisted {
+	if sources[0].Mode != observation.ModeFull || sources[0].Unlisted {
 		t.Fatalf("old source was not normalized to full: %+v", sources[0])
 	}
 	if got := sources[0].Policy(); got != observation.Full() {

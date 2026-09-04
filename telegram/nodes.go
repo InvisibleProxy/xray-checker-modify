@@ -25,6 +25,23 @@ func (s *Service) latestSpeedResult(stableID string) *speedtest.Result {
 	return nil
 }
 
+// speaksAbout reports whether the bot mentions a node at all.
+//
+// Telegram is the operator's channel about the service they run, and that
+// service is the subscription the deployment configures itself. Sources added
+// from the panel enrich the picture in the admin UI; in the bot they would only
+// be noise about servers nobody here operates.
+//
+// This deliberately does not reach proxyCandidates. Those are the nodes the bot
+// tunnels through to reach Telegram itself, where a foreign node is as good as
+// any — and in a blocked network it may be the only one that still works.
+func (s *Service) speaksAbout(stableID string) bool {
+	if s.proxyChecker == nil {
+		return true
+	}
+	return s.proxyChecker.EnvironmentSourced(stableID)
+}
+
 func (s *Service) sortedProxies() []*models.ProxyConfig {
 	all := s.proxyChecker.GetProxies()
 	proxies := make([]*models.ProxyConfig, 0, len(all))
@@ -32,7 +49,7 @@ func (s *Service) sortedProxies() []*models.ProxyConfig {
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
-		if !s.proxyChecker.MonitoringEnabled(proxy.StableID) {
+		if !s.proxyChecker.MonitoringEnabled(proxy.StableID) || !s.speaksAbout(proxy.StableID) {
 			continue
 		}
 		proxies = append(proxies, proxy)
@@ -141,7 +158,7 @@ func (s *Service) findProxy(query string) (*models.ProxyConfig, []*models.ProxyC
 		if proxy.StableID == "" {
 			proxy.StableID = proxy.GenerateStableID()
 		}
-		if !s.proxyChecker.MonitoringEnabled(proxy.StableID) {
+		if !s.proxyChecker.MonitoringEnabled(proxy.StableID) || !s.speaksAbout(proxy.StableID) {
 			continue
 		}
 		stableID := strings.ToLower(proxy.StableID)
@@ -196,7 +213,7 @@ func (s *Service) activeNodeIDs() map[string]bool {
 func (s *Service) monitoredNodeIDs() map[string]bool {
 	active := s.activeNodeIDs()
 	for stableID := range active {
-		if !s.proxyChecker.MonitoringEnabled(stableID) {
+		if !s.proxyChecker.MonitoringEnabled(stableID) || !s.speaksAbout(stableID) {
 			delete(active, stableID)
 		}
 	}

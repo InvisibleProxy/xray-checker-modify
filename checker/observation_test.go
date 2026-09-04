@@ -21,14 +21,14 @@ func TestPolicyReachesNodesThroughTheirSource(t *testing.T) {
 	paused := sourcedProxy("paused", "src-paused")
 	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{own, quiet, paused})
 	proxyChecker.SetSourcePolicies(map[string]observation.Policy{
-		"src-quiet":  observation.PolicyFor(observation.ModeAvailability, true, true),
-		"src-paused": observation.PolicyFor(observation.ModePaused, false, false),
+		"src-quiet":  observation.PolicyFor(observation.ModeAvailability, true),
+		"src-paused": observation.PolicyFor(observation.ModePaused, false),
 	})
 
 	if got := proxyChecker.ObservationPolicyFor(own.StableID); got != observation.Full() {
 		t.Fatalf("environment node policy = %+v, want the full one", got)
 	}
-	if !proxyChecker.SpeedTestEnabled(own.StableID) || !proxyChecker.AlertsEnabled(own.StableID) || !proxyChecker.ListedPublicly(own.StableID) {
+	if !proxyChecker.SpeedTestEnabled(own.StableID) || !proxyChecker.ListedPublicly(own.StableID) {
 		t.Fatal("environment node lost part of the full policy")
 	}
 
@@ -38,15 +38,35 @@ func TestPolicyReachesNodesThroughTheirSource(t *testing.T) {
 	if !proxyChecker.AvailabilityAccounted(quiet.StableID) {
 		t.Fatal("an availability-only source stopped being accounted for")
 	}
-	if proxyChecker.AlertsEnabled(quiet.StableID) || proxyChecker.ListedPublicly(quiet.StableID) {
-		t.Fatal("a silent, unlisted source still alerts or publishes")
+	if proxyChecker.ListedPublicly(quiet.StableID) {
+		t.Fatal("an unlisted source is still published")
 	}
 
 	if proxyChecker.AvailabilityAccounted(paused.StableID) || proxyChecker.SpeedTestEnabled(paused.StableID) {
 		t.Fatal("a paused source is still measured")
 	}
-	if !proxyChecker.AlertsEnabled(paused.StableID) || !proxyChecker.ListedPublicly(paused.StableID) {
-		t.Fatal("pausing a source silently changed its unrelated switches")
+	if !proxyChecker.ListedPublicly(paused.StableID) {
+		t.Fatal("pausing a source silently changed its unrelated switch")
+	}
+}
+
+// Telegram is the operator's channel about the service they run, so the bot
+// separates nodes by where they came from rather than by any setting.
+func TestEnvironmentSourcedSeparatesOwnNodesFromAddedOnes(t *testing.T) {
+	own := sourcedProxy("own", "")
+	added := sourcedProxy("added", "src-added")
+	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{own, added})
+	proxyChecker.SetSourcePolicies(map[string]observation.Policy{"src-added": observation.Full()})
+
+	if !proxyChecker.EnvironmentSourced(own.StableID) {
+		t.Fatal("a node without a source id is the environment's")
+	}
+	if proxyChecker.EnvironmentSourced(added.StableID) {
+		t.Fatal("a panel-added node was taken for the environment's own")
+	}
+	// A node the checker has never heard of cannot be somebody's addition.
+	if !proxyChecker.EnvironmentSourced("unknown") {
+		t.Fatal("an unknown node should default to the environment")
 	}
 }
 
@@ -71,7 +91,7 @@ func TestSourceIndexFollowsARefresh(t *testing.T) {
 	before := sourcedProxy("node-1", "src-quiet")
 	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{before})
 	proxyChecker.SetSourcePolicies(map[string]observation.Policy{
-		"src-quiet": observation.PolicyFor(observation.ModeAvailability, false, false),
+		"src-quiet": observation.PolicyFor(observation.ModeAvailability, false),
 	})
 	if proxyChecker.SpeedTestEnabled(before.StableID) {
 		t.Fatal("the availability-only policy did not reach the node")

@@ -36,9 +36,9 @@ type AdminSubscriptionSource struct {
 	OSVersion   string `json:"osVersion,omitempty"`
 	DeviceModel string `json:"deviceModel,omitempty"`
 	Locale      string `json:"locale,omitempty"`
-	// Mode, Silent and Unlisted say how this source's nodes are watched.
+	// Mode and Unlisted say how this source's nodes are watched. Telegram is
+	// not among them: the bot speaks only about the environment's subscription.
 	Mode      string `json:"mode"`
-	Silent    bool   `json:"silent"`
 	Unlisted  bool   `json:"unlisted"`
 	CreatedAt string `json:"createdAt,omitempty"`
 }
@@ -86,7 +86,6 @@ type AdminSubscriptionSourceRequest struct {
 	DeviceModel string `json:"deviceModel"`
 	Locale      string `json:"locale"`
 	Mode        string `json:"mode"`
-	Silent      *bool  `json:"silent"`
 	Unlisted    *bool  `json:"unlisted"`
 }
 
@@ -125,10 +124,6 @@ func AdminSubscriptionSourcesHandler(store *subsource.Store, environmentURLs []s
 			if req.Enabled != nil {
 				enabled = *req.Enabled
 			}
-			silent := false
-			if req.Silent != nil {
-				silent = *req.Silent
-			}
 			unlisted := false
 			if req.Unlisted != nil {
 				unlisted = *req.Unlisted
@@ -138,7 +133,6 @@ func AdminSubscriptionSourcesHandler(store *subsource.Store, environmentURLs []s
 				Name:     req.Name,
 				Enabled:  enabled,
 				Mode:     observation.Mode(req.Mode),
-				Silent:   silent,
 				Unlisted: unlisted,
 				Profile: subscription.ClientProfile{
 					Profile:     req.Profile,
@@ -198,7 +192,6 @@ func sourcesResponse(store *subsource.Store, environmentURLs []string) AdminSubs
 			DeviceModel: source.Profile.DeviceModel,
 			Locale:      source.Profile.Locale,
 			Mode:        string(observation.NormalizeMode(source.Mode)),
-			Silent:      source.Silent,
 			Unlisted:    source.Unlisted,
 			CreatedAt:   source.CreatedAt.Format("2006-01-02 15:04:05"),
 		})

@@ -11,42 +11,42 @@ func TestModeExpandsIntoWhatIsMeasured(t *testing.T) {
 		{
 			name: "full watches everything",
 			mode: ModeFull,
-			want: Policy{AccountAvailability: true, SpeedTest: true, Alerts: true, Listed: true},
+			want: Policy{AccountAvailability: true, SpeedTest: true, Listed: true},
 		},
 		{
 			name: "availability only drops scheduled speed tests",
 			mode: ModeAvailability,
-			want: Policy{AccountAvailability: true, SpeedTest: false, Alerts: true, Listed: true},
+			want: Policy{AccountAvailability: true, SpeedTest: false, Listed: true},
 		},
 		{
 			// The probe still runs; what stops is the verdict drawn from it.
 			name: "paused stops the verdict and the measurement",
 			mode: ModePaused,
-			want: Policy{AccountAvailability: false, SpeedTest: false, Alerts: true, Listed: true},
+			want: Policy{AccountAvailability: false, SpeedTest: false, Listed: true},
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			if got := PolicyFor(testCase.mode, false, false); got != testCase.want {
+			if got := PolicyFor(testCase.mode, false); got != testCase.want {
 				t.Fatalf("policy = %+v, want %+v", got, testCase.want)
 			}
 		})
 	}
 }
 
-// Silence and listing are independent of the mode: an operator can want every
-// measurement a full source gives and none of its noise.
-func TestSilentAndUnlistedApplyOnTopOfAnyMode(t *testing.T) {
-	policy := PolicyFor(ModeFull, true, true)
+// Listing is independent of the mode: an operator can want every measurement a
+// full source gives while keeping its nodes out of what they publish.
+func TestUnlistedAppliesOnTopOfAnyMode(t *testing.T) {
+	policy := PolicyFor(ModeFull, true)
 	if !policy.AccountAvailability || !policy.SpeedTest {
-		t.Fatalf("silence or listing changed what is measured: %+v", policy)
+		t.Fatalf("listing changed what is measured: %+v", policy)
 	}
-	if policy.Alerts || policy.Listed {
-		t.Fatalf("policy = %+v, want no alerts and no listing", policy)
+	if policy.Listed {
+		t.Fatalf("policy = %+v, want no listing", policy)
 	}
 
-	paused := PolicyFor(ModePaused, true, false)
-	if paused.Alerts || paused.Listed == false {
-		t.Fatalf("paused with silence = %+v, want listing kept", paused)
+	paused := PolicyFor(ModePaused, false)
+	if !paused.Listed {
+		t.Fatalf("paused = %+v, want listing kept", paused)
 	}
 }
 
@@ -57,7 +57,7 @@ func TestAnUnknownOrEmptyModeReadsAsFull(t *testing.T) {
 		if got := NormalizeMode(mode); got != ModeFull {
 			t.Fatalf("NormalizeMode(%q) = %q, want full", mode, got)
 		}
-		if got := PolicyFor(mode, false, false); got != Full() {
+		if got := PolicyFor(mode, false); got != Full() {
 			t.Fatalf("PolicyFor(%q) = %+v, want the full policy", mode, got)
 		}
 	}

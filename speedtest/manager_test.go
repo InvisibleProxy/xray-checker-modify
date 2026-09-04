@@ -751,8 +751,8 @@ func TestScheduledRunSkipsSourcesWatchedForAvailabilityOnly(t *testing.T) {
 	paused := &models.ProxyConfig{StableID: "paused-source", Name: "Paused source", SourceID: "src-paused"}
 	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{own, availabilityOnly, paused}, 10000, "", 1, "", "", 1, 0, "status")
 	proxyChecker.SetSourcePolicies(map[string]observation.Policy{
-		"src-availability": observation.PolicyFor(observation.ModeAvailability, false, false),
-		"src-paused":       observation.PolicyFor(observation.ModePaused, false, false),
+		"src-availability": observation.PolicyFor(observation.ModeAvailability, false),
+		"src-paused":       observation.PolicyFor(observation.ModePaused, false),
 	})
 	manager := NewManager(proxyChecker, 10000, "", TestConfig{})
 
