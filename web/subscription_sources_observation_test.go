@@ -178,3 +178,40 @@ func TestAdminProxyInfoCarriesBothNames(t *testing.T) {
 		t.Fatalf("renamed node = %+v, want both names returned", named)
 	}
 }
+
+// The panel holds no subscription URL to compare against, so the API is the
+// only thing that can tell it which nodes came from the deployment's own feed
+// and which were added to enrich the picture. Its filters default on that.
+func TestAdminProxiesMarkTheEnvironmentsOwnSubscription(t *testing.T) {
+	own := &models.ProxyConfig{
+		StableID: "own", Name: "Own", SubName: "Home panel",
+		Protocol: "vless", Server: "own.example", Port: 443, UUID: "a",
+	}
+	added := &models.ProxyConfig{
+		StableID: "added", Name: "Added", SubName: "Third-party panel", SourceID: "src-1",
+		Protocol: "vless", Server: "added.example", Port: 443, UUID: "b",
+	}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{own, added}, 10000, "", 1, "", "", 1, 0, "status")
+
+	rec := httptest.NewRecorder()
+	AdminProxiesHandler(proxyChecker, 10000).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/proxies", nil))
+	var envelope struct {
+		Data []AdminProxyInfo `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(envelope.Data) != 2 {
+		t.Fatalf("proxies = %+v, want two", envelope.Data)
+	}
+	sourced := make(map[string]bool, len(envelope.Data))
+	for _, info := range envelope.Data {
+		sourced[info.StableID] = info.EnvSource
+	}
+	if !sourced["own"] {
+		t.Fatal("a node from the environment subscription was not marked as the deployment's own")
+	}
+	if sourced["added"] {
+		t.Fatal("a node from a panel-added source was marked as the environment's")
+	}
+}

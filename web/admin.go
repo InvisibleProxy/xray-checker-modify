@@ -38,6 +38,11 @@ type AdminProxyInfo struct {
 	// held several outbounds — the human name a routing tag replaced.
 	GroupName string `json:"groupName,omitempty"`
 	SubName   string `json:"subName"`
+	// EnvSource marks a node that came from a subscription configured in the
+	// environment rather than added from the panel. It is what lets the panel
+	// tell the deployment's own feed from the ones added to enrich the picture,
+	// without the panel having to know any subscription URL.
+	EnvSource bool   `json:"envSource"`
 	Server    string `json:"server"`
 	Port      int    `json:"port"`
 	Protocol  string `json:"protocol"`
@@ -1001,6 +1006,7 @@ func adminProxyInfo(proxy *models.ProxyConfig, details checker.ProxyStatusDetail
 		DisplayName:        displayName,
 		GroupName:          proxy.GroupName,
 		SubName:            proxy.SubName,
+		EnvSource:          strings.TrimSpace(proxy.SourceID) == "",
 		Server:             proxy.Server,
 		Port:               proxy.Port,
 		Protocol:           proxy.Protocol,

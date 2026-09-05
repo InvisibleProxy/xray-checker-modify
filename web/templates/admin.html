@@ -2928,6 +2928,13 @@
             <h2>Speed History</h2>
             <span id="history-count" class="muted">0 results</span>
           </div>
+          <!-- The node list spans every subscription, so on a fleet enriched
+               with foreign feeds finding one's own host means scrolling past
+               them all. This narrows the list before the node is picked. -->
+          <label>
+            Subscription
+            <select id="history-sub"></select>
+          </label>
           <label>
             Node
             <select id="history-node"></select>
@@ -3092,9 +3099,13 @@
         remnawavePane: "settings",
         lastUpdatedAt: null,
         historyStableId: "",
+        historySubName: "",
         historyRange: "7d",
         historyResults: [],
         nodesOverview: [],
+        // Set once the operator picks a subscription in the node overview, so
+        // the environment default stops being reapplied over their choice.
+        nodesOverviewSubTouched: false,
         incidents: [],
         reachability: null,
         reachabilityPoll: null,
@@ -5081,6 +5092,16 @@
         })).sort((a, b) => nodeOverviewLabel(a).localeCompare(nodeOverviewLabel(b)));
       }
 
+      // The nodes the history picker offers. The subscription filter narrows
+      // only this list; historyNodes() stays whole, because pruning a stale
+      // selection has to ask whether a node still exists, not whether a filter
+      // currently hides it.
+      function historySubscriptionNodes() {
+        const subscription = state.historySubName || "";
+        if (!subscription) return historyNodes();
+        return historyNodes().filter((node) => (node.subName || "") === subscription);
+      }
+
       function nodeOverviewLabel(node) {
         return [node.name || "Unnamed", node.subName, node.server].filter(Boolean).join(" / ");
       }
@@ -5254,6 +5275,18 @@
         };
       }
 
+      // The subscription configured in the environment is the deployment's own;
+      // the ones added from the panel only enrich the picture. With several
+      // environment feeds there is no single "own" one, and picking the first
+      // would quietly hide the rest, so the overview then opens on all of them.
+      function environmentSubscriptionName() {
+        const names = [...new Set(state.proxies
+          .filter((proxy) => proxy.envSource)
+          .map((proxy) => proxy.subName)
+          .filter(Boolean))];
+        return names.length === 1 ? names[0] : "";
+      }
+
       function renderNodesOverviewFilters() {
         const countryValue = $("nodes-overview-country").value;
         const subValue = $("nodes-overview-sub").value;
@@ -5269,7 +5302,15 @@
           .map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`)
           .join("");
         $("nodes-overview-country").value = countries.some(([value]) => value === countryValue) ? countryValue : "";
-        $("nodes-overview-sub").value = subs.includes(subValue) ? subValue : "";
+        // Until the operator chooses for themselves the overview opens on the
+        // environment's own subscription. The preference is not applied once
+        // they have picked — including when they picked "All" — and an
+        // environment name absent from the list leaves the choice untouched, so
+        // a render that arrives before the proxies do does not spend it.
+        const preferred = state.nodesOverviewSubTouched ? subValue : environmentSubscriptionName();
+        $("nodes-overview-sub").value = subs.includes(preferred)
+          ? preferred
+          : (subs.includes(subValue) ? subValue : "");
       }
 
       function filteredNodesOverview() {
@@ -6551,9 +6592,26 @@
         }).join("") || `<tr><td colspan="7" class="muted">No speed test results yet</td></tr>`;
       }
 
+      // Subscriptions are taken from the whole node list, so the one in scope
+      // never disappears from the picker it is filtering by.
+      function renderHistorySubOptions() {
+        const select = $("history-sub");
+        if (!select) return;
+        const subs = [...new Set(historyNodes().map((node) => node.subName).filter(Boolean))].sort();
+        select.innerHTML = `<option value="">All subscriptions</option>` + subs
+          .map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`)
+          .join("");
+        if (!subs.includes(state.historySubName)) state.historySubName = "";
+        // With a single feed there is nothing to choose between, and the row
+        // would only take space above the node picker.
+        select.parentElement.hidden = subs.length < 2;
+        select.value = state.historySubName;
+      }
+
       function renderHistoryNodeOptions() {
+        renderHistorySubOptions();
         const select = $("history-node");
-        const nodes = historyNodes();
+        const nodes = historySubscriptionNodes();
         if (nodes.length === 0) {
           state.historyStableId = "";
           select.innerHTML = `<option value="">No nodes</option>`;
@@ -9236,6 +9294,15 @@
         state.historyStableId = $("history-node").value;
         loadHistory();
       });
+      $("history-sub").addEventListener("change", () => {
+        state.historySubName = $("history-sub").value;
+        const previous = state.historyStableId;
+        // Narrowing the list can drop the node in scope, and the picker then
+        // falls to the first one of the subscription. Only that reselection
+        // needs a fetch; a filter that keeps the node on screen changes nothing.
+        renderHistoryNodeOptions();
+        if (state.historyStableId !== previous) loadHistory();
+      });
       $("run").addEventListener("click", () => (speedRunActive() ? cancelSpeedRun() : runSelected()));
       $("toggle-maintenance").addEventListener("click", (event) => {
         const button = event.currentTarget;
@@ -9328,7 +9395,12 @@
       });
       ["nodes-overview-search", "nodes-overview-status", "nodes-overview-country", "nodes-overview-sub", "nodes-overview-geo", "nodes-overview-sort"].forEach((id) => {
         $(id).addEventListener("input", renderNodesOverview);
-        $(id).addEventListener("change", renderNodesOverview);
+        $(id).addEventListener("change", () => {
+          // A subscription the operator chose outranks the environment default
+          // from here on, "All" included.
+          if (id === "nodes-overview-sub") state.nodesOverviewSubTouched = true;
+          renderNodesOverview();
+        });
       });
       function activateNodesOverviewSort(header) {
         const sort = header.dataset.sort;

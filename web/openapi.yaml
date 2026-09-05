@@ -1848,6 +1848,12 @@ components:
               description: >-
                 The remarks of the config the node came from, present when that config held several outbounds and
                 each node had to keep its routing tag as a name.
+            envSource:
+              type: boolean
+              description: >-
+                True for a node from a subscription configured in the environment, false for one added from the
+                panel. It is what lets a client tell the deployment's own feed from the ones added to enrich the
+                picture, without exposing any subscription URL.
             checkedAt:
               type: string
               format: date-time
