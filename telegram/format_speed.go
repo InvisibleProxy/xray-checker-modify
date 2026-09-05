@@ -494,11 +494,13 @@ func localizedSpeedDiagnosticDetail(detail string) string {
 	case "automation capacity is busy":
 		return "все слоты автоматической диагностики заняты"
 	case "no healthy idle diagnostic agent is connected":
-		return "нет подключённого healthy-агента"
+		return "нет свободного healthy-агента"
 	case "automatic diagnostics are paused by maintenance":
 		return "автоматическая диагностика приостановлена maintenance-режимом"
 	case "remote diagnostics are disabled":
 		return "Remote Diagnostics отключены"
+	case "automatic diagnostic could not be started":
+		return "автоматическую диагностику не удалось запустить"
 	case "diagnostic session is no longer available":
 		return "diagnostic session больше недоступна"
 	case "no signed remote observation was received":
