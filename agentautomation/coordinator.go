@@ -3,6 +3,7 @@ package agentautomation
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +58,11 @@ type Handle struct {
 	Outcome   string
 	Threshold float64
 	StartedAt time.Time
+	// retry is set when the start was refused for a reason that clears on its
+	// own, and carries what a second attempt needs. It is unexported because it
+	// is bookkeeping rather than evidence: a caller hands the handle back and
+	// never builds or reads one.
+	retry *startRequest
 }
 
 type entry struct {
@@ -132,22 +138,109 @@ func (c *Coordinator) Snapshot() Snapshot {
 // StartSpeedDiagnostics creates at most one automatic job per unresolved
 // StableID. A repeated confirmation run reuses the same session during the
 // cooldown, which is how its completed evidence reaches the final alert.
+//
+// Slots are handed out in candidate order, not report order. A report lists
+// nodes in whatever order the run measured them, so with more unresolved nodes
+// than slots the last free one used to go to whoever happened to be listed
+// first. That is how an alert ends up explaining two timeouts and saying
+// nothing about the one node that came back with a measurable slowdown.
 func (c *Coordinator) StartSpeedDiagnostics(report speedtest.RunReport, threshold float64) map[string]Handle {
 	if !c.Enabled() {
 		return nil
 	}
-	handles := make(map[string]Handle)
-	for _, result := range report.Results {
-		outcome, ok := speedAutomationOutcome(result, threshold)
+	candidates := speedAutomationCandidates(report.Results, report.Source, threshold)
+	if len(candidates) == 0 {
+		return nil
+	}
+	handles := make(map[string]Handle, len(candidates))
+	for _, candidate := range candidates {
+		handles[candidate.stableID] = c.startSpeed(candidate)
+	}
+	return handles
+}
+
+// startRequest is one node's claim on a diagnostic slot. It holds everything a
+// start needs, so a start refused for a transient reason can be attempted again
+// from the handle alone, without the report it came from.
+type startRequest struct {
+	stableID         string
+	source           string
+	outcome          string
+	threshold        float64
+	observedMbps     float64
+	measuredBytes    int64
+	fallbackAttempts int
+	// shortfall is how far below the threshold the measurement fell, as a
+	// fraction of it. Zero means there is no number to compare, which is the
+	// case for every technical failure; see speedAutomationCandidates.
+	shortfall float64
+	// notBefore paces the retries of a deferred start.
+	notBefore time.Time
+}
+
+// speedAutomationCandidates selects the nodes worth an agent's time and orders
+// them by what a remote observation can settle.
+//
+// A low-speed result goes first, deepest shortfall first. It is the only
+// outcome where the agent answers with a number that can be held against the
+// one the run produced, and that comparison only means anything while both
+// describe the same moment: a rate that drifts is not settled by measuring it
+// again half an hour later. A technical failure gets a yes/no answer instead,
+// and the confirmation retry re-measures it anyway.
+func speedAutomationCandidates(results []speedtest.Result, source string, threshold float64) []startRequest {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		source = "unknown"
+	}
+	candidates := make([]startRequest, 0, len(results))
+	seen := make(map[string]bool, len(results))
+	for _, result := range results {
+		effective := effectiveThreshold(result, threshold)
+		outcome, ok := speedAutomationOutcome(result, effective)
 		if !ok {
 			continue
 		}
-		handles[result.StableID] = c.startSpeed(result, report.Source, threshold, outcome)
+		stableID := strings.TrimSpace(result.StableID)
+		if seen[stableID] {
+			continue
+		}
+		seen[stableID] = true
+		candidate := startRequest{
+			stableID: stableID, source: source, outcome: outcome, threshold: effective,
+			observedMbps: result.Mbps, measuredBytes: result.DownloadedBytes,
+			fallbackAttempts: result.FallbackAttempts,
+		}
+		if outcome == diagnostics.AutomationOutcomeLowSpeed && effective > 0 {
+			candidate.shortfall = (effective - result.Mbps) / effective
+		}
+		candidates = append(candidates, candidate)
 	}
-	if len(handles) == 0 {
-		return nil
+	sortStartRequests(candidates)
+	return candidates
+}
+
+// sortStartRequests is the single ordering both the first pass and a deferred
+// retry use. Map iteration is random, and a random winner for the last free
+// slot is exactly what this ordering exists to remove.
+func sortStartRequests(requests []startRequest) {
+	sort.Slice(requests, func(i, j int) bool {
+		if requests[i].shortfall != requests[j].shortfall {
+			return requests[i].shortfall > requests[j].shortfall
+		}
+		return requests[i].stableID < requests[j].stableID
+	})
+}
+
+// effectiveThreshold is the threshold the run judged this measurement against:
+// the node's own override when it has one, exactly as the report reads it.
+// Reading the global setting here instead would classify one node two ways — a
+// node overridden to 50 Mbps and measured at 60 reads as healthy in the alert
+// and as a slowdown worth diagnosing in this package.
+func effectiveThreshold(result speedtest.Result, threshold float64) float64 {
+	if result.LowSpeedThresholdMbps > 0 {
+		return result.LowSpeedThresholdMbps
 	}
-	return handles
+	return threshold
 }
 
 func speedAutomationOutcome(result speedtest.Result, threshold float64) (string, bool) {
@@ -164,39 +257,41 @@ func speedAutomationOutcome(result speedtest.Result, threshold float64) (string,
 	return "", false
 }
 
-func (c *Coordinator) startSpeed(result speedtest.Result, source string, threshold float64, outcome string) Handle {
+func (c *Coordinator) startSpeed(request startRequest) Handle {
 	now := c.config.Now().UTC()
-	stableID := strings.TrimSpace(result.StableID)
-	if strings.TrimSpace(source) == "" {
-		source = "unknown"
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.pruneLocked(now)
-	if existing, ok := c.entries[stableID]; ok {
+	if existing, ok := c.entries[request.stableID]; ok {
 		return existing.handle
 	}
 	if c.activeLocked() >= c.config.MaxConcurrent {
-		return Handle{StableID: stableID, State: speedtest.AgentDiagnosticUnavailable, Detail: "automation capacity is busy", Outcome: outcome, Threshold: threshold, StartedAt: now}
+		return c.deferredHandle(request, now, "automation capacity is busy")
 	}
 	view, err := c.controller.CreateAutomatic(remoteprobe.CreateAutomaticRequest{
-		StableID:  stableID,
+		StableID:  request.stableID,
 		Trigger:   diagnostics.TriggerAutoSpeedFallback,
 		ProfileID: diagnostics.ProfileDownload,
 		AutomationContext: diagnostics.AutomationContext{
 			Kind:             diagnostics.AutomationKindSpeedFallback,
-			Outcome:          outcome,
-			Source:           source,
-			ThresholdMbps:    threshold,
-			ObservedMbps:     result.Mbps,
-			FallbackAttempts: result.FallbackAttempts,
+			Outcome:          request.outcome,
+			Source:           request.source,
+			ThresholdMbps:    request.threshold,
+			ObservedMbps:     request.observedMbps,
+			MeasuredBytes:    request.measuredBytes,
+			FallbackAttempts: request.fallbackAttempts,
 		},
 	})
 	if err != nil {
 		detail := "automatic diagnostic could not be started"
+		transient := false
 		switch {
 		case errors.Is(err, remoteprobe.ErrUnavailableAgent):
 			detail = "no healthy idle diagnostic agent is connected"
+			// Occupied is far more common than absent: the periodic reachability
+			// sweep holds every agent for the length of a pass, and a manual
+			// session holds one. Both clear well inside a single alert wait.
+			transient = true
 		case errors.Is(err, remoteprobe.ErrAutomaticPaused):
 			detail = "automatic diagnostics are paused by maintenance"
 		case errors.Is(err, probeagent.ErrDisabled):
@@ -207,14 +302,37 @@ func (c *Coordinator) startSpeed(result speedtest.Result, source string, thresho
 		// agent right now - would silence the node for the whole cooldown even
 		// after an agent reconnects a second later. This also keeps the two
 		// transient refusals, here and the capacity one above, behaving alike.
-		return Handle{StableID: stableID, State: speedtest.AgentDiagnosticUnavailable, Detail: detail, Outcome: outcome, Threshold: threshold, StartedAt: now}
+		if transient {
+			return c.deferredHandle(request, now, detail)
+		}
+		return Handle{StableID: request.stableID, State: speedtest.AgentDiagnosticUnavailable, Detail: detail, Outcome: request.outcome, Threshold: request.threshold, StartedAt: now}
 	}
 	handle := Handle{
-		StableID: stableID, SessionID: view.Session.SessionID, State: speedtest.AgentDiagnosticRunning,
-		Outcome: outcome, Threshold: threshold, StartedAt: now,
+		StableID: request.stableID, SessionID: view.Session.SessionID, State: speedtest.AgentDiagnosticRunning,
+		Outcome: request.outcome, Threshold: request.threshold, StartedAt: now,
 	}
-	c.entries[stableID] = entry{handle: handle}
+	c.entries[request.stableID] = entry{handle: handle}
 	return handle
+}
+
+// deferredHandle records a refusal the wait window may outlive. The handle
+// still reads as unavailable, so an alert sent right now says exactly what it
+// said before; the difference is that this one can be retried.
+func (c *Coordinator) deferredHandle(request startRequest, now time.Time, detail string) Handle {
+	request.notBefore = now.Add(c.deferredRetryInterval())
+	return Handle{
+		StableID: request.stableID, State: speedtest.AgentDiagnosticUnavailable, Detail: detail,
+		Outcome: request.outcome, Threshold: request.threshold, StartedAt: now, retry: &request,
+	}
+}
+
+// deferredRetryInterval paces retries of a deferred start. Asking at the
+// annotation poll rate would put hundreds of creation attempts into one alert
+// wait, for an answer that changes on the scale of a whole diagnostic session,
+// so a deferred node re-asks an order of magnitude less often than the alert
+// re-reads the sessions it already has.
+func (c *Coordinator) deferredRetryInterval() time.Duration {
+	return c.config.PollInterval * 10
 }
 
 func (c *Coordinator) Annotations(handles map[string]Handle) map[string]speedtest.AgentDiagnostic {
@@ -228,15 +346,24 @@ func (c *Coordinator) Annotations(handles map[string]Handle) map[string]speedtes
 	return result
 }
 
+// Await holds the alert until every diagnostic has either answered or run out
+// of wait. It works on its own copy of the handles, because a start that was
+// refused when the report arrived may succeed part way through the wait and the
+// handle it produces has to replace the refused one.
 func (c *Coordinator) Await(ctx context.Context, handles map[string]Handle) map[string]speedtest.AgentDiagnostic {
 	if c == nil || len(handles) == 0 {
 		return nil
 	}
+	current := make(map[string]Handle, len(handles))
+	for stableID, handle := range handles {
+		current[stableID] = handle
+	}
 	ticker := time.NewTicker(c.config.PollInterval)
 	defer ticker.Stop()
 	for {
-		annotations := c.Annotations(handles)
-		pending := false
+		c.resumeDeferred(current)
+		annotations := c.Annotations(current)
+		pending := hasDeferred(current)
 		for _, annotation := range annotations {
 			if annotation.State == speedtest.AgentDiagnosticRunning {
 				pending = true
@@ -252,6 +379,41 @@ func (c *Coordinator) Await(ctx context.Context, handles map[string]Handle) map[
 		case <-ticker.C:
 		}
 	}
+}
+
+// resumeDeferred gives a node refused for a self-clearing reason another chance
+// while the alert is still waiting.
+//
+// Capacity comes back inside the wait far more often than not: a session that
+// answers in ten seconds releases its slot with most of the wait still to run.
+// Without this the node refused at second zero stays refused until the next
+// run, which is how the only node with a measurable slowdown ends up being the
+// one the alert has nothing to say about.
+func (c *Coordinator) resumeDeferred(handles map[string]Handle) {
+	now := c.config.Now().UTC()
+	deferred := make([]startRequest, 0, len(handles))
+	for _, handle := range handles {
+		if handle.retry == nil || now.Before(handle.retry.notBefore) {
+			continue
+		}
+		deferred = append(deferred, *handle.retry)
+	}
+	if len(deferred) == 0 {
+		return
+	}
+	sortStartRequests(deferred)
+	for _, request := range deferred {
+		handles[request.stableID] = c.startSpeed(request)
+	}
+}
+
+func hasDeferred(handles map[string]Handle) bool {
+	for _, handle := range handles {
+		if handle.retry != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Coordinator) annotation(handle Handle) speedtest.AgentDiagnostic {
@@ -316,12 +478,13 @@ func (c *Coordinator) annotation(handle Handle) speedtest.AgentDiagnostic {
 		return annotation
 	}
 	if observation.Status == diagnostics.ProbeStatusOnline {
-		if handle.Outcome == diagnostics.AutomationOutcomeLowSpeed && handle.Threshold > 0 {
-			if observation.Throughput == nil {
-				annotation.State = speedtest.AgentDiagnosticUnreliable
-				annotation.Detail = "agent download observation has no throughput evidence"
-				return annotation
-			}
+		// The agent's own rate decides, whichever outcome sent it. A run that
+		// timed out and an agent that gets through at half the threshold is not
+		// a node the agent found healthy: calling that "not reproduced" sends an
+		// operator to look at the checker while the node is the thing that is
+		// slow. It was the shape of the very first alerts this handled — a node
+		// reported as fine at 42 Mbps against a threshold of 100.
+		if handle.Threshold > 0 && observation.Throughput != nil {
 			// The agent reports whole Mbps, so its true rate lies in
 			// [Mbps, Mbps+1). Only claim the slowdown was reproduced when the
 			// whole interval is below the threshold; near the boundary the
@@ -330,6 +493,14 @@ func (c *Coordinator) annotation(handle Handle) speedtest.AgentDiagnostic {
 				annotation.State = speedtest.AgentDiagnosticReproduced
 				return annotation
 			}
+		}
+		// A slowdown answered with no rate at all settles nothing, and saying so
+		// is the honest reading. A technical failure is different: the agent got
+		// through, which is an answer on its own terms.
+		if handle.Outcome == diagnostics.AutomationOutcomeLowSpeed && handle.Threshold > 0 && observation.Throughput == nil {
+			annotation.State = speedtest.AgentDiagnosticUnreliable
+			annotation.Detail = "agent download observation has no throughput evidence"
+			return annotation
 		}
 		annotation.State = speedtest.AgentDiagnosticNotReproduced
 		return annotation

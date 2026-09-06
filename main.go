@@ -196,9 +196,19 @@ func main() {
 	)
 	proxyChecker.SetProjectMaintenance(projectMaintenance.Enabled())
 	proxyChecker.SetSourcePolicies(sourceObservationPolicies(subscriptionSources))
+	reachabilityMatrix := reachability.NewMatrix("data/reachability.json")
+	handleStateLoadError("reachability matrix", reachabilityMatrix.Load())
+	// The matrix ranks vantage points for automatic diagnostics only while the
+	// sweep keeps it current. A matrix nobody refreshes would go on preferring
+	// whichever agent looked best the day the sweep was switched off.
+	var agentPreference remoteprobe.AgentPreference
+	if config.CLIConfig.RemoteDiagnostics.ReachabilityEnabled {
+		agentPreference = reachabilityMatrix
+	}
 	remoteDiagnosticController, err := remoteprobe.NewController(remoteprobe.Config{
-		Enabled:     config.CLIConfig.RemoteDiagnostics.Enabled,
-		CheckMethod: config.CLIConfig.Proxy.CheckMethod,
+		Enabled:         config.CLIConfig.RemoteDiagnostics.Enabled,
+		CheckMethod:     config.CLIConfig.Proxy.CheckMethod,
+		AgentPreference: agentPreference,
 	}, probeAgentRegistry, proxyChecker)
 	if err != nil {
 		logger.Fatal("Failed to configure remote diagnostic jobs: %v", err)
@@ -212,8 +222,6 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to configure diagnostic automation: %v", err)
 	}
-	reachabilityMatrix := reachability.NewMatrix("data/reachability.json")
-	handleStateLoadError("reachability matrix", reachabilityMatrix.Load())
 	reachabilitySweeper, err := reachability.NewSweeper(reachability.Config{
 		Enabled:      config.CLIConfig.RemoteDiagnostics.ReachabilityEnabled,
 		Interval:     time.Duration(config.CLIConfig.RemoteDiagnostics.ReachabilityIntervalMin) * time.Minute,

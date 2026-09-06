@@ -37,6 +37,22 @@ type Config struct {
 	CheckMethod string
 	JobTTL      time.Duration
 	SocksPort   int
+	// AgentPreference ranks the vantage points an automatic diagnostic may use.
+	// It is optional; without it every node falls back to liveness order.
+	AgentPreference AgentPreference
+}
+
+// AgentPreference orders the vantage points an automatic diagnostic should try
+// for one node, best first.
+//
+// It exists because the two questions differ: liveness order answers "who is
+// free", and an automatic diagnostic needs "whose answer will mean something".
+// The implementation lives outside this package — the reachability matrix is
+// the natural source, and it already depends on this one — so the contract is
+// deliberately forgiving: unknown ids are ignored, ids left out keep their
+// place in the controller's own order, and returning nothing is not an error.
+type AgentPreference interface {
+	PreferAgents(stableID string, agentIDs []string) []string
 }
 
 type CreateManualRequest struct {
@@ -252,6 +268,52 @@ func (c *Controller) createTargeted(request targetedRequest) (SessionView, error
 	return view(updated), nil
 }
 
+// automaticProfile asks the agent to transfer the same amount the run did, so
+// the two rates describe the same thing.
+//
+// Only a low-speed outcome carries a size worth copying. A technical failure
+// transferred whatever it managed before it gave up, and asking the agent to
+// stop at that many bytes would measure the checker's timeout rather than the
+// node — so that case keeps the agent's own configured amount.
+func automaticProfile(descriptor diagnostics.ProfileDescriptor, alternativeID string, context diagnostics.AutomationContext) diagnostics.TestProfile {
+	profile := descriptor.TestProfileFor(alternativeID)
+	if profile.Method != diagnostics.ProbeMethodDownload || context.Outcome != diagnostics.AutomationOutcomeLowSpeed {
+		return profile
+	}
+	if bytes, ok := diagnostics.ProfileDownloadBytes(context.MeasuredBytes); ok {
+		profile.DownloadBytes = bytes
+	}
+	return profile
+}
+
+// preferredAgent picks which of the free agents to ask.
+//
+// Liveness order alone hands a node in one region to whichever agent last
+// checked in, and an observation taken from an unrelated continent cannot
+// settle whether that node is slow: the agent's path to it is a different path
+// from the checker's, so a healthy number there says nothing about the number
+// here. When a preference is configured it answers from recorded evidence about
+// this specific node, and liveness order stays the tie-break it always was —
+// including when the preference ranks nothing, which is the normal state before
+// the first reachability sweep has run.
+func (c *Controller) preferredAgent(stableID string, eligible []probeagent.AgentSnapshot) probeagent.AgentSnapshot {
+	if c.config.AgentPreference == nil || len(eligible) < 2 {
+		return eligible[0]
+	}
+	agentIDs := make([]string, 0, len(eligible))
+	index := make(map[string]probeagent.AgentSnapshot, len(eligible))
+	for _, candidate := range eligible {
+		agentIDs = append(agentIDs, candidate.AgentID)
+		index[candidate.AgentID] = candidate
+	}
+	for _, agentID := range c.config.AgentPreference.PreferAgents(stableID, agentIDs) {
+		if candidate, ok := index[agentID]; ok {
+			return candidate
+		}
+	}
+	return eligible[0]
+}
+
 // CreateAutomatic selects one healthy idle agent and creates the same bounded,
 // generation-bound assignment as the manual workflow. The returned session is
 // diagnostic evidence only; this method has no operational callbacks.
@@ -295,19 +357,19 @@ func (c *Controller) CreateAutomatic(request CreateAutomaticRequest) (SessionVie
 	for _, queued := range c.assignments {
 		busyAgents[queued.assignment.Job.AgentID] = true
 	}
-	var agent probeagent.AgentSnapshot
+	eligible := make([]probeagent.AgentSnapshot, 0, len(agents))
 	for _, candidate := range agents {
 		if !candidate.Enabled || !candidate.Connected || candidate.Health != "healthy" || busyAgents[candidate.AgentID] ||
 			!contains(candidate.Capabilities, diagnostics.CapabilityControlV1) ||
 			!contains(candidate.Capabilities, descriptor.Capability) {
 			continue
 		}
-		agent = candidate
-		break
+		eligible = append(eligible, candidate)
 	}
-	if agent.AgentID == "" {
+	if len(eligible) == 0 {
 		return SessionView{}, ErrUnavailableAgent
 	}
+	agent := c.preferredAgent(snapshot.Proxy.StableID, eligible)
 	alternativeID := ""
 	if candidate, ok := diagnostics.AlternativeFor(descriptor.ID); ok {
 		if alternative, known := diagnostics.ProfileByID(candidate); known && contains(agent.Capabilities, alternative.Capability) {
@@ -330,7 +392,7 @@ func (c *Controller) CreateAutomatic(request CreateAutomaticRequest) (SessionVie
 	job, err := c.manager.RegisterJob(diagnostics.RegisterJobRequest{
 		SessionID: session.SessionID,
 		AgentID:   agent.AgentID,
-		Profile:   descriptor.TestProfileFor(alternativeID),
+		Profile:   automaticProfile(descriptor, alternativeID, request.AutomationContext),
 		ExpiresAt: expiresAt,
 	})
 	if err != nil {

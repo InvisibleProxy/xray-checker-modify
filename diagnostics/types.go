@@ -234,6 +234,32 @@ type AutomationContext struct {
 	ThresholdMbps    float64 `json:"thresholdMbps,omitempty"`
 	ObservedMbps     float64 `json:"observedMbps,omitempty"`
 	FallbackAttempts int     `json:"fallbackAttempts,omitempty"`
+	// MeasuredBytes is how much the run actually transferred to reach
+	// ObservedMbps. It is what lets the agent be asked for a transfer of the
+	// same size: two rates measured over different amounts are not comparable,
+	// and a short transfer spends its whole life in TCP slow start, so the
+	// smaller one reads low for reasons that have nothing to do with the node.
+	MeasuredBytes int64 `json:"measuredBytes,omitempty"`
+}
+
+// Bounds on a requested transfer size. The floor keeps a request from asking
+// for a sample too short to mean anything; the ceiling keeps one from asking an
+// agent for an unbounded transfer. A request outside them is not clamped
+// silently anywhere it matters — it is simply not made, and the agent measures
+// its own configured amount instead.
+const (
+	MinProfileDownloadBytes = int64(1_000_000)
+	MaxProfileDownloadBytes = int64(200_000_000)
+)
+
+// ProfileDownloadBytes reports the transfer size a job may ask for, and whether
+// asking is worthwhile at all. Both the controller that fills the field and the
+// agent that reads it go through here, so neither can widen the range alone.
+func ProfileDownloadBytes(bytes int64) (int64, bool) {
+	if bytes < MinProfileDownloadBytes || bytes > MaxProfileDownloadBytes {
+		return 0, false
+	}
+	return bytes, true
 }
 
 type TestProfile struct {
@@ -242,6 +268,13 @@ type TestProfile struct {
 	ID                   string      `json:"id"`
 	Method               ProbeMethod `json:"method"`
 	AlternativeProfileID string      `json:"alternativeProfileId,omitempty"`
+	// DownloadBytes asks a download probe to transfer this much instead of the
+	// agent's own configured amount, so its rate can be held against the one the
+	// run produced. Zero means the agent decides, which is what an agent that
+	// predates this field does anyway: it ignores the field and measures its own
+	// amount, and the answer is still a valid observation — just not a directly
+	// comparable rate. It carries no URL, so it cannot redirect the fetch.
+	DownloadBytes int64 `json:"downloadBytes,omitempty"`
 }
 
 type DiagnosticJob struct {

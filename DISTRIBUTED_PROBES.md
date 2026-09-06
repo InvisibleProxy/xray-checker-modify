@@ -21,11 +21,11 @@
 - отдельные `Dockerfile.agent` и `docker-compose.agent.yml` для Linux с outbound-only network model, read-only root filesystem, non-root UID, drop всех capabilities, resource limits и persistent identity volume.
 - manual session из раскрытой карточки active-ноды с выбором одного подключённого агента;
 - ephemeral credential-bearing assignment queue, не входящая в session export или backup;
-- семь fixed profile ID, agent-owned endpoint/profile parameters и fingerprint validation;
+- семь fixed profile ID, agent-owned endpoint/profile parameters и fingerprint validation; единственный параметр, который задаёт controller, — объём download-трансфера в границах схемы, чтобы скорость агента была сопоставима со скоростью прогона;
 - временный Xray config с mode `0600` внутри tmpfs, loopback-only SOCKS inbound, embedded Xray lifecycle и обязательное удаление после job;
 - proxy-check, TCP/ping evidence, direct-connectivity control, отдельная observation-подпись и generation/fingerprint recheck перед приёмом;
 - cancel, sanitized JSON export и вероятностная summary без operational side effects.
-- opt-in `auto_speed_fallback`, выбирающий одну healthy idle probe, с per-node cooldown, concurrency limit и bounded read-only alert enrichment.
+- opt-in `auto_speed_fallback`, выбирающий одну healthy idle probe — по ранжированию матрицы достижимости, когда sweep её поддерживает, — с per-node cooldown, concurrency limit, повтором отложенного старта внутри окна ожидания алерта и bounded read-only alert enrichment.
 - opt-in `reachability_sweep`: периодический обход «каждая нода × каждый подключённый агент» с persisted матрицей вердиктов, hysteresis по streak и отдельной вкладкой `Reachability`.
 
 Manager diagnostic sessions связан с отдельным manual admin workflow, agent endpoints, узким automation coordinator-ом и sweep-ом достижимости. Он не является writer-ом availability или speedtest workflow: текущий код ничего не меняет в status/history/incidents/retries/Remnawave/speedtest. Automatic trigger реализован для неразрешённого speedtest country fallback и для периодического sweep-а; availability-trigger по-прежнему не реализован.
@@ -240,7 +240,7 @@ Probe-agent должен:
 2. Получать только ограниченные диагностические задания controller-а.
 3. Проверять срок действия задания и допустимость test profile.
 4. Материализовать минимальную временную Xray-конфигурацию для назначенного `StableID`.
-5. Выполнять тот же базовый proxy-check: `ip`, `status` или `download`.
+5. Выполнять тот же базовый proxy-check: `ip`, `status` или `download`; для `download` — перекачивать объём из задания, когда он попадает в границы схемы, и свой собственный в остальных случаях.
 6. После proxy failure выполнять TCP/ping diagnostics по тем же правилам, не используя ping как самостоятельное доказательство offline.
 7. Выполнять direct connectivity control probe собственной сети.
 8. При `check_endpoint` запускать разрешённый альтернативный endpoint profile.

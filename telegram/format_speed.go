@@ -425,6 +425,12 @@ func formatSpeedAgentDiagnosticHTML(diagnostic *speedtest.AgentDiagnostic) strin
 	case speedtest.AgentDiagnosticRunning:
 		return prefix + " · проверка запущена"
 	case speedtest.AgentDiagnosticReproduced:
+		// The agent got through and still measured below the threshold. Saying
+		// only "воспроизведена" reads as "the node is down", which this very
+		// observation disproves: what was reproduced is the rate, not the outage.
+		if diagnostic.RemoteStatus == "online" {
+			return prefix + " · нода отвечает агенту, но медленнее порога" + detail + ". Вероятнее сама нода или её аплинк, а не маршрут checker-а."
+		}
 		return prefix + " · проблема воспроизведена" + detail + ". Вероятнее общая проблема ноды, сервера или конфигурации."
 	case speedtest.AgentDiagnosticNotReproduced:
 		if diagnostic.AlternativeStatus == "online" {

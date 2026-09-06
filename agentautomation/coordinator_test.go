@@ -1,6 +1,8 @@
 package agentautomation
 
 import (
+	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -15,6 +17,7 @@ type fakeSessionController struct {
 	requests []remoteprobe.CreateAutomaticRequest
 	views    map[string]remoteprobe.SessionView
 	err      error
+	created  int
 }
 
 func (f *fakeSessionController) Enabled() bool { return f.enabled }
@@ -26,7 +29,7 @@ func (f *fakeSessionController) CreateAutomatic(request remoteprobe.CreateAutoma
 	}
 	view := remoteprobe.SessionView{Session: diagnostics.DiagnosticSession{
 		SchemaVersion: diagnostics.SessionSchemaVersion,
-		SessionID:     "diag-one", StableID: request.StableID, Trigger: request.Trigger,
+		SessionID:     f.nextSessionID(), StableID: request.StableID, Trigger: request.Trigger,
 		AutomationContext: request.AutomationContext,
 		RequestedAgents:   []string{"agent-one"}, State: diagnostics.SessionStateRequested,
 	}}
@@ -35,6 +38,35 @@ func (f *fakeSessionController) CreateAutomatic(request remoteprobe.CreateAutoma
 	}
 	f.views[view.Session.SessionID] = view
 	return view, nil
+}
+
+// nextSessionID keeps the first session named as every single-session test
+// expects it, and names the ones after it apart so a test can hold two.
+func (f *fakeSessionController) nextSessionID() string {
+	f.created++
+	if f.created == 1 {
+		return "diag-one"
+	}
+	return fmt.Sprintf("diag-%d", f.created)
+}
+
+// complete drives a session to a terminal state with an answer, which is what
+// releases its concurrency slot.
+func (f *fakeSessionController) complete(sessionID string) {
+	view, ok := f.views[sessionID]
+	if !ok {
+		return
+	}
+	view.Session.State = diagnostics.SessionStateCompleted
+	view.Session.AgentObservations = []diagnostics.AcceptedObservation{{
+		Reliable: true,
+		Observation: diagnostics.Observation{
+			Status: diagnostics.ProbeStatusOnline, CheckedAt: time.Now(),
+			DirectConnectivity: diagnostics.CheckEvidence{Checked: true, Online: true},
+			Throughput:         &diagnostics.ThroughputEvidence{Mbps: 500},
+		},
+	}}
+	f.views[sessionID] = view
 }
 
 func (f *fakeSessionController) Session(sessionID string) (remoteprobe.SessionView, bool) {
@@ -353,5 +385,200 @@ func TestAForgottenSessionKeepsItsCooldown(t *testing.T) {
 	coordinator.StartSpeedDiagnostics(report, 10)
 	if len(controller.requests) != 1 {
 		t.Fatalf("automatic creates = %d, want a forgotten session to hold its cooldown", len(controller.requests))
+	}
+}
+
+// The last free slot used to go to whoever the run happened to measure first.
+// A report that carries a timeout and a measurable slowdown must spend it on
+// the slowdown: that is the only one where the agent answers with a number the
+// run's own number can be held against.
+func TestTheLastSlotGoesToTheDeepestSlowdownRatherThanTheFirstResultListed(t *testing.T) {
+	controller := &fakeSessionController{enabled: true}
+	now := time.Date(2026, 9, 1, 1, 2, 3, 0, time.UTC)
+	coordinator, err := New(Config{
+		Enabled: true, Cooldown: time.Minute, AlertWait: time.Second, MaxConcurrent: 1,
+		Now: func() time.Time { return now },
+	}, controller, fakeAgentSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{
+		{StableID: "node-timeout", Error: "context deadline exceeded", FallbackAttempted: true, FallbackAttempts: 2, FallbackExhausted: true},
+		{StableID: "node-mild", Mbps: 80, FallbackAttempted: true, FallbackAttempts: 1, FallbackUsed: true},
+		{StableID: "node-severe", Mbps: 10, FallbackAttempted: true, FallbackAttempts: 1, FallbackUsed: true},
+	}}
+
+	handles := coordinator.StartSpeedDiagnostics(report, 100)
+	if got := handles["node-severe"].SessionID; got == "" {
+		t.Fatalf("the deepest slowdown got no session: %+v", handles["node-severe"])
+	}
+	for _, stableID := range []string{"node-timeout", "node-mild"} {
+		if got := handles[stableID].SessionID; got != "" {
+			t.Errorf("%s took the only slot with session %q", stableID, got)
+		}
+		if got := handles[stableID].State; got != speedtest.AgentDiagnosticUnavailable {
+			t.Errorf("%s state = %q, want unavailable", stableID, got)
+		}
+	}
+	if len(controller.requests) != 1 || controller.requests[0].StableID != "node-severe" {
+		t.Fatalf("automatic creates = %+v, want one for node-severe", controller.requests)
+	}
+}
+
+// Capacity frees up inside the alert wait far more often than not, and the node
+// refused at second zero used to stay refused until the next run — which is how
+// the one node with a measurable slowdown became the one the alert said nothing
+// about.
+func TestANodeRefusedForCapacityIsRetriedWhenASlotFreesUpDuringTheWait(t *testing.T) {
+	controller := &fakeSessionController{enabled: true}
+	coordinator, err := New(Config{
+		Enabled: true, Cooldown: time.Minute, AlertWait: 2 * time.Second, MaxConcurrent: 1,
+		PollInterval: time.Millisecond,
+	}, controller, fakeAgentSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{
+		{StableID: "node-severe", Mbps: 10, FallbackAttempted: true, FallbackAttempts: 1, FallbackUsed: true},
+		{StableID: "node-mild", Mbps: 80, FallbackAttempted: true, FallbackAttempts: 1, FallbackUsed: true},
+	}}
+
+	handles := coordinator.StartSpeedDiagnostics(report, 100)
+	if handles["node-severe"].SessionID != "diag-one" || handles["node-mild"].SessionID != "" {
+		t.Fatalf("first pass = %+v", handles)
+	}
+
+	// The first session answers, exactly as it does well inside a real wait.
+	controller.complete("diag-one")
+
+	// The retry lands about ten poll intervals in; the wait only has to outlast
+	// that, and then runs out because the second session never answers.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	annotations := coordinator.Await(ctx, handles)
+
+	if got := annotations["node-mild"].State; got == speedtest.AgentDiagnosticUnavailable {
+		t.Fatalf("node-mild was never retried: %+v", annotations["node-mild"])
+	}
+	if len(controller.requests) != 2 {
+		t.Fatalf("automatic creates = %d, want the freed slot to be reused", len(controller.requests))
+	}
+	// The caller's own map is untouched: Await works on a copy, so a handle it
+	// replaced cannot leak back into the caller's bookkeeping.
+	if handles["node-mild"].SessionID != "" {
+		t.Errorf("Await mutated the caller's handles: %+v", handles["node-mild"])
+	}
+}
+
+// The run judges a node against its own threshold override when it has one.
+// Reading the global setting here instead classified the same node two ways:
+// healthy in the alert, worth an agent's time in this package.
+func TestAutomationJudgesANodeAgainstTheThresholdTheRunUsed(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		result    speedtest.Result
+		global    float64
+		wantStart bool
+		wantAgent float64
+	}{
+		{
+			name:   "override clears a node the global setting would have flagged",
+			result: speedtest.Result{StableID: "node-one", Mbps: 60, LowSpeedThresholdMbps: 50, FallbackAttempted: true, FallbackAttempts: 1, FallbackUsed: true},
+			global: 100,
+		},
+		{
+			name:      "override flags a node the global setting would have cleared",
+			result:    speedtest.Result{StableID: "node-one", Mbps: 150, LowSpeedThresholdMbps: 200, FallbackAttempted: true, FallbackAttempts: 1, FallbackUsed: true},
+			global:    100,
+			wantStart: true,
+			wantAgent: 200,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			controller := &fakeSessionController{enabled: true}
+			now := time.Date(2026, 9, 1, 1, 2, 3, 0, time.UTC)
+			coordinator, err := New(Config{
+				Enabled: true, Cooldown: time.Minute, AlertWait: time.Second, MaxConcurrent: 2,
+				Now: func() time.Time { return now },
+			}, controller, fakeAgentSource{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			report := speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{test.result}}
+
+			handles := coordinator.StartSpeedDiagnostics(report, test.global)
+			started := handles["node-one"].SessionID != ""
+			if started != test.wantStart {
+				t.Fatalf("started = %t, want %t (handles %+v)", started, test.wantStart, handles)
+			}
+			if !test.wantStart {
+				return
+			}
+			if got := controller.requests[0].AutomationContext.ThresholdMbps; got != test.wantAgent {
+				t.Errorf("threshold sent to the agent = %v, want the one the run used (%v)", got, test.wantAgent)
+			}
+			if got := handles["node-one"].Threshold; got != test.wantAgent {
+				t.Errorf("handle threshold = %v, want %v", got, test.wantAgent)
+			}
+		})
+	}
+}
+
+// A run that timed out and an agent that gets through at half the threshold is
+// not a healthy node. Judging the agent's rate only for a low-speed outcome
+// reported exactly that as "not reproduced", which sends an operator to look at
+// the checker while the node is the thing that is slow.
+func TestAnAgentRateBelowTheThresholdIsReproducedWhateverTheRunFailedWith(t *testing.T) {
+	controller := &fakeSessionController{enabled: true}
+	coordinator, err := New(Config{Enabled: true, Cooldown: time.Minute, AlertWait: time.Second, MaxConcurrent: 2}, controller, fakeAgentSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{{
+		StableID: "node-one", Error: "context deadline exceeded",
+		FallbackAttempted: true, FallbackAttempts: 2, FallbackExhausted: true,
+	}}}
+	handles := coordinator.StartSpeedDiagnostics(report, 100)
+	if got := controller.requests[0].AutomationContext.Outcome; got != diagnostics.AutomationOutcomeTechnical {
+		t.Fatalf("outcome = %q, want the technical one", got)
+	}
+
+	view := controller.views["diag-one"]
+	view.Session.State = diagnostics.SessionStateCompleted
+	view.Session.AgentObservations = []diagnostics.AcceptedObservation{{
+		Reliable: true,
+		Observation: diagnostics.Observation{
+			Status: diagnostics.ProbeStatusOnline, CheckedAt: time.Now(),
+			DirectConnectivity: diagnostics.CheckEvidence{Checked: true, Online: true},
+			Throughput:         &diagnostics.ThroughputEvidence{Mbps: 42},
+		},
+	}}
+	controller.views["diag-one"] = view
+
+	annotation := coordinator.Annotations(handles)["node-one"]
+	if annotation.State != speedtest.AgentDiagnosticReproduced {
+		t.Fatalf("state = %q for 42 Mbps against a threshold of 100, want reproduced", annotation.State)
+	}
+	if annotation.RemoteStatus != string(diagnostics.ProbeStatusOnline) {
+		t.Errorf("remote status = %q, want the alert to still say the agent got through", annotation.RemoteStatus)
+	}
+}
+
+// Two rates measured over different amounts are not comparable, and a short
+// transfer spends its whole life in TCP slow start. The agent is told how much
+// the run moved so it can move the same.
+func TestTheAgentIsAskedToTransferWhatTheRunTransferred(t *testing.T) {
+	controller := &fakeSessionController{enabled: true}
+	coordinator, err := New(Config{Enabled: true, Cooldown: time.Minute, AlertWait: time.Second, MaxConcurrent: 2}, controller, fakeAgentSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{{
+		StableID: "node-one", Mbps: 37, DownloadedBytes: 100_000_000,
+		FallbackAttempted: true, FallbackAttempts: 1, FallbackUsed: true,
+	}}}
+	coordinator.StartSpeedDiagnostics(report, 100)
+	if got := controller.requests[0].AutomationContext.MeasuredBytes; got != 100_000_000 {
+		t.Fatalf("measured bytes sent to the agent = %d, want the amount the run transferred", got)
 	}
 }

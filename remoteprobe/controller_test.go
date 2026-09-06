@@ -28,6 +28,34 @@ type controllerFixture struct {
 	now                time.Time
 }
 
+// bringAgentOnline enrolls a created agent and lands one signed heartbeat, so
+// the registry reports it connected and healthy. It is separate from the
+// fixture because a test that is about choosing between vantage points needs
+// more than one of them.
+func bringAgentOnline(t *testing.T, registry *probeagent.Registry, created probeagent.CreationResult, sourceIP string, now time.Time) ed25519.PrivateKey {
+	t.Helper()
+	identityPublic, identityPrivate, _ := ed25519.GenerateKey(rand.Reader)
+	observationPublic, observationPrivate, _ := ed25519.GenerateKey(rand.Reader)
+	if _, err := registry.Enroll(probeagent.EnrollRequest{
+		ProtocolVersion: probeagent.ProtocolVersion, AgentID: created.Agent.AgentID,
+		EnrollmentToken: created.EnrollmentToken, IdentityPublicKey: identityPublic,
+		ObservationPublicKey: observationPublic, AgentVersion: "test",
+		Capabilities: []string{"control-v1", "diagnostic-v1"},
+	}, netip.MustParseAddr(sourceIP)); err != nil {
+		t.Fatalf("enroll agent: %v", err)
+	}
+	heartbeat := probeagent.HeartbeatRequest{
+		ProtocolVersion: probeagent.ProtocolVersion, AgentID: created.Agent.AgentID,
+		AgentVersion: "test", Capabilities: []string{"control-v1", "diagnostic-v1"}, Health: "healthy",
+	}
+	body, _ := json.Marshal(heartbeat)
+	payload, _ := probeagent.ControlSigningPayload(http.MethodPost, probeagent.HeartbeatPath, created.Agent.AgentID, now, 1, body)
+	if _, err := registry.AcceptHeartbeat(heartbeat, netip.MustParseAddr(sourceIP), now, 1, payload, ed25519.Sign(identityPrivate, payload)); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	return observationPrivate
+}
+
 func newControllerFixture(t *testing.T) controllerFixture {
 	t.Helper()
 	now := time.Now().UTC()
@@ -45,26 +73,7 @@ func newControllerFixture(t *testing.T) controllerFixture {
 	if err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
-	identityPublic, identityPrivate, _ := ed25519.GenerateKey(rand.Reader)
-	observationPublic, observationPrivate, _ := ed25519.GenerateKey(rand.Reader)
-	_, err = registry.Enroll(probeagent.EnrollRequest{
-		ProtocolVersion: probeagent.ProtocolVersion, AgentID: created.Agent.AgentID,
-		EnrollmentToken: created.EnrollmentToken, IdentityPublicKey: identityPublic,
-		ObservationPublicKey: observationPublic, AgentVersion: "test",
-		Capabilities: []string{"control-v1", "diagnostic-v1"},
-	}, netip.MustParseAddr("203.0.113.40"))
-	if err != nil {
-		t.Fatalf("enroll agent: %v", err)
-	}
-	heartbeat := probeagent.HeartbeatRequest{
-		ProtocolVersion: probeagent.ProtocolVersion, AgentID: created.Agent.AgentID,
-		AgentVersion: "test", Capabilities: []string{"control-v1", "diagnostic-v1"}, Health: "healthy",
-	}
-	body, _ := json.Marshal(heartbeat)
-	payload, _ := probeagent.ControlSigningPayload(http.MethodPost, probeagent.HeartbeatPath, created.Agent.AgentID, now, 1, body)
-	if _, err := registry.AcceptHeartbeat(heartbeat, netip.MustParseAddr("203.0.113.40"), now, 1, payload, ed25519.Sign(identityPrivate, payload)); err != nil {
-		t.Fatalf("heartbeat: %v", err)
-	}
+	observationPrivate := bringAgentOnline(t, registry, created, "203.0.113.40", now)
 	proxy := &models.ProxyConfig{
 		StableID: "node-one", Name: "Node One", Protocol: "vless", Server: "node.example.com",
 		Port: 443, UUID: "11111111-1111-1111-1111-111111111111", Security: "tls", SNI: "node.example.com",
@@ -392,5 +401,134 @@ func TestClearRemovesOnlyTheRequestedNode(t *testing.T) {
 	// An empty StableID is the deliberate "everything" case.
 	if removed := fixture.controller.Clear(""); removed != 0 {
 		t.Fatalf("clearing an empty store removed %d sessions", removed)
+	}
+}
+
+type fakeAgentPreference struct {
+	order    []string
+	asked    []string
+	stableID string
+}
+
+func (f *fakeAgentPreference) PreferAgents(stableID string, agentIDs []string) []string {
+	f.stableID = stableID
+	f.asked = append([]string(nil), agentIDs...)
+	return f.order
+}
+
+// Liveness order answers "who is free", which is the wrong question for an
+// automatic diagnostic: an agent that has never reached this node cannot settle
+// anything about it. When a preference is configured its ranking wins over the
+// order the registry happened to return.
+func TestCreateAutomaticAsksTheVantagePointThePreferenceRanksFirst(t *testing.T) {
+	fixture := newControllerFixture(t)
+	second, err := fixture.registry.Create(probeagent.CreateAgentRequest{
+		DisplayName: "US probe", ExpectedSourceIP: "203.0.113.41",
+		ControllerIP: "198.51.100.10", ControllerURL: "https://checker.example.com",
+	})
+	if err != nil {
+		t.Fatalf("create second agent: %v", err)
+	}
+	bringAgentOnline(t, fixture.registry, second, "203.0.113.41", fixture.now)
+
+	// Both agents last checked in at the same instant, so liveness order falls
+	// through to its agent-id tie-break. Rank the other one first.
+	livenessWinner := fixture.agentID
+	if second.Agent.AgentID < livenessWinner {
+		livenessWinner = second.Agent.AgentID
+	}
+	preferred := fixture.agentID
+	if preferred == livenessWinner {
+		preferred = second.Agent.AgentID
+	}
+
+	preference := &fakeAgentPreference{order: []string{preferred, livenessWinner}}
+	controller, err := NewController(Config{Enabled: true, CheckMethod: "status", AgentPreference: preference}, fixture.registry, fixture.proxyChecker)
+	if err != nil {
+		t.Fatalf("new controller: %v", err)
+	}
+
+	created, err := controller.CreateAutomatic(CreateAutomaticRequest{
+		StableID: "node-one", Trigger: diagnostics.TriggerAutoSpeedFallback, ProfileID: diagnostics.ProfileDownload,
+		AutomationContext: diagnostics.AutomationContext{
+			Kind: diagnostics.AutomationKindSpeedFallback, Outcome: diagnostics.AutomationOutcomeLowSpeed,
+			Source: "schedule", ThresholdMbps: 100, ObservedMbps: 37, FallbackAttempts: 1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create automatic diagnostics: %v", err)
+	}
+	if len(created.Session.RequestedAgents) != 1 || created.Session.RequestedAgents[0] != preferred {
+		t.Fatalf("selected agents = %+v, want the preferred %q", created.Session.RequestedAgents, preferred)
+	}
+	if preference.stableID != "node-one" {
+		t.Errorf("preference was asked about %q, want the node being diagnosed", preference.stableID)
+	}
+	if len(preference.asked) != 2 {
+		t.Errorf("preference saw %d candidates, want both free agents", len(preference.asked))
+	}
+}
+
+// A preference that ranks nothing usable is the normal state before the first
+// sweep, and it must not cost the node its diagnostic.
+func TestCreateAutomaticFallsBackToLivenessOrderWhenThePreferenceRanksNothing(t *testing.T) {
+	fixture := newControllerFixture(t)
+	preference := &fakeAgentPreference{order: []string{"agent-that-does-not-exist"}}
+	controller, err := NewController(Config{Enabled: true, CheckMethod: "status", AgentPreference: preference}, fixture.registry, fixture.proxyChecker)
+	if err != nil {
+		t.Fatalf("new controller: %v", err)
+	}
+	created, err := controller.CreateAutomatic(CreateAutomaticRequest{
+		StableID: "node-one", Trigger: diagnostics.TriggerAutoSpeedFallback, ProfileID: diagnostics.ProfileDownload,
+		AutomationContext: diagnostics.AutomationContext{
+			Kind: diagnostics.AutomationKindSpeedFallback, Outcome: diagnostics.AutomationOutcomeLowSpeed,
+			Source: "schedule", ThresholdMbps: 100, ObservedMbps: 37, FallbackAttempts: 1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create automatic diagnostics: %v", err)
+	}
+	if len(created.Session.RequestedAgents) != 1 || created.Session.RequestedAgents[0] != fixture.agentID {
+		t.Fatalf("selected agents = %+v, want the only free agent", created.Session.RequestedAgents)
+	}
+}
+
+// The agent measures what the run measured, so the two rates can be compared.
+// A technical failure transferred whatever it managed before giving up, and
+// copying that would measure the checker's timeout rather than the node.
+func TestAutomaticDownloadProfileCopiesTheRunTransferSizeOnlyForASlowdown(t *testing.T) {
+	descriptor, _ := diagnostics.ProfileByID(diagnostics.ProfileDownload)
+	for _, test := range []struct {
+		name    string
+		context diagnostics.AutomationContext
+		want    int64
+	}{
+		{
+			name:    "a slowdown carries a comparable size",
+			context: diagnostics.AutomationContext{Outcome: diagnostics.AutomationOutcomeLowSpeed, MeasuredBytes: 100_000_000},
+			want:    100_000_000,
+		},
+		{
+			name:    "a technical failure keeps the agent's own amount",
+			context: diagnostics.AutomationContext{Outcome: diagnostics.AutomationOutcomeTechnical, MeasuredBytes: 12_000},
+		},
+		{
+			name:    "a size below the floor is not worth asking for",
+			context: diagnostics.AutomationContext{Outcome: diagnostics.AutomationOutcomeLowSpeed, MeasuredBytes: 12_000},
+		},
+		{
+			name:    "a size above the ceiling is refused rather than clamped",
+			context: diagnostics.AutomationContext{Outcome: diagnostics.AutomationOutcomeLowSpeed, MeasuredBytes: 900_000_000},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			profile := automaticProfile(descriptor, diagnostics.ProfileStatus, test.context)
+			if profile.DownloadBytes != test.want {
+				t.Fatalf("download bytes = %d, want %d", profile.DownloadBytes, test.want)
+			}
+			if profile.ID != diagnostics.ProfileDownload || profile.AlternativeProfileID != diagnostics.ProfileStatus {
+				t.Fatalf("profile = %+v, want the download profile with its fallback", profile)
+			}
+		})
 	}
 }

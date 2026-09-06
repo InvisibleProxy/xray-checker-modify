@@ -345,8 +345,16 @@ func (e *Executor) proxyCheck(ctx context.Context, profile diagnostics.TestProfi
 		return proxyCheckResult{status: diagnostics.ProbeStatusProxyFailure, latency: ttfb, failure: diagnostics.FailureEvidence{Code: "http_status", Stage: diagnostics.FailureStageEndpoint}}
 	}
 	if profile.Method == diagnostics.ProbeMethodDownload {
+		// The job may ask for the amount the checker itself transferred, so the
+		// two rates describe the same transfer. A size outside the agreed bounds
+		// is ignored rather than clamped: measuring some third amount would
+		// produce a number that looks comparable and is not.
+		target := e.config.DownloadMinSize
+		if requested, ok := diagnostics.ProfileDownloadBytes(profile.DownloadBytes); ok {
+			target = requested
+		}
 		transferStart := time.Now()
-		read, err := io.CopyN(io.Discard, response.Body, e.config.DownloadMinSize)
+		read, err := io.CopyN(io.Discard, response.Body, target)
 		transferred := time.Since(transferStart)
 		// The rate is reported even for an incomplete transfer: "stalled after
 		// 12 KiB at 0.3 Mbps" is a different diagnosis from "refused outright".
@@ -354,7 +362,17 @@ func (e *Executor) proxyCheck(ctx context.Context, profile diagnostics.TestProfi
 		if err != nil && !errors.Is(err, io.EOF) {
 			return proxyCheckResult{status: diagnostics.ProbeStatusProxyFailure, latency: ttfb, failure: classifyProxyError(err), throughput: throughput}
 		}
-		if read < e.config.DownloadMinSize {
+		// A requested size is a target, not a contract with the endpoint: the
+		// agent's own download URL may simply be a smaller file, and running off
+		// the end of it is a completed transfer, not a node that cut the
+		// connection. Completeness therefore stays measured against the agent's
+		// own configured minimum, and the bytes actually transferred travel with
+		// the evidence for anyone comparing the two rates.
+		minimum := e.config.DownloadMinSize
+		if target < minimum {
+			minimum = target
+		}
+		if read < minimum {
 			return proxyCheckResult{status: diagnostics.ProbeStatusProxyFailure, latency: ttfb, failure: diagnostics.FailureEvidence{Code: "download_incomplete", Stage: diagnostics.FailureStageEndpoint}, throughput: throughput}
 		}
 		return proxyCheckResult{status: diagnostics.ProbeStatusOnline, latency: ttfb, throughput: throughput}

@@ -567,7 +567,8 @@ func validateCreateSessionRequest(request CreateSessionRequest, now time.Time, m
 		context := request.AutomationContext
 		if context.Kind != AutomationKindSpeedFallback ||
 			(context.Outcome != AutomationOutcomeTechnical && context.Outcome != AutomationOutcomeLowSpeed) ||
-			!validToken(context.Source) || context.ThresholdMbps < 0 || context.ObservedMbps < 0 || context.FallbackAttempts < 1 {
+			!validToken(context.Source) || context.ThresholdMbps < 0 || context.ObservedMbps < 0 ||
+			context.MeasuredBytes < 0 || context.FallbackAttempts < 1 {
 			return fmt.Errorf("%w: invalid speed fallback automation context", ErrInvalidRequest)
 		}
 	} else if request.AutomationContext != (AutomationContext{}) {
@@ -732,6 +733,14 @@ func validateProfile(profile TestProfile) error {
 	if profile.AlternativeProfileID != "" {
 		if !validProfileID(profile.AlternativeProfileID) || profile.AlternativeProfileID == profile.ID {
 			return fmt.Errorf("%w: alternative profile ID is invalid", ErrInvalidRequest)
+		}
+	}
+	if profile.DownloadBytes != 0 {
+		if profile.Method != ProbeMethodDownload {
+			return fmt.Errorf("%w: only a download probe may be given a transfer size", ErrInvalidRequest)
+		}
+		if _, ok := ProfileDownloadBytes(profile.DownloadBytes); !ok {
+			return fmt.Errorf("%w: requested transfer size is out of range", ErrInvalidRequest)
 		}
 	}
 	return nil

@@ -456,3 +456,50 @@ func TestFailureCodesEmittedByTheTransportProbesAreAccepted(t *testing.T) {
 		}
 	}
 }
+
+// A transfer size is not a URL and cannot redirect a probe, but it still
+// reaches an agent, so the schema bounds it: an unbounded transfer and a size
+// on a probe that transfers nothing are both refused here rather than at the
+// agent, where the only thing left to report is a configuration failure.
+func TestJobValidationBoundsTheRequestedTransferSize(t *testing.T) {
+	fixture := newManagerFixture(t)
+	for _, test := range []struct {
+		name    string
+		profile TestProfile
+		wantErr bool
+	}{
+		{
+			name:    "the size the checker itself transfers",
+			profile: TestProfile{ID: ProfileDownload, Method: ProbeMethodDownload, DownloadBytes: 100_000_000},
+		},
+		{
+			name:    "the agent's own amount",
+			profile: TestProfile{ID: ProfileDownload, Method: ProbeMethodDownload},
+		},
+		{
+			name:    "above the ceiling",
+			profile: TestProfile{ID: ProfileDownload, Method: ProbeMethodDownload, DownloadBytes: 900_000_000},
+			wantErr: true,
+		},
+		{
+			name:    "below the floor",
+			profile: TestProfile{ID: ProfileDownload, Method: ProbeMethodDownload, DownloadBytes: 1},
+			wantErr: true,
+		},
+		{
+			name:    "on a probe that transfers nothing",
+			profile: TestProfile{ID: ProfileStatus, Method: ProbeMethodStatus, DownloadBytes: 10_000_000},
+			wantErr: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := fixture.manager.RegisterJob(RegisterJobRequest{
+				SessionID: fixture.session.SessionID, AgentID: "agent-eu",
+				Profile: test.profile, ExpiresAt: fixture.now.Add(time.Minute),
+			})
+			if test.wantErr != errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("register job error = %v, want invalid request: %t", err, test.wantErr)
+			}
+		})
+	}
+}
