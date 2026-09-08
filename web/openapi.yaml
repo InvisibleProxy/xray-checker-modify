@@ -3555,6 +3555,12 @@ components:
       properties:
         stableId: {type: string}
         name: {type: string}
+        subscription:
+          type: string
+          description: >-
+            The subscription the node came from, carrying the same value as the matching node row so a client
+            filtering the matrix by subscription filters the findings with it. Absent for a node that is no
+            longer in the live node list.
         agentId:
           type: string
           description: Absent when the vantage point is this checker itself, which has no agent record.
@@ -3586,6 +3592,13 @@ components:
       properties:
         stableId: {type: string}
         name: {type: string}
+        subscription:
+          type: string
+          description: >-
+            The subscription the node came from, resolved from the live node list rather than stored with the
+            cells. The matrix is not filtered server-side: every swept node is returned, and this field is what
+            lets a client narrow a matrix that mixes several subscriptions down to one. Absent for a row whose
+            node is no longer in the node list.
         cells: {type: array, items: {$ref: '#/components/schemas/ReachabilityCell'}}
         alive:
           type: boolean

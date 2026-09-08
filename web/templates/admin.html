@@ -2910,7 +2910,9 @@
           <div class="hint">
             Each member connects a checker StableID to the Remnawave Host used for audience filtering. A healthy
             member prevents a full location outage; a confirmed failed member uses the partial-availability scenario.
-            Adding or replacing a member keeps the location and its Announce binding unchanged.
+            Adding or replacing a member keeps the location and its Announce binding unchanged. Only nodes of your
+            own subscription are listed: announce speaks to your subscribers about your service, so a source added
+            from the panel takes no part in it and its outage cannot make a location partially unavailable.
           </div>
         </section>
 
@@ -2961,6 +2963,12 @@
               <div class="muted">What each probe agent sees, next to what this checker sees</div>
             </div>
             <div class="row">
+              <label class="row">
+                Subscription
+                <select id="reachability-sub-filter">
+                  <option value="">All</option>
+                </select>
+              </label>
               <button id="reachability-refresh" class="secondary" type="button">Refresh</button>
               <button id="reachability-sweep" class="primary" type="button">Sweep now</button>
             </div>
@@ -3231,6 +3239,7 @@
         incidents: [],
         reachability: null,
         reachabilityPoll: null,
+        reachabilitySubscription: "",
         remnawave: null,
         nodesOverviewSort: "avgMbps",
         nodesOverviewSortDir: "desc",
@@ -3272,6 +3281,7 @@
       const speedDraftKey = "xray-checker-admin-speed-test";
       const filterStateKey = "xray-checker-admin-filters";
       const dashboardOrderStateKey = "xray-checker-admin-node-order";
+      const reachabilityFilterKey = "xray-checker-admin-reachability-subscription";
       const pendingNodeMergeKey = "xray-checker-admin-pending-node-merge";
       const dashboardSortModes = new Set(["source", "manual", "name", "status", "location", "latency", "speed", "subscription"]);
 
@@ -7956,11 +7966,37 @@
         return `<td title="${escapeHtml(tooltip)}"><span class="chip ${state.chip}">${state.mark}</span>${provisional ? `<span class="muted"> ?</span>` : ""}</td>`;
       }
 
+      // The subscription filter narrows what is read, never what is swept: the
+      // counters above the table keep describing the whole matrix, because a
+      // filter is a way to look at findings, not a way to stop having them.
+      function renderReachabilitySubscriptions(nodes) {
+        const select = $("reachability-sub-filter");
+        if (!select) return "";
+        const previous = state.reachabilitySubscription || "";
+        const subscriptions = [...new Set(nodes.map((node) => node.subscription).filter(Boolean))].sort();
+        select.innerHTML = `<option value="">${escapeHtml(tr("All"))}</option>`
+          + subscriptions.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("");
+        // A subscription that is gone stops filtering rather than hiding
+        // everything behind a value no option carries any more.
+        const selected = subscriptions.includes(previous) ? previous : "";
+        state.reachabilitySubscription = selected;
+        select.value = selected;
+        // One subscription is the ordinary case, and a filter that can only be
+        // set to "All" is noise.
+        select.parentElement.hidden = subscriptions.length < 2;
+        return selected;
+      }
+
       function renderReachability() {
         const view = state.reachability || {};
         const agents = Array.isArray(view.agents) ? view.agents : [];
-        const nodes = Array.isArray(view.nodes) ? view.nodes : [];
-        const findings = Array.isArray(view.findings) ? view.findings : [];
+        const allNodes = Array.isArray(view.nodes) ? view.nodes : [];
+        const subscription = renderReachabilitySubscriptions(allNodes);
+        const nodes = subscription ? allNodes.filter((node) => node.subscription === subscription) : allNodes;
+        const allFindings = Array.isArray(view.findings) ? view.findings : [];
+        const findings = subscription
+          ? allFindings.filter((finding) => finding.subscription === subscription)
+          : allFindings;
 
         $("reachability-enabled-state").textContent = view.enabled ? tr("Enabled") : tr("Disabled");
         $("reachability-interval-state").textContent = Number(view.intervalSeconds) > 0
@@ -9455,6 +9491,14 @@
       $("tab-reachability").addEventListener("click", () => switchTab("reachability"));
       $("reachability-refresh").addEventListener("click", loadReachability);
       $("reachability-sweep").addEventListener("click", () => sweepReachability());
+      $("reachability-sub-filter").addEventListener("change", (event) => {
+        state.reachabilitySubscription = event.target.value || "";
+        try {
+          localStorage.setItem(reachabilityFilterKey, state.reachabilitySubscription);
+        } catch {
+        }
+        renderReachability();
+      });
       // Delegated: both tables are re-rendered on every poll, so a listener
       // bound to a button would not survive the next refresh.
       $("reachability-view").addEventListener("click", (event) => {
@@ -9832,6 +9876,10 @@
       }, true);
 
       restoreDashboardOrderState();
+      try {
+        state.reachabilitySubscription = localStorage.getItem(reachabilityFilterKey) || "";
+      } catch {
+      }
       syncDashboardOrderControls();
       bindTabListKeyboardNavigation();
       switchSettingsPane(state.settingsPane);

@@ -193,6 +193,14 @@ func (s suggestProxySource) GetProxyStatusDetailsIncludingMaintenance(string) (c
 	return checker.ProxyStatusDetails{}, nil
 }
 func (s suggestProxySource) MonitoringEnabled(string) bool { return true }
+func (s suggestProxySource) EnvironmentSourced(stableID string) bool {
+	for _, proxy := range s.proxies {
+		if proxy != nil && proxy.StableID == stableID {
+			return proxy.SourceID == ""
+		}
+	}
+	return true
+}
 
 // The panel already groups hosts with tags, so the checker can report those
 // groupings instead of asking for every node to be paired by hand. It never picks
@@ -204,6 +212,10 @@ func TestSuggestLocationsGroupsNodesByHostTag(t *testing.T) {
 			{StableID: "nl-xhttp", Name: "🇳🇱 Нидерланды xHTTP", Server: "144.31.86.63", Port: 2096},
 			{StableID: "de-tcp", Name: "🇩🇪 Германия #2", Server: "31.76.38.179", Port: 443},
 			{StableID: "stranger", Name: "Other subscription", Server: "10.0.0.1", Port: 443},
+			// A node from a panel-added source shares an endpoint with one of
+			// ours, so only the source tells them apart. It belongs in neither
+			// list: announce locations are built from our own fleet.
+			{StableID: "foreign", Name: "Somebody else's", Server: "31.76.38.179", Port: 443, SourceID: "src-foreign"},
 		}},
 		topology: Topology{Hosts: []Host{
 			{UUID: "h-nl-tcp", Remark: "NL", Address: "144.31.86.63", Port: 8443, Tags: []string{"BALANCER_NL", "EU"}},

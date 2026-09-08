@@ -122,7 +122,12 @@ type Cell struct {
 type NodeRow struct {
 	StableID string `json:"stableId"`
 	Name     string `json:"name,omitempty"`
-	Cells    []Cell `json:"cells"`
+	// Subscription names the feed the node came from, so a reader can narrow a
+	// matrix that mixes several of them down to one. Like Name it is resolved
+	// from the live node list rather than stored, and it is empty for a row
+	// whose node is no longer in it.
+	Subscription string `json:"subscription,omitempty"`
+	Cells        []Cell `json:"cells"`
 	// Alive reports that at least one vantage point — the checker or any agent —
 	// reached the node. It is what turns another vantage point's failure into a
 	// finding rather than an ordinary outage everybody agrees on.
@@ -456,6 +461,9 @@ func deriveRow(row NodeRow) NodeRow {
 type Finding struct {
 	StableID string `json:"stableId"`
 	Name     string `json:"name,omitempty"`
+	// Subscription carries the same label as the matching NodeRow, so filtering
+	// the matrix by subscription filters the findings above it with it.
+	Subscription string `json:"subscription,omitempty"`
 	// AgentID is empty when the vantage point is the checker itself.
 	AgentID      string                   `json:"agentId,omitempty"`
 	Local        bool                     `json:"local"`

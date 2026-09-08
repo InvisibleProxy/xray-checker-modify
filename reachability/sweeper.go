@@ -43,6 +43,10 @@ type AgentSource interface {
 type Target struct {
 	StableID string
 	Name     string
+	// Subscription is the feed the node came from. The sweep does not read it —
+	// every target is asked about the same way — but the view carries it so a
+	// matrix built from several subscriptions can be read one at a time.
+	Subscription string
 }
 
 type Config struct {
@@ -459,9 +463,16 @@ func (s *Sweeper) Snapshot() View {
 	// at once, and a matrix restored from disk is labelled before the first
 	// sweep has had a chance to refresh anything.
 	live := make(map[string]string)
+	// The subscription is resolved the same way and for the same reason: it is
+	// a property of the node list, not of the matrix, and a node that moved
+	// between feeds must read as it stands now.
+	subscriptions := make(map[string]string)
 	for _, target := range s.targets() {
 		if target.Name != "" {
 			live[target.StableID] = target.Name
+		}
+		if target.Subscription != "" {
+			subscriptions[target.StableID] = target.Subscription
 		}
 	}
 	rows := s.matrix.Rows()
@@ -469,12 +480,14 @@ func (s *Sweeper) Snapshot() View {
 		if name := live[rows[i].StableID]; name != "" {
 			rows[i].Name = name
 		}
+		rows[i].Subscription = subscriptions[rows[i].StableID]
 	}
 	findings := s.matrix.Findings()
 	for i := range findings {
 		if name := live[findings[i].StableID]; name != "" {
 			findings[i].Name = name
 		}
+		findings[i].Subscription = subscriptions[findings[i].StableID]
 	}
 	confirmed := 0
 	for _, finding := range findings {

@@ -20,6 +20,11 @@ type ProxySource interface {
 	GetProxies() []*models.ProxyConfig
 	GetProxyStatusDetailsIncludingMaintenance(string) (checker.ProxyStatusDetails, error)
 	MonitoringEnabled(string) bool
+	// EnvironmentSourced separates the subscription this deployment configures
+	// itself from one an operator added from the admin panel. Announce speaks
+	// to our own subscribers about our own service, so only the first kind of
+	// node takes part in it.
+	EnvironmentSourced(string) bool
 }
 
 type IncidentSource interface {
@@ -254,13 +259,10 @@ func (s *Service) ObserveFullCheck() {
 	if s.proxySource == nil || s.ProjectMaintenanceEnabled() {
 		return
 	}
-	proxies := s.proxySource.GetProxies()
+	proxies := s.ownProxies()
 	active := make(map[string]bool, len(proxies))
 	s.mu.Lock()
 	for _, proxy := range proxies {
-		if proxy == nil || proxy.StableID == "" {
-			continue
-		}
 		active[proxy.StableID] = true
 		details, err := s.proxySource.GetProxyStatusDetailsIncludingMaintenance(proxy.StableID)
 		if err != nil || details.Online {
@@ -660,18 +662,38 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 	return nil
 }
 
-func (s *Service) proxySnapshot() ([]*models.ProxyConfig, map[string]checker.ProxyStatusDetails, map[string]bool) {
+// ownProxies lists the nodes of the subscription this deployment configures
+// itself, which is the only fleet announce is allowed to describe. A node an
+// operator added from the panel belongs to somebody else's service: it has no
+// place in the locations announce is built from, in the confirmations it waits
+// for, or in the lists the admin UI offers for those locations.
+func (s *Service) ownProxies() []*models.ProxyConfig {
 	if s.proxySource == nil {
-		return nil, map[string]checker.ProxyStatusDetails{}, map[string]bool{}
+		return nil
 	}
 	proxies := s.proxySource.GetProxies()
-	active := make([]*models.ProxyConfig, 0, len(proxies))
-	statuses := make(map[string]checker.ProxyStatusDetails, len(proxies))
-	maintenance := make(map[string]bool, len(proxies))
+	own := make([]*models.ProxyConfig, 0, len(proxies))
 	for _, proxy := range proxies {
 		if proxy == nil || proxy.StableID == "" {
 			continue
 		}
+		if !s.proxySource.EnvironmentSourced(proxy.StableID) {
+			continue
+		}
+		own = append(own, proxy)
+	}
+	return own
+}
+
+func (s *Service) proxySnapshot() ([]*models.ProxyConfig, map[string]checker.ProxyStatusDetails, map[string]bool) {
+	if s.proxySource == nil {
+		return nil, map[string]checker.ProxyStatusDetails{}, map[string]bool{}
+	}
+	proxies := s.ownProxies()
+	active := make([]*models.ProxyConfig, 0, len(proxies))
+	statuses := make(map[string]checker.ProxyStatusDetails, len(proxies))
+	maintenance := make(map[string]bool, len(proxies))
+	for _, proxy := range proxies {
 		active = append(active, proxy)
 		maintenance[proxy.StableID] = !s.proxySource.MonitoringEnabled(proxy.StableID)
 		if details, err := s.proxySource.GetProxyStatusDetailsIncludingMaintenance(proxy.StableID); err == nil {
@@ -1171,12 +1193,9 @@ func (s *Service) proxyOptions() []ProxyOption {
 	if s.proxySource == nil {
 		return []ProxyOption{}
 	}
-	proxies := s.proxySource.GetProxies()
+	proxies := s.ownProxies()
 	result := make([]ProxyOption, 0, len(proxies))
 	for _, proxy := range proxies {
-		if proxy == nil || proxy.StableID == "" {
-			continue
-		}
 		result = append(result, ProxyOption{
 			StableID: proxy.StableID,
 			Name:     proxy.Name,
@@ -1367,10 +1386,7 @@ func (s *Service) SuggestLocations() LocationSuggestion {
 
 	byTag := map[string][]CandidateMember{}
 	suggestion := LocationSuggestion{}
-	for _, proxy := range s.proxySource.GetProxies() {
-		if proxy == nil || proxy.StableID == "" {
-			continue
-		}
+	for _, proxy := range s.ownProxies() {
 		endpoint := endpointKey(proxy.Server, proxy.Port)
 		member := CandidateMember{
 			StableID: proxy.StableID,

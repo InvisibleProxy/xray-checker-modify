@@ -464,6 +464,46 @@ func TestRepeatedRechecksCannotConfirmOnTheirOwn(t *testing.T) {
 
 // The subscription owns the name, so a rename must show at once rather than
 // waiting for a sweep to refresh the matrix's stored copy.
+// A matrix that mixes several subscriptions is read one at a time, so every row
+// and every finding says which one it belongs to. Like the name, the label comes
+// from the live node list: a node that moved between feeds reads as it stands
+// now, and the sweep itself keeps covering every node either way.
+func TestSnapshotCarriesTheSubscriptionOfEveryRowAndFinding(t *testing.T) {
+	controller := newFakeController()
+	controller.statuses["agent-1"] = diagnostics.ProbeStatusOffline
+	agents := fakeAgents{agents: []probeagent.AgentSnapshot{healthyAgent("agent-1")}}
+	matrix := NewMatrix("")
+	targets := []Target{
+		{StableID: "node-1", Name: "Ours", Subscription: "Own subscription"},
+		{StableID: "node-2", Name: "Theirs", Subscription: "Somebody else"},
+	}
+	sweeper, err := NewSweeper(Config{
+		Enabled: true, Interval: time.Hour, ProbeTimeout: time.Minute, PollInterval: time.Millisecond,
+		Now: func() time.Time { return time.Unix(3000, 0).UTC() },
+	}, controller, agents, func() []Target { return targets }, matrix)
+	if err != nil {
+		t.Fatalf("new sweeper: %v", err)
+	}
+	sweeper.SweepOnce(context.Background())
+
+	view := sweeper.Snapshot()
+	subscriptions := map[string]string{}
+	for _, row := range view.Nodes {
+		subscriptions[row.StableID] = row.Subscription
+	}
+	if subscriptions["node-1"] != "Own subscription" || subscriptions["node-2"] != "Somebody else" {
+		t.Fatalf("row subscriptions = %+v", subscriptions)
+	}
+	for _, finding := range view.Findings {
+		if finding.Subscription != subscriptions[finding.StableID] {
+			t.Fatalf("finding %+v does not carry the subscription of its row", finding)
+		}
+	}
+	if len(view.Findings) == 0 {
+		t.Fatal("no findings to check the subscription of")
+	}
+}
+
 func TestSnapshotLabelsRowsFromTheLiveNodeList(t *testing.T) {
 	controller := newFakeController()
 	controller.statuses["agent-1"] = diagnostics.ProbeStatusOffline

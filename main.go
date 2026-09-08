@@ -881,7 +881,7 @@ func reachabilityTargets(proxyChecker *checker.ProxyChecker) []reachability.Targ
 		if stableID == "" || !proxyChecker.MonitoringEnabled(stableID) {
 			continue
 		}
-		targets = append(targets, reachability.Target{StableID: stableID, Name: proxy.Name})
+		targets = append(targets, reachability.Target{StableID: stableID, Name: proxy.Name, Subscription: proxy.SubName})
 	}
 	return targets
 }

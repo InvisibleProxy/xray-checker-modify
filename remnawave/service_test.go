@@ -79,6 +79,17 @@ func (f *fakeProxySource) GetProxies() []*models.ProxyConfig {
 	return append([]*models.ProxyConfig(nil), f.proxies...)
 }
 
+func (f *fakeProxySource) EnvironmentSourced(stableID string) bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	for _, proxy := range f.proxies {
+		if proxy != nil && proxy.StableID == stableID {
+			return proxy.SourceID == ""
+		}
+	}
+	return true
+}
+
 func (f *fakeProxySource) GetProxyStatusDetailsIncludingMaintenance(stableID string) (checker.ProxyStatusDetails, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -131,6 +142,53 @@ func TestProxySnapshotIncludesMaintenanceProbeState(t *testing.T) {
 	}
 	if !maintenance["paused"] || maintenance["active"] {
 		t.Fatalf("maintenance flags = %+v", maintenance)
+	}
+}
+
+// Announce is a message to our own subscribers about our own service. A node
+// from a source an operator added in the admin panel is somebody else's, so it
+// takes no part in it — not even when it sits in a location, is confirmed
+// offline and would otherwise turn that location partial. The same rule empties
+// it out of the node list the Remnawave tab offers for those locations.
+func TestAnnounceAndItsNodeListIgnorePanelAddedSources(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	api, proxies := oneAudienceFixture(now, map[string]string{})
+	proxies.proxies = append(proxies.proxies, &models.ProxyConfig{StableID: "stable-foreign", Name: "Foreign", SourceID: "src-foreign"})
+	proxies.setOnline("stable-a")
+	proxies.setOffline(now.Add(-20*time.Minute), "stable-foreign")
+	service := testService(t, api, proxies, &fakeIncidentSource{}, &now)
+	config := audienceConfig("")
+	location := config.Locations["de"]
+	location.Members["stable-foreign"] = "host-a"
+	config.Locations["de"] = location
+	service.config = config
+
+	for range 3 {
+		service.ObserveFullCheck()
+	}
+	if _, err := service.SyncNow(context.Background()); err != nil {
+		t.Fatalf("SyncNow: %v", err)
+	}
+	if len(api.updates) != 0 {
+		t.Fatalf("a foreign node changed the announce: %+v", api.updates)
+	}
+
+	options := service.proxyOptions()
+	if len(options) != 1 || options[0].StableID != "stable-a" {
+		t.Fatalf("node options = %+v, want only the deployment's own node", options)
+	}
+
+	// Our own node failing still announces: the filter is about whose node it
+	// is, not about announcing less.
+	proxies.setOffline(now.Add(-20*time.Minute), "stable-a")
+	for range 3 {
+		service.ObserveFullCheck()
+	}
+	if _, err := service.ReconcileNow(context.Background()); err != nil {
+		t.Fatalf("ReconcileNow: %v", err)
+	}
+	if len(api.updates) != 1 {
+		t.Fatalf("announce updates = %+v, want the outage of our own node published", api.updates)
 	}
 }
 
