@@ -2533,6 +2533,7 @@
                 <option value="partial">Partial</option>
                 <option value="conflict">Conflict</option>
                 <option value="mismatch">Mismatch</option>
+                <option value="geo-only">Geo only</option>
                 <option value="unknown">Unknown</option>
               </select>
             </label>
@@ -4035,7 +4036,13 @@
 
       function dashboardLocation(proxy) {
         const overview = overviewNodeFor(proxy.stableId);
-        return String((overview && overview.claimedCountryCode) || "").trim().toUpperCase();
+        if (!overview) return "";
+        const code = String(overview.claimedCountryCode || "").trim().toUpperCase();
+        if (code) return code;
+        // Sorting by location follows the marker on the card, geo-located
+        // nodes included; otherwise they all sink to the end as unplaced.
+        const geoOnly = geoOnlyCountries(overview);
+        return geoOnly.length === 1 ? geoOnly[0].code : "";
       }
 
       function sortDashboardProxies(proxies) {
@@ -5246,9 +5253,15 @@
       }
 
       function countryText(node) {
-        const claimed = node.claimedCountry || node.claimedCountryCode || "Unknown";
-        const code = node.claimedCountryCode ? ` (${node.claimedCountryCode})` : "";
-        return `${claimed}${code}`;
+        const claimed = node.claimedCountry || node.claimedCountryCode;
+        if (claimed) {
+          const code = node.claimedCountryCode ? ` (${node.claimedCountryCode})` : "";
+          return `${claimed}${code}`;
+        }
+        // The suffix keeps the two apart: a country the node claims and one
+        // only the lookups vouch for are not the same statement.
+        const geoOnly = geoOnlyText(node);
+        return geoOnly ? `${geoOnly} · geo` : "Unknown";
       }
 
       function escapeRegExp(value) {
@@ -5257,7 +5270,14 @@
 
       function countryChip(node) {
         const code = String(node.claimedCountryCode || "").trim().toUpperCase();
-        return `<span class="chip blue country-chip">${escapeHtml(code || "--")}</span>`;
+        if (code) return `<span class="chip blue country-chip">${escapeHtml(code)}</span>`;
+        // Sources that disagree get no single code to show; the Geo column
+        // carries that case, so the marker stays empty rather than picking one.
+        const geoOnly = geoOnlyCountries(node);
+        if (geoOnly.length === 1) {
+          return `<span class="chip neutral country-chip" title="From geo lookup; the name claims no country">${escapeHtml(geoOnly[0].code)}</span>`;
+        }
+        return `<span class="chip blue country-chip">--</span>`;
       }
 
       function displayNodeName(node) {
@@ -5271,20 +5291,28 @@
       }
 
       function countryMatchChip(node) {
-        const match = node.countryMatch || "unknown";
+        const match = effectiveCountryMatch(node);
         if (match === "match") return `<span class="chip ok">Match</span>`;
         if (match === "partial") return `<span class="chip warn">Partial</span>`;
         if (match === "conflict") return `<span class="chip warn">Conflict</span>`;
         if (match === "mismatch") return `<span class="chip error">Mismatch</span>`;
+        if (match === "geo-only") {
+          const codes = geoOnlyCountries(node).map((entry) => entry.code);
+          // Blue is informational, not a verdict; disagreeing sources are the
+          // one thing here worth warning about.
+          const tone = codes.length > 1 ? "warn" : "blue";
+          return `<span class="chip ${tone}">Geo ${escapeHtml(codes.join(" / "))}</span>`;
+        }
         return `<span class="chip neutral">Unknown</span>`;
       }
 
       function countryMatchLabel(node) {
-        const match = node.countryMatch || "unknown";
+        const match = effectiveCountryMatch(node);
         if (match === "match") return "Match";
         if (match === "partial") return "Partial";
         if (match === "conflict") return "Conflict";
         if (match === "mismatch") return "Mismatch";
+        if (match === "geo-only") return "Geo only; the name claims no country";
         return "Unknown";
       }
 
@@ -5332,6 +5360,38 @@
           });
         }
         return sources;
+      }
+
+      // A node whose name says nothing about a country still sits somewhere,
+      // and the geo lookups already know where. Nothing was claimed, so there
+      // is no match to report — the location is shown as coming from geo alone
+      // instead of being hidden behind "Unknown".
+      // Returns [] when a country was claimed (the match verdict answers then)
+      // or when no source resolved one.
+      function geoOnlyCountries(node) {
+        if (String(node.claimedCountryCode || node.claimedCountry || "").trim()) return [];
+        const found = new Map();
+        geoSources(node).forEach((source) => {
+          if (source.error) return;
+          const code = String(source.countryCode || "").trim().toUpperCase();
+          if (!code || found.has(code)) return;
+          found.set(code, String(source.country || "").trim() || code);
+        });
+        return [...found].map(([code, name]) => ({ code, name }));
+      }
+
+      // What the Geo column actually shows, which is what its filter and sort
+      // have to agree with: a location known from geo alone is no longer
+      // "unknown", even though the backend verdict has nothing to compare.
+      function effectiveCountryMatch(node) {
+        if (geoOnlyCountries(node).length > 0) return "geo-only";
+        return node.countryMatch || "unknown";
+      }
+
+      function geoOnlyText(node) {
+        const entries = geoOnlyCountries(node);
+        if (entries.length === 0) return "";
+        return entries.map((entry) => `${entry.name} (${entry.code})`).join(" / ");
       }
 
       function geoSourceText(source) {
@@ -5411,10 +5471,22 @@
       function renderNodesOverviewFilters() {
         const countryValue = $("nodes-overview-country").value;
         const subValue = $("nodes-overview-sub").value;
-        const countries = [...new Map((state.nodesOverview || [])
-          .filter((node) => node.claimedCountryCode || node.claimedCountry)
-          .map((node) => [node.claimedCountryCode || node.claimedCountry, countryText(node)]))]
-          .sort((a, b) => a[1].localeCompare(b[1]));
+        // Nodes located by geo alone belong in this list too, under the same
+        // code: filtering by a country should not depend on whether the name
+        // happened to spell it out. A claimed label outranks a geo one when
+        // both exist for a code, so the option reads as the plain country.
+        const countryOptions = new Map();
+        (state.nodesOverview || []).forEach((node) => {
+          const claimed = node.claimedCountryCode || node.claimedCountry || "";
+          if (claimed) {
+            countryOptions.set(claimed, countryText(node));
+            return;
+          }
+          geoOnlyCountries(node).forEach((entry) => {
+            if (!countryOptions.has(entry.code)) countryOptions.set(entry.code, `${entry.name} (${entry.code}) · geo`);
+          });
+        });
+        const countries = [...countryOptions].sort((a, b) => a[1].localeCompare(b[1]));
         const subs = [...new Set((state.nodesOverview || []).map((node) => node.subName).filter(Boolean))].sort();
         $("nodes-overview-country").innerHTML = `<option value="">All</option>` + countries
           .map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`)
@@ -5434,16 +5506,22 @@
           : (subs.includes(subValue) ? subValue : "");
       }
 
+      function matchesCountryFilter(node, value) {
+        const claimed = node.claimedCountryCode || node.claimedCountry || "";
+        if (claimed) return claimed === value;
+        return geoOnlyCountries(node).some((entry) => entry.code === value);
+      }
+
       function filteredNodesOverview() {
         const filters = nodesOverviewFilters();
         const rows = (state.nodesOverview || []).filter((node) => {
           if (filters.status === "active" && !node.active) return false;
           if (filters.status === "maintenance" && (!node.active || !node.maintenance)) return false;
           if (filters.status === "retired" && node.active) return false;
-          if (filters.country && filters.country !== (node.claimedCountryCode || node.claimedCountry || "")) return false;
+          if (filters.country && !matchesCountryFilter(node, filters.country)) return false;
           if (filters.subName && filters.subName !== (node.subName || "")) return false;
           if (filters.geo === "blacklist" && !hasGeoBlacklistHit(node)) return false;
-          if (filters.geo && filters.geo !== "blacklist" && filters.geo !== (node.countryMatch || "unknown")) return false;
+          if (filters.geo && filters.geo !== "blacklist" && filters.geo !== effectiveCountryMatch(node)) return false;
           if (filters.search) {
             const haystack = [
               node.name,
@@ -5475,6 +5553,10 @@
         if (key === "totalProxyFailureSec") return effectiveProxyFailureSec(node);
         if (key === "lastSeenAt") return node.lastSeenAt ? new Date(node.lastSeenAt).getTime() : 0;
         if (key === "active") return node.active ? 1 : 0;
+        // Both columns show more than the raw field holds, and sorting by what
+        // is not on screen groups rows the operator sees as alike apart.
+        if (key === "claimedCountry") return countryText(node).toLowerCase();
+        if (key === "countryMatch") return effectiveCountryMatch(node);
         if (["avgMbps", "minMbps", "maxMbps", "failedResults"].includes(key)) return Number(node[key] || 0);
         return String(node[key] || "").toLowerCase();
       }
@@ -5614,8 +5696,14 @@
 
       function nodeCountryMarker(stableId) {
         const node = overviewNodeFor(stableId);
-        const code = String((node && node.claimedCountryCode) || "").trim().toUpperCase();
-        return code ? `<span class="chip blue country-chip">${escapeHtml(code)}</span>` : "";
+        if (!node) return "";
+        const code = String(node.claimedCountryCode || "").trim().toUpperCase();
+        if (code) return `<span class="chip blue country-chip">${escapeHtml(code)}</span>`;
+        const geoOnly = geoOnlyCountries(node);
+        if (geoOnly.length === 1) {
+          return `<span class="chip neutral country-chip" title="From geo lookup; the name claims no country">${escapeHtml(geoOnly[0].code)}</span>`;
+        }
+        return "";
       }
 
       function dashboardRangeControls(stableId, history) {
@@ -6694,8 +6782,18 @@
         renderSelectionCount();
       }
 
+      // The table sits under the node list and answers for what that list
+      // shows. The subscription switch and the Controls filters scope both, or
+      // a fleet spread over several feeds reads its own results as everyone's.
       function renderResults() {
-        const results = activeSpeedResults();
+        const visibleIDs = new Set(filteredProxies().map((proxy) => proxy.stableId));
+        const active = activeSpeedResults();
+        const results = active.filter((result) => visibleIDs.has(result.stableId));
+        // Nothing measured yet and nothing left by the filters are different
+        // answers, and the second one is only reachable by changing a filter.
+        const empty = active.length > 0
+          ? `<tr><td colspan="7" class="muted">No results for the current filters</td></tr>`
+          : `<tr><td colspan="7" class="muted">No speed test results yet</td></tr>`;
         $("results").innerHTML = results.map((result) => {
           const severity = resultSeverity(result);
           const reason = resultReason(result);
@@ -6710,7 +6808,7 @@
               <td class="reason-cell">${formatReasonChip(reason, severity)}</td>
             </tr>
           `;
-        }).join("") || `<tr><td colspan="7" class="muted">No speed test results yet</td></tr>`;
+        }).join("") || empty;
       }
 
       // Subscriptions are taken from the whole node list, so the one in scope
@@ -9673,10 +9771,14 @@
         renderNodes();
       });
       ["search", "status-filter", "protocol-filter", "sub-filter"].forEach((id) => {
-        $(id).addEventListener("input", renderNodes);
+        $(id).addEventListener("input", () => {
+          renderNodes();
+          renderResults();
+        });
         $(id).addEventListener("change", () => {
           saveFilterState();
           renderNodes();
+          renderResults();
           // The subscription filter also scopes the KPIs, so the summary above
           // has to be recomputed rather than left describing the whole fleet.
           if (id === "sub-filter") renderOverview();
