@@ -58,6 +58,11 @@ type Handle struct {
 	Outcome   string
 	Threshold float64
 	StartedAt time.Time
+	// request is what this handle was asked for. It is kept so a refused start
+	// can still describe the question nobody got to answer: a record saying only
+	// "no agent was available" leaves a later reader unable to tell which
+	// measurement went undiagnosed.
+	request startRequest
 	// retry is set when the start was refused for a reason that clears on its
 	// own, and carries what a second attempt needs. It is unexported because it
 	// is bookkeeping rather than evidence: a caller hands the handle back and
@@ -243,15 +248,29 @@ func effectiveThreshold(result speedtest.Result, threshold float64) float64 {
 	return threshold
 }
 
+// speedAutomationOutcome names what the agent is being asked to settle, or
+// refuses a measurement no observation can speak to.
+//
+// An attempted country fallback used to be a precondition, on the reading that
+// a run which had not yet tried its own alternatives was not worth an agent's
+// time. That withheld the second vantage point from exactly the failures that
+// need it most: a node whose country has no fallback endpoint configured, or
+// one whose declaration resolves to no country at all, never attempts a
+// fallback and so was never diagnosed. What decides is the measurement itself —
+// a technical error, or a rate below the threshold the run judged it against.
+//
+// An offline node is still skipped. Its speed test never ran, so there is no
+// measurement for an agent to reproduce; whether the node answers elsewhere is
+// what the reachability sweep exists to say.
 func speedAutomationOutcome(result speedtest.Result, threshold float64) (string, bool) {
-	if strings.TrimSpace(result.StableID) == "" || result.MaintenanceProbe || result.ProjectMaintenanceProbe ||
-		result.Offline || !result.FallbackAttempted || result.FallbackAttempts < 1 {
+	if strings.TrimSpace(result.StableID) == "" || result.MaintenanceProbe ||
+		result.ProjectMaintenanceProbe || result.Offline {
 		return "", false
 	}
-	if result.FallbackExhausted && result.Error != "" {
+	if result.Error != "" {
 		return diagnostics.AutomationOutcomeTechnical, true
 	}
-	if threshold > 0 && result.Error == "" && result.Mbps < threshold && (result.FallbackExhausted || result.FallbackUsed) {
+	if threshold > 0 && result.Mbps < threshold {
 		return diagnostics.AutomationOutcomeLowSpeed, true
 	}
 	return "", false
@@ -305,11 +324,14 @@ func (c *Coordinator) startSpeed(request startRequest) Handle {
 		if transient {
 			return c.deferredHandle(request, now, detail)
 		}
-		return Handle{StableID: request.stableID, State: speedtest.AgentDiagnosticUnavailable, Detail: detail, Outcome: request.outcome, Threshold: request.threshold, StartedAt: now}
+		return Handle{
+			StableID: request.stableID, State: speedtest.AgentDiagnosticUnavailable, Detail: detail,
+			Outcome: request.outcome, Threshold: request.threshold, StartedAt: now, request: request,
+		}
 	}
 	handle := Handle{
 		StableID: request.stableID, SessionID: view.Session.SessionID, State: speedtest.AgentDiagnosticRunning,
-		Outcome: request.outcome, Threshold: request.threshold, StartedAt: now,
+		Outcome: request.outcome, Threshold: request.threshold, StartedAt: now, request: request,
 	}
 	c.entries[request.stableID] = entry{handle: handle}
 	return handle
@@ -322,7 +344,8 @@ func (c *Coordinator) deferredHandle(request startRequest, now time.Time, detail
 	request.notBefore = now.Add(c.deferredRetryInterval())
 	return Handle{
 		StableID: request.stableID, State: speedtest.AgentDiagnosticUnavailable, Detail: detail,
-		Outcome: request.outcome, Threshold: request.threshold, StartedAt: now, retry: &request,
+		Outcome: request.outcome, Threshold: request.threshold, StartedAt: now,
+		request: request, retry: &request,
 	}
 }
 
@@ -417,7 +440,13 @@ func hasDeferred(handles map[string]Handle) bool {
 }
 
 func (c *Coordinator) annotation(handle Handle) speedtest.AgentDiagnostic {
-	annotation := speedtest.AgentDiagnostic{State: handle.State, SessionID: handle.SessionID, Detail: handle.Detail}
+	annotation := speedtest.AgentDiagnostic{
+		State:       handle.State,
+		SessionID:   handle.SessionID,
+		Detail:      handle.Detail,
+		RequestedAt: handle.StartedAt,
+		Task:        requestTask(handle.request),
+	}
 	if handle.SessionID == "" {
 		return annotation
 	}
@@ -427,6 +456,10 @@ func (c *Coordinator) annotation(handle Handle) speedtest.AgentDiagnostic {
 		annotation.Detail = "diagnostic session is no longer available"
 		return annotation
 	}
+	annotation.Trigger = string(view.Session.Trigger)
+	annotation.SessionState = string(view.Session.State)
+	annotation.Summary = view.Summary
+	annotation.Task = sessionTask(view.Session, handle.request)
 	// Prefer the agent that actually signed the observation over the first one
 	// requested; with more than one requested agent they are not the same, and an
 	// alert naming the wrong region is worse than naming none.
@@ -454,6 +487,7 @@ func (c *Coordinator) annotation(handle Handle) speedtest.AgentDiagnostic {
 	}
 	record := view.Session.AgentObservations[len(view.Session.AgentObservations)-1]
 	observation := record.Observation
+	annotation.Observation = probeObservation(record)
 	annotation.RemoteStatus = string(observation.Status)
 	annotation.FailureCode = observation.Failure.Code
 	annotation.FailureStage = string(observation.Failure.Stage)
@@ -507,6 +541,112 @@ func (c *Coordinator) annotation(handle Handle) speedtest.AgentDiagnostic {
 	}
 	annotation.State = speedtest.AgentDiagnosticReproduced
 	return annotation
+}
+
+// requestTask describes the job that was asked for, from the request alone. It
+// is what the record falls back on when no session exists: "no agent was
+// available" on its own leaves a later reader unable to tell which measurement
+// went undiagnosed, or against which threshold.
+func requestTask(request startRequest) *speedtest.AgentProbeTask {
+	if strings.TrimSpace(request.stableID) == "" {
+		return nil
+	}
+	return &speedtest.AgentProbeTask{
+		ProfileID:        diagnostics.ProfileDownload,
+		Kind:             diagnostics.AutomationKindSpeedFallback,
+		Outcome:          request.outcome,
+		Source:           request.source,
+		ThresholdMbps:    request.threshold,
+		ObservedMbps:     request.observedMbps,
+		MeasuredBytes:    request.measuredBytes,
+		FallbackAttempts: request.fallbackAttempts,
+	}
+}
+
+// sessionTask reads what the controller actually registered. The request names
+// a profile; only the session says what that profile resolved to for this
+// agent — the probe method, the transfer size it was asked for and how far the
+// job itself got.
+func sessionTask(session diagnostics.DiagnosticSession, request startRequest) *speedtest.AgentProbeTask {
+	task := requestTask(request)
+	if task == nil {
+		task = &speedtest.AgentProbeTask{}
+	}
+	if context := session.AutomationContext; context != (diagnostics.AutomationContext{}) {
+		task.Kind = context.Kind
+		task.Outcome = context.Outcome
+		task.Source = context.Source
+		task.ThresholdMbps = context.ThresholdMbps
+		task.ObservedMbps = context.ObservedMbps
+		task.MeasuredBytes = context.MeasuredBytes
+		task.FallbackAttempts = context.FallbackAttempts
+	}
+	task.RequestedAgents = append([]string(nil), session.RequestedAgents...)
+	task.CreatedAt = session.CreatedAt
+	task.ExpiresAt = session.ExpiresAt
+	task.ConfigGeneration = session.ConfigGeneration
+	if count := len(session.Jobs); count > 0 {
+		job := session.Jobs[count-1]
+		task.ProfileID = job.Profile.ID
+		task.Method = string(job.Profile.Method)
+		task.AlternativeProfileID = job.Profile.AlternativeProfileID
+		task.DownloadBytes = job.Profile.DownloadBytes
+		task.JobState = string(job.State)
+		task.ExpiresAt = job.ExpiresAt
+	}
+	return task
+}
+
+// probeObservation copies the signed answer without its signature. The
+// signature was verified when the controller accepted the observation, and a
+// copy carrying one would invite a later reader to treat this record as the
+// original rather than as a report of it.
+func probeObservation(record diagnostics.AcceptedObservation) *speedtest.AgentProbeObservation {
+	observation := record.Observation
+	stored := &speedtest.AgentProbeObservation{
+		Status:             string(observation.Status),
+		CheckedAt:          observation.CheckedAt,
+		AcceptedAt:         record.AcceptedAt,
+		DurationMillis:     observation.DurationMillis,
+		LatencyMillis:      observation.LatencyMillis,
+		EndpointProfile:    observation.EndpointProfile,
+		Failure:            probeFailure(observation.Failure),
+		TCP:                probeCheck(observation.TCP),
+		Ping:               probeCheck(observation.Ping),
+		DirectConnectivity: probeCheck(observation.DirectConnectivity),
+		AgentVersion:       observation.AgentVersion,
+		Reliable:           record.Reliable,
+	}
+	if alternative := observation.AlternativeEndpoint; alternative != nil {
+		stored.AlternativeEndpoint = &speedtest.AgentProbeAlternative{
+			ProfileID:     alternative.ProfileID,
+			Status:        string(alternative.Status),
+			LatencyMillis: alternative.LatencyMillis,
+			Failure:       probeFailure(alternative.Failure),
+		}
+	}
+	if throughput := observation.Throughput; throughput != nil {
+		stored.Throughput = &speedtest.AgentProbeThroughput{
+			Bytes:          throughput.Bytes,
+			DurationMillis: throughput.DurationMillis,
+			Mbps:           throughput.Mbps,
+			TTFBMillis:     throughput.TTFBMillis,
+		}
+	}
+	return stored
+}
+
+func probeCheck(evidence diagnostics.CheckEvidence) speedtest.AgentProbeCheck {
+	return speedtest.AgentProbeCheck{
+		Checked:       evidence.Checked,
+		Online:        evidence.Online,
+		LatencyMillis: evidence.LatencyMillis,
+		FailureCode:   evidence.FailureCode,
+	}
+}
+
+func probeFailure(evidence diagnostics.FailureEvidence) speedtest.AgentProbeFailure {
+	return speedtest.AgentProbeFailure{Code: evidence.Code, Stage: string(evidence.Stage)}
 }
 
 func (c *Coordinator) pruneLocked(now time.Time) {

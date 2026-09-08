@@ -565,10 +565,15 @@ func validateCreateSessionRequest(request CreateSessionRequest, now time.Time, m
 	}
 	if request.Trigger == TriggerAutoSpeedFallback {
 		context := request.AutomationContext
+		// FallbackAttempts may be zero: a run reaches this trigger whenever its
+		// measurement failed or came in under the threshold, and a node whose
+		// country has no fallback endpoint configured never attempts one. The
+		// count remains a fact about the run, not a precondition for asking an
+		// agent about it.
 		if context.Kind != AutomationKindSpeedFallback ||
 			(context.Outcome != AutomationOutcomeTechnical && context.Outcome != AutomationOutcomeLowSpeed) ||
 			!validToken(context.Source) || context.ThresholdMbps < 0 || context.ObservedMbps < 0 ||
-			context.MeasuredBytes < 0 || context.FallbackAttempts < 1 {
+			context.MeasuredBytes < 0 || context.FallbackAttempts < 0 {
 			return fmt.Errorf("%w: invalid speed fallback automation context", ErrInvalidRequest)
 		}
 	} else if request.AutomationContext != (AutomationContext{}) {

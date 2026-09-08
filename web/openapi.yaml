@@ -2312,6 +2312,185 @@ components:
           format: date-time
         source:
           type: string
+        agentProbe:
+          $ref: '#/components/schemas/AgentProbe'
+
+    AgentProbe:
+      type: object
+      description: >-
+        Automatic isolated agent diagnostic triggered by this measurement, stored beside it as evidence.
+        It is present only for measurements that failed or came in below the threshold in force, and only
+        while agent automation is enabled. It never affects result classification, node status, incidents,
+        KPI, retries or Remnawave.
+      properties:
+        state:
+          type: string
+          enum: [running, reproduced, not_reproduced, unreliable, unavailable]
+          description: >-
+            Verdict of the probe. reproduced — the agent saw the same problem; not_reproduced — the agent
+            got through; unreliable — the observation cannot be read as a verdict, usually because the
+            agent's own direct connectivity control failed; unavailable — no session produced evidence.
+        detail:
+          type: string
+        sessionId:
+          type: string
+        sessionState:
+          type: string
+        trigger:
+          type: string
+        summary:
+          type: string
+          description: Probabilistic controller summary of the diagnostic session.
+        agentId:
+          type: string
+        agentName:
+          type: string
+        region:
+          type: string
+        provider:
+          type: string
+        requestedAt:
+          type: string
+          format: date-time
+        task:
+          $ref: '#/components/schemas/AgentProbeTask'
+        observation:
+          $ref: '#/components/schemas/AgentProbeObservation'
+
+    AgentProbeTask:
+      type: object
+      description: The job asked of the agent, in bounded terms; it carries profile identifiers rather than URLs.
+      properties:
+        profileId:
+          type: string
+        method:
+          type: string
+        alternativeProfileId:
+          type: string
+        downloadBytes:
+          type: integer
+          format: int64
+          description: Transfer size the agent was asked for, so its rate is comparable with the run's. Absent means the agent measured its own amount.
+        jobState:
+          type: string
+        kind:
+          type: string
+        outcome:
+          type: string
+          enum: [technical_error, low_speed]
+        source:
+          type: string
+          description: Speed-test run source the probe answers to.
+        thresholdMbps:
+          type: number
+          format: double
+        observedMbps:
+          type: number
+          format: double
+        measuredBytes:
+          type: integer
+          format: int64
+        fallbackAttempts:
+          type: integer
+        requestedAgents:
+          type: array
+          items:
+            type: string
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        configGeneration:
+          type: integer
+          format: int64
+
+    AgentProbeCheck:
+      type: object
+      properties:
+        checked:
+          type: boolean
+        online:
+          type: boolean
+        latencyMillis:
+          type: integer
+          format: int64
+        failureCode:
+          type: string
+
+    AgentProbeFailure:
+      type: object
+      description: Bounded classification only; raw transport errors never enter the diagnostic schema.
+      properties:
+        code:
+          type: string
+        stage:
+          type: string
+
+    AgentProbeObservation:
+      type: object
+      description: >-
+        Signed agent answer as accepted by the controller, without its signature. Field names match the
+        diagnostic observation schema.
+      properties:
+        status:
+          type: string
+          enum: [unknown, online, proxy_failure, offline]
+        checkedAt:
+          type: string
+          format: date-time
+        acceptedAt:
+          type: string
+          format: date-time
+        durationMillis:
+          type: integer
+          format: int64
+        latencyMillis:
+          type: integer
+          format: int64
+        endpointProfile:
+          type: string
+        failure:
+          $ref: '#/components/schemas/AgentProbeFailure'
+        tcp:
+          $ref: '#/components/schemas/AgentProbeCheck'
+        ping:
+          $ref: '#/components/schemas/AgentProbeCheck'
+        directConnectivity:
+          $ref: '#/components/schemas/AgentProbeCheck'
+        alternativeEndpoint:
+          type: object
+          properties:
+            profileId:
+              type: string
+            status:
+              type: string
+            latencyMillis:
+              type: integer
+              format: int64
+            failure:
+              $ref: '#/components/schemas/AgentProbeFailure'
+        throughput:
+          type: object
+          properties:
+            bytes:
+              type: integer
+              format: int64
+            durationMillis:
+              type: integer
+              format: int64
+            mbps:
+              type: integer
+              format: int64
+            ttfbMillis:
+              type: integer
+              format: int64
+        agentVersion:
+          type: string
+        reliable:
+          type: boolean
+          description: Controller-derived. A signed result whose direct connectivity control failed stays evidence but is not a verdict.
 
     SpeedTestSnapshot:
       type: object

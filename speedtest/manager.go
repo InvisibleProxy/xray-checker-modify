@@ -151,9 +151,13 @@ type Result struct {
 	PingCheck             *checker.PingCheckDetails `json:"pingCheck,omitempty"`
 	CheckedAt             time.Time                 `json:"checkedAt"`
 	Source                string                    `json:"source"`
-	// AgentDiagnostic is ephemeral alert enrichment. It is deliberately absent
-	// from persisted speed history, admin API snapshots and backup state.
-	AgentDiagnostic *AgentDiagnostic `json:"-"`
+	// AgentDiagnostic is the automatic agent probe this measurement triggered.
+	// It is sanitized evidence from a separate vantage point, kept beside the
+	// measurement it explains: a diagnostic session lives in memory and expires,
+	// so a record that only pointed at one would be empty by the time anyone
+	// read the history. It never participates in result classification, node
+	// status, KPI or any other operational decision.
+	AgentDiagnostic *AgentDiagnostic `json:"agentProbe,omitempty"`
 }
 
 const (
@@ -164,26 +168,129 @@ const (
 	AgentDiagnosticUnavailable   = "unavailable"
 )
 
-// AgentDiagnostic is a sanitized read-only annotation attached only to a
-// Telegram report copy. It never participates in result classification or any
-// operational decision.
+// AgentDiagnostic is a sanitized read-only record of one automatic agent probe.
+//
+// The tagged fields are persisted with the measurement and read by the admin
+// history view; the untagged ones exist only for the Telegram report copy,
+// which is written before the probe finishes and reads its evidence flat. Both
+// halves describe the same observation, and neither is authoritative: the
+// verdict belongs to the run, not to the agent.
 type AgentDiagnostic struct {
-	State                     string
-	SessionID                 string
-	AgentID                   string
-	AgentName                 string
-	Region                    string
-	Provider                  string
-	RemoteStatus              string
-	FailureCode               string
-	FailureStage              string
-	DirectConnectivityChecked bool
-	DirectConnectivityOnline  bool
-	AlternativeProfile        string
-	AlternativeStatus         string
-	Mbps                      int64
-	CheckedAt                 time.Time
-	Detail                    string
+	State        string    `json:"state"`
+	Detail       string    `json:"detail,omitempty"`
+	SessionID    string    `json:"sessionId,omitempty"`
+	SessionState string    `json:"sessionState,omitempty"`
+	Trigger      string    `json:"trigger,omitempty"`
+	Summary      string    `json:"summary,omitempty"`
+	AgentID      string    `json:"agentId,omitempty"`
+	AgentName    string    `json:"agentName,omitempty"`
+	Region       string    `json:"region,omitempty"`
+	Provider     string    `json:"provider,omitempty"`
+	RequestedAt  time.Time `json:"requestedAt,omitempty"`
+	// Task is what the agent was asked to do, and why. Without it a stored
+	// verdict cannot be read back: "not reproduced" means one thing when the
+	// agent was asked for the same transfer size the run used and another when
+	// it measured whatever amount it likes.
+	Task        *AgentProbeTask        `json:"task,omitempty"`
+	Observation *AgentProbeObservation `json:"observation,omitempty"`
+
+	RemoteStatus              string    `json:"-"`
+	FailureCode               string    `json:"-"`
+	FailureStage              string    `json:"-"`
+	DirectConnectivityChecked bool      `json:"-"`
+	DirectConnectivityOnline  bool      `json:"-"`
+	AlternativeProfile        string    `json:"-"`
+	AlternativeStatus         string    `json:"-"`
+	Mbps                      int64     `json:"-"`
+	CheckedAt                 time.Time `json:"-"`
+}
+
+// AgentProbeTask is the job the controller created, in the bounded terms the
+// diagnostic schema allows: profile identifiers rather than URLs, and the
+// numbers the run produced rather than its raw errors.
+type AgentProbeTask struct {
+	ProfileID            string    `json:"profileId,omitempty"`
+	Method               string    `json:"method,omitempty"`
+	AlternativeProfileID string    `json:"alternativeProfileId,omitempty"`
+	DownloadBytes        int64     `json:"downloadBytes,omitempty"`
+	JobState             string    `json:"jobState,omitempty"`
+	Kind                 string    `json:"kind,omitempty"`
+	Outcome              string    `json:"outcome,omitempty"`
+	Source               string    `json:"source,omitempty"`
+	ThresholdMbps        float64   `json:"thresholdMbps,omitempty"`
+	ObservedMbps         float64   `json:"observedMbps,omitempty"`
+	MeasuredBytes        int64     `json:"measuredBytes,omitempty"`
+	FallbackAttempts     int       `json:"fallbackAttempts,omitempty"`
+	RequestedAgents      []string  `json:"requestedAgents,omitempty"`
+	CreatedAt            time.Time `json:"createdAt,omitempty"`
+	ExpiresAt            time.Time `json:"expiresAt,omitempty"`
+	ConfigGeneration     uint64    `json:"configGeneration,omitempty"`
+}
+
+// The observation types below mirror the diagnostic schema field for field,
+// names included. They are a copy rather than the schema itself: the diagnostic
+// package is isolated on purpose, and letting its versioned types into a
+// persisted operational file would tie the format of stored measurements to a
+// schema that answers to nobody here. Keeping the names identical is what lets
+// the admin UI render a stored probe with the same code it renders a live
+// session with.
+
+// AgentProbeCheck is one control the agent ran beside its probe.
+type AgentProbeCheck struct {
+	Checked       bool   `json:"checked"`
+	Online        bool   `json:"online"`
+	LatencyMillis int64  `json:"latencyMillis,omitempty"`
+	FailureCode   string `json:"failureCode,omitempty"`
+}
+
+// AgentProbeFailure carries bounded classification only. Raw transport errors
+// may quote endpoint details, and never enter the diagnostic schema.
+type AgentProbeFailure struct {
+	Code  string `json:"code,omitempty"`
+	Stage string `json:"stage,omitempty"`
+}
+
+// AgentProbeThroughput keeps bytes and duration beside the rate, because a rate
+// on its own cannot say whether the transfer was long enough to mean anything.
+type AgentProbeThroughput struct {
+	Bytes          int64 `json:"bytes"`
+	DurationMillis int64 `json:"durationMillis"`
+	Mbps           int64 `json:"mbps"`
+	TTFBMillis     int64 `json:"ttfbMillis,omitempty"`
+}
+
+// AgentProbeAlternative is the second tunnelled endpoint a failed probe is
+// re-checked against, which is what separates a broken endpoint from a broken
+// node.
+type AgentProbeAlternative struct {
+	ProfileID     string            `json:"profileId"`
+	Status        string            `json:"status"`
+	LatencyMillis int64             `json:"latencyMillis,omitempty"`
+	Failure       AgentProbeFailure `json:"failure,omitempty"`
+}
+
+// AgentProbeObservation is the signed agent answer, minus the signature: the
+// signature was verified when the controller accepted the observation, and a
+// copy carrying one would invite a later reader to treat this record as the
+// original rather than as a report of it.
+type AgentProbeObservation struct {
+	Status              string                 `json:"status"`
+	CheckedAt           time.Time              `json:"checkedAt"`
+	AcceptedAt          time.Time              `json:"acceptedAt,omitempty"`
+	DurationMillis      int64                  `json:"durationMillis,omitempty"`
+	LatencyMillis       int64                  `json:"latencyMillis,omitempty"`
+	EndpointProfile     string                 `json:"endpointProfile,omitempty"`
+	Failure             AgentProbeFailure      `json:"failure,omitempty"`
+	TCP                 AgentProbeCheck        `json:"tcp"`
+	Ping                AgentProbeCheck        `json:"ping"`
+	DirectConnectivity  AgentProbeCheck        `json:"directConnectivity"`
+	AlternativeEndpoint *AgentProbeAlternative `json:"alternativeEndpoint,omitempty"`
+	Throughput          *AgentProbeThroughput  `json:"throughput,omitempty"`
+	AgentVersion        string                 `json:"agentVersion,omitempty"`
+	// Reliable is the controller's judgement, not the agent's: an observation
+	// whose direct connectivity control failed stays evidence but must not be
+	// read as a verdict about the node.
+	Reliable bool `json:"reliable"`
 }
 
 type RunInfo struct {
@@ -242,6 +349,16 @@ type Reporter interface {
 	NotifySpeedTest(report RunReport)
 }
 
+// AgentProbeRunner diagnoses a finished run from a second vantage point. It is
+// separate from Reporter because the two answer to different switches: Telegram
+// reporting can be off, muted, or filtered down to nothing, and the history
+// still wants the agent's evidence for the measurements that failed. It must
+// not block its caller, and it may reach back into the manager only through
+// RecordAgentProbe.
+type AgentProbeRunner interface {
+	RunSpeedProbes(report RunReport)
+}
+
 type Manager struct {
 	proxyChecker *checker.ProxyChecker
 	startPort    int
@@ -262,6 +379,7 @@ type Manager struct {
 	schedule           ScheduleConfig
 	nextRun            time.Time
 	reporter           Reporter
+	probeRunner        AgentProbeRunner
 	runGate            sync.Locker
 	projectMaintenance bool
 
@@ -304,6 +422,14 @@ func (m *Manager) SetReporter(reporter Reporter) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.reporter = reporter
+}
+
+// SetAgentProbeRunner installs the optional automatic agent diagnostics that
+// follow a run. A nil runner leaves the manager behaving exactly as before.
+func (m *Manager) SetAgentProbeRunner(runner AgentProbeRunner) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.probeRunner = runner
 }
 
 func (m *Manager) SetProjectMaintenance(enabled bool) {
@@ -517,6 +643,46 @@ func (m *Manager) ResultHistory(stableID string) []Result {
 
 	history := retainResultHistory(m.history[stableID], historyCutoff(m.historyRetentionDaysLocked(), time.Now()))
 	return history
+}
+
+// RecordAgentProbe attaches an automatic agent probe to a measurement that is
+// already stored. The probe cannot be written with the result it belongs to:
+// the agent is asked once the run is over and answers minutes later, so the
+// record is found again by StableID and the moment it was measured.
+//
+// A probe is evidence, not a measurement. It is copied into the stored result
+// and nothing else — no threshold is re-read, no status recomputed, no counter
+// touched — so a node reads exactly as it did before the agent answered.
+func (m *Manager) RecordAgentProbe(stableID string, checkedAt time.Time, probe AgentDiagnostic) (bool, error) {
+	stableID = strings.TrimSpace(stableID)
+	if stableID == "" || checkedAt.IsZero() {
+		return false, nil
+	}
+
+	m.mu.Lock()
+	recorded := false
+	if result, ok := m.results[stableID]; ok && result.CheckedAt.Equal(checkedAt) {
+		stored := probe
+		result.AgentDiagnostic = &stored
+		m.results[stableID] = result
+		recorded = true
+	}
+	for index, entry := range m.history[stableID] {
+		if !entry.CheckedAt.Equal(checkedAt) {
+			continue
+		}
+		stored := probe
+		entry.AgentDiagnostic = &stored
+		m.history[stableID][index] = entry
+		recorded = true
+		break
+	}
+	m.mu.Unlock()
+
+	if !recorded {
+		return false, nil
+	}
+	return true, m.persistResults()
 }
 
 func (m *Manager) AllResultHistory() map[string][]Result {
@@ -1142,6 +1308,7 @@ func (m *Manager) run(
 	m.lastRun.Cancelled = cancelled
 	m.lastRun.FinishedAt = &finishedAt
 	reporter := m.reporter
+	probeRunner := m.probeRunner
 	m.mu.Unlock()
 
 	if err := m.persistResults(); err != nil {
@@ -1156,6 +1323,9 @@ func (m *Manager) run(
 		// would only read as an outage that never happened.
 		logger.Info("Speed test cancelled after %d of %d nodes", len(runResults), len(proxies))
 		return
+	}
+	if probeRunner != nil {
+		go probeRunner.RunSpeedProbes(report)
 	}
 	if reporter != nil {
 		go reporter.NotifySpeedTest(report)

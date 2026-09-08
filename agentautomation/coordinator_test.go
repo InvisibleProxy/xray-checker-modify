@@ -92,7 +92,11 @@ func (fakeAgentSource) Agent(agentID string) (probeagent.AgentSnapshot, bool) {
 	return probeagent.AgentSnapshot{AgentID: agentID, DisplayName: "EU probe", Region: "DE", Provider: "example"}, true
 }
 
-func TestSpeedFallbackAutomationRequiresAnAttemptedUnresolvedFallbackAndDeduplicates(t *testing.T) {
+// A country fallback is not a precondition. Requiring one withheld the second
+// vantage point from the failures that need it most: a node whose country has
+// no fallback endpoint configured never attempts one, and so was never
+// diagnosed at all.
+func TestSpeedAutomationDiagnosesAnUnresolvedMeasurementWithOrWithoutAFallbackAndDeduplicates(t *testing.T) {
 	controller := &fakeSessionController{enabled: true}
 	now := time.Date(2026, 9, 1, 1, 2, 3, 0, time.UTC)
 	coordinator, err := New(Config{
@@ -108,16 +112,47 @@ func TestSpeedFallbackAutomationRequiresAnAttemptedUnresolvedFallbackAndDeduplic
 	}}
 	first := coordinator.StartSpeedDiagnostics(report, 10)
 	second := coordinator.StartSpeedDiagnostics(report, 10)
-	if len(first) != 1 || first["node-one"].SessionID != "diag-one" || second["node-one"].SessionID != "diag-one" {
-		t.Fatalf("handles = first:%+v second:%+v", first, second)
+	if len(first) != 2 || first["node-one"].SessionID == "" || first["node-two"].SessionID == "" {
+		t.Fatalf("handles = %+v, want a session for both unresolved nodes", first)
 	}
-	if len(controller.requests) != 1 {
-		t.Fatalf("automatic creates = %d, want one", len(controller.requests))
+	if second["node-one"].SessionID != first["node-one"].SessionID ||
+		second["node-two"].SessionID != first["node-two"].SessionID {
+		t.Fatalf("second pass handles = %+v, want the sessions the first pass created", second)
+	}
+	if len(controller.requests) != 2 {
+		t.Fatalf("automatic creates = %d, want one per node", len(controller.requests))
 	}
 	request := controller.requests[0]
 	if request.Trigger != diagnostics.TriggerAutoSpeedFallback || request.ProfileID != diagnostics.ProfileDownload ||
 		request.AutomationContext.Outcome != diagnostics.AutomationOutcomeTechnical || request.AutomationContext.FallbackAttempts != 2 {
 		t.Fatalf("automatic request = %+v", request)
+	}
+	if got := controller.requests[1].AutomationContext.FallbackAttempts; got != 0 {
+		t.Fatalf("fallback attempts for the node that never tried one = %d, want zero", got)
+	}
+}
+
+// A healthy measurement is not diagnosed, and neither is an offline node: its
+// speed test never ran, so there is no measurement for an agent to reproduce.
+func TestSpeedAutomationSkipsHealthyOfflineAndMaintenanceResults(t *testing.T) {
+	controller := &fakeSessionController{enabled: true}
+	coordinator, err := New(Config{
+		Enabled: true, Cooldown: time.Minute, AlertWait: time.Second, MaxConcurrent: 4,
+	}, controller, fakeAgentSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{
+		{StableID: "node-fast", Mbps: 500},
+		{StableID: "node-offline", Offline: true},
+		{StableID: "node-paused", Error: "context deadline exceeded", MaintenanceProbe: true},
+		{StableID: "node-project", Mbps: 2, ProjectMaintenanceProbe: true},
+	}}
+	if handles := coordinator.StartSpeedDiagnostics(report, 100); len(handles) != 0 {
+		t.Fatalf("handles = %+v, want none", handles)
+	}
+	if len(controller.requests) != 0 {
+		t.Fatalf("automatic creates = %d, want none", len(controller.requests))
 	}
 }
 

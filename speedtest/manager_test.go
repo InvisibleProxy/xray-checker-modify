@@ -252,19 +252,36 @@ func TestLegacySpeedResultsDefaultNewFallbackMetadataSafely(t *testing.T) {
 	}
 }
 
-func TestAgentDiagnosticIsNeverSerializedWithSpeedResult(t *testing.T) {
+// The probe is stored with the measurement, but only in its bounded form. The
+// flat fields exist for the Telegram copy alone and duplicate what the
+// observation already says; serializing them too would put the same evidence on
+// disk twice, in two shapes that can drift apart.
+func TestSpeedResultSerializesTheProbeWithoutItsTelegramOnlyFields(t *testing.T) {
 	data, err := json.Marshal(Result{
 		StableID: "node-1",
 		AgentDiagnostic: &AgentDiagnostic{
-			State: AgentDiagnosticReproduced, SessionID: "diag-secret-context", AgentName: "EU probe",
+			State: AgentDiagnosticReproduced, SessionID: "diag-one", AgentName: "EU probe",
+			Task: &AgentProbeTask{ProfileID: "download", Outcome: "low_speed", ThresholdMbps: 100},
+			Observation: &AgentProbeObservation{
+				Status: "online", Reliable: true,
+				Throughput: &AgentProbeThroughput{Bytes: 100, DurationMillis: 10, Mbps: 42},
+			},
+			RemoteStatus: "online", Mbps: 42, AlternativeProfile: "status",
+			DirectConnectivityChecked: true, DirectConnectivityOnline: true,
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{"agentDiagnostic", "diag-secret-context", "EU probe"} {
-		if strings.Contains(string(data), forbidden) {
-			t.Fatalf("serialized speed result contains ephemeral agent field %q: %s", forbidden, data)
+	serialized := string(data)
+	for _, want := range []string{`"agentProbe"`, "diag-one", "EU probe", `"task"`, `"observation"`} {
+		if !strings.Contains(serialized, want) {
+			t.Fatalf("serialized result is missing %q: %s", want, serialized)
+		}
+	}
+	for _, forbidden := range []string{"remoteStatus", "alternativeProfile", "directConnectivityChecked"} {
+		if strings.Contains(serialized, forbidden) {
+			t.Fatalf("serialized result contains the Telegram-only field %q: %s", forbidden, serialized)
 		}
 	}
 }
@@ -764,5 +781,84 @@ func TestScheduledRunSkipsSourcesWatchedForAvailabilityOnly(t *testing.T) {
 	manual := manager.selectProxies(RunRequest{ProxyIDs: []string{availabilityOnly.StableID}}, true)
 	if len(manual) != 1 || manual[0].StableID != availabilityOnly.StableID {
 		t.Fatalf("manual selection = %+v, want the explicitly chosen node", manual)
+	}
+}
+
+// The agent answers minutes after the run is over, so the probe is filed
+// against the measurement it belongs to rather than written with it.
+func TestRecordAgentProbeAttachesEvidenceToTheStoredMeasurement(t *testing.T) {
+	dir := t.TempDir()
+	schedulePath := filepath.Join(dir, "speedtest_schedule.json")
+	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
+	manager := NewManager(proxyChecker, 10000, schedulePath, TestConfig{})
+	checkedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	earlier := checkedAt.Add(-time.Hour)
+	measured := Result{StableID: "node-1", Name: "Node 1", Error: "context deadline exceeded", CheckedAt: checkedAt}
+	manager.results["node-1"] = measured
+	manager.history["node-1"] = []Result{measured, {StableID: "node-1", Name: "Node 1", Mbps: 90, CheckedAt: earlier}}
+
+	probe := AgentDiagnostic{
+		State: AgentDiagnosticReproduced, SessionID: "diag-one", AgentName: "EU probe",
+		Task:        &AgentProbeTask{ProfileID: "download", Outcome: "technical_error", ThresholdMbps: 100},
+		Observation: &AgentProbeObservation{Status: "offline", CheckedAt: checkedAt, Reliable: true},
+	}
+	recorded, err := manager.RecordAgentProbe("node-1", checkedAt, probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !recorded {
+		t.Fatal("probe was not attached to the measurement")
+	}
+
+	history := manager.ResultHistory("node-1")
+	if len(history) != 2 {
+		t.Fatalf("history length = %d, want the two stored measurements", len(history))
+	}
+	stored := history[0]
+	if stored.AgentDiagnostic == nil || stored.AgentDiagnostic.SessionID != "diag-one" {
+		t.Fatalf("history probe = %+v, want the recorded session", stored.AgentDiagnostic)
+	}
+	if history[1].AgentDiagnostic != nil {
+		t.Fatal("the probe was attached to a measurement it does not belong to")
+	}
+	if stored.Error != measured.Error || stored.Mbps != measured.Mbps || stored.Offline != measured.Offline {
+		t.Fatalf("stored measurement = %+v, want it unchanged by the probe", stored)
+	}
+	latest := manager.Snapshot().Results
+	if len(latest) != 1 || latest[0].AgentDiagnostic == nil {
+		t.Fatalf("latest results = %+v, want the probe on the current result", latest)
+	}
+
+	// The probe has to survive a restart: it is the evidence for a failure an
+	// operator investigates later, which is the whole point of storing it.
+	reloaded := NewManager(proxyChecker, 10000, schedulePath, TestConfig{})
+	if err := reloaded.Load(); err != nil {
+		t.Fatal(err)
+	}
+	restored := reloaded.ResultHistory("node-1")
+	if len(restored) == 0 || restored[0].AgentDiagnostic == nil {
+		t.Fatalf("restored history = %+v, want the stored probe", restored)
+	}
+	if restored[0].AgentDiagnostic.Task == nil || restored[0].AgentDiagnostic.Task.ThresholdMbps != 100 {
+		t.Fatalf("restored task = %+v, want the threshold the run judged against", restored[0].AgentDiagnostic.Task)
+	}
+	if restored[0].AgentDiagnostic.Observation == nil || !restored[0].AgentDiagnostic.Observation.Reliable {
+		t.Fatalf("restored observation = %+v, want the agent answer", restored[0].AgentDiagnostic.Observation)
+	}
+}
+
+func TestRecordAgentProbeIgnoresAMeasurementItCannotFind(t *testing.T) {
+	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
+	manager := NewManager(proxyChecker, 10000, "", TestConfig{})
+	checkedAt := time.Now().UTC()
+	manager.results["node-1"] = Result{StableID: "node-1", CheckedAt: checkedAt}
+	manager.history["node-1"] = []Result{{StableID: "node-1", CheckedAt: checkedAt}}
+
+	recorded, err := manager.RecordAgentProbe("node-1", checkedAt.Add(time.Minute), AgentDiagnostic{State: AgentDiagnosticReproduced})
+	if err != nil || recorded {
+		t.Fatalf("recorded = %v, err = %v, want a silent miss", recorded, err)
+	}
+	if manager.history["node-1"][0].AgentDiagnostic != nil {
+		t.Fatal("probe was attached to an unrelated measurement")
 	}
 }

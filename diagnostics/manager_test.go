@@ -385,7 +385,14 @@ func TestSpeedFallbackAutomationContextIsValidatedAndStored(t *testing.T) {
 		t.Fatalf("automation context = %+v, want %+v", session.AutomationContext, request.AutomationContext)
 	}
 
+	// Zero attempts is a fact about the run, not an invalid request: a node
+	// whose country has no fallback endpoint configured never attempts one and
+	// is still worth diagnosing.
 	request.AutomationContext.FallbackAttempts = 0
+	if _, err := fixture.manager.CreateSession(request); errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("session without an attempted fallback rejected as invalid: %v", err)
+	}
+	request.AutomationContext.FallbackAttempts = -1
 	if _, err := fixture.manager.CreateSession(request); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("invalid automation context error = %v", err)
 	}

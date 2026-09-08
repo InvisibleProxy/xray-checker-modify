@@ -353,6 +353,13 @@ func (m *Manager) fallbackLowSpeedThreshold() float64 {
 	return m.lowSpeedThresholdMbps
 }
 
+// LowSpeedThresholdMbps is the global threshold currently in force, for readers
+// that judge a run the way it was judged. A result stores the threshold it was
+// measured against, so this answers only for the ones that do not.
+func (m *Manager) LowSpeedThresholdMbps() float64 {
+	return m.fallbackLowSpeedThreshold()
+}
+
 func successfulSpeedResult(result Result) bool {
 	return !result.Offline && result.Error == "" && result.DownloadedBytes > 0
 }

@@ -1394,14 +1394,16 @@
         header,
         .tabs,
         .panel,
-        dialog.merge-dialog {
+        dialog.merge-dialog,
+        dialog.quicklook {
           -webkit-backdrop-filter: none;
           backdrop-filter: none;
         }
         header { background: var(--bg); }
         .tabs,
         .panel,
-        dialog.merge-dialog { background: var(--panel-solid); }
+        dialog.merge-dialog,
+        dialog.quicklook { background: var(--panel-solid); }
         .speed-chart-tooltip,
         .language-switch { background: var(--panel-3-solid); }
       }
@@ -1601,6 +1603,96 @@
         padding: 0;
         font-size: 1.25rem;
         line-height: 1;
+      }
+      /* Quick look: one measurement's evidence, floated over the table it came
+         from. It borrows the merge dialog's material and adds the short scale-in
+         that tells the eye the panel came from the row that was clicked. */
+      dialog.quicklook {
+        width: min(760px, calc(100vw - 40px));
+        max-height: calc(100vh - 60px);
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 0;
+        background: var(--panel);
+        color: var(--text);
+        -webkit-backdrop-filter: blur(28px) saturate(150%);
+        backdrop-filter: blur(28px) saturate(150%);
+        box-shadow: 0 30px 90px rgba(0, 0, 0, 0.55);
+      }
+      dialog.quicklook::backdrop {
+        background: rgba(5, 8, 12, 0.62);
+        backdrop-filter: blur(4px);
+      }
+      dialog.quicklook[open] {
+        animation: quicklook-in 160ms cubic-bezier(0.2, 0.8, 0.3, 1);
+      }
+      @keyframes quicklook-in {
+        from { opacity: 0; transform: scale(0.97); }
+        to { opacity: 1; transform: scale(1); }
+      }
+      .quicklook-shell {
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        max-height: calc(100vh - 60px);
+      }
+      .quicklook-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      .quicklook-heading h2 { margin: 0; }
+      .quicklook-body {
+        display: grid;
+        gap: 14px;
+        padding: 16px;
+        overflow: auto;
+      }
+      .quicklook-section {
+        display: grid;
+        gap: 8px;
+        border: 1px solid var(--border);
+        border-radius: 11px;
+        padding: 12px;
+        background: var(--panel-2);
+      }
+      .quicklook-section > h3 {
+        margin: 0;
+        font-size: 0.92rem;
+      }
+      .quicklook-facts {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+        gap: 8px 16px;
+      }
+      .quicklook-facts > div {
+        display: grid;
+        gap: 2px;
+        min-width: 0;
+      }
+      .quicklook-facts span {
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+      .quicklook-facts strong {
+        font-weight: 600;
+        overflow-wrap: anywhere;
+      }
+      .quicklook-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .history-probe-button {
+        padding: 2px 9px;
+        font-size: 0.76rem;
+        line-height: 1.5;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        dialog.quicklook[open] { animation: none; }
       }
       .merge-node-card {
         min-width: 0;
@@ -2267,7 +2359,7 @@
                 <h3>Agent automation</h3>
                 <span id="diagnostic-automation-state" class="pill">Loading</span>
               </div>
-              <div class="hint">Automatic sessions enrich Telegram speed alerts with isolated agent evidence. They never change status, history, incidents, retries or Remnawave.</div>
+              <div class="hint">A failed or slow measurement starts an isolated agent probe. Its evidence is stored with that measurement and enriches the Telegram alert; it never changes status, classification, incidents, retries or Remnawave.</div>
               <div class="config-status">
                 <div><span>Trigger</span><strong id="diagnostic-automation-trigger">Speed fallback</strong></div>
                 <div><span>Cooldown</span><strong id="diagnostic-automation-cooldown">—</strong></div>
@@ -3002,6 +3094,7 @@
                   <th>Source</th>
                   <th>Test URL</th>
                   <th>Error</th>
+                  <th>Agent probe</th>
                 </tr>
               </thead>
               <tbody id="history-results"></tbody>
@@ -3010,6 +3103,26 @@
         </section>
       </section>
     </main>
+    <!-- The probe opens over the history instead of expanding a row: it is a
+         look at one measurement's evidence, not a place to work, and the table
+         underneath stays where the operator left it. Escape, the backdrop and
+         the close button all dismiss it. -->
+    <dialog id="agent-probe-dialog" class="quicklook" aria-labelledby="agent-probe-dialog-title">
+      <div class="quicklook-shell">
+        <div class="quicklook-header">
+          <div class="quicklook-heading">
+            <h2 id="agent-probe-dialog-title">Agent probe</h2>
+            <div id="agent-probe-dialog-subtitle" class="muted"></div>
+          </div>
+          <div class="row">
+            <span id="agent-probe-dialog-verdict" class="chip neutral"></span>
+            <button id="close-agent-probe-dialog" class="secondary merge-dialog-close" type="button" aria-label="Close agent probe">×</button>
+          </div>
+        </div>
+        <div id="agent-probe-dialog-body" class="quicklook-body"></div>
+      </div>
+    </dialog>
+
     <dialog id="node-merge-dialog" class="merge-dialog" aria-labelledby="node-merge-dialog-title">
       <div class="merge-dialog-shell">
         <div class="merge-dialog-header">
@@ -6652,7 +6765,7 @@
         $("history-count").textContent = `${results.length} results`;
         renderHistoryStats(results);
         if (!state.historyStableId) {
-          $("history-results").innerHTML = `<tr><td colspan="8" class="muted">Select a node</td></tr>`;
+          $("history-results").innerHTML = `<tr><td colspan="9" class="muted">Select a node</td></tr>`;
           return;
         }
         $("history-results").innerHTML = results.map((result) => {
@@ -6668,9 +6781,158 @@
               <td>${escapeHtml(result.source || "")}</td>
               <td class="mono history-url">${escapeHtml(result.url || "")}</td>
               <td class="history-error ${issue ? "error" : ""}">${escapeHtml(issue)}</td>
+              <td>${agentProbeCellHTML(result)}</td>
             </tr>
           `;
-        }).join("") || `<tr><td colspan="8" class="muted">No speed history for this node</td></tr>`;
+        }).join("") || `<tr><td colspan="9" class="muted">No speed history for this node</td></tr>`;
+      }
+
+      // The cell carries the verdict rather than the agent's raw status: the
+      // question a failed measurement asks is "is it the node?", and reproduced
+      // or not reproduced is the answer to that. The probe never changes how the
+      // measurement itself is classified, which is why it sits in its own column
+      // instead of colouring the row.
+      function agentProbeVerdict(probe) {
+        switch (probe && probe.state) {
+          case "reproduced": return { label: "Reproduced", chip: "error" };
+          case "not_reproduced": return { label: "Not reproduced", chip: "ok" };
+          case "unreliable": return { label: "Unreliable", chip: "warn" };
+          case "running": return { label: "Probing", chip: "warn" };
+          case "unavailable": return { label: "No agent", chip: "neutral" };
+          default: return { label: "Unknown", chip: "neutral" };
+        }
+      }
+
+      // Addressed by the measurement's own timestamp rather than by row index:
+      // a refresh landing between the render and the click would otherwise open
+      // the probe of whichever measurement moved into that position.
+      function agentProbeCellHTML(result) {
+        const probe = result && result.agentProbe;
+        if (!probe) return `<span class="muted">—</span>`;
+        const verdict = agentProbeVerdict(probe);
+        return `<button class="secondary small history-probe-button" type="button" data-agent-probe="${escapeHtml(result.checkedAt || "")}" title="Open the agent probe">
+          <span class="chip ${verdict.chip}">${escapeHtml(tr(verdict.label))}</span>
+        </button>`;
+      }
+
+      function agentProbeOutcomeLabel(outcome) {
+        switch (outcome) {
+          case "low_speed": return tr("Low speed");
+          case "technical_error": return tr("Technical failure");
+          default: return outcome || "";
+        }
+      }
+
+      function agentProbeFactsHTML(facts) {
+        const cells = facts
+          .filter((fact) => fact && fact[1] !== "" && fact[1] !== null && fact[1] !== undefined)
+          .map(([label, value]) => `<div><span>${escapeHtml(tr(label))}</span><strong>${escapeHtml(String(value))}</strong></div>`);
+        return cells.length ? `<div class="quicklook-facts">${cells.join("")}</div>` : "";
+      }
+
+      function agentProbeAgentLabel(probe) {
+        const identity = [probe.agentName || probe.agentId, probe.region, probe.provider].filter(Boolean);
+        return identity.join(" · ");
+      }
+
+      // The task section answers what a stored verdict cannot on its own. "Not
+      // reproduced" means one thing when the agent was asked to transfer the
+      // same amount the run did and quite another when it measured its own, so
+      // the instructions are kept beside the answer.
+      function agentProbeTaskSectionHTML(task) {
+        if (!task) return "";
+        const profile = task.profileId ? diagnosticProfileLabel(task.profileId) : "";
+        const alternative = task.alternativeProfileId ? diagnosticProfileLabel(task.alternativeProfileId) : "";
+        const agents = Array.isArray(task.requestedAgents) ? task.requestedAgents.map(diagnosticAgentLabel).join(", ") : "";
+        return `<section class="quicklook-section">
+          <h3>Task</h3>
+          ${agentProbeFactsHTML([
+            ["Reason", agentProbeOutcomeLabel(task.outcome)],
+            ["Run source", task.source],
+            ["Threshold", task.thresholdMbps > 0 ? formatMbps(task.thresholdMbps) : ""],
+            ["Measured by the run", task.observedMbps > 0 ? formatMbps(task.observedMbps) : ""],
+            ["Transferred by the run", task.measuredBytes > 0 ? formatBytes(task.measuredBytes) : ""],
+            ["Fallback attempts", task.fallbackAttempts > 0 ? task.fallbackAttempts : ""],
+            ["Probe", profile],
+            ["Method", task.method],
+            ["Asked to transfer", task.downloadBytes > 0 ? formatBytes(task.downloadBytes) : tr("Agent's own amount")],
+            ["Alternative endpoint", alternative],
+            ["Job", task.jobState],
+            ["Requested agents", agents],
+            ["Created", formatTime(task.createdAt)],
+            ["Expires", formatTime(task.expiresAt)],
+            ["Config generation", task.configGeneration || ""],
+          ])}
+        </section>`;
+      }
+
+      function agentProbeObservationSectionHTML(observation) {
+        if (!observation) {
+          return `<section class="quicklook-section">
+            <h3>Result</h3>
+            <div class="muted">No signed observation was recorded for this probe.</div>
+          </section>`;
+        }
+        const statusChip = observation.status === "online" ? "ok" : observation.status === "proxy_failure" ? "warn" : "error";
+        return `<section class="quicklook-section">
+          <h3>Result</h3>
+          <div class="quicklook-chips">
+            <span class="chip ${statusChip}">Remote ${escapeHtml(observation.status || "unknown")}</span>
+            ${diagnosticEvidenceChip("TCP", observation.tcp)}
+            ${diagnosticEvidenceChip("Ping", observation.ping)}
+            ${diagnosticEvidenceChip("Direct", observation.directConnectivity)}
+            ${diagnosticProfileEvidenceHTML(observation)}
+            <span class="chip ${observation.reliable ? "ok" : "error"}">${observation.reliable ? "Reliable" : "Unreliable"}</span>
+          </div>
+          ${agentProbeFactsHTML([
+            ["Checked", formatTime(observation.checkedAt)],
+            ["Accepted", formatTime(observation.acceptedAt)],
+            ["Duration", observation.durationMillis > 0 ? `${observation.durationMillis} ms` : ""],
+            ["Latency", observation.latencyMillis > 0 ? `${observation.latencyMillis} ms` : ""],
+            ["Endpoint", observation.endpointProfile ? diagnosticProfileLabel(observation.endpointProfile) : ""],
+            ["Failure", observation.failure && observation.failure.code ? observation.failure.code : ""],
+            ["Failed at", observation.failure && observation.failure.stage ? observation.failure.stage : ""],
+            ["Agent version", observation.agentVersion],
+          ])}
+        </section>`;
+      }
+
+      function agentProbeVerdictSectionHTML(probe) {
+        const agent = agentProbeAgentLabel(probe);
+        return `<section class="quicklook-section">
+          <h3>Verdict</h3>
+          ${probe.detail ? `<div>${escapeHtml(probe.detail)}</div>` : ""}
+          ${probe.summary ? `<div class="muted">${escapeHtml(probe.summary)}</div>` : ""}
+          ${agentProbeFactsHTML([
+            ["Agent", agent],
+            ["Trigger", probe.trigger ? diagnosticTriggerLabel(probe.trigger) : ""],
+            ["Session", probe.sessionState],
+            ["Requested", formatTime(probe.requestedAt)],
+            ["Session ID", probe.sessionId],
+          ])}
+        </section>`;
+      }
+
+      function openAgentProbeDialog(checkedAt) {
+        const result = (state.historyResults || []).find((entry) => entry.checkedAt === checkedAt);
+        const probe = result && result.agentProbe;
+        if (!probe) return;
+        const verdict = agentProbeVerdict(probe);
+        const verdictChip = $("agent-probe-dialog-verdict");
+        verdictChip.className = `chip ${verdict.chip}`;
+        verdictChip.textContent = tr(verdict.label);
+        $("agent-probe-dialog-subtitle").textContent = [
+          result.name || result.stableId,
+          formatTime(result.checkedAt),
+          formatSpeedStatus(result),
+        ].filter(Boolean).join(" · ");
+        $("agent-probe-dialog-body").innerHTML = [
+          agentProbeVerdictSectionHTML(probe),
+          agentProbeTaskSectionHTML(probe.task),
+          agentProbeObservationSectionHTML(probe.observation),
+        ].join("");
+        $("agent-probe-dialog").showModal();
+        $("close-agent-probe-dialog").focus();
       }
 
       // A run is "active" from the moment the request leaves the browser: a
@@ -9288,6 +9550,25 @@
         $(id).addEventListener("change", () => {
           if (state.historyRange === "custom") loadHistory();
         });
+      });
+      $("history-results").addEventListener("click", (event) => {
+        const target = event.target instanceof Element ? event.target.closest("[data-agent-probe]") : null;
+        if (target) openAgentProbeDialog(target.dataset.agentProbe);
+      });
+      $("close-agent-probe-dialog").addEventListener("click", () => {
+        const dialog = $("agent-probe-dialog");
+        if (dialog.open) dialog.close();
+      });
+      // Clicking outside dismisses it the way a quick look does. A backdrop
+      // click is reported against the dialog itself, so the pointer position is
+      // what tells it apart from a click on the panel's own edge.
+      $("agent-probe-dialog").addEventListener("click", (event) => {
+        const dialog = $("agent-probe-dialog");
+        if (event.target !== dialog) return;
+        const box = dialog.getBoundingClientRect();
+        const inside = event.clientX >= box.left && event.clientX <= box.right &&
+          event.clientY >= box.top && event.clientY <= box.bottom;
+        if (!inside) dialog.close();
       });
       $("refresh-history").addEventListener("click", loadHistory);
       $("history-node").addEventListener("change", () => {

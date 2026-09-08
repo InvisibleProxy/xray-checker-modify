@@ -24,6 +24,7 @@ import (
 	"xray-checker/reachability"
 	remnawaveannounce "xray-checker/remnawave"
 	"xray-checker/remoteprobe"
+	"xray-checker/speedprobe"
 	"xray-checker/speedtest"
 	"xray-checker/subscription"
 	"xray-checker/subsource"
@@ -473,6 +474,17 @@ func main() {
 	}
 
 	speedTestManager.SetReporter(telegramService)
+	// The probe recorder shares the coordinator with Telegram, so a failure is
+	// diagnosed once however many consumers are interested in the answer. It is
+	// installed regardless of Telegram: the history keeps the agent's evidence
+	// even when no alert was sent.
+	agentProbeRecorder := speedprobe.New(speedprobe.Config{
+		Threshold: speedTestManager.LowSpeedThresholdMbps,
+	}, diagnosticAutomation, speedTestManager)
+	if agentProbeRecorder != nil {
+		speedTestManager.SetAgentProbeRunner(agentProbeRecorder)
+		defer agentProbeRecorder.Stop()
+	}
 	telegramService.Start()
 
 	speedTestManager.StartScheduler()

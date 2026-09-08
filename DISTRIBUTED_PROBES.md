@@ -1,6 +1,6 @@
 # Remote Diagnostics через distributed probe-agent'ов
 
-> Статус: защищённый manual workflow реализован полностью; из этапа 2 реализован opt-in `auto_speed_fallback` с одним агентом, cooldown/concurrency и read-only обогащением уже разрешённого Telegram speed alert.
+> Статус: защищённый manual workflow реализован полностью; из этапа 2 реализован opt-in `auto_speed_fallback` с одним агентом, cooldown/concurrency, read-only обогащением уже разрешённого Telegram speed alert и справочной записью пробы рядом с замером в speedtest history.
 
 ## Текущее состояние реализации
 
@@ -25,10 +25,10 @@
 - временный Xray config с mode `0600` внутри tmpfs, loopback-only SOCKS inbound, embedded Xray lifecycle и обязательное удаление после job;
 - proxy-check, TCP/ping evidence, direct-connectivity control, отдельная observation-подпись и generation/fingerprint recheck перед приёмом;
 - cancel, sanitized JSON export и вероятностная summary без operational side effects.
-- opt-in `auto_speed_fallback`, выбирающий одну healthy idle probe — по ранжированию матрицы достижимости, когда sweep её поддерживает, — с per-node cooldown, concurrency limit, повтором отложенного старта внутри окна ожидания алерта и bounded read-only alert enrichment.
+- opt-in `auto_speed_fallback`, выбирающий одну healthy idle probe — по ранжированию матрицы достижимости, когда sweep её поддерживает, — с per-node cooldown, concurrency limit, повтором отложенного старта внутри окна ожидания алерта, bounded read-only alert enrichment и справочной записью пробы в speedtest history.
 - opt-in `reachability_sweep`: периодический обход «каждая нода × каждый подключённый агент» с persisted матрицей вердиктов, hysteresis по streak и отдельной вкладкой `Reachability`.
 
-Manager diagnostic sessions связан с отдельным manual admin workflow, agent endpoints, узким automation coordinator-ом и sweep-ом достижимости. Он не является writer-ом availability или speedtest workflow: текущий код ничего не меняет в status/history/incidents/retries/Remnawave/speedtest. Automatic trigger реализован для неразрешённого speedtest country fallback и для периодического sweep-а; availability-trigger по-прежнему не реализован.
+Manager diagnostic sessions связан с отдельным manual admin workflow, agent endpoints, узким automation coordinator-ом и sweep-ом достижимости. Он не является writer-ом availability или speedtest workflow: код не меняет status/incidents/retries/Remnawave и не влияет на классификацию замеров. Единственная запись в persisted state — справочная копия автоматической пробы рядом с вызвавшим её замером, которую переносит `speedprobe/`; сам manager и координатор по-прежнему без callbacks в operational state. Automatic trigger реализован для неразрешённого замера скорости и для периодического sweep-а; availability-trigger по-прежнему не реализован.
 
 ### Sweep достижимости
 
@@ -183,7 +183,7 @@ State
 - `auto_proxy_failure` — controller увидел переход локальной ноды в `proxy_failure`;
 - `auto_check_endpoint` — controller хочет проверить вероятную проблему test endpoint;
 - `auto_ambiguous_failure` — локальной диагностики недостаточно для уверенной классификации.
-- `auto_speed_fallback` — speedtest действительно выполнил country fallback, но резервы исчерпались technical error либо финальная скорость осталась ниже threshold.
+- `auto_speed_fallback` — замер завершился technical error либо показал скорость ниже действовавшего порога. Имя триггера осталось от первой версии, где условием была исчерпанная попытка country fallback; сейчас попытка резерва предусловием не является.
 
 Автоматический trigger только создаёт diagnostic session. Он не меняет исходный local result и не задерживает его публикацию.
 
@@ -420,7 +420,8 @@ Metadata network condition используется только для выбо
 
 ### Этап 2. Automatic controller trigger (частично реализован)
 
-- Реализован opt-in `auto_speed_fallback` после исчерпанных резервов или низкой fallback-скорости.
+- Реализован opt-in `auto_speed_fallback` после замера с technical error или скоростью ниже порога, с попыткой country fallback или без неё.
+- Результат пробы сохраняется рядом с замером в speedtest history как справочное свидетельство; вкладка `Speed History` открывает его quick look с задачей и наблюдением.
 - Реализованы per-`StableID` deduplication/cooldown, общий concurrency limit и bounded alert wait.
 - Реализованы direct connectivity и alternative endpoint probes; automatic download использует status как alternative.
 - Operational retry/alert decision выполняется до ожидания агента; automatic session остаётся полностью изолированной.
