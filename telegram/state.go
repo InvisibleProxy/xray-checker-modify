@@ -56,22 +56,46 @@ type persistedNodeMute struct {
 }
 
 type pendingSpeedRetry struct {
-	Kind      string
-	Request   speedtest.RunRequest
-	StableIDs []string
-	DueAt     time.Time
+	Kind    string
+	Request speedtest.RunRequest
+	Targets []speedRetryTarget
+	DueAt   time.Time
 }
 
 type persistedSpeedRetry struct {
-	Kind      string               `json:"kind,omitempty"`
-	StableIDs []string             `json:"stableIds"`
-	Config    speedtest.TestConfig `json:"config"`
-	DueAt     time.Time            `json:"dueAt"`
+	Kind string `json:"kind,omitempty"`
+	// StableIDs stays alongside Targets: it is what a build without reasons
+	// reads, so rolling the controller back does not drop pending confirmations
+	// on the floor, and the backup schema still validates on it.
+	StableIDs []string                    `json:"stableIds"`
+	Targets   []persistedSpeedRetryTarget `json:"targets,omitempty"`
+	Config    speedtest.TestConfig        `json:"config"`
+	DueAt     time.Time                   `json:"dueAt"`
 }
+
+type persistedSpeedRetryTarget struct {
+	StableID string `json:"stableId"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// speedRetryTarget is one pending confirmation: a node and the failure it is
+// waiting to have confirmed. The reason is part of the identity because a node
+// can be waiting on a slowdown when its next run fails outright, and the two
+// are different questions.
+type speedRetryTarget struct {
+	StableID string
+	Reason   string
+}
+
+const (
+	speedRetryReasonLowSpeed  = "low-speed"
+	speedRetryReasonTechnical = "technical"
+)
 
 type speedRetryKey struct {
 	Kind     string
 	StableID string
+	Reason   string
 }
 
 type persistedNodeAlertState struct {
@@ -190,9 +214,9 @@ func (s *Service) loadAlertState() error {
 	}
 
 	type restoredSpeedRetry struct {
-		stableIDs []string
-		config    speedtest.TestConfig
-		dueAt     time.Time
+		targets []speedRetryTarget
+		config  speedtest.TestConfig
+		dueAt   time.Time
 	}
 	retryStateMigrated := false
 	normalizedRetries := make([]restoredSpeedRetry, 0, len(stateFile.SpeedRetries))
@@ -217,10 +241,24 @@ func (s *Service) loadAlertState() error {
 		if rawKind != speedRetryKindConfirmation {
 			retryStateMigrated = true
 		}
+		// A file written before reasons existed carries only node ids. They are
+		// restored with an empty reason, which keeps them waiting exactly as
+		// they were; the next failure of either kind opens its own wait beside
+		// them rather than being swallowed by the legacy entry.
+		targets := make([]speedRetryTarget, 0, len(persisted.Targets)+len(persisted.StableIDs))
+		if len(persisted.Targets) > 0 {
+			for _, target := range persisted.Targets {
+				targets = append(targets, speedRetryTarget{StableID: target.StableID, Reason: target.Reason})
+			}
+		} else {
+			for _, stableID := range persisted.StableIDs {
+				targets = append(targets, speedRetryTarget{StableID: stableID})
+			}
+		}
 		normalizedRetries = append(normalizedRetries, restoredSpeedRetry{
-			stableIDs: persisted.StableIDs,
-			config:    persisted.Config,
-			dueAt:     dueAt,
+			targets: targets,
+			config:  persisted.Config,
+			dueAt:   dueAt,
 		})
 	}
 	sort.SliceStable(normalizedRetries, func(i, j int) bool {
@@ -230,31 +268,36 @@ func (s *Service) loadAlertState() error {
 	restoredRetries := 0
 	s.speedRetryMu.Lock()
 	for _, persisted := range normalizedRetries {
-		var ids []string
-		for _, rawStableID := range persisted.stableIDs {
-			stableID := strings.TrimSpace(rawStableID)
-			key := speedRetryKey{Kind: speedRetryKindConfirmation, StableID: stableID}
+		var targets []speedRetryTarget
+		for _, rawTarget := range persisted.targets {
+			stableID := strings.TrimSpace(rawTarget.StableID)
+			key := speedRetryKey{Kind: speedRetryKindConfirmation, StableID: stableID, Reason: rawTarget.Reason}
 			if stableID == "" || !active[stableID] || s.speedRetryPending[key] {
 				continue
 			}
 			s.speedRetryPending[key] = true
-			ids = append(ids, stableID)
+			targets = append(targets, speedRetryTarget{StableID: stableID, Reason: rawTarget.Reason})
 		}
-		if len(ids) == 0 {
+		if len(targets) == 0 {
 			continue
 		}
-		sort.Strings(ids)
+		sort.Slice(targets, func(i, j int) bool {
+			if targets[i].StableID != targets[j].StableID {
+				return targets[i].StableID < targets[j].StableID
+			}
+			return targets[i].Reason < targets[j].Reason
+		})
 		s.speedRetrySeq++
 		s.speedRetryEntries[s.speedRetrySeq] = pendingSpeedRetry{
 			Kind: speedRetryKindConfirmation,
 			Request: speedtest.RunRequest{
-				ProxyIDs: append([]string(nil), ids...),
+				ProxyIDs: speedRetryTargetIDs(targets),
 				Config:   persisted.config,
 			},
-			StableIDs: append([]string(nil), ids...),
-			DueAt:     persisted.dueAt,
+			Targets: append([]speedRetryTarget(nil), targets...),
+			DueAt:   persisted.dueAt,
 		}
-		restoredRetries += len(ids)
+		restoredRetries += len(targets)
 	}
 	s.speedRetryMu.Unlock()
 	if retryStateMigrated {
@@ -322,19 +365,34 @@ func (s *Service) saveAlertState() error {
 	var retries []persistedSpeedRetry
 	s.speedRetryMu.Lock()
 	for _, entry := range s.speedRetryEntries {
-		var ids []string
-		for _, stableID := range entry.StableIDs {
-			if active[stableID] {
-				ids = append(ids, stableID)
+		var targets []persistedSpeedRetryTarget
+		for _, target := range entry.Targets {
+			if active[target.StableID] {
+				targets = append(targets, persistedSpeedRetryTarget{StableID: target.StableID, Reason: target.Reason})
 			}
 		}
-		if len(ids) == 0 {
+		if len(targets) == 0 {
 			continue
 		}
-		sort.Strings(ids)
+		sort.Slice(targets, func(i, j int) bool {
+			if targets[i].StableID != targets[j].StableID {
+				return targets[i].StableID < targets[j].StableID
+			}
+			return targets[i].Reason < targets[j].Reason
+		})
+		ids := make([]string, 0, len(targets))
+		seen := make(map[string]bool, len(targets))
+		for _, target := range targets {
+			if seen[target.StableID] {
+				continue
+			}
+			seen[target.StableID] = true
+			ids = append(ids, target.StableID)
+		}
 		retries = append(retries, persistedSpeedRetry{
 			Kind:      normalizedSpeedRetryKind(entry.Kind),
 			StableIDs: ids,
+			Targets:   targets,
 			Config:    entry.Request.Config,
 			DueAt:     entry.DueAt,
 		})

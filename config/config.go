@@ -86,7 +86,7 @@ type CLI struct {
 	RemoteDiagnostics struct {
 		Enabled                    bool   `name:"remote-diagnostics-enabled" help:"Enable remote diagnostic probe-agent enrollment and control endpoints" default:"false" env:"REMOTE_DIAGNOSTICS_ENABLED"`
 		AutomationEnabled          bool   `name:"remote-diagnostics-automation-enabled" help:"Automatically run isolated agent diagnostics after an unresolved speed-test fallback" default:"false" env:"REMOTE_DIAGNOSTICS_AUTOMATION_ENABLED"`
-		AutomationCooldownMinutes  int    `name:"probe-automation-cooldown" help:"Cooldown per StableID after an automatic diagnostic session, in minutes" default:"30" env:"PROBE_AUTOMATION_COOLDOWN_MINUTES"`
+		AutomationCooldownMinutes  int    `name:"probe-automation-cooldown" help:"Cooldown per StableID after an automatic diagnostic session, in minutes; keep it below the 30-minute confirmation retry so the retry gets a fresh probe" default:"15" env:"PROBE_AUTOMATION_COOLDOWN_MINUTES"`
 		AutomationAlertWaitSeconds int    `name:"probe-automation-alert-wait" help:"Maximum time a background Telegram speed alert waits for agent evidence" default:"90" env:"PROBE_AUTOMATION_ALERT_WAIT_SECONDS"`
 		AutomationMaxConcurrent    int    `name:"probe-automation-max-concurrent" help:"Maximum concurrent automatic diagnostic sessions" default:"2" env:"PROBE_AUTOMATION_MAX_CONCURRENT"`
 		ReachabilityEnabled        bool   `name:"reachability-sweep-enabled" help:"Periodically ask every connected agent whether it can reach every node, and record the disagreements" default:"false" env:"REACHABILITY_SWEEP_ENABLED"`

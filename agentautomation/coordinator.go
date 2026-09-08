@@ -15,7 +15,12 @@ import (
 )
 
 const (
-	DefaultCooldown      = 30 * time.Minute
+	// DefaultCooldown deliberately sits below the confirmation retry delay. When
+	// the two were equal, the retry ran at the moment the cooldown expired, and
+	// a few seconds either way decided whether the confirmation got a fresh
+	// probe or reused a session whose task described the previous measurement.
+	// Half the retry delay puts the boundary nowhere near the retry.
+	DefaultCooldown      = 15 * time.Minute
 	DefaultMaxConcurrent = 2
 	defaultPollInterval  = 200 * time.Millisecond
 )

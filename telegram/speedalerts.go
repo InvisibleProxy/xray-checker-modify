@@ -49,10 +49,19 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 	if automaticSpeedReportsEnabled(cfg) {
 		diagnosticHandles = s.startSpeedDiagnostics(report, cfg)
 	}
+	var annotations map[string]speedtest.AgentDiagnostic
 	if automaticSpeedReportsEnabled(cfg) && report.Source != speedConfirmationRetrySource {
-		ids := speedConfirmationRetryIDs(report.Results, cfg.LowSpeedThresholdMbps)
-		if s.scheduleSpeedRetry(report, speedRetryKindConfirmation, ids, s.configuredSpeedRetryDelay()) {
-			report = excludeSpeedResults(report, ids)
+		targets := speedConfirmationRetryTargets(report.Results, cfg.LowSpeedThresholdMbps)
+		if s.scheduleSpeedRetry(report, speedRetryKindConfirmation, targets, s.configuredSpeedRetryDelay()) {
+			// The wait for confirmation exists because one bad measurement from
+			// one vantage point may be the vantage point's fault. A second
+			// vantage point that saw the same thing answers that question now,
+			// so a node it confirmed goes into this report instead of waiting
+			// half an hour to say what is already known. The retry still stands:
+			// whether the problem persists is a different question, and only a
+			// later measurement answers it.
+			annotations = s.awaitSpeedDiagnostics(diagnosticHandlesForResults(diagnosticHandles, report.Results))
+			report = excludeSpeedResults(report, unconfirmedRetryIDs(targets, annotations))
 		}
 	}
 	report = filterTelegramAlertSuppressedRunReport(report)
@@ -69,7 +78,10 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 	}
 	diagnosticHandles = diagnosticHandlesForResults(diagnosticHandles, report.Results)
 	if len(diagnosticHandles) > 0 {
-		report = attachSpeedDiagnostics(report, s.awaitSpeedDiagnostics(diagnosticHandles))
+		if annotations == nil {
+			annotations = s.awaitSpeedDiagnostics(diagnosticHandles)
+		}
+		report = attachSpeedDiagnostics(report, annotations)
 	}
 
 	content := s.formatSpeedReportMessage(report, cfg, failed, slow, issuesOnly)
@@ -201,25 +213,76 @@ func automaticSpeedReportsEnabled(cfg Config) bool {
 	return cfg.Enabled && cfg.ChatID != "" && cfg.SpeedReportsEnabled && cfg.SpeedReportMode != "disabled"
 }
 
-// speedConfirmationRetryIDs selects results that need delayed confirmation.
-// It groups their scheduling only: Error and PrimaryError remain unchanged, and
-// a deadline is still a technical failure rather than a low-speed result.
-func speedConfirmationRetryIDs(results []speedtest.Result, threshold float64) []string {
-	seen := make(map[string]bool)
-	var ids []string
+// speedConfirmationRetryTargets selects results that need delayed confirmation
+// and names what each one is waiting to have confirmed.
+//
+// The reason is part of the identity of a pending confirmation, not decoration.
+// Keyed by node alone, a node already waiting on a slowdown could not open a
+// second wait when its next run failed outright: the failure changed character,
+// and the pending entry went on asking the old question. Error and PrimaryError
+// are still left untouched, and a deadline is still a technical failure rather
+// than a low-speed result.
+func speedConfirmationRetryTargets(results []speedtest.Result, threshold float64) []speedRetryTarget {
+	seen := make(map[speedRetryTarget]bool)
+	var targets []speedRetryTarget
 	for _, result := range results {
 		stableID := strings.TrimSpace(result.StableID)
 		effective := resultThreshold(result, threshold)
 		lowSpeed := effective > 0 && !result.Offline && result.Error == "" && result.Mbps < effective
 		unresolvedDeadline := resultHasContextDeadlineExceeded(result) &&
 			(result.Offline || result.Error != "" || (effective > 0 && result.Mbps < effective))
-		if stableID == "" || (!lowSpeed && !unresolvedDeadline) || seen[stableID] {
+		if stableID == "" || (!lowSpeed && !unresolvedDeadline) {
 			continue
 		}
-		seen[stableID] = true
+		reason := speedRetryReasonLowSpeed
+		if !lowSpeed {
+			reason = speedRetryReasonTechnical
+		}
+		target := speedRetryTarget{StableID: stableID, Reason: reason}
+		if seen[target] {
+			continue
+		}
+		seen[target] = true
+		targets = append(targets, target)
+	}
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].StableID != targets[j].StableID {
+			return targets[i].StableID < targets[j].StableID
+		}
+		return targets[i].Reason < targets[j].Reason
+	})
+	return targets
+}
+
+// unconfirmedRetryIDs lists the nodes whose problem is still only this
+// checker's word, and which therefore stay out of the report until the
+// confirmation run either reproduces it or clears it.
+//
+// A node an agent reproduced is not on the list: two independent points saw the
+// same failure, which is what the delay was buying. Every other verdict leaves
+// it - "not reproduced" says the agent's path was fine, not that this one was,
+// and an unreliable or absent observation settles nothing at all.
+func unconfirmedRetryIDs(targets []speedRetryTarget, annotations map[string]speedtest.AgentDiagnostic) []string {
+	ids := make([]string, 0, len(targets))
+	for _, stableID := range speedRetryTargetIDs(targets) {
+		if annotations[stableID].State == speedtest.AgentDiagnosticReproduced {
+			continue
+		}
 		ids = append(ids, stableID)
 	}
-	sort.Strings(ids)
+	return ids
+}
+
+func speedRetryTargetIDs(targets []speedRetryTarget) []string {
+	seen := make(map[string]bool, len(targets))
+	ids := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if seen[target.StableID] {
+			continue
+		}
+		seen[target.StableID] = true
+		ids = append(ids, target.StableID)
+	}
 	return ids
 }
 
@@ -265,12 +328,12 @@ func containsContextDeadlineExceeded(value string) bool {
 
 func (s *Service) scheduleSpeedConfirmationRetry(report speedtest.RunReport) bool {
 	cfg := s.Config()
-	ids := speedConfirmationRetryIDs(report.Results, cfg.LowSpeedThresholdMbps)
-	return s.scheduleSpeedRetry(report, speedRetryKindConfirmation, ids, s.configuredSpeedRetryDelay())
+	targets := speedConfirmationRetryTargets(report.Results, cfg.LowSpeedThresholdMbps)
+	return s.scheduleSpeedRetry(report, speedRetryKindConfirmation, targets, s.configuredSpeedRetryDelay())
 }
 
-func (s *Service) scheduleSpeedRetry(report speedtest.RunReport, kind string, ids []string, delay time.Duration) bool {
-	if len(ids) == 0 {
+func (s *Service) scheduleSpeedRetry(report speedtest.RunReport, kind string, targets []speedRetryTarget, delay time.Duration) bool {
+	if len(targets) == 0 {
 		return false
 	}
 
@@ -291,25 +354,25 @@ func (s *Service) scheduleSpeedRetry(report speedtest.RunReport, kind string, id
 		s.speedRetryEntries = make(map[uint64]pendingSpeedRetry)
 	}
 
-	newIDs := make([]string, 0, len(ids))
-	for _, stableID := range ids {
-		key := speedRetryKey{Kind: kind, StableID: stableID}
+	newTargets := make([]speedRetryTarget, 0, len(targets))
+	for _, target := range targets {
+		key := speedRetryKey{Kind: kind, StableID: target.StableID, Reason: target.Reason}
 		if s.speedRetryPending[key] {
 			continue
 		}
 		s.speedRetryPending[key] = true
-		newIDs = append(newIDs, stableID)
+		newTargets = append(newTargets, target)
 	}
-	if len(newIDs) == 0 {
+	if len(newTargets) == 0 {
 		s.speedRetryMu.Unlock()
 		return true
 	}
 
 	req := speedtest.RunRequest{
-		ProxyIDs: append([]string(nil), newIDs...),
+		ProxyIDs: speedRetryTargetIDs(newTargets),
 		Config:   report.Config,
 	}
-	s.scheduleSpeedRetryLocked(kind, req, newIDs, delay)
+	s.scheduleSpeedRetryLocked(kind, req, newTargets, delay)
 	s.speedRetryMu.Unlock()
 	s.persistRetryStateWithWarn()
 	return true
@@ -329,17 +392,17 @@ func (s *Service) configuredSpeedRetryBusyDelay() time.Duration {
 	return speedConfirmationRetryBusyDelay
 }
 
-func (s *Service) scheduleSpeedRetryLocked(kind string, req speedtest.RunRequest, ids []string, delay time.Duration) {
+func (s *Service) scheduleSpeedRetryLocked(kind string, req speedtest.RunRequest, targets []speedRetryTarget, delay time.Duration) {
 	s.speedRetrySeq++
 	timerID := s.speedRetrySeq
 	if delay < 0 {
 		delay = 0
 	}
 	s.speedRetryEntries[timerID] = pendingSpeedRetry{
-		Kind:      kind,
-		Request:   req,
-		StableIDs: append([]string(nil), ids...),
-		DueAt:     time.Now().Add(delay),
+		Kind:    kind,
+		Request: req,
+		Targets: append([]speedRetryTarget(nil), targets...),
+		DueAt:   time.Now().Add(delay),
 	}
 	s.armSpeedRetryLocked(timerID, delay)
 }
@@ -351,15 +414,15 @@ func (s *Service) armSpeedRetryLocked(timerID uint64, delay time.Duration) {
 	}
 	kind := normalizedSpeedRetryKind(entry.Kind)
 	req := entry.Request
-	ids := append([]string(nil), entry.StableIDs...)
+	targets := append([]speedRetryTarget(nil), entry.Targets...)
 	s.speedRetryWG.Add(1)
 	s.speedRetryTimers[timerID] = time.AfterFunc(delay, func() {
 		defer s.speedRetryWG.Done()
-		s.runSpeedRetry(timerID, kind, req, ids)
+		s.runSpeedRetry(timerID, kind, req, targets)
 	})
 }
 
-func (s *Service) runSpeedRetry(timerID uint64, kind string, req speedtest.RunRequest, ids []string) {
+func (s *Service) runSpeedRetry(timerID uint64, kind string, req speedtest.RunRequest, targets []speedRetryTarget) {
 	select {
 	case <-s.stopCh:
 		return
@@ -368,7 +431,7 @@ func (s *Service) runSpeedRetry(timerID uint64, kind string, req speedtest.RunRe
 
 	source, ok := speedRetrySourceForKind(kind)
 	if !ok {
-		s.clearSpeedRetry(kind, ids)
+		s.clearSpeedRetry(kind, speedRetryTargetIDs(targets))
 		s.persistRetryStateWithWarn()
 		logger.Warn("Discarded speed-test retry with unknown kind %q", kind)
 		return
@@ -376,12 +439,13 @@ func (s *Service) runSpeedRetry(timerID uint64, kind string, req speedtest.RunRe
 
 	s.speedRetryMu.Lock()
 	delete(s.speedRetryTimers, timerID)
-	pendingIDs := make([]string, 0, len(ids))
-	for _, stableID := range ids {
-		if s.speedRetryPending[speedRetryKey{Kind: kind, StableID: stableID}] {
-			pendingIDs = append(pendingIDs, stableID)
+	pendingTargets := make([]speedRetryTarget, 0, len(targets))
+	for _, target := range targets {
+		if s.speedRetryPending[speedRetryKey{Kind: kind, StableID: target.StableID, Reason: target.Reason}] {
+			pendingTargets = append(pendingTargets, target)
 		}
 	}
+	pendingIDs := speedRetryTargetIDs(pendingTargets)
 	if len(pendingIDs) == 0 {
 		delete(s.speedRetryEntries, timerID)
 		s.speedRetryMu.Unlock()
@@ -404,7 +468,7 @@ func (s *Service) runSpeedRetry(timerID uint64, kind string, req speedtest.RunRe
 		default:
 		}
 		delete(s.speedRetryEntries, timerID)
-		s.scheduleSpeedRetryLocked(kind, req, pendingIDs, s.configuredSpeedRetryBusyDelay())
+		s.scheduleSpeedRetryLocked(kind, req, pendingTargets, s.configuredSpeedRetryBusyDelay())
 		s.speedRetryMu.Unlock()
 		s.persistRetryStateWithWarn()
 		logger.Warn("%s speed-test retry postponed because another speed-test is running", speedRetryKindLabel(kind))
@@ -428,29 +492,47 @@ func (s *Service) completeSpeedRetry(kind string, requestedStableIDs []string, r
 	s.persistRetryStateWithWarn()
 }
 
+// speedRetryPendingForLocked reports whether a node is waiting on any
+// confirmation, whichever failure opened the wait. The caller holds
+// speedRetryMu, as every other reader of this map does.
+func (s *Service) speedRetryPendingForLocked(kind string, stableID string) bool {
+	for key := range s.speedRetryPending {
+		if key.Kind == kind && key.StableID == stableID {
+			return true
+		}
+	}
+	return false
+}
+
+// clearSpeedRetry drops every pending confirmation for these nodes, whatever it
+// was waiting to confirm. The reason distinguishes waits when they are created,
+// so that a node can wait on two different failures at once; it does not
+// survive resolution. A node that answered cleanly, was paused, or left the
+// fleet has no failure left to confirm, of either kind.
 func (s *Service) clearSpeedRetry(kind string, ids []string) bool {
 	s.speedRetryMu.Lock()
 	defer s.speedRetryMu.Unlock()
 	changed := false
 	cleared := make(map[string]bool, len(ids))
 	for _, stableID := range ids {
-		stableID = strings.TrimSpace(stableID)
-		key := speedRetryKey{Kind: kind, StableID: stableID}
-		if s.speedRetryPending[key] {
-			delete(s.speedRetryPending, key)
-			changed = true
+		cleared[strings.TrimSpace(stableID)] = true
+	}
+	for key := range s.speedRetryPending {
+		if key.Kind != kind || !cleared[key.StableID] {
+			continue
 		}
-		cleared[stableID] = true
+		delete(s.speedRetryPending, key)
+		changed = true
 	}
 	for timerID, entry := range s.speedRetryEntries {
 		if normalizedSpeedRetryKind(entry.Kind) != kind {
 			continue
 		}
-		originalCount := len(entry.StableIDs)
-		remaining := entry.StableIDs[:0]
-		for _, stableID := range entry.StableIDs {
-			if !cleared[stableID] {
-				remaining = append(remaining, stableID)
+		originalCount := len(entry.Targets)
+		remaining := entry.Targets[:0]
+		for _, target := range entry.Targets {
+			if !cleared[target.StableID] {
+				remaining = append(remaining, target)
 			}
 		}
 		if len(remaining) == originalCount {
@@ -465,8 +547,8 @@ func (s *Service) clearSpeedRetry(kind string, ids []string) bool {
 			delete(s.speedRetryTimers, timerID)
 			continue
 		}
-		entry.StableIDs = append([]string(nil), remaining...)
-		entry.Request.ProxyIDs = append([]string(nil), remaining...)
+		entry.Targets = append([]speedRetryTarget(nil), remaining...)
+		entry.Request.ProxyIDs = speedRetryTargetIDs(entry.Targets)
 		s.speedRetryEntries[timerID] = entry
 	}
 	return changed

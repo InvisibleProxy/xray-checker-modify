@@ -138,7 +138,7 @@ func TestConfirmationRetryUsesThePerNodeThreshold(t *testing.T) {
 		// Fast globally, slow for itself: this one needs confirming.
 		{StableID: "demanding", Mbps: 150, LowSpeedThresholdMbps: 500},
 	}
-	ids := speedConfirmationRetryIDs(results, 100)
+	ids := speedRetryTargetIDs(speedConfirmationRetryTargets(results, 100))
 	if len(ids) != 1 || ids[0] != "demanding" {
 		t.Fatalf("confirmation retry ids = %v, want only the node below its own threshold", ids)
 	}
