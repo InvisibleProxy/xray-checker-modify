@@ -862,3 +862,46 @@ func TestRecordAgentProbeIgnoresAMeasurementItCannotFind(t *testing.T) {
 		t.Fatal("probe was attached to an unrelated measurement")
 	}
 }
+
+type recordingProbeRunner struct {
+	mu       sync.Mutex
+	awaited  [][]string
+	reported int
+}
+
+func (r *recordingProbeRunner) RunSpeedProbes(RunReport) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reported++
+}
+
+func (r *recordingProbeRunner) AwaitIdleNodes(stableIDs []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.awaited = append(r.awaited, append([]string(nil), stableIDs...))
+}
+
+// A run asks the agents to stop measuring its nodes before it starts, because a
+// probe transfers as much as the run it followed and two transfers over one
+// uplink describe neither the node nor each other.
+func TestRunWaitsForAgentProbesOnTheNodesItIsAboutToMeasure(t *testing.T) {
+	proxyChecker := checker.NewProxyChecker(nil, 10000, "", 1, "", "", 1, 0, "status")
+	manager := NewManager(proxyChecker, 10000, "", TestConfig{})
+	runner := &recordingProbeRunner{}
+	manager.SetAgentProbeRunner(runner)
+
+	// No node matches, so the run stops before measuring anything; the wait
+	// happens first and is what this asserts.
+	if err := manager.Run(RunRequest{ProxyIDs: []string{"node-1", "node-2"}}, ManualSource); err == nil {
+		t.Fatal("run without matching proxies should fail")
+	}
+
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if len(runner.awaited) != 1 {
+		t.Fatalf("idle waits = %+v, want one before the run", runner.awaited)
+	}
+	if got := runner.awaited[0]; len(got) != 2 || got[0] != "node-1" || got[1] != "node-2" {
+		t.Fatalf("waited for %+v, want the requested nodes", got)
+	}
+}

@@ -404,6 +404,65 @@ func (c *Coordinator) Await(ctx context.Context, handles map[string]Handle) map[
 	}
 }
 
+// AwaitIdle blocks until no automatic probe is still measuring the given nodes,
+// or until ctx runs out. An empty list means every node with a probe in flight.
+//
+// It exists because an agent cannot be called off. It takes a job and runs it to
+// the deadline the job carries without asking the controller again, so
+// cancelling the session here would only discard the answer while the transfer
+// went on. Waiting is the only thing that actually leaves the node alone.
+func (c *Coordinator) AwaitIdle(ctx context.Context, stableIDs []string) {
+	if c == nil || !c.Enabled() {
+		return
+	}
+	wanted := make(map[string]bool, len(stableIDs))
+	for _, stableID := range stableIDs {
+		if trimmed := strings.TrimSpace(stableID); trimmed != "" {
+			wanted[trimmed] = true
+		}
+	}
+	ticker := time.NewTicker(c.config.PollInterval)
+	defer ticker.Stop()
+	for {
+		if c.measuringCount(wanted) == 0 {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// measuringCount counts the sessions that could still have an agent transferring
+// data through one of the wanted nodes. A session the controller no longer knows
+// about, and one that has reached a terminal state, are both finished with the
+// node: the agent stops at the job deadline that expiry is derived from.
+func (c *Coordinator) measuringCount(wanted map[string]bool) int {
+	c.mu.Lock()
+	sessions := make([]string, 0, len(c.entries))
+	for stableID, current := range c.entries {
+		if len(wanted) > 0 && !wanted[stableID] {
+			continue
+		}
+		if current.handle.SessionID != "" {
+			sessions = append(sessions, current.handle.SessionID)
+		}
+	}
+	c.mu.Unlock()
+
+	measuring := 0
+	for _, sessionID := range sessions {
+		view, ok := c.controller.Session(sessionID)
+		if !ok || view.Session.State.Terminal() {
+			continue
+		}
+		measuring++
+	}
+	return measuring
+}
+
 // resumeDeferred gives a node refused for a self-clearing reason another chance
 // while the alert is still waiting.
 //

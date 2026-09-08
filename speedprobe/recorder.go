@@ -42,6 +42,7 @@ type Coordinator interface {
 	StartSpeedDiagnostics(speedtest.RunReport, float64) map[string]agentautomation.Handle
 	Annotations(map[string]agentautomation.Handle) map[string]speedtest.AgentDiagnostic
 	Await(context.Context, map[string]agentautomation.Handle) map[string]speedtest.AgentDiagnostic
+	AwaitIdle(context.Context, []string)
 }
 
 // History is the narrow write this package is allowed. It is deliberately the
@@ -129,6 +130,39 @@ func (r *Recorder) RunSpeedProbes(report speedtest.RunReport) {
 		}
 	}()
 	r.record(measured, r.coordinator.Await(ctx, handles), written)
+}
+
+// AwaitIdleNodes holds a starting run until the agents have stopped measuring
+// the nodes it is about to measure.
+//
+// An agent probe transfers as much as the run it followed, over the node's own
+// uplink, so two of them at once produce two rates and neither describes the
+// node. The agent cannot be called off mid-job, which leaves waiting as the only
+// way to get a clean measurement. It is bounded by the same window the recorder
+// follows a probe for: past the job deadline the agent stops on its own, so
+// there is nothing left to wait for.
+func (r *Recorder) AwaitIdleNodes(stableIDs []string) {
+	if r == nil || !r.coordinator.Enabled() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), r.wait)
+	defer cancel()
+	go func() {
+		select {
+		case <-r.stop:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	startedAt := time.Now()
+	r.coordinator.AwaitIdle(ctx, stableIDs)
+	// Only a wait long enough to delay the run is worth a line: an operator who
+	// pressed Run and waited needs to see why, and a run that started at once
+	// has nothing to explain.
+	if waited := time.Since(startedAt); waited > time.Second {
+		logger.Info("Speed test waited %s for agent probes to finish measuring the same nodes", waited.Round(time.Second))
+	}
 }
 
 func (r *Recorder) globalThreshold() float64 {

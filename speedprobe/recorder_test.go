@@ -17,6 +17,8 @@ type fakeCoordinator struct {
 	annotations map[string]speedtest.AgentDiagnostic
 	awaited     map[string]speedtest.AgentDiagnostic
 	awaitCalls  int
+	idleWaits   [][]string
+	idleBlocks  bool
 }
 
 func (f *fakeCoordinator) Enabled() bool { return f.enabled }
@@ -36,6 +38,13 @@ func (f *fakeCoordinator) Await(context.Context, map[string]agentautomation.Hand
 		return f.awaited
 	}
 	return f.annotations
+}
+
+func (f *fakeCoordinator) AwaitIdle(ctx context.Context, stableIDs []string) {
+	f.idleWaits = append(f.idleWaits, append([]string(nil), stableIDs...))
+	if f.idleBlocks {
+		<-ctx.Done()
+	}
 }
 
 type recordedProbe struct {
@@ -183,5 +192,47 @@ func TestRecorderSkipsAMeasurementItCannotIdentify(t *testing.T) {
 
 	if writes := history.writes(); len(writes) != 0 {
 		t.Fatalf("writes = %+v, want none", writes)
+	}
+}
+
+// A run waits for the agents to stop measuring the nodes it is about to
+// measure. Two transfers over one uplink produce two rates and neither
+// describes the node.
+func TestRecorderHoldsARunUntilTheNodesItMeasuresAreIdle(t *testing.T) {
+	coordinator := &fakeCoordinator{enabled: true}
+	recorder := New(Config{Wait: time.Second}, coordinator, &fakeHistory{})
+
+	recorder.AwaitIdleNodes([]string{"node-1", "node-2"})
+
+	if len(coordinator.idleWaits) != 1 {
+		t.Fatalf("idle waits = %+v, want one", coordinator.idleWaits)
+	}
+	if got := coordinator.idleWaits[0]; len(got) != 2 || got[0] != "node-1" || got[1] != "node-2" {
+		t.Fatalf("waited for %+v, want the nodes the run selected", got)
+	}
+}
+
+// The wait is bounded: past the job deadline the agent stops on its own, and a
+// run that never starts is worse than one measured beside a probe.
+func TestRecorderStopsWaitingWhenTheBoundRunsOut(t *testing.T) {
+	coordinator := &fakeCoordinator{enabled: true, idleBlocks: true}
+	recorder := New(Config{Wait: 50 * time.Millisecond}, coordinator, &fakeHistory{})
+
+	startedAt := time.Now()
+	recorder.AwaitIdleNodes(nil)
+
+	if waited := time.Since(startedAt); waited > 2*time.Second {
+		t.Fatalf("waited %s, want the bound to release the run", waited)
+	}
+}
+
+func TestRecorderDoesNotWaitWhenAutomationIsDisabled(t *testing.T) {
+	coordinator := &fakeCoordinator{idleBlocks: true}
+	recorder := New(Config{Wait: time.Minute}, coordinator, &fakeHistory{})
+
+	recorder.AwaitIdleNodes([]string{"node-1"})
+
+	if len(coordinator.idleWaits) != 0 {
+		t.Fatalf("idle waits = %+v, want none", coordinator.idleWaits)
 	}
 }

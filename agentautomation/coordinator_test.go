@@ -617,3 +617,70 @@ func TestTheAgentIsAskedToTransferWhatTheRunTransferred(t *testing.T) {
 		t.Fatalf("measured bytes sent to the agent = %d, want the amount the run transferred", got)
 	}
 }
+
+// An agent cannot be called off: it takes a job and runs it to the deadline the
+// job carries. So a run that is about to measure the same node waits for the
+// probe to finish rather than cancelling it and measuring through the transfer.
+func TestAwaitIdleHoldsWhileAnAgentIsStillMeasuringTheNode(t *testing.T) {
+	controller := &fakeSessionController{enabled: true}
+	coordinator, err := New(Config{
+		Enabled: true, Cooldown: time.Minute, AlertWait: time.Second, MaxConcurrent: 2,
+		PollInterval: 5 * time.Millisecond,
+	}, controller, fakeAgentSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{
+		{StableID: "node-one", Error: "context deadline exceeded"},
+	}}
+	handles := coordinator.StartSpeedDiagnostics(report, 100)
+	sessionID := handles["node-one"].SessionID
+	if sessionID == "" {
+		t.Fatal("no session was created for the failed measurement")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	coordinator.AwaitIdle(ctx, []string{"node-one"})
+	if ctx.Err() == nil {
+		t.Fatal("AwaitIdle returned while the agent was still measuring the node")
+	}
+
+	controller.complete(sessionID)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer waitCancel()
+		coordinator.AwaitIdle(waitCtx, []string{"node-one"})
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("AwaitIdle did not return after the session reached a terminal state")
+	}
+}
+
+// A node nobody is probing must not delay its own measurement, and neither must
+// a probe running against a different node.
+func TestAwaitIdleReturnsAtOnceForNodesWithoutAProbe(t *testing.T) {
+	controller := &fakeSessionController{enabled: true}
+	coordinator, err := New(Config{
+		Enabled: true, Cooldown: time.Minute, AlertWait: time.Second, MaxConcurrent: 2,
+		PollInterval: 5 * time.Millisecond,
+	}, controller, fakeAgentSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator.StartSpeedDiagnostics(speedtest.RunReport{
+		Source:  speedtest.ScheduleSource,
+		Results: []speedtest.Result{{StableID: "node-one", Error: "context deadline exceeded"}},
+	}, 100)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	coordinator.AwaitIdle(ctx, []string{"node-two"})
+	if ctx.Err() != nil {
+		t.Fatal("AwaitIdle waited for a probe against another node")
+	}
+}

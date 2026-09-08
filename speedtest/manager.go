@@ -357,6 +357,11 @@ type Reporter interface {
 // RecordAgentProbe.
 type AgentProbeRunner interface {
 	RunSpeedProbes(report RunReport)
+	// AwaitIdleNodes blocks until no automatic probe is still measuring the
+	// given nodes, or until its own bound runs out. An empty list means "every
+	// node with a probe in flight", which is what a scheduled run over the whole
+	// fleet needs. It is called before a run starts and must return on its own.
+	AwaitIdleNodes(stableIDs []string)
 }
 
 type Manager struct {
@@ -980,7 +985,19 @@ func (m *Manager) Run(req RunRequest, source string) error {
 	}
 	m.mu.RLock()
 	runGate := m.runGate
+	probeRunner := m.probeRunner
 	m.mu.RUnlock()
+	// An agent probe measures the node from its own side, over the same uplink,
+	// and it is asked to transfer as much as the run did. Two such transfers at
+	// once produce two rates, neither of which describes the node. The agent
+	// cannot be called off - it takes a job and runs it to its own deadline
+	// without asking the controller again - so the run waits for the node to go
+	// quiet instead. This is before the run gate on purpose: holding that while
+	// waiting would block the Xray lifecycle, and a subscription refresh would
+	// queue behind an agent's download.
+	if probeRunner != nil {
+		probeRunner.AwaitIdleNodes(req.ProxyIDs)
+	}
 	if runGate != nil {
 		runGate.Lock()
 	}
