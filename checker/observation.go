@@ -66,6 +66,20 @@ func (pc *ProxyChecker) AvailabilityAccounted(stableID string) bool {
 	return pc.ObservationPolicyFor(stableID).AccountAvailability
 }
 
+// IncidentsAccounted reports whether an outage of this node belongs in the
+// incident journal. It needs both a verdict to journal and a node the journal
+// is about: the journal, like Telegram, covers the service this deployment
+// runs, and a source an operator added from the panel is somebody else's. Such
+// nodes are still probed, still carry downtime and still show their status —
+// they just open no incident here, and they do not count towards the majority
+// a mass incident needs.
+func (pc *ProxyChecker) IncidentsAccounted(stableID string) bool {
+	if !pc.AvailabilityAccounted(stableID) {
+		return false
+	}
+	return pc.EnvironmentSourced(stableID)
+}
+
 // EnvironmentSourced reports whether a node came from a subscription the
 // deployment configures itself, rather than one an operator added from the
 // panel. A node with no source at all is the environment's.

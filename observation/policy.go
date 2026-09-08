@@ -6,8 +6,8 @@
 // every outage announced, every result published. A third-party panel added
 // from the admin UI is usually watched for one specific reason, and the rest —
 // speed tests it does not need, alerts at three in the morning about servers it
-// does not own, foreign nodes on its public status page — is noise nobody asked
-// for.
+// does not own, incidents about them in a journal it keeps about its own
+// service, foreign nodes on its public status page — is noise nobody asked for.
 //
 // The mode and the two switches beside it are a property of the source, and the
 // node carries only the source id. That is deliberate: changing how a source is
@@ -35,18 +35,23 @@ const (
 // Policy is the effective answer for one node, resolved from its source's mode
 // plus the switch beside it.
 type Policy struct {
-	// AccountAvailability turns a probe into a verdict: downtime, incidents,
-	// node status and the availability side of Telegram.
+	// AccountAvailability turns a probe into a verdict: downtime, node status,
+	// incidents and the availability side of Telegram.
+	//
+	// It is a necessary condition for the last two, not a sufficient one. Both
+	// the incident journal and the bot are about the service this deployment
+	// runs, so both also require the node to come from an environment
+	// subscription; see ProxyChecker.IncidentsAccounted and the note on Listed.
 	AccountAvailability bool
 	// SpeedTest lets a scheduled run select the node.
 	SpeedTest bool
 	// Listed puts the node on the public dashboard, into Prometheus and behind
 	// its own /config endpoint.
 	//
-	// Telegram is deliberately not one of these switches. The bot is the
-	// operator's channel about the service they run, and that service is the
-	// subscription the deployment configures itself; a panel-added source never
-	// reaches it at all. See ProxyChecker.EnvironmentSourced.
+	// Telegram and the incident journal are deliberately not switches here.
+	// Both are about the service the operator runs, and that service is the
+	// subscription the deployment configures itself; a panel-added source
+	// reaches neither, whatever its mode. See ProxyChecker.EnvironmentSourced.
 	Listed bool
 }
 

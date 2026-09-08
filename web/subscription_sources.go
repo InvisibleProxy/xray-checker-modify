@@ -224,13 +224,13 @@ func observationModeCatalog() []AdminObservationModeInfo {
 		switch mode {
 		case observation.ModeAvailability:
 			info.Label = "Availability only"
-			info.Description = "Checked and alerted on as usual, but scheduled speed tests skip it."
+			info.Description = "Checked and counted as usual, but scheduled speed tests skip it."
 		case observation.ModePaused:
 			info.Label = "Paused"
 			info.Description = "Nodes stay listed and probed, but nothing is counted: no downtime, no incidents, no alerts, no speed tests."
 		default:
 			info.Label = "Full"
-			info.Description = "Watched like the deployment's own subscription."
+			info.Description = "Measured, counted and published like your own subscription. The bot and the incident journal stay about your own nodes."
 		}
 		catalog = append(catalog, info)
 	}

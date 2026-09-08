@@ -14,6 +14,7 @@ import (
 
 	"xray-checker/checker"
 	"xray-checker/models"
+	"xray-checker/observation"
 	"xray-checker/speedtest"
 )
 
@@ -453,6 +454,91 @@ func TestRecordAvailabilityPersistsIncidentJournal(t *testing.T) {
 	incidents := reloaded.Incidents(10)
 	if len(incidents) != 1 || incidents[0].CauseCode != checker.FailureCodeTCPTimeout || incidents[0].Status != incidentStatusActive {
 		t.Fatalf("persisted incidents = %+v", incidents)
+	}
+}
+
+// The journal is about the service this deployment runs. A source added from
+// the panel is watched — its nodes are probed, their downtime is counted, their
+// status is shown — but its outages are somebody else's, so they open no
+// incident and do not dilute the majority a mass incident needs. Three foreign
+// nodes failing the same way would reach that majority on their own; here they
+// leave a single node incident about the one node that is ours.
+func TestPanelSourceOutageStaysOutOfTheIncidentJournal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "node_registry.json")
+	own := &models.ProxyConfig{StableID: "own", Name: "Own", Protocol: "vless", Server: "own.example", Port: 443}
+	proxies := []*models.ProxyConfig{own}
+	for _, name := range []string{"foreign-1", "foreign-2", "foreign-3"} {
+		proxies = append(proxies, &models.ProxyConfig{
+			StableID: name, Name: name, Protocol: "vless", Server: name + ".example", Port: 443, SourceID: "src-foreign",
+		})
+	}
+	proxyChecker := checker.NewProxyChecker(proxies, 10000, "", 1, "", "", 1, 0, "status")
+	proxyChecker.SetSourcePolicies(map[string]observation.Policy{
+		"src-foreign": observation.PolicyFor(observation.ModeAvailability, false),
+	})
+	store := NewStore(path, proxyChecker)
+	if err := store.SyncProxies(proxies); err != nil {
+		t.Fatal(err)
+	}
+	downSince := time.Now().Add(-time.Minute).Truncate(time.Second)
+	failure := checker.FailureDetails{Code: checker.FailureCodeTCPTimeout, Summary: checker.FailureSummary(checker.FailureCodeTCPTimeout)}
+	for _, proxy := range proxies {
+		if !proxyChecker.RestoreOfflineStatus(proxy.StableID, downSince, checker.HostCheckDetails{}, checker.PingCheckDetails{}, failure) {
+			t.Fatalf("failed to seed an offline probe for %s", proxy.StableID)
+		}
+	}
+
+	if err := store.RecordAvailability(); err != nil {
+		t.Fatal(err)
+	}
+
+	incidents := store.Incidents(10)
+	if len(incidents) != 1 {
+		t.Fatalf("incidents = %+v, want only the deployment's own node", incidents)
+	}
+	if incidents[0].Kind != incidentKindNode || incidents[0].Scope != "node:"+own.StableID {
+		t.Fatalf("journalled incident = %+v, want the node incident of %s", incidents[0], own.StableID)
+	}
+	// The foreign nodes are still watched: what they lose is the journal, not
+	// the measurement.
+	for _, proxy := range proxies[1:] {
+		record := store.nodes[proxy.StableID]
+		if !record.CurrentDownSince.Equal(downSince) {
+			t.Fatalf("downtime of %s = %+v, want the outage still counted", proxy.StableID, record)
+		}
+	}
+}
+
+// A source can leave the journal while one of its incidents is still open —
+// the mode changed, or the state predates this rule. The next pass closes it
+// rather than leaving it active forever.
+func TestRecordAvailabilityResolvesIncidentsLeftByAPanelSource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "node_registry.json")
+	foreign := &models.ProxyConfig{StableID: "foreign", Name: "Foreign", Protocol: "vless", Server: "foreign.example", Port: 443, SourceID: "src-foreign"}
+	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{foreign}, 10000, "", 1, "", "", 1, 0, "status")
+	proxyChecker.SetSourcePolicies(map[string]observation.Policy{
+		"src-foreign": observation.PolicyFor(observation.ModeAvailability, false),
+	})
+	store := NewStore(path, proxyChecker)
+	if err := store.SyncProxies([]*models.ProxyConfig{foreign}); err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	store.incidents = []IncidentRecord{{
+		ID: "left-open", Kind: incidentKindNode, Status: incidentStatusActive,
+		Scope: "node:" + foreign.StableID, StableIDs: []string{foreign.StableID}, StartedAt: startedAt,
+	}}
+	if !proxyChecker.RestoreOfflineStatus(foreign.StableID, startedAt, checker.HostCheckDetails{}, checker.PingCheckDetails{}) {
+		t.Fatal("failed to seed an offline probe")
+	}
+
+	if err := store.RecordAvailability(); err != nil {
+		t.Fatal(err)
+	}
+
+	incidents := store.Incidents(10)
+	if len(incidents) != 1 || incidents[0].Status != incidentStatusResolved || incidents[0].ResolvedAt.IsZero() {
+		t.Fatalf("incidents = %+v, want the leftover one resolved", incidents)
 	}
 }
 

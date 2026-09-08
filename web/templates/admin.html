@@ -2200,7 +2200,7 @@
                 <input id="subscription-source-unlisted" type="checkbox" />
                 Keep off the public status page
               </label>
-              <div class="hint">This also removes the source's nodes from Prometheus and from their own /config endpoints — somebody else's panel is not the service you publish as your own. The Telegram bot never lists a source added here at all: it speaks only about your own subscription. Such a node can still carry the bot's own traffic when a direct connection to Telegram fails.</div>
+              <div class="hint">This also removes the source's nodes from Prometheus and from their own /config endpoints — somebody else's panel is not the service you publish as your own. The Telegram bot never lists a source added here at all: it speaks only about your own subscription. Such a node can still carry the bot's own traffic when a direct connection to Telegram fails. The incident journal is scoped the same way and by the same rule, not by the mode: an outage of a source added here shows on its node card and in its downtime, but opens no incident and never counts towards a mass one.</div>
               <label>
                 HWID
                 <input id="subscription-source-hwid" type="text" autocomplete="off" placeholder="Generated automatically" />

@@ -2114,10 +2114,13 @@ components:
           type: string
           enum: [full, availability, paused]
           description: >-
-            How this source's nodes are watched. `full` is the deployment's own treatment. `availability` keeps the
-            checks and the alerts but drops the source out of scheduled speed tests. `paused` still probes — a probe
-            is what everything else rests on — but draws no verdict from it: no downtime, no incident, no alert, no
-            speed test. A node an operator paused by hand stays paused whatever the source says.
+            How this source's nodes are watched. `full` measures, counts and publishes them like the deployment's own
+            subscription. `availability` keeps the checks and the accounting but drops the source out of scheduled
+            speed tests. `paused` still probes — a probe is what everything else rests on — but draws no verdict from
+            it: no downtime, no incident, no alert, no speed test. A node an operator paused by hand stays paused
+            whatever the source says. Telegram and the incident journal are outside these modes altogether: both are
+            about the subscription the deployment configures itself, so a source added from the panel never reaches
+            them in any mode.
         unlisted:
           type: boolean
           description: >-

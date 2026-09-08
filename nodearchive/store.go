@@ -597,7 +597,9 @@ func (s *Store) recordAvailability(recordHistory bool) error {
 	changed := false
 	active := make(map[string]bool, len(proxies))
 	detailsByStableID := make(map[string]checker.ProxyStatusDetails, len(proxies))
-	monitoredProxies := make([]*models.ProxyConfig, 0, len(proxies))
+	// Only nodes the journal is about, which is also the denominator a mass
+	// incident measures its majority against.
+	incidentProxies := make([]*models.ProxyConfig, 0, len(proxies))
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -642,7 +644,19 @@ func (s *Store) recordAvailability(recordHistory bool) error {
 			}
 			continue
 		}
-		monitoredProxies = append(monitoredProxies, proxy)
+		// Downtime, history and status belong to whoever watches the node; the
+		// incident journal belongs to the service this deployment runs. A node
+		// from a panel-added source keeps everything above and stays out of the
+		// journal — including out of the majority a mass incident needs.
+		journalled := s.proxyChecker.IncidentsAccounted(proxy.StableID)
+		if journalled {
+			incidentProxies = append(incidentProxies, proxy)
+		} else if incidentIndex := s.findActiveIncidentLocked(incidentKindNode, "node:"+proxy.StableID); incidentIndex >= 0 {
+			// State written before the node left the journal still carries its
+			// open incident.
+			s.resolveIncidentLocked(incidentIndex, now)
+			changed = true
+		}
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
 		if err == nil {
 			detailsByStableID[proxy.StableID] = details
@@ -650,7 +664,7 @@ func (s *Store) recordAvailability(recordHistory bool) error {
 			if recordHistory && s.recordAvailabilitySampleLocked(proxy.StableID, details, now, false) {
 				changed = true
 			}
-			if s.updateNodeIncidentLocked(proxy, details, now) {
+			if journalled && s.updateNodeIncidentLocked(proxy, details, now) {
 				changed = true
 			}
 		}
@@ -659,7 +673,7 @@ func (s *Store) recordAvailability(recordHistory bool) error {
 			changed = true
 		}
 	}
-	if s.updateMassIncidentsLocked(monitoredProxies, detailsByStableID, now) {
+	if s.updateMassIncidentsLocked(incidentProxies, detailsByStableID, now) {
 		changed = true
 	}
 	if s.pruneIncidentsLocked() {
