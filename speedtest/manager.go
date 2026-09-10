@@ -3,8 +3,10 @@ package speedtest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -113,13 +115,18 @@ type scheduleStateFile struct {
 }
 
 type Result struct {
-	StableID                string  `json:"stableId"`
-	Name                    string  `json:"name"`
-	SubName                 string  `json:"subName"`
-	Protocol                string  `json:"protocol"`
-	URL                     string  `json:"url"`
-	PrimaryURL              string  `json:"primaryUrl,omitempty"`
-	PrimaryError            string  `json:"primaryError,omitempty"`
+	StableID     string `json:"stableId"`
+	Name         string `json:"name"`
+	SubName      string `json:"subName"`
+	Protocol     string `json:"protocol"`
+	URL          string `json:"url"`
+	PrimaryURL   string `json:"primaryUrl,omitempty"`
+	PrimaryError string `json:"primaryError,omitempty"`
+	// PrimaryTimedOut records that the endpoint this result replaced ran out of
+	// time rather than failed. Without it a reserve measurement would report an
+	// empty PrimaryError beside a primary rate, and the reason the reserve was
+	// reached for at all would be missing from the record.
+	PrimaryTimedOut         bool    `json:"primaryTimedOut,omitempty"`
 	PrimaryMbps             float64 `json:"primaryMbps,omitempty"`
 	FallbackAttempted       bool    `json:"fallbackAttempted,omitempty"`
 	FallbackAttempts        int     `json:"fallbackAttempts,omitempty"`
@@ -134,9 +141,23 @@ type Result struct {
 	ProjectMaintenanceProbe bool    `json:"projectMaintenanceProbe,omitempty"`
 	StatusCode              int     `json:"statusCode"`
 	DownloadedBytes         int64   `json:"downloadedBytes"`
-	DurationMs              int64   `json:"durationMs"`
-	TTFBMs                  int64   `json:"ttfbMs"`
-	Mbps                    float64 `json:"mbps"`
+	// RequestedBytes is how much the run asked the node to transfer. Kept
+	// beside what actually arrived so a shortened transfer can say "20.7 of
+	// 100 MiB" instead of leaving a reader to guess whether the amount that
+	// arrived was the whole job.
+	RequestedBytes int64   `json:"requestedBytes,omitempty"`
+	DurationMs     int64   `json:"durationMs"`
+	TTFBMs         int64   `json:"ttfbMs"`
+	Mbps           float64 `json:"mbps"`
+	// TimedOut marks a transfer the deadline cut short. It is deliberately not
+	// an error: bytes were arriving, and the rate they arrived at is the
+	// measurement the run exists to take. Recording it as a failure threw that
+	// rate away and sent the operator after a technical fault, while what the
+	// node was actually doing - moving 5.79 Mbps against a 100 Mbps threshold -
+	// went unsaid. The flag says the transfer was cut short, so a reader can
+	// tell an unfinished measurement from a completed one without having to
+	// read a raw transport error to find out.
+	TimedOut bool `json:"timedOut,omitempty"`
 	// LowSpeedThresholdMbps is the threshold this measurement was judged
 	// against — the node's own override when it has one, the global setting
 	// otherwise. Recorded with the result so every later reader reaches the
@@ -1431,13 +1452,14 @@ func (m *Manager) runManualTestPhases(
 
 func (m *Manager) testProxy(proxy *models.ProxyConfig, cfg TestConfig, source string) Result {
 	result := Result{
-		StableID:  proxy.StableID,
-		Name:      proxy.Name,
-		SubName:   proxy.SubName,
-		Protocol:  proxy.Protocol,
-		URL:       cfg.URL,
-		CheckedAt: time.Now(),
-		Source:    source,
+		StableID:       proxy.StableID,
+		Name:           proxy.Name,
+		SubName:        proxy.SubName,
+		Protocol:       proxy.Protocol,
+		URL:            cfg.URL,
+		RequestedBytes: cfg.MaxBytes,
+		CheckedAt:      time.Now(),
+		Source:         source,
 	}
 
 	proxyURL, err := url.Parse(fmt.Sprintf("socks5://127.0.0.1:%d", m.startPort+proxy.Index))
@@ -1474,9 +1496,16 @@ func (m *Manager) testProxy(proxy *models.ProxyConfig, cfg TestConfig, source st
 	}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 
+	budget := time.Duration(cfg.TimeoutSec) * time.Second
+
 	resp, err := client.Do(req)
 	if err != nil {
-		result.Error = err.Error()
+		result.DurationMs = time.Since(start).Milliseconds()
+		if transferDeadlineReached(ctx, err, time.Since(start), budget) {
+			result.Error = fmt.Sprintf("timed out after %s before the response started", budget)
+		} else {
+			result.Error = err.Error()
+		}
 		return result
 	}
 	defer resp.Body.Close()
@@ -1490,6 +1519,7 @@ func (m *Manager) testProxy(proxy *models.ProxyConfig, cfg TestConfig, source st
 	}
 
 	buffer := make([]byte, 32768)
+	var readErr error
 	for result.DownloadedBytes < cfg.MaxBytes {
 		limit := int64(len(buffer))
 		remaining := cfg.MaxBytes - result.DownloadedBytes
@@ -1497,15 +1527,15 @@ func (m *Manager) testProxy(proxy *models.ProxyConfig, cfg TestConfig, source st
 			limit = remaining
 		}
 
-		n, readErr := resp.Body.Read(buffer[:int(limit)])
+		n, err := resp.Body.Read(buffer[:int(limit)])
 		if n > 0 {
 			result.DownloadedBytes += int64(n)
 		}
-		if readErr == io.EOF {
+		if err == io.EOF {
 			break
 		}
-		if readErr != nil {
-			result.Error = readErr.Error()
+		if err != nil {
+			readErr = err
 			break
 		}
 	}
@@ -1516,10 +1546,71 @@ func (m *Manager) testProxy(proxy *models.ProxyConfig, cfg TestConfig, source st
 	if result.DownloadedBytes > 0 && duration > 0 {
 		result.Mbps = float64(result.DownloadedBytes*8) / duration.Seconds() / 1000000
 	}
-	if result.Error == "" && result.DownloadedBytes == 0 {
-		result.Error = "empty response"
-	}
+	deadline := transferDeadlineReached(ctx, readErr, duration, budget)
+	result.TimedOut, result.Error = transferOutcome(readErr, deadline, result.DownloadedBytes, budget)
 	return result
+}
+
+// transferOutcome says what a finished transfer should carry, and it is where
+// the deadline stops being an error.
+//
+// The rate is computed before this is called, so a transfer the clock cut short
+// keeps the number it measured and is marked as shortened instead. That rate is
+// the answer the run exists to produce; reporting it as "context deadline
+// exceeded" threw it away and sent the operator after a transport fault, while
+// the node quietly moving 5.79 Mbps against a 100 Mbps threshold went unsaid.
+// Every other read error stays an error, and so does a deadline that delivered
+// nothing at all - there is no measurement in it to keep.
+func transferOutcome(readErr error, deadlineReached bool, bytes int64, budget time.Duration) (bool, string) {
+	switch {
+	case readErr == nil:
+		if bytes == 0 {
+			return false, "empty response"
+		}
+		return false, ""
+	case !deadlineReached:
+		return false, readErr.Error()
+	case bytes > 0:
+		return true, ""
+	default:
+		return false, fmt.Sprintf("timed out after %s without receiving data", budget)
+	}
+}
+
+// deadlineSlack is how close to the budget an expiring socket has to land
+// before it is read as the run's own deadline rather than a stall.
+const deadlineSlack = 250 * time.Millisecond
+
+// transferDeadlineReached says whether a transfer ran out of the time the run
+// allowed it, as opposed to failing. Both reach the caller as the same read
+// error, and only one of them is the node's fault.
+//
+// The run's own context is the reliable signal, so it decides first. A
+// cancelled run is never a deadline: that measurement is abandoned, not
+// shortened, and it must keep an error so the run drops it instead of storing
+// a rate nobody finished measuring. Below that, http.Client.Timeout surfaces
+// as a plain net timeout with no type of its own, so it counts as the deadline
+// only when the elapsed time actually reached the budget - a socket that timed
+// out early stalled, which is a failure and stays reported as one.
+func transferDeadlineReached(ctx context.Context, err error, elapsed, budget time.Duration) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	spent := budget > 0 && elapsed+deadlineSlack >= budget
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return spent
+	}
+	// The transport can hand back an error that carries none of this, so an
+	// expired run context still counts - but only once the time it granted is
+	// actually gone. A connection reset moments before the deadline is a reset.
+	return spent && errors.Is(ctx.Err(), context.DeadlineExceeded)
 }
 
 func (m *Manager) proxyReadyForSpeedTest(proxy *models.ProxyConfig, allowMaintenance bool) bool {

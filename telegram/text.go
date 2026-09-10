@@ -30,11 +30,13 @@ func formatBytes(bytes int64) string {
 	if bytes <= 0 {
 		return "0 B"
 	}
-	mb := float64(bytes) / 1024 / 1024
-	if mb >= 1 {
-		return fmt.Sprintf("%.1f MB", mb)
+	// Binary units, named as such: a transfer size divided by 1024^2 and
+	// labelled "MB" will not divide into the decimal Mbps printed beside it.
+	mib := float64(bytes) / 1024 / 1024
+	if mib >= 1 {
+		return fmt.Sprintf("%.1f MiB", mib)
 	}
-	return fmt.Sprintf("%.0f KB", float64(bytes)/1024)
+	return fmt.Sprintf("%.0f KiB", float64(bytes)/1024)
 }
 
 func formatDuration(value time.Duration) string {

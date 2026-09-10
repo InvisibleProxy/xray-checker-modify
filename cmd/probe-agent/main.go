@@ -217,9 +217,9 @@ func shortID(value string) string {
 func formatBytes(bytes int64) string {
 	switch {
 	case bytes >= 1<<20:
-		return fmt.Sprintf("%.0f MB", float64(bytes)/(1<<20))
+		return fmt.Sprintf("%.0f MiB", float64(bytes)/(1<<20))
 	case bytes >= 1<<10:
-		return fmt.Sprintf("%.0f KB", float64(bytes)/(1<<10))
+		return fmt.Sprintf("%.0f KiB", float64(bytes)/(1<<10))
 	default:
 		return fmt.Sprintf("%d B", bytes)
 	}

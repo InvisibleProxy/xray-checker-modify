@@ -116,7 +116,9 @@ func speedResultStatusHTML(result speedtest.Result, threshold float64) string {
 	case result.Error != "":
 		return "❌ <b>ошибка</b>"
 	case effective > 0 && result.Mbps < effective:
-		return fmt.Sprintf("⚠️ <b>%.2f Mbps</b>", result.Mbps)
+		return fmt.Sprintf("⚠️ <b>%.2f Mbps</b>%s", result.Mbps, speedTimeoutNote(result))
+	case result.TimedOut:
+		return fmt.Sprintf("⚠️ <b>%.2f Mbps</b>%s", result.Mbps, speedTimeoutNote(result))
 	default:
 		return fmt.Sprintf("✅ <b>%.2f Mbps</b>", result.Mbps)
 	}
@@ -277,8 +279,14 @@ func speedIssuesHTML(results []speedtest.Result, threshold float64) []string {
 			lines = appendSpeedAgentDiagnostic(lines, result)
 			continue
 		}
-		if effective := resultThreshold(result, threshold); effective > 0 && result.Mbps < effective {
-			lines = append(lines, fmt.Sprintf("• ⚠️ <b>%s</b> · <b>%.2f Mbps</b>", htmlEscape(result.Name), result.Mbps))
+		effective := resultThreshold(result, threshold)
+		slow := effective > 0 && result.Mbps < effective
+		if slow || result.TimedOut {
+			detail := ""
+			if note := speedTimeoutDetail(result); note != "" {
+				detail = " · " + htmlEscape(note)
+			}
+			lines = append(lines, fmt.Sprintf("• ⚠️ <b>%s</b> · <b>%.2f Mbps</b>%s", htmlEscape(result.Name), result.Mbps, detail))
 			lines = appendSpeedAgentDiagnostic(lines, result)
 		}
 	}
@@ -304,12 +312,41 @@ func resultThreshold(result speedtest.Result, threshold float64) float64 {
 	return threshold
 }
 
+// speedTimeoutNote marks a measurement the deadline cut short. The rate stays
+// the headline, because it is what the run actually measured; the note says the
+// transfer never finished, so a node that is merely slow and a node that could
+// not deliver the requested amount in time do not read the same.
+func speedTimeoutNote(result speedtest.Result) string {
+	if !result.TimedOut {
+		return ""
+	}
+	return " · ⏱ таймаут"
+}
+
+// speedTimeoutDetail spells the note out where there is room for it.
+func speedTimeoutDetail(result speedtest.Result) string {
+	if !result.TimedOut {
+		return ""
+	}
+	seconds := float64(result.DurationMs) / 1000
+	if result.RequestedBytes > 0 {
+		return fmt.Sprintf("таймаут: %s из %s за %.1f с",
+			formatBytes(result.DownloadedBytes), formatBytes(result.RequestedBytes), seconds)
+	}
+	return fmt.Sprintf("таймаут: %s за %.1f с", formatBytes(result.DownloadedBytes), seconds)
+}
+
+// A shortened transfer is never healthy, whatever rate it reached: the run
+// asked for an amount it did not get, and reporting that beside the nodes that
+// are simply fine hides the one measurement worth looking at.
 func speedResultClass(result speedtest.Result, threshold float64) int {
 	threshold = resultThreshold(result, threshold)
 	switch {
 	case result.Offline || result.Error != "":
 		return speedClassFailed
 	case threshold > 0 && result.Mbps < threshold:
+		return speedClassSlow
+	case result.TimedOut:
 		return speedClassSlow
 	default:
 		return speedClassHealthy
@@ -348,7 +385,8 @@ func orderedSpeedResults(results []speedtest.Result, threshold float64) []speedt
 func speedIssueResults(results []speedtest.Result, threshold float64) []speedtest.Result {
 	issues := make([]speedtest.Result, 0)
 	for _, result := range results {
-		if effective := resultThreshold(result, threshold); result.Offline || result.Error != "" || (effective > 0 && result.Mbps < effective) {
+		effective := resultThreshold(result, threshold)
+		if result.Offline || result.Error != "" || result.TimedOut || (effective > 0 && result.Mbps < effective) {
 			issues = append(issues, result)
 		}
 	}
@@ -366,8 +404,8 @@ func formatSpeedStatusRich(result speedtest.Result, threshold float64) string {
 	if result.Error != "" {
 		return "❌ " + htmlEscape(compactText(result.Error, 120))
 	}
-	if effective := resultThreshold(result, threshold); effective > 0 && result.Mbps < effective {
-		return fmt.Sprintf("⚠️ <b>%.2f Mbps</b>", result.Mbps)
+	if effective := resultThreshold(result, threshold); (effective > 0 && result.Mbps < effective) || result.TimedOut {
+		return fmt.Sprintf("⚠️ <b>%.2f Mbps</b>%s", result.Mbps, speedTimeoutNote(result))
 	}
 	return fmt.Sprintf("✅ <b>%.2f Mbps</b>", result.Mbps)
 }
@@ -393,6 +431,9 @@ func formatSpeedDiagnosticsRichDetails(results []speedtest.Result, limit int) st
 				fmt.Sprintf("%d ms", result.DurationMs),
 				fmt.Sprintf("TTFB %d ms", result.TTFBMs),
 			)
+			if note := speedTimeoutDetail(result); note != "" {
+				parts = append(parts, htmlEscape(note))
+			}
 		}
 		if diagnostic := formatSpeedAgentDiagnosticRich(result.AgentDiagnostic); diagnostic != "" {
 			parts = append(parts, diagnostic)
@@ -581,6 +622,9 @@ func healthySpeedResults(results []speedtest.Result, threshold float64) []speedt
 	healthy := successfulResults(results)
 	result := healthy[:0]
 	for _, item := range healthy {
+		if item.TimedOut {
+			continue
+		}
 		effective := resultThreshold(item, threshold)
 		if effective <= 0 || item.Mbps >= effective {
 			result = append(result, item)
@@ -608,10 +652,10 @@ func formatSpeedResultHTML(result speedtest.Result, threshold float64) string {
 		return fmt.Sprintf("• ❌ <b>%s</b> · %s", htmlEscape(result.Name), htmlEscape(compactText(result.Error, 120)))
 	}
 
-	if effective := resultThreshold(result, threshold); effective <= 0 || result.Mbps >= effective {
+	if effective := resultThreshold(result, threshold); (effective <= 0 || result.Mbps >= effective) && !result.TimedOut {
 		return fmt.Sprintf("• ✅ <b>%s</b> · <b>%.2f Mbps</b>", htmlEscape(result.Name), result.Mbps)
 	}
-	return fmt.Sprintf("• ⚠️ <b>%s</b> · <b>%.2f Mbps</b>", htmlEscape(result.Name), result.Mbps)
+	return fmt.Sprintf("• ⚠️ <b>%s</b> · <b>%.2f Mbps</b>%s", htmlEscape(result.Name), result.Mbps, speedTimeoutNote(result))
 }
 
 func reportSourceLabel(source string) string {
@@ -655,14 +699,14 @@ func formatSpeedHistoryLine(result speedtest.Result, threshold float64) string {
 		return fmt.Sprintf("• %s · ❌ %s", htmlCode(prefix), htmlEscape(compactText(result.Error, 120)))
 	}
 	marker := "✅"
-	if effective := resultThreshold(result, threshold); effective > 0 && result.Mbps < effective {
+	if effective := resultThreshold(result, threshold); (effective > 0 && result.Mbps < effective) || result.TimedOut {
 		marker = "⚠️"
 	}
 	ttfb := ""
 	if result.TTFBMs > 0 {
 		ttfb = fmt.Sprintf(" · TTFB %d ms", result.TTFBMs)
 	}
-	return fmt.Sprintf("• %s · %s <b>%.2f Mbps</b>%s", htmlCode(prefix), marker, result.Mbps, ttfb)
+	return fmt.Sprintf("• %s · %s <b>%.2f Mbps</b>%s%s", htmlCode(prefix), marker, result.Mbps, ttfb, speedTimeoutNote(result))
 }
 
 func formatSpeedResultDiagnosticsHTML(result speedtest.Result) string {

@@ -275,8 +275,18 @@ func speedAutomationOutcome(result speedtest.Result, threshold float64) (string,
 	if result.Error != "" {
 		return diagnostics.AutomationOutcomeTechnical, true
 	}
+	// A measurement the deadline cut short is judged by its rate first. It used
+	// to arrive here as an error and was sent out as a technical failure, which
+	// asked the agent the wrong question: a node moving 5.79 Mbps against a
+	// 100 Mbps threshold is slow, and the answer worth having is the agent's own
+	// rate to hold against it, not a yes/no on whether the transfer broke.
 	if threshold > 0 && result.Mbps < threshold {
 		return diagnostics.AutomationOutcomeLowSpeed, true
+	}
+	// Above the threshold, or with no threshold to judge by, a shortened
+	// transfer is still unexplained, and yes/no is all that is left to ask.
+	if result.TimedOut {
+		return diagnostics.AutomationOutcomeTechnical, true
 	}
 	return "", false
 }

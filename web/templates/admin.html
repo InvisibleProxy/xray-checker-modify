@@ -1883,7 +1883,7 @@
             </label>
             <div class="split">
               <label>
-                Max MB
+                Max MiB
                 <input id="max-mb" type="number" min="1" max="100" step="1" />
               </label>
               <label>
@@ -1907,7 +1907,7 @@
               <input id="node-url" type="url" autocomplete="off" disabled />
             </label>
             <label>
-              Download size, MB
+              Download size, MiB
               <input id="node-max-mb" type="number" min="0.06" max="100" step="0.1" autocomplete="off" placeholder="Global size" disabled />
             </label>
             <label>
@@ -3136,6 +3136,7 @@
           </div>
           <div class="row">
             <span id="agent-probe-dialog-verdict" class="chip neutral"></span>
+            <button id="copy-agent-probe" class="secondary small" type="button" title="Copy the probe as text" aria-label="Copy the probe as text">Copy</button>
             <button id="close-agent-probe-dialog" class="secondary merge-dialog-close" type="button" aria-label="Close agent probe">×</button>
           </div>
         </div>
@@ -3218,6 +3219,10 @@
       const state = {
         proxies: [],
         snapshot: null,
+        // The measurement and probe the open dialog is showing, so the copy
+        // button reports on the same pair the reader is looking at rather than
+        // re-deriving it from a history list a refresh may have moved on.
+        agentProbeDialog: null,
         telegram: null,
         diagnosticAgents: null,
         diagnosticAgentCreation: null,
@@ -3320,9 +3325,9 @@
       }
 
       let copyToastTimer = 0;
-      function showCopyToast() {
+      function showCopyToast(message) {
         const toast = $("copy-toast");
-        toast.textContent = tr("IP / server copied!");
+        toast.textContent = message || tr("IP / server copied!");
         toast.hidden = false;
         window.clearTimeout(copyToastTimer);
         copyToastTimer = window.setTimeout(() => {
@@ -4479,8 +4484,8 @@
 
       function bytesToMB(bytes) {
         if (!bytes) return "";
-        // Trim the trailing zeros a plain division leaves behind, so 10 MB reads
-        // as "10" rather than "10.000".
+        // Trim the trailing zeros a plain division leaves behind, so 10 MiB
+        // reads as "10" rather than "10.000".
         return String(Number((bytes / (1024 * 1024)).toFixed(3)));
       }
 
@@ -4554,10 +4559,14 @@
         return [proxy.name || "Unnamed", proxy.subName, proxy.server].filter(Boolean).join(" / ");
       }
 
+      // Sizes here are binary: the size field multiplies by 1024^2 and the
+      // transfer loop counts against that. Labelling them "MB" beside a rate in
+      // decimal Mbps left an operator with two numbers that would not divide
+      // into each other, so they say MiB and the arithmetic holds.
       function formatBytes(bytes) {
         if (!bytes) return "0 B";
-        if (bytes >= mb) return `${(bytes / mb).toFixed(1)} MB`;
-        return `${(bytes / 1024).toFixed(0)} KB`;
+        if (bytes >= mb) return `${(bytes / mb).toFixed(1)} MiB`;
+        return `${(bytes / 1024).toFixed(0)} KiB`;
       }
 
       function formatTime(iso) {
@@ -4623,6 +4632,32 @@
         return isSuccessfulResult(result) && threshold > 0 && Number(result.mbps || 0) < threshold;
       }
 
+      // A measurement the deadline cut short. It is not a failure - the transfer
+      // ran, and the rate it reached is the answer the run was after - but it is
+      // not a clean result either, so it keeps its number and says so.
+      function isShortenedResult(result) {
+        return !!result && !result.offline && !result.error && !!result.timedOut;
+      }
+
+      function shortenedMarker(result) {
+        return isShortenedResult(result) ? " ⏱" : "";
+      }
+
+      // What the transfer actually managed, in the terms the deadline set it:
+      // how much of the requested amount arrived, and in how long.
+      function formatShortfall(result) {
+        const seconds = (Number(result.durationMs || 0) / 1000).toFixed(1);
+        const transferred = formatBytes(result.downloadedBytes);
+        const requested = Number(result.requestedBytes || 0) > 0
+          ? ` ${tr("of")} ${formatBytes(result.requestedBytes)}`
+          : "";
+        return `${transferred}${requested} · ${seconds} ${tr("sec")}`;
+      }
+
+      function formatTimeoutReason(result) {
+        return `${tr("Timed out")} · ${formatShortfall(result)}`;
+      }
+
       function speedStats(results) {
         const speeds = (results || [])
           .filter(isSuccessfulResult)
@@ -4639,8 +4674,12 @@
 
       function measurementStats(results) {
         const measurements = results || [];
+        // A shortened transfer counts as a measurement - it produced a rate -
+        // but never as a healthy one: the run asked for an amount it did not
+        // get, whatever speed it reached while trying.
         const completed = measurements.filter(isSuccessfulResult).length;
-        const successful = measurements.filter((result) => isSuccessfulResult(result) && !isLowSpeed(result)).length;
+        const successful = measurements.filter((result) =>
+          isSuccessfulResult(result) && !isLowSpeed(result) && !isShortenedResult(result)).length;
         return {
           completed,
           failed: measurements.length - completed,
@@ -4958,11 +4997,12 @@
         const isolatedSpacing = isolatedRuns.length > 1 ? plotWidth / isolatedRuns.length : plotWidth;
         const singlePointRadius = Math.max(2, Math.min(5, isolatedSpacing * 0.45));
         const points = successful.map((result) => {
+          const shortened = view === "speedtest" && isShortenedResult(result);
           const low = view === "speedtest" && isLowSpeed(result);
-          const color = low ? "var(--yellow)" : "var(--blue)";
+          const color = low || shortened ? "var(--yellow)" : "var(--blue)";
           const detail = view === "availability"
             ? `${formatTime(result.checkedAt)} · ${formatLatencyMs(result.latencyMs)} · Online`
-            : `${formatTime(result.checkedAt)} · ${formatMbps(result.mbps)} · TTFB ${Number(result.ttfbMs || 0)} ms · ${formatBytes(result.downloadedBytes)}`;
+            : `${formatTime(result.checkedAt)} · ${formatMbps(result.mbps)} · TTFB ${Number(result.ttfbMs || 0)} ms · ${formatBytes(result.downloadedBytes)}${shortened ? ` · ${formatTimeoutReason(result)}` : ""}`;
           const single = singlePointTimes.has(result.checkedAt);
           const singleClass = single ? " single" : "";
           const radius = single ? singlePointRadius.toFixed(1) : "5";
@@ -5073,17 +5113,22 @@
       function metricChartTooltipHTML(result, view) {
         const successful = chartResultSuccessful(result, view);
         const low = view === "speedtest" && successful && isLowSpeed(result);
+        const shortened = view === "speedtest" && successful && isShortenedResult(result);
         const sampleStatus = view === "availability" ? availabilitySampleStatus(result) : "";
-        const statusClass = successful ? (low ? "warn" : "ok") : (sampleStatus === "proxy_failure" ? "warn" : "error");
+        const statusClass = successful ? (low || shortened ? "warn" : "ok") : (sampleStatus === "proxy_failure" ? "warn" : "error");
+        const speedStatus = shortened
+          ? `${low ? "Below threshold" : "Successful"} · ${tr("timed out")}`
+          : (low ? "Below threshold" : "Successful");
         const status = view === "availability"
           ? (successful ? "Online" : (sampleStatus === "proxy_failure" ? "Proxy failure" : result.failureSummary || "Offline"))
-          : (successful ? (low ? "Below threshold" : "Successful") : (result.offline ? "Offline" : compactReason(result.error) || "Failed"));
+          : (successful ? speedStatus : (result.offline ? "Offline" : compactReason(result.error) || "Failed"));
         const measurement = successful
           ? (view === "availability"
             ? `<div class="speed-chart-tooltip-row">Latency: <strong>${escapeHtml(formatLatencyMs(result.latencyMs))}</strong></div>`
             : `<div class="speed-chart-tooltip-row">Speed: <strong>${escapeHtml(formatMbps(result.mbps))}</strong></div>
                <div class="speed-chart-tooltip-row">TTFB: <strong>${Number(result.ttfbMs || 0)} ms</strong></div>
-               <div class="speed-chart-tooltip-row">Downloaded: <strong>${escapeHtml(formatBytes(result.downloadedBytes))}</strong></div>`)
+               <div class="speed-chart-tooltip-row">Downloaded: <strong>${escapeHtml(formatBytes(result.downloadedBytes))}</strong></div>
+               ${shortened ? `<div class="speed-chart-tooltip-row">${escapeHtml(formatTimeoutReason(result))}</div>` : ""}`)
           : "";
         // Without this, a paused node's probe reads as an outage nobody caused.
         const paused = view === "availability" && result.maintenance
@@ -5219,13 +5264,13 @@
         if (!result) return "n/a";
         if (result.offline) return "Offline";
         if (result.error) return "Failed";
-        return `${result.mbps.toFixed(2)} Mbps${result.fallbackUsed ? " ↪" : ""}`;
+        return `${result.mbps.toFixed(2)} Mbps${result.fallbackUsed ? " ↪" : ""}${shortenedMarker(result)}`;
       }
 
       function formatSpeedStatus(result) {
         if (result.offline) return "Offline";
         if (result.error) return "Failed";
-        return `${result.mbps.toFixed(2)} Mbps${result.fallbackUsed ? " ↪" : ""}`;
+        return `${result.mbps.toFixed(2)} Mbps${result.fallbackUsed ? " ↪" : ""}${shortenedMarker(result)}`;
       }
 
       function fallbackResultTitle(result) {
@@ -5236,14 +5281,14 @@
       }
 
       function speedStatusClass(result) {
-        if (isLowSpeed(result)) return "warn";
+        if (isLowSpeed(result) || isShortenedResult(result)) return "warn";
         return result.offline || result.error ? "error" : "ok";
       }
 
       function resultSeverity(result) {
         if (!result) return "neutral";
         if (result.offline || result.error) return "error";
-        if (isLowSpeed(result)) return "warn";
+        if (isLowSpeed(result) || isShortenedResult(result)) return "warn";
         return "ok";
       }
 
@@ -5264,7 +5309,13 @@
         if (!result) return "No result";
         if (result.offline) return formatSpeedDiagnostics(result) || "Offline";
         if (result.error) return compactReason(result.error);
-        if (isLowSpeed(result)) return `Low speed < ${lowSpeedThreshold().toFixed(2)} Mbps`;
+        // Both facts matter and neither replaces the other: how fast the node
+        // was, and that it never delivered the amount the run asked for.
+        if (isLowSpeed(result)) {
+          const low = `${tr("Low speed")} < ${lowSpeedThreshold().toFixed(2)} Mbps`;
+          return isShortenedResult(result) ? `${low} · ${tr("timed out")}` : low;
+        }
+        if (isShortenedResult(result)) return formatTimeoutReason(result);
         return "OK";
       }
 
@@ -6039,11 +6090,26 @@
         };
       }
 
-      function diagnosticEvidenceChip(label, evidence) {
-        if (!evidence || !evidence.checked) return `<span class="chip neutral">${escapeHtml(label)} n/a</span>`;
+      // Evidence is described once, as text and a tone, and rendered from that.
+      // The dialog draws chips out of it and the copy button writes the same
+      // wording into a paste, so what an operator quotes in a ticket cannot
+      // drift away from what they were looking at.
+      function diagnosticEvidenceItem(label, evidence) {
+        if (!evidence || !evidence.checked) return { text: `${label} n/a`, tone: "neutral" };
         const latency = evidence.latencyMillis > 0 ? ` · ${evidence.latencyMillis} ms` : "";
         const failure = !evidence.online && evidence.failureCode ? ` · ${evidence.failureCode}` : "";
-        return `<span class="chip ${evidence.online ? "ok" : "error"}">${escapeHtml(label)} ${evidence.online ? "OK" : "failed"}${escapeHtml(latency + failure)}</span>`;
+        return {
+          text: `${label} ${evidence.online ? "OK" : "failed"}${latency}${failure}`,
+          tone: evidence.online ? "ok" : "error",
+        };
+      }
+
+      function evidenceChipHTML(item) {
+        return `<span class="chip ${item.tone}">${escapeHtml(item.text)}</span>`;
+      }
+
+      function diagnosticEvidenceChip(label, evidence) {
+        return evidenceChipHTML(diagnosticEvidenceItem(label, evidence));
       }
 
       function diagnosticProfileLabel(profileId) {
@@ -6053,50 +6119,83 @@
 
       // Each profile contributes only its own evidence, so a session shows the
       // measurements that were actually taken and nothing invented.
-      function diagnosticProfileEvidenceHTML(observation) {
-        const chips = [];
+      function diagnosticProfileEvidence(observation) {
+        const items = [];
         const throughput = observation.throughput;
         if (throughput) {
           const rate = throughput.mbps > 0 ? `${throughput.mbps} Mbps` : formatBytes(throughput.bytes);
-          chips.push(`<span class="chip ${throughput.mbps > 0 ? "ok" : "warn"}">Throughput ${escapeHtml(rate)}</span>`);
+          items.push({ text: `Throughput ${rate}`, tone: throughput.mbps > 0 ? "ok" : "warn" });
         }
         const series = observation.latencySeries;
         if (series) {
           const detail = series.succeeded > 0
             ? `${series.medianMillis} ms p50 · ${series.p95Millis} ms p95 · ±${series.jitterMillis} ms`
             : "no successful samples";
-          chips.push(`<span class="chip ${series.succeeded === series.samples ? "ok" : "warn"}">Latency ${escapeHtml(series.succeeded)}/${escapeHtml(series.samples)} · ${escapeHtml(detail)}</span>`);
+          items.push({
+            text: `Latency ${series.succeeded}/${series.samples} · ${detail}`,
+            tone: series.succeeded === series.samples ? "ok" : "warn",
+          });
         }
         const stability = observation.stability;
         if (stability) {
           const held = `${Math.round(stability.heldMillis / 1000)}s/${Math.round(stability.plannedMillis / 1000)}s`;
-          chips.push(`<span class="chip ${stability.interrupted ? "error" : "ok"}">Stability ${escapeHtml(held)} · ${escapeHtml(formatBytes(stability.bytes))}${stability.interrupted ? " · dropped" : ""}</span>`);
+          items.push({
+            text: `Stability ${held} · ${formatBytes(stability.bytes)}${stability.interrupted ? " · dropped" : ""}`,
+            tone: stability.interrupted ? "error" : "ok",
+          });
         }
         const tls = observation.tls;
         if (tls && tls.checked) {
           const detail = tls.handshake
             ? [tls.negotiatedVersion, tls.negotiatedProtocol, tls.latencyMillis > 0 ? `${tls.latencyMillis} ms` : ""].filter(Boolean).join(" · ")
             : (tls.failureCode || "failed");
-          chips.push(`<span class="chip ${tls.handshake ? "ok" : "error"}">TLS ${escapeHtml(detail)}</span>`);
-          if (tls.serverName) chips.push(`<span class="chip neutral">SNI ${escapeHtml(tls.serverName)}</span>`);
+          items.push({ text: `TLS ${detail}`, tone: tls.handshake ? "ok" : "error" });
+          if (tls.serverName) items.push({ text: `SNI ${tls.serverName}`, tone: "neutral" });
         }
         const dns = observation.dns;
         if (dns && dns.checked) {
           if (dns.literal) {
-            chips.push(`<span class="chip neutral">DNS not applicable · literal address</span>`);
+            items.push({ text: "DNS not applicable · literal address", tone: "neutral" });
           } else {
-            chips.push(`<span class="chip ${dns.mismatch ? "error" : "ok"}">DNS ${dns.mismatch ? "resolvers disagree" : "consistent"}</span>`);
+            items.push({
+              text: `DNS ${dns.mismatch ? "resolvers disagree" : "consistent"}`,
+              tone: dns.mismatch ? "error" : "ok",
+            });
             (dns.resolvers || []).forEach((resolver) => {
               const answer = resolver.failureCode ? resolver.failureCode : (resolver.addresses || []).join(", ");
-              chips.push(`<span class="chip ${resolver.failureCode ? "error" : "neutral"}">${escapeHtml(resolver.resolver)} ${escapeHtml(answer || "no answer")}</span>`);
+              items.push({ text: `${resolver.resolver} ${answer || "no answer"}`, tone: resolver.failureCode ? "error" : "neutral" });
             });
           }
         }
         const alternative = observation.alternativeEndpoint;
         if (alternative) {
-          chips.push(`<span class="chip ${alternative.status === "online" ? "ok" : "warn"}">Fallback ${escapeHtml(diagnosticProfileLabel(alternative.profileId))} ${escapeHtml(alternative.status)}</span>`);
+          items.push({
+            text: `Fallback ${diagnosticProfileLabel(alternative.profileId)} ${alternative.status}`,
+            tone: alternative.status === "online" ? "ok" : "warn",
+          });
         }
-        return chips.join("");
+        return items;
+      }
+
+      function diagnosticProfileEvidenceHTML(observation) {
+        return diagnosticProfileEvidence(observation).map(evidenceChipHTML).join("");
+      }
+
+      // Everything the agent's own observation showed, in the order the dialog
+      // reads it: what the tunnel did, the controls beside it, and whether the
+      // agent's network was fit to judge any of it.
+      function agentProbeObservationEvidence(observation) {
+        return [
+          {
+            text: `Remote ${observation.status || "unknown"}`,
+            tone: observation.status === "online" ? "ok" : observation.status === "proxy_failure" ? "warn" : "error",
+          },
+          diagnosticEvidenceItem("TCP", observation.tcp),
+          diagnosticEvidenceItem("Ping", observation.ping),
+          diagnosticEvidenceItem("Direct", observation.directConnectivity),
+          ...diagnosticProfileEvidence(observation),
+          { text: observation.reliable ? "Reliable" : "Unreliable", tone: observation.reliable ? "ok" : "error" },
+        ];
       }
 
       function diagnosticSessionHTML(view) {
@@ -6937,7 +7036,14 @@
         }
         $("history-results").innerHTML = results.map((result) => {
           const diagnostics = formatSpeedDiagnostics(result);
-          const issue = result.error || diagnostics || "";
+          // A shortened transfer used to leave this column carrying a raw
+          // "context deadline exceeded", and now that the deadline is no longer
+          // an error it would leave the column empty instead. Neither tells the
+          // operator what happened, so the shortfall is spelled out and marked
+          // as a warning rather than a failure.
+          const shortened = isShortenedResult(result);
+          const issue = result.error || diagnostics || (shortened ? formatTimeoutReason(result) : "");
+          const issueClass = !issue ? "" : (result.error || result.offline ? "error" : "warn");
           return `
             <tr>
               <td>${formatTime(result.checkedAt)}</td>
@@ -6947,7 +7053,7 @@
               <td>${result.offline ? "n/a" : `${result.ttfbMs || 0} ms`}</td>
               <td>${escapeHtml(result.source || "")}</td>
               <td class="mono history-url">${escapeHtml(result.url || "")}</td>
-              <td class="history-error ${issue ? "error" : ""}">${escapeHtml(issue)}</td>
+              <td class="history-error ${issueClass}">${escapeHtml(issue)}</td>
               <td>${agentProbeCellHTML(result)}</td>
             </tr>
           `;
@@ -7006,31 +7112,46 @@
       // reproduced" means one thing when the agent was asked to transfer the
       // same amount the run did and quite another when it measured its own, so
       // the instructions are kept beside the answer.
+      function agentProbeTaskFacts(task) {
+        const agents = Array.isArray(task.requestedAgents) ? task.requestedAgents.map(diagnosticAgentLabel).join(", ") : "";
+        return [
+          ["Reason", agentProbeOutcomeLabel(task.outcome)],
+          ["Run source", task.source],
+          ["Threshold", task.thresholdMbps > 0 ? formatMbps(task.thresholdMbps) : ""],
+          ["Measured by the run", task.observedMbps > 0 ? formatMbps(task.observedMbps) : ""],
+          ["Transferred by the run", task.measuredBytes > 0 ? formatBytes(task.measuredBytes) : ""],
+          ["Fallback attempts", task.fallbackAttempts > 0 ? task.fallbackAttempts : ""],
+          ["Probe", task.profileId ? diagnosticProfileLabel(task.profileId) : ""],
+          ["Method", task.method],
+          ["Asked to transfer", task.downloadBytes > 0 ? formatBytes(task.downloadBytes) : tr("Agent's own amount")],
+          ["Alternative endpoint", task.alternativeProfileId ? diagnosticProfileLabel(task.alternativeProfileId) : ""],
+          ["Job", task.jobState],
+          ["Requested agents", agents],
+          ["Created", formatTime(task.createdAt)],
+          ["Expires", formatTime(task.expiresAt)],
+          ["Config generation", task.configGeneration || ""],
+        ];
+      }
+
       function agentProbeTaskSectionHTML(task) {
         if (!task) return "";
-        const profile = task.profileId ? diagnosticProfileLabel(task.profileId) : "";
-        const alternative = task.alternativeProfileId ? diagnosticProfileLabel(task.alternativeProfileId) : "";
-        const agents = Array.isArray(task.requestedAgents) ? task.requestedAgents.map(diagnosticAgentLabel).join(", ") : "";
         return `<section class="quicklook-section">
           <h3>Task</h3>
-          ${agentProbeFactsHTML([
-            ["Reason", agentProbeOutcomeLabel(task.outcome)],
-            ["Run source", task.source],
-            ["Threshold", task.thresholdMbps > 0 ? formatMbps(task.thresholdMbps) : ""],
-            ["Measured by the run", task.observedMbps > 0 ? formatMbps(task.observedMbps) : ""],
-            ["Transferred by the run", task.measuredBytes > 0 ? formatBytes(task.measuredBytes) : ""],
-            ["Fallback attempts", task.fallbackAttempts > 0 ? task.fallbackAttempts : ""],
-            ["Probe", profile],
-            ["Method", task.method],
-            ["Asked to transfer", task.downloadBytes > 0 ? formatBytes(task.downloadBytes) : tr("Agent's own amount")],
-            ["Alternative endpoint", alternative],
-            ["Job", task.jobState],
-            ["Requested agents", agents],
-            ["Created", formatTime(task.createdAt)],
-            ["Expires", formatTime(task.expiresAt)],
-            ["Config generation", task.configGeneration || ""],
-          ])}
+          ${agentProbeFactsHTML(agentProbeTaskFacts(task))}
         </section>`;
+      }
+
+      function agentProbeObservationFacts(observation) {
+        return [
+          ["Checked", formatTime(observation.checkedAt)],
+          ["Accepted", formatTime(observation.acceptedAt)],
+          ["Duration", observation.durationMillis > 0 ? `${observation.durationMillis} ms` : ""],
+          ["Latency", observation.latencyMillis > 0 ? `${observation.latencyMillis} ms` : ""],
+          ["Endpoint", observation.endpointProfile ? diagnosticProfileLabel(observation.endpointProfile) : ""],
+          ["Failure", observation.failure && observation.failure.code ? observation.failure.code : ""],
+          ["Failed at", observation.failure && observation.failure.stage ? observation.failure.stage : ""],
+          ["Agent version", observation.agentVersion],
+        ];
       }
 
       function agentProbeObservationSectionHTML(observation) {
@@ -7040,27 +7161,12 @@
             <div class="muted">No signed observation was recorded for this probe.</div>
           </section>`;
         }
-        const statusChip = observation.status === "online" ? "ok" : observation.status === "proxy_failure" ? "warn" : "error";
         return `<section class="quicklook-section">
           <h3>Result</h3>
           <div class="quicklook-chips">
-            <span class="chip ${statusChip}">Remote ${escapeHtml(observation.status || "unknown")}</span>
-            ${diagnosticEvidenceChip("TCP", observation.tcp)}
-            ${diagnosticEvidenceChip("Ping", observation.ping)}
-            ${diagnosticEvidenceChip("Direct", observation.directConnectivity)}
-            ${diagnosticProfileEvidenceHTML(observation)}
-            <span class="chip ${observation.reliable ? "ok" : "error"}">${observation.reliable ? "Reliable" : "Unreliable"}</span>
+            ${agentProbeObservationEvidence(observation).map(evidenceChipHTML).join("")}
           </div>
-          ${agentProbeFactsHTML([
-            ["Checked", formatTime(observation.checkedAt)],
-            ["Accepted", formatTime(observation.acceptedAt)],
-            ["Duration", observation.durationMillis > 0 ? `${observation.durationMillis} ms` : ""],
-            ["Latency", observation.latencyMillis > 0 ? `${observation.latencyMillis} ms` : ""],
-            ["Endpoint", observation.endpointProfile ? diagnosticProfileLabel(observation.endpointProfile) : ""],
-            ["Failure", observation.failure && observation.failure.code ? observation.failure.code : ""],
-            ["Failed at", observation.failure && observation.failure.stage ? observation.failure.stage : ""],
-            ["Agent version", observation.agentVersion],
-          ])}
+          ${agentProbeFactsHTML(agentProbeObservationFacts(observation))}
         </section>`;
       }
 
@@ -7080,10 +7186,78 @@
         </section>`;
       }
 
+      // What the measurement itself showed. The dialog carries it in one line
+      // above the sections; a copied report has room to spell it out, and
+      // without it the probe reads as an answer to a question nobody wrote down.
+      function agentProbeMeasurementFacts(result) {
+        const threshold = Number(result.lowSpeedThresholdMbps || 0);
+        return [
+          ["Node", [result.name, result.stableId].filter(Boolean).join(" · ")],
+          ["Checked", formatTime(result.checkedAt)],
+          ["Result", result.offline ? "Offline" : formatSpeedStatus(result)],
+          ["Threshold", threshold > 0 ? formatMbps(threshold) : ""],
+          ["Timed out", isShortenedResult(result) ? formatShortfall(result) : ""],
+          ["Error", result.error || ""],
+          ["Downloaded", result.offline ? "" : formatBytes(result.downloadedBytes)],
+          ["Duration", result.offline ? "" : `${result.durationMs || 0} ms`],
+          ["TTFB", result.offline ? "" : `${result.ttfbMs || 0} ms`],
+          ["Source", result.source || ""],
+          ["Test URL", result.url || ""],
+          ["Reserve Test URL", result.fallbackUsed ? [result.fallbackProvider, result.fallbackCity, result.fallbackCountryCode].filter(Boolean).join(" · ") : ""],
+          ["Primary URL", result.fallbackUsed ? result.primaryUrl || "" : ""],
+        ];
+      }
+
+      // The text the copy button puts on the clipboard.
+      //
+      // It is built from the same data the dialog renders, never from the
+      // rendered markup: a paste has to survive being read in a ticket a week
+      // later, so it is sectioned the way the investigation runs - what was
+      // measured, what the agent was asked to settle, what it saw, and what
+      // that was taken to mean - and it drops every fact that has no value
+      // rather than pasting a column of empty labels.
+      function agentProbeReportText(result, probe) {
+        const verdict = agentProbeVerdict(probe);
+        const lines = [
+          `${tr("Agent probe")} — ${tr(verdict.label)}`,
+          [result.name || result.stableId, formatTime(result.checkedAt), result.offline ? "Offline" : formatSpeedStatus(result)]
+            .filter(Boolean).join(" · "),
+        ];
+        const section = (title, rows) => {
+          const body = (rows || [])
+            .filter((row) => row && row[1] !== "" && row[1] !== null && row[1] !== undefined)
+            .map(([label, value]) => `  ${tr(label)}: ${value}`);
+          if (body.length) lines.push("", tr(title), ...body);
+        };
+
+        section("Verdict", [
+          ["Verdict", tr(verdict.label)],
+          ["Detail", probe.detail ? tr(probe.detail) : ""],
+          ["Summary", probe.summary ? tr(probe.summary) : ""],
+          ["Agent", agentProbeAgentLabel(probe)],
+          ["Trigger", probe.trigger ? diagnosticTriggerLabel(probe.trigger) : ""],
+          ["Session", probe.sessionState || ""],
+          ["Requested", formatTime(probe.requestedAt)],
+          ["Session ID", probe.sessionId || ""],
+        ]);
+        section("Measurement", agentProbeMeasurementFacts(result));
+        if (probe.task) section("Task", agentProbeTaskFacts(probe.task));
+        if (probe.observation) {
+          section("Result", [
+            ["Checks", agentProbeObservationEvidence(probe.observation).map((item) => item.text).join(" · ")],
+            ...agentProbeObservationFacts(probe.observation),
+          ]);
+        } else {
+          section("Result", [["Result", tr("No signed observation was recorded for this probe.")]]);
+        }
+        return lines.join("\n");
+      }
+
       function openAgentProbeDialog(checkedAt) {
         const result = (state.historyResults || []).find((entry) => entry.checkedAt === checkedAt);
         const probe = result && result.agentProbe;
         if (!probe) return;
+        state.agentProbeDialog = { result, probe };
         const verdict = agentProbeVerdict(probe);
         const verdictChip = $("agent-probe-dialog-verdict");
         verdictChip.className = `chip ${verdict.chip}`;
@@ -7302,7 +7476,7 @@
 
         const active = [];
         if (currentURL) active.push(tr("URL"));
-        if (currentSize) active.push(`${currentSize} ${tr("MB")}`);
+        if (currentSize) active.push(`${currentSize} ${tr("MiB")}`);
         if (currentThreshold) active.push(`${currentThreshold} Mbps`);
         $("node-url-state").textContent = state.nodeURLDirty
           ? tr("Unsaved changes")
@@ -9759,6 +9933,13 @@
       $("close-agent-probe-dialog").addEventListener("click", () => {
         const dialog = $("agent-probe-dialog");
         if (dialog.open) dialog.close();
+      });
+      $("copy-agent-probe").addEventListener("click", () => {
+        const context = state.agentProbeDialog;
+        if (!context) return;
+        copyToClipboard(agentProbeReportText(context.result, context.probe))
+          .then(() => showCopyToast(tr("Agent probe copied!")))
+          .catch((err) => showCopyToast(`${tr("Copy failed")}: ${err.message}`));
       });
       // Clicking outside dismisses it the way a quick look does. A backdrop
       // click is reported against the dialog itself, so the pointer position is
