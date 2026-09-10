@@ -1239,8 +1239,10 @@
         stroke-dasharray: 5 5;
         stroke-linecap: round;
       }
+      /* The band is a strip along the baseline, not a fill across the plot, so
+         it carries its own colour instead of tinting the whole chart. */
       .chart-error-band {
-        fill: rgba(247, 118, 142, 0.11);
+        fill: rgba(247, 118, 142, 0.62);
         transition: fill 0.15s ease;
         animation: chart-layer-enter 0.3s ease-out both;
       }
@@ -1249,13 +1251,13 @@
         font-size: 12px;
       }
       .chart-error-band:hover {
-        fill: rgba(247, 118, 142, 0.2);
+        fill: rgba(247, 118, 142, 0.85);
       }
       .chart-error-band.warn {
-        fill: rgba(242, 184, 75, 0.13);
+        fill: rgba(242, 184, 75, 0.62);
       }
       .chart-error-band.warn:hover {
-        fill: rgba(242, 184, 75, 0.22);
+        fill: rgba(242, 184, 75, 0.85);
       }
       .chart-point {
         opacity: 0;
@@ -1269,6 +1271,7 @@
       }
       .chart-point.single {
         opacity: 0.9;
+        stroke-width: 1;
       }
       .chart-outlier-marker {
         fill: var(--yellow);
@@ -4798,9 +4801,8 @@
         const successful = ordered.filter((result) => chartResultSuccessful(result, view));
         // Nothing succeeded in this window, so there is no measurement to plot.
         // Drawing the value axis anyway would label it from an invented maximum,
-        // and filling the whole plot with failure bands makes a wall that reads
-        // as data. The failures become a strip along the baseline instead: still
-        // a record of when they happened, no longer pretending to be a graph.
+        // so the grid and the unit are dropped and the failure strip along the
+        // baseline is left to say when the checks happened.
         const hasMeasuredScale = successful.length > 0;
         const threshold = view === "speedtest" ? lowSpeedThreshold() : 0;
         const observedMax = successful.reduce((max, result) => Math.max(max, chartResultValue(result, view)), 0);
@@ -4868,9 +4870,15 @@
         if (run.length) runs.push(run);
 
         const successfulRuns = runs.filter((items) => items.length > 1);
+        const isolatedRuns = runs.filter((items) => items.length === 1);
+        // A check covers no time on its own, so the interval between checks is
+        // what one sample stands for. The same width sizes failure bands.
+        const sampleWidth = Math.max(3, Math.min(34, medianInterval > 0 ? (medianInterval / spanMs) * plotWidth : 8));
         const areaMasks = [];
         const chartPrefix = `node-${view}-${chartDOMToken(stableId)}`;
         const areaGradientID = `${chartPrefix}-area-gradient`;
+        const sampleGradientID = `${chartPrefix}-sample-gradient`;
+        const sampleFadeID = `${chartPrefix}-sample-fade`;
         const clipID = `${chartPrefix}-plot`;
         const areas = successfulRuns.map((items, index) => {
           const firstX = xOf(items[0].checkedAt).toFixed(1);
@@ -4893,6 +4901,39 @@
           const path = items.map((result) => `L ${xOf(result.checkedAt).toFixed(1)} ${yOf(chartResultValue(result, view)).toFixed(1)}`).join(" ");
           return `<path class="chart-area" style="fill:url(#${areaGradientID})" mask="url(#${maskID})" d="M ${firstX} ${baselineY} ${path} L ${lastX} ${baselineY} Z" />`;
         }).join("");
+        // A success surrounded by failures has no neighbour to draw a line to,
+        // and the run above needs two samples, so on a flapping node the check
+        // would leave nothing but a dashed bridge. It gets a column one check
+        // interval wide instead, faded at both edges like every other area: the
+        // shape says a measurement happened here, not that it lasted.
+        // One mask in bounding-box units serves every column, because a flapping
+        // day produces hundreds of them and a mask each would bloat the defs.
+        if (isolatedRuns.length > 0) {
+          areaMasks.push(`<linearGradient id="${sampleGradientID}" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="var(--blue)" stop-opacity="0.5" />
+              <stop offset="100%" stop-color="var(--blue)" stop-opacity="0.06" />
+            </linearGradient>
+            <linearGradient id="${sampleFadeID}-gradient" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stop-color="white" stop-opacity="0" />
+              <stop offset="42%" stop-color="white" stop-opacity="1" />
+              <stop offset="58%" stop-color="white" stop-opacity="1" />
+              <stop offset="100%" stop-color="white" stop-opacity="0" />
+            </linearGradient>
+            <mask id="${sampleFadeID}" maskUnits="objectBoundingBox" maskContentUnits="objectBoundingBox" x="0" y="0" width="1" height="1" style="mask-type: alpha">
+              <rect x="0" y="0" width="1" height="1" fill="url(#${sampleFadeID}-gradient)" />
+            </mask>`);
+        }
+        // Narrower than this the column disappears under its own edge fade, so a
+        // one-minute check on a month-long axis still leaves something to see.
+        const columnWidth = Math.max(5, sampleWidth);
+        const sampleBaselineY = (top + plotHeight).toFixed(1);
+        const isolatedAreas = isolatedRuns.map((items) => {
+          const result = items[0];
+          const startX = (xOf(result.checkedAt) - columnWidth / 2).toFixed(1);
+          const endX = (Number(startX) + columnWidth).toFixed(1);
+          const valueY = yOf(chartResultValue(result, view)).toFixed(1);
+          return `<path class="chart-area chart-area-sample" style="fill:url(#${sampleGradientID})" mask="url(#${sampleFadeID})" d="M ${startX} ${sampleBaselineY} L ${startX} ${valueY} L ${endX} ${valueY} L ${endX} ${sampleBaselineY} Z" />`;
+        }).join("");
         const lines = successfulRuns.map((items) => {
           const path = items.map((result, index) => {
             const command = index === 0 ? "M" : "L";
@@ -4907,18 +4948,25 @@
           const next = items[0];
           return `<path class="chart-gap-bridge" d="M ${xOf(previous.checkedAt).toFixed(1)} ${yOf(chartResultValue(previous, view)).toFixed(1)} L ${xOf(next.checkedAt).toFixed(1)} ${yOf(chartResultValue(next, view)).toFixed(1)}" aria-hidden="true" />`;
         }).join("");
-        // A single real measurement remains visible. Isolated successes in a
-        // flapping series are represented by dashed gap bridges and error bands,
-        // not by a misleading solid interpolation or a chart full of dots.
-        const singlePointTimes = new Set(successful.length === 1 ? [successful[0].checkedAt] : []);
+        // A sample no line can reach stays visible on its own: the dot marks the
+        // measured value, its column marks the moment. Samples inside a run keep
+        // the hover-only dot, so a dense series is a line and not a field of dots.
+        const singlePointTimes = new Set(isolatedRuns.map((items) => items[0].checkedAt));
+        // Dots keep the spacing they are given: a day of flapping puts hundreds
+        // of them on the same axis, and at the fixed radius they would merge into
+        // a solid band — the very thing a chart of single samples must not become.
+        const isolatedSpacing = isolatedRuns.length > 1 ? plotWidth / isolatedRuns.length : plotWidth;
+        const singlePointRadius = Math.max(2, Math.min(5, isolatedSpacing * 0.45));
         const points = successful.map((result) => {
           const low = view === "speedtest" && isLowSpeed(result);
           const color = low ? "var(--yellow)" : "var(--blue)";
           const detail = view === "availability"
             ? `${formatTime(result.checkedAt)} · ${formatLatencyMs(result.latencyMs)} · Online`
             : `${formatTime(result.checkedAt)} · ${formatMbps(result.mbps)} · TTFB ${Number(result.ttfbMs || 0)} ms · ${formatBytes(result.downloadedBytes)}`;
-          const singleClass = singlePointTimes.has(result.checkedAt) ? " single" : "";
-          return `<circle class="chart-point${singleClass}" cx="${xOf(result.checkedAt).toFixed(1)}" cy="${yOf(chartResultValue(result, view)).toFixed(1)}" r="5" fill="${color}" tabindex="0"><title>${escapeHtml(detail)}</title></circle>`;
+          const single = singlePointTimes.has(result.checkedAt);
+          const singleClass = single ? " single" : "";
+          const radius = single ? singlePointRadius.toFixed(1) : "5";
+          return `<circle class="chart-point${singleClass}" cx="${xOf(result.checkedAt).toFixed(1)}" cy="${yOf(chartResultValue(result, view)).toFixed(1)}" r="${radius}" fill="${color}" tabindex="0"><title>${escapeHtml(detail)}</title></circle>`;
         }).join("");
         const outlierMarkers = view === "availability" && hasClippedPeaks
           ? successful.filter((result) => chartResultValue(result, view) > yMax).map((result) => {
@@ -4927,7 +4975,6 @@
             return `<path class="chart-outlier-marker" d="M ${(x - 5).toFixed(1)} ${top + 10} L ${x.toFixed(1)} ${top + 2} L ${(x + 5).toFixed(1)} ${top + 10} Z" tabindex="0" aria-label="${escapeHtml(detail)}"><title>${escapeHtml(detail)}</title></path>`;
           }).join("")
           : "";
-        const errorBandWidth = Math.max(3, Math.min(34, medianInterval > 0 ? (medianInterval / spanMs) * plotWidth : 8));
         // One band per failed check overlaps its neighbours at any ordinary
         // check interval, and translucent rectangles stacked on each other are
         // what turn a long outage into a smeared field with seams. Consecutive
@@ -4954,13 +5001,17 @@
           openFailure = { status, first: result, last: result, count: 1 };
           failureRuns.push(openFailure);
         });
-        const failureStripHeight = 16;
-        const failureTop = hasMeasuredScale ? top : top + plotHeight - failureStripHeight;
-        const failureHeight = hasMeasuredScale ? plotHeight : failureStripHeight;
+        // A failed check has no value on the value axis, so it is drawn as a
+        // strip along the baseline rather than a band across the whole plot: on
+        // a node that fails most of the time, full-height fills become a wall
+        // that reads as data and buries the samples that did succeed.
+        const failureStripHeight = 14;
+        const failureTop = top + plotHeight - failureStripHeight;
+        const failureHeight = failureStripHeight;
         const errors = failureRuns.map((run) => {
-          const startX = xOf(run.first.checkedAt) - errorBandWidth / 2;
-          const endX = xOf(run.last.checkedAt) + errorBandWidth / 2;
-          const bandWidth = Math.max(errorBandWidth, endX - startX);
+          const startX = xOf(run.first.checkedAt) - sampleWidth / 2;
+          const endX = xOf(run.last.checkedAt) + sampleWidth / 2;
+          const bandWidth = Math.max(sampleWidth, endX - startX);
           const reason = view === "availability"
             ? (run.status === "proxy_failure" ? "Proxy failure" : (run.first.failureSummary || "Offline"))
             : (run.first.offline ? "Offline" : compactReason(run.first.error) || "Failed");
@@ -4995,7 +5046,7 @@
             ${areaMasks.join("")}
           </defs>
           ${grid.join("")}
-          <g clip-path="url(#${clipID})">${areas}${errors}${thresholdLine}${gapBridges}${lines}${latestMarker}${cursor}${points}${outlierMarkers}</g>
+          <g clip-path="url(#${clipID})">${areas}${isolatedAreas}${errors}${thresholdLine}${gapBridges}${lines}${latestMarker}${cursor}${points}${outlierMarkers}</g>
           ${unitLabel}
         </svg>`;
       }
