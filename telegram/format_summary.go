@@ -50,21 +50,21 @@ func (s *Service) notificationLabels(cfg Config) (alerts, reports string) {
 // A mute affects delivery, not whether a problem exists in an interactive view.
 // Resolve the requested scope separately: a permanent alert mute may coexist
 // with a temporary speed mute on the same node.
-func (s *Service) muteNoteHTML(stableID string, cfg Config, scope string) string {
+func (s *Service) muteNoteHTML(stableID string, cfg Config, scope string) (string, time.Time) {
 	permanent := mutedAlertNodeSet(cfg)
 	if scope == muteScopeSpeed {
 		permanent = mutedSpeedNodeSet(cfg)
 	}
 	if permanent[stableID] {
-		return " · 🔕 уведомления выключены"
+		return " · 🔕 уведомления выключены", time.Time{}
 	}
 	s.mu.RLock()
 	mute, ok := s.mutes[stableID]
 	s.mu.RUnlock()
 	if ok && mute.Until.After(time.Now()) && (mute.Scope == muteScopeAll || mute.Scope == scope) {
-		return " · 🔕 до " + htmlEscape(formatCheckedAt(mute.Until))
+		return " · 🔕 до " + htmlEscape(formatCheckedAt(mute.Until)), mute.Until
 	}
-	return ""
+	return "", time.Time{}
 }
 
 // Budget whole node blocks, including their agent evidence. Both renderings
@@ -170,11 +170,11 @@ func buildSpeedReport(report speedtest.RunReport, cfg Config, issuesOnly bool, s
 	if len(issues) == 0 && !issuesOnly {
 		actions = visibleHealthy
 	}
-	return formattedMessage{
-		HTML:        trimHTMLMessage(strings.Join(lines, "\n")),
+	return withMessageTimezone(formattedMessage{
+		HTML:        strings.Join(lines, "\n"),
 		RichHTML:    rich.String(),
 		ReplyMarkup: speedReportMarkup(actions),
-	}
+	}, report.FinishedAt)
 }
 
 // A timeout above the threshold is neither healthy nor a low rate. Keep the
@@ -212,6 +212,7 @@ func speedAttentionLabel(results []speedtest.Result) string {
 func (s *Service) buildIssuesSummary() formattedMessage {
 	cfg := s.Config()
 	var availability, richAvailability []string
+	var availabilityTimes, timestamps []time.Time
 	for _, proxy := range s.sortedProxies() {
 		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
 		if err != nil {
@@ -220,7 +221,8 @@ func (s *Service) buildIssuesSummary() formattedMessage {
 		if details.EffectiveStatus() == checker.AvailabilityStateOnline {
 			continue
 		}
-		note := s.muteNoteHTML(proxy.StableID, cfg, muteScopeAlerts)
+		note, until := s.muteNoteHTML(proxy.StableID, cfg, muteScopeAlerts)
+		availabilityTimes = append(availabilityTimes, until)
 		availability = append(availability, formatProxyLineHTML(proxy, details)+note)
 		richAvailability = append(richAvailability, strings.TrimSuffix(formatProxyRichItem(proxy, details), "</li>")+note+"</li>")
 	}
@@ -250,6 +252,7 @@ func (s *Service) buildIssuesSummary() formattedMessage {
 			}
 			lines = append(lines, line)
 			rich.WriteString(richAvailability[i])
+			timestamps = append(timestamps, availabilityTimes[i])
 			shown++
 		}
 		if shown < len(availability) {
@@ -265,7 +268,7 @@ func (s *Service) buildIssuesSummary() formattedMessage {
 		visible := visibleSpeedResults(speedResults, cfg.LowSpeedThresholdMbps, cfg.SpeedReportLimit, 1500)
 		used, shown := 0, 0
 		for _, result := range visible {
-			note := s.muteNoteHTML(result.StableID, cfg, muteScopeSpeed)
+			note, until := s.muteNoteHTML(result.StableID, cfg, muteScopeSpeed)
 			block := speedIssuesHTML([]speedtest.Result{result}, cfg.LowSpeedThresholdMbps)[0]
 			used += utf8.RuneCountInString(block+note) + 1
 			if used > 1500 {
@@ -273,6 +276,7 @@ func (s *Service) buildIssuesSummary() formattedMessage {
 			}
 			shown++
 			lines = append(lines, block+note)
+			timestamps = append(timestamps, until)
 			rich.WriteString(strings.TrimSuffix(formatSpeedIssueRichItem(result, cfg.LowSpeedThresholdMbps), "</li>") + note + "</li>")
 		}
 		visible = visible[:shown]
@@ -283,5 +287,5 @@ func (s *Service) buildIssuesSummary() formattedMessage {
 		rich.WriteString("</ul>")
 		rich.WriteString(formatSpeedDiagnosticsRichDetails(visible, 0))
 	}
-	return formattedMessage{HTML: trimHTMLMessage(strings.Join(lines, "\n")), RichHTML: rich.String()}
+	return withMessageTimezone(formattedMessage{HTML: strings.Join(lines, "\n"), RichHTML: rich.String()}, timestamps...)
 }

@@ -117,6 +117,7 @@ func formatNodeDown(proxy *models.ProxyConfig, state nodeAlertState, now time.Ti
 		fmt.Sprintf("%s <b>%s</b> · %s", marker, htmlEscape(proxy.Name), htmlEscape(title)),
 	}
 	if since := nodeAlertIssueSince(state); !since.IsZero() {
+		lines = append(lines, htmlEscape(messageTimezone(since)))
 		lines = append(lines, fmt.Sprintf("%s: <b>%s</b> · с %s", durationLabel, htmlEscape(formatDuration(now.Sub(since))), htmlEscape(formatCheckedAt(since))))
 	}
 	if failure := formatFailureHTML(state.Failure); failure != "" {

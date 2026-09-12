@@ -745,7 +745,8 @@ func muteConfirmationText(minutes int) string {
 	if minutes <= 0 {
 		return "Уведомления выключены"
 	}
-	return "Тишина до " + time.Now().Add(time.Duration(minutes)*time.Minute).In(messageLocation()).Format("15:04")
+	until := time.Now().Add(time.Duration(minutes) * time.Minute)
+	return "Тишина до " + formatCheckedAt(until) + "\n" + messageTimezone(until)
 }
 
 func (s *Service) newSpeedTestRunRequest() speedtest.RunRequest {

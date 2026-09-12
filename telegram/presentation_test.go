@@ -62,14 +62,14 @@ func TestMuteNoteResolvesEachScopeIndependently(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MutedAlertNodeIDs = []string{"node"}
 	service.mutes["node"] = nodeMute{Scope: muteScopeSpeed, Until: time.Now().Add(time.Hour)}
-	if got := service.muteNoteHTML("node", cfg, muteScopeAlerts); !strings.Contains(got, "выключены") {
+	if got, _ := service.muteNoteHTML("node", cfg, muteScopeAlerts); !strings.Contains(got, "выключены") {
 		t.Fatal(got)
 	}
-	if got := service.muteNoteHTML("node", cfg, muteScopeSpeed); !strings.Contains(got, "до ") {
+	if got, _ := service.muteNoteHTML("node", cfg, muteScopeSpeed); !strings.Contains(got, "до ") {
 		t.Fatal(got)
 	}
 	service.mutes["node"] = nodeMute{Scope: muteScopeSpeed, Until: time.Now().Add(-time.Minute)}
-	if got := service.muteNoteHTML("node", cfg, muteScopeSpeed); got != "" {
+	if got, _ := service.muteNoteHTML("node", cfg, muteScopeSpeed); got != "" {
 		t.Fatal("expired mute is still shown: " + got)
 	}
 }
@@ -242,7 +242,7 @@ func TestConfiguredTimeZoneRendersMessageTimestamps(t *testing.T) {
 	service.setConfig(cfg)
 
 	downSince := time.Date(2026, 9, 12, 0, 30, 0, 0, time.UTC)
-	if got, want := formatCheckedAt(downSince), "12.09 09:30 +09:00"; got != want {
+	if got, want := formatCheckedAt(downSince), "12.09 09:30"; got != want {
 		t.Fatalf("timestamp = %q, want %q", got, want)
 	}
 
@@ -251,20 +251,101 @@ func TestConfiguredTimeZoneRendersMessageTimestamps(t *testing.T) {
 	proxy := testProxies("alpha")[0]
 	message := formatNodeDownMessage(proxy, nodeAlertState{DownSince: downSince, FailCount: 2}, downSince.Add(time.Hour))
 	for _, text := range []string{message.HTML, message.RichHTML} {
-		if !strings.Contains(text, "12.09 09:30 +09:00") {
+		if !strings.Contains(text, "12.09 09:30") || strings.Contains(text, "09:30 +09:00") || strings.Count(text, "Часовой пояс: UTC+09:00 (Asia/Tokyo).") != 1 {
 			t.Fatalf("alert kept another zone: %s", text)
 		}
 	}
 
 	cfg.TimeZone = "Europe/Moscow"
 	service.setConfig(cfg)
-	if got, want := formatCheckedAt(downSince), "12.09 03:30 +03:00"; got != want {
+	if got, want := formatCheckedAt(downSince), "12.09 03:30"; got != want {
 		t.Fatalf("timestamp after a zone change = %q, want %q", got, want)
 	}
 
 	cfg.TimeZone = ""
 	service.setConfig(cfg)
-	if got, want := formatCheckedAt(downSince), downSince.In(time.Local).Format("02.01 15:04 -07:00"); got != want {
+	if got, want := formatCheckedAt(downSince), downSince.In(time.Local).Format("02.01 15:04"); got != want {
 		t.Fatalf("cleared zone = %q, want the process zone %q", got, want)
+	}
+}
+
+func TestTimezoneCaptionAcrossTelegramViews(t *testing.T) {
+	previous := messageLocation()
+	t.Cleanup(func() { setDisplayLocation(previous) })
+	proxies := testProxies("alpha")
+	proxyChecker := testChecker(proxies)
+	id := proxies[0].StableID
+	checkedAt := time.Date(2026, 9, 12, 13, 18, 0, 0, time.UTC)
+	result := speedtest.Result{StableID: id, Name: "alpha", Mbps: 2, CheckedAt: checkedAt}
+	dir := t.TempDir()
+	data, err := json.Marshal(map[string]any{
+		"version": 1,
+		"results": map[string]speedtest.Result{id: result},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "speedtest_results.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager := speedtest.NewManager(proxyChecker, 10000, filepath.Join(dir, "schedule.json"), speedtest.TestConfig{})
+	if err := manager.Load(); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService("", proxyChecker, manager, 10000)
+	cfg := DefaultConfig()
+	cfg.LowSpeedThresholdMbps = 10
+	service.setConfig(cfg)
+	setDisplayLocation(time.FixedZone("Asia/Krasnoyarsk", 7*60*60))
+	until := time.Now().Add(time.Hour)
+	service.mutes[id] = nodeMute{Scope: muteScopeAll, Until: until}
+	messages := map[string]formattedMessage{
+		"measurements": service.formatRecentSpeedOverviewMessage(),
+		"history":      service.formatSpeedHistoryMessage(id),
+		"node":         service.formatNodeDetailsMessage(id),
+		"report":       buildSpeedReport(speedtest.RunReport{Results: []speedtest.Result{result}, FinishedAt: checkedAt}, cfg, false, nil),
+		"issues":       service.buildIssuesSummary(),
+		"mute":         formatNodeMuteMenuMessage(proxies[0], service.nodeMuteStatusFor(id, cfg)),
+	}
+	for name, message := range messages {
+		t.Run(name, func(t *testing.T) {
+			for _, text := range []string{message.HTML, message.RichHTML} {
+				if strings.Count(text, "Часовой пояс: UTC+07:00 (Asia/Krasnoyarsk).") != 1 || strings.Count(text, "+07:00") != 1 {
+					t.Fatalf("timezone must appear once in the message body: %s", text)
+				}
+				if name != "issues" && name != "mute" && !strings.Contains(text, "12.09 20:18") {
+					t.Fatalf("missing local timestamp: %s", text)
+				}
+			}
+		})
+	}
+	if text := muteConfirmationText(60); strings.Count(text, "Часовой пояс: UTC+07:00 (Asia/Krasnoyarsk).") != 1 {
+		t.Fatal(text)
+	}
+	for _, message := range []formattedMessage{
+		service.formatStatusMessage(),
+		formatNodeMuteMenuMessage(proxies[0], nodeMuteStatus{}),
+	} {
+		if strings.Contains(message.HTML+message.RichHTML, "Часовой пояс:") {
+			t.Fatal("a message without timestamps should not show a timezone")
+		}
+	}
+}
+
+func TestTimezoneCaptionIncludesHistoricalOffsets(t *testing.T) {
+	location, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := messageLocation()
+	t.Cleanup(func() { setDisplayLocation(previous) })
+	setDisplayLocation(location)
+	winter := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	summer := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if got := messageTimezone(summer, winter, winter, time.Time{}); got != "Часовой пояс: UTC+01:00 / UTC+02:00 (Europe/Berlin)." {
+		t.Fatal(got)
+	}
+	if messageTimezone(time.Time{}) != "" || formatCheckedAt(time.Time{}) != "—" {
+		t.Fatal("zero timestamps must not invent a timezone or date")
 	}
 }

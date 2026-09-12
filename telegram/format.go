@@ -170,19 +170,21 @@ func formatNodeMuteMenuMessage(proxy *models.ProxyConfig, status nodeMuteStatus)
 		name = proxy.Name
 	}
 	state := "уведомления включены"
+	var until time.Time
 	switch {
 	case status.Permanent:
 		state = "заглушена без срока · " + muteScopeLabel(status.Scope)
 	case status.Muted():
 		state = fmt.Sprintf("тишина до %s · %s", formatCheckedAt(status.Until), muteScopeLabel(status.Scope))
+		until = status.Until
 	}
 
-	return formattedMessage{
+	return withMessageTimezone(formattedMessage{
 		HTML: fmt.Sprintf("<b>Уведомления · %s</b>\n\nСейчас: <b>%s</b>\n\nВыберите срок тишины кнопкой ниже.",
 			htmlEscape(name), htmlEscape(state)),
 		RichHTML: fmt.Sprintf("<h2>Уведомления</h2><p><b>%s</b></p><table bordered><tr><th>Сейчас</th><td>%s</td></tr></table><footer>Выберите срок тишины кнопкой ниже.</footer>",
 			htmlEscape(name), htmlEscape(state)),
-	}
+	}, until)
 }
 
 func muteScopeLabel(scope string) string {
@@ -223,11 +225,14 @@ func (s *Service) formatNodeDetails(stableID string) string {
 		fmt.Sprintf("<b>%s</b>", htmlEscape(proxy.Name)),
 		fmt.Sprintf("Статус: <b>%s</b> · %s", htmlEscape(status), htmlEscape(latencyText)),
 	}
+	var timestamps []time.Time
 	if availabilityStatus == checker.AvailabilityStateOffline && !details.DownSince.IsZero() {
+		timestamps = append(timestamps, details.DownSince)
 		lines = append(lines, fmt.Sprintf("Недоступна с: <b>%s</b>", htmlEscape(formatCheckedAt(details.DownSince))))
 		lines = append(lines, fmt.Sprintf("Простой: <b>%s</b>", htmlEscape(formatDuration(time.Since(details.DownSince)))))
 	}
 	if availabilityStatus == checker.AvailabilityStateProxyFailure && !details.ProxyFailureSince.IsZero() {
+		timestamps = append(timestamps, details.ProxyFailureSince)
 		lines = append(lines, fmt.Sprintf("Proxy failure с: <b>%s</b>", htmlEscape(formatCheckedAt(details.ProxyFailureSince))))
 		lines = append(lines, fmt.Sprintf("Длительность proxy failure: <b>%s</b>", htmlEscape(formatDuration(time.Since(details.ProxyFailureSince)))))
 	}
@@ -251,6 +256,7 @@ func (s *Service) formatNodeDetails(stableID string) string {
 	} else {
 		cfg := s.Config()
 		for _, result := range limitResults(history, 5) {
+			timestamps = append(timestamps, result.CheckedAt)
 			lines = append(lines, formatSpeedHistoryLine(result, cfg.LowSpeedThresholdMbps))
 		}
 	}
@@ -262,7 +268,7 @@ func (s *Service) formatNodeDetails(stableID string) string {
 	if proxy.Server != "" {
 		lines = append(lines, "Сервер: "+htmlCode(fmt.Sprintf("%s:%d", proxy.Server, proxy.Port)))
 	}
-	return trimHTMLMessage(strings.Join(lines, "\n"))
+	return trimHTMLMessage(withTimezoneHTML(strings.Join(lines, "\n"), false, timestamps...))
 }
 
 func (s *Service) formatNodeDetailsMessage(stableID string) formattedMessage {
@@ -291,10 +297,13 @@ func (s *Service) formatNodeDetailsMessage(stableID string) formattedMessage {
 	var rich strings.Builder
 	fmt.Fprintf(&rich, "<h2>%s</h2>", htmlEscape(proxy.Name))
 	fmt.Fprintf(&rich, "<p><b>%s</b> · %s</p>", htmlEscape(status), htmlEscape(latency))
+	var timestamps []time.Time
 	if availabilityStatus == checker.AvailabilityStateOffline && !details.DownSince.IsZero() {
+		timestamps = append(timestamps, details.DownSince)
 		fmt.Fprintf(&rich, "<p>Простой: <b>%s</b> · с %s</p>", htmlEscape(formatDuration(time.Since(details.DownSince))), htmlEscape(formatCheckedAt(details.DownSince)))
 	}
 	if availabilityStatus == checker.AvailabilityStateProxyFailure && !details.ProxyFailureSince.IsZero() {
+		timestamps = append(timestamps, details.ProxyFailureSince)
 		fmt.Fprintf(&rich, "<p>Proxy failure: <b>%s</b> · с %s</p>", htmlEscape(formatDuration(time.Since(details.ProxyFailureSince))), htmlEscape(formatCheckedAt(details.ProxyFailureSince)))
 	}
 	if availabilityStatus != checker.AvailabilityStateOnline {
@@ -329,9 +338,10 @@ func (s *Service) formatNodeDetailsMessage(stableID string) formattedMessage {
 		cfg := s.Config()
 		rich.WriteString("<h3>Последние замеры</h3>")
 		rich.WriteString(formatSpeedHistoryRichTable(limitResults(history, 5), cfg.LowSpeedThresholdMbps))
+		timestamps = append(timestamps, speedResultTimes(limitResults(history, 5))...)
 	}
 
-	return formattedMessage{HTML: fallback, RichHTML: rich.String()}
+	return formattedMessage{HTML: fallback, RichHTML: withTimezoneHTML(rich.String(), true, timestamps...)}
 }
 
 func (s *Service) nodeCounts() (total int, online int, proxyFailures int, offline int) {

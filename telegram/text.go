@@ -3,6 +3,7 @@ package telegram
 import (
 	"fmt"
 	"html"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -117,7 +118,64 @@ func formatCheckedAt(value time.Time) string {
 	if value.IsZero() {
 		return "—"
 	}
-	return value.In(messageLocation()).Format("02.01 15:04 -07:00")
+	return value.In(messageLocation()).Format("02.01 15:04")
+}
+
+// Describe the offsets at the displayed instants, including historical DST.
+// Zero timestamps render as a dash and do not need a timezone caption.
+func messageTimezone(values ...time.Time) string {
+	location := messageLocation()
+	var offsets []string
+	var names []string
+	seen := make(map[string]bool)
+	seenNames := make(map[string]bool)
+	for _, value := range values {
+		if value.IsZero() {
+			continue
+		}
+		local := value.In(location)
+		offset := "UTC" + local.Format("-07:00")
+		if !seen[offset] {
+			seen[offset] = true
+			offsets = append(offsets, offset)
+		}
+		name := location.String()
+		if name == "Local" {
+			name, _ = local.Zone()
+		}
+		if !seenNames[name] {
+			seenNames[name] = true
+			names = append(names, name)
+		}
+	}
+	if len(offsets) == 0 {
+		return ""
+	}
+	sort.Strings(offsets)
+	sort.Strings(names)
+	return fmt.Sprintf("Часовой пояс: %s (%s).", strings.Join(offsets, " / "), strings.Join(names, " / "))
+}
+
+func withTimezoneHTML(text string, rich bool, values ...time.Time) string {
+	caption := htmlEscape(messageTimezone(values...))
+	if caption == "" {
+		return text
+	}
+	if rich {
+		heading, body, found := strings.Cut(text, "</h2>")
+		if found {
+			return heading + "</h2><p>" + caption + "</p>" + body
+		}
+		return "<p>" + caption + "</p>" + text
+	}
+	heading, body, _ := strings.Cut(text, "\n")
+	return heading + "\n" + caption + "\n" + body
+}
+
+func withMessageTimezone(message formattedMessage, values ...time.Time) formattedMessage {
+	message.HTML = trimHTMLMessage(withTimezoneHTML(message.HTML, false, values...))
+	message.RichHTML = withTimezoneHTML(message.RichHTML, true, values...)
+	return message
 }
 
 func trimMessage(text string) string {
