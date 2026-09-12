@@ -78,6 +78,7 @@ geo/
 .claude/
 TODO.md
 DESIGN.md
+/DO_NOT_READ.md
 
 # Throwaway harnesses used to drive the admin UI against mock data. They are
 # scratch tooling for one investigation, not something the build depends on.

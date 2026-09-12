@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"xray-checker/checker"
 	"xray-checker/speedtest"
@@ -86,6 +87,7 @@ func (s *Service) formatRecentSpeedOverview() string {
 	lines := []string{
 		"<b>Замеры</b>",
 		speedCountsHTML(results, cfg.LowSpeedThresholdMbps),
+		htmlEscape(speedOverviewTimezone(results)),
 	}
 	appendGroup := func(title string, group []speedtest.Result) {
 		if len(group) == 0 {
@@ -96,7 +98,7 @@ func (s *Service) formatRecentSpeedOverview() string {
 			lines = append(lines, fmt.Sprintf("• <b>%s</b> · %s · %s",
 				htmlEscape(result.Name),
 				speedResultStatusHTML(result, cfg.LowSpeedThresholdMbps),
-				htmlEscape(formatCheckedAt(result.CheckedAt)),
+				htmlEscape(formatSpeedOverviewTime(result.CheckedAt)),
 			))
 		}
 	}
@@ -125,6 +127,7 @@ func (s *Service) formatRecentSpeedOverviewMessage() formattedMessage {
 	var rich strings.Builder
 	rich.WriteString("<h2>Замеры</h2>")
 	fmt.Fprintf(&rich, "<p>%s</p>", speedCountsHTML(results, cfg.LowSpeedThresholdMbps))
+	fmt.Fprintf(&rich, "<p>%s</p>", htmlEscape(speedOverviewTimezone(results)))
 	writeSpeedGroupTable(&rich, "Ошибки", failed, cfg.LowSpeedThresholdMbps)
 	writeSpeedGroupTable(&rich, speedAttentionLabel(slow), slow, cfg.LowSpeedThresholdMbps)
 	// Nodes that are simply fine are the bulk of the list and the least worth
@@ -152,10 +155,38 @@ func writeSpeedResultRows(rich *strings.Builder, group []speedtest.Result, thres
 		fmt.Fprintf(rich, "<tr><td>%s</td><td>%s</td><td>%s</td></tr>",
 			htmlEscape(result.Name),
 			formatSpeedStatusRich(result, threshold),
-			htmlEscape(formatCheckedAt(result.CheckedAt)),
+			htmlEscape(formatSpeedOverviewTime(result.CheckedAt)),
 		)
 	}
 	rich.WriteString("</table>")
+}
+
+func formatSpeedOverviewTime(value time.Time) string {
+	if value.IsZero() {
+		return "—"
+	}
+	return value.In(messageLocation()).Format("02.01 15:04")
+}
+
+func speedOverviewTimezone(results []speedtest.Result) string {
+	location := messageLocation()
+	var offsets []string
+	seen := make(map[string]bool)
+	for _, result := range results {
+		if result.CheckedAt.IsZero() {
+			continue
+		}
+		offset := "UTC" + result.CheckedAt.In(location).Format("-07:00")
+		if !seen[offset] {
+			seen[offset] = true
+			offsets = append(offsets, offset)
+		}
+	}
+	if len(offsets) == 0 {
+		offsets = append(offsets, "UTC"+time.Now().In(location).Format("-07:00"))
+	}
+	sort.Strings(offsets)
+	return fmt.Sprintf("Часовой пояс: %s (%s).", strings.Join(offsets, "/"), location.String())
 }
 
 func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, failed int, slow int, issuesOnly bool, scopes ...speedReportScope) string {
