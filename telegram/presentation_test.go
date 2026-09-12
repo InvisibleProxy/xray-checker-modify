@@ -229,3 +229,42 @@ func TestNodeAlertReminderIsPresentInBothFormats(t *testing.T) {
 		}
 	}
 }
+
+func TestConfiguredTimeZoneRendersMessageTimestamps(t *testing.T) {
+	if _, err := time.LoadLocation("Asia/Tokyo"); err != nil {
+		t.Skipf("zone database is unavailable: %v", err)
+	}
+	t.Cleanup(func() { setDisplayLocation(time.Local) })
+
+	service := NewService("", nil, nil, 10000)
+	cfg := DefaultConfig()
+	cfg.TimeZone = "Asia/Tokyo"
+	service.setConfig(cfg)
+
+	downSince := time.Date(2026, 9, 12, 0, 30, 0, 0, time.UTC)
+	if got, want := formatCheckedAt(downSince), "12.09 09:30 +09:00"; got != want {
+		t.Fatalf("timestamp = %q, want %q", got, want)
+	}
+
+	// The zone has to reach the rendered alert, not just the helper: every
+	// timestamp the operator reads comes through these messages.
+	proxy := testProxies("alpha")[0]
+	message := formatNodeDownMessage(proxy, nodeAlertState{DownSince: downSince, FailCount: 2}, downSince.Add(time.Hour))
+	for _, text := range []string{message.HTML, message.RichHTML} {
+		if !strings.Contains(text, "12.09 09:30 +09:00") {
+			t.Fatalf("alert kept another zone: %s", text)
+		}
+	}
+
+	cfg.TimeZone = "Europe/Moscow"
+	service.setConfig(cfg)
+	if got, want := formatCheckedAt(downSince), "12.09 03:30 +03:00"; got != want {
+		t.Fatalf("timestamp after a zone change = %q, want %q", got, want)
+	}
+
+	cfg.TimeZone = ""
+	service.setConfig(cfg)
+	if got, want := formatCheckedAt(downSince), downSince.In(time.Local).Format("02.01 15:04 -07:00"); got != want {
+		t.Fatalf("cleared zone = %q, want the process zone %q", got, want)
+	}
+}

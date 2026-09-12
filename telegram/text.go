@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"html"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -95,11 +96,28 @@ func compactText(value string, maxRunes int) string {
 	return string(runes[:maxRunes-1]) + "…"
 }
 
+// Timestamps are printed by free functions spread across every format*.go
+// family, so the operator's zone lives beside them rather than being threaded
+// through every signature. One process runs one bot, and the value is refreshed
+// whenever a config is applied.
+var displayLocation atomic.Pointer[time.Location]
+
+func setDisplayLocation(location *time.Location) {
+	displayLocation.Store(location)
+}
+
+func messageLocation() *time.Location {
+	if location := displayLocation.Load(); location != nil {
+		return location
+	}
+	return time.Local
+}
+
 func formatCheckedAt(value time.Time) string {
 	if value.IsZero() {
 		return "—"
 	}
-	return value.Format("02.01 15:04 -07:00")
+	return value.In(messageLocation()).Format("02.01 15:04 -07:00")
 }
 
 func trimMessage(text string) string {

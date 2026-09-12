@@ -82,6 +82,7 @@ type Config struct {
 	MutedNodeIDs                 []string `json:"mutedNodeIds,omitempty"`
 	MutedSpeedNodeIDs            []string `json:"mutedSpeedNodeIds,omitempty"`
 	MutedAlertNodeIDs            []string `json:"mutedAlertNodeIds,omitempty"`
+	TimeZone                     string   `json:"timeZone,omitempty"`
 	TimeoutSec                   int      `json:"timeoutSec"`
 }
 
@@ -104,6 +105,7 @@ type AdminConfig struct {
 	MutedNodeIDs                 []string `json:"mutedNodeIds,omitempty"`
 	MutedSpeedNodeIDs            []string `json:"mutedSpeedNodeIds,omitempty"`
 	MutedAlertNodeIDs            []string `json:"mutedAlertNodeIds,omitempty"`
+	TimeZone                     string   `json:"timeZone"`
 	BotTokenConfigured           bool     `json:"botTokenConfigured"`
 	ChatConfigured               bool     `json:"chatConfigured"`
 	MessageThreadConfigured      bool     `json:"messageThreadConfigured"`
@@ -174,9 +176,45 @@ func (c *Config) Normalize() {
 	c.MutedNodeIDs = normalizeNodeIDs(c.MutedNodeIDs)
 	c.MutedSpeedNodeIDs = normalizeNodeIDs(c.MutedSpeedNodeIDs)
 	c.MutedAlertNodeIDs = normalizeNodeIDs(c.MutedAlertNodeIDs)
+	c.TimeZone = strings.TrimSpace(c.TimeZone)
 	if c.TimeoutSec <= 0 {
 		c.TimeoutSec = defaultTimeoutSec
 	}
+}
+
+// parseTimeZone resolves the operator's IANA name. An empty name is not an
+// error: it means the timestamps keep the process time zone, which is what the
+// bot printed before the setting existed.
+func parseTimeZone(name string) (*time.Location, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return time.Local, nil
+	}
+	return time.LoadLocation(name)
+}
+
+// warnUnknownTimeZone reports a saved zone this host cannot resolve. The bot
+// still starts, printing the process zone, because a missing zone database is
+// not a reason to stop alerting.
+func warnUnknownTimeZone(cfg Config) {
+	if cfg.TimeZone == "" {
+		return
+	}
+	if _, err := parseTimeZone(cfg.TimeZone); err != nil {
+		logger.Warn("Telegram time zone %q cannot be loaded (%v); message timestamps stay in the process time zone", cfg.TimeZone, err)
+	}
+}
+
+// Location is the zone every timestamp in a message is printed in. An unknown
+// name falls back to the process zone instead of failing the render: the value
+// is validated when it is saved, so only a hand-edited state file or a host
+// without the zone database can get here.
+func (c Config) Location() *time.Location {
+	location, err := parseTimeZone(c.TimeZone)
+	if err != nil {
+		return time.Local
+	}
+	return location
 }
 
 func applyLegacyAlertRepeat(data []byte, cfg *Config) {

@@ -2284,6 +2284,11 @@
                 </div>
               </div>
               <div class="hint">Sensitive Telegram values are read from environment variables only.</div>
+              <label>
+                Time zone
+                <select id="telegram-timezone"></select>
+              </label>
+              <div class="hint">Every time the bot prints — alerts, reports, mute expiry — is shown in this zone. Server time keeps the checker's own zone, which is UTC unless the container sets one.</div>
             </div>
 
             <div class="control-group">
@@ -3918,6 +3923,7 @@
           mutedNodeIds: activeTelegramMuteNodeIds("all"),
           mutedSpeedNodeIds: activeTelegramMuteNodeIds("speed"),
           mutedAlertNodeIds: activeTelegramMuteNodeIds("alerts"),
+          timeZone: $("telegram-timezone").value || "",
           timeoutSec: 20,
         };
       }
@@ -7513,6 +7519,60 @@
         applySpeedConfig(loadSpeedDraft());
       }
 
+      // Browsers ship the same IANA database the backend validates against, so
+      // the list is read from there instead of being duplicated in the page.
+      // The static list is only for a browser too old to enumerate zones; it
+      // covers where the fleet and its operators actually are.
+      const fallbackTimeZones = [
+        "UTC", "Europe/London", "Europe/Lisbon", "Europe/Berlin", "Europe/Amsterdam", "Europe/Warsaw",
+        "Europe/Helsinki", "Europe/Tallinn", "Europe/Kyiv", "Europe/Istanbul", "Europe/Moscow",
+        "Asia/Tbilisi", "Asia/Yerevan", "Asia/Dubai", "Asia/Almaty", "Asia/Novosibirsk", "Asia/Krasnoyarsk",
+        "Asia/Bangkok", "Asia/Singapore", "Asia/Tokyo",
+        "America/New_York", "America/Chicago", "America/Los_Angeles",
+      ];
+      let timeZoneOptionsReady = false;
+
+      function supportedTimeZones() {
+        try {
+          if (typeof Intl.supportedValuesOf === "function") {
+            const zones = Intl.supportedValuesOf("timeZone");
+            if (Array.isArray(zones) && zones.length) return zones;
+          }
+        } catch (err) {
+          /* fall through to the static list */
+        }
+        return fallbackTimeZones;
+      }
+
+      function timeZoneLabel(zone) {
+        try {
+          const parts = new Intl.DateTimeFormat("en-US", { timeZone: zone, timeZoneName: "longOffset" }).formatToParts(new Date());
+          const offset = parts.find((part) => part.type === "timeZoneName");
+          if (offset && offset.value) return `${zone} · ${offset.value}`;
+        } catch (err) {
+          /* an unlabelled zone is still selectable */
+        }
+        return zone;
+      }
+
+      function applyTimeZoneOptions(selected) {
+        const select = $("telegram-timezone");
+        if (!select) return;
+        const value = selected || "";
+        if (!timeZoneOptionsReady) {
+          const zones = [...supportedTimeZones()].sort();
+          select.innerHTML = `<option value="">${escapeHtml(tr("Server time"))}</option>` +
+            zones.map((zone) => `<option value="${escapeHtml(zone)}">${escapeHtml(timeZoneLabel(zone))}</option>`).join("");
+          timeZoneOptionsReady = true;
+        }
+        if (value && !Array.from(select.options).some((option) => option.value === value)) {
+          // A zone saved on a host whose database is wider than this browser's:
+          // keep it selectable so saving the form does not silently drop it.
+          select.insertAdjacentHTML("beforeend", `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`);
+        }
+        select.value = value;
+      }
+
       function applyTelegram() {
         const cfg = state.telegram || {};
         $("telegram-enabled").checked = !!cfg.enabled;
@@ -7524,6 +7584,7 @@
         $("telegram-topic-state").className = cfg.messageThreadConfigured ? "ok" : "muted";
         $("telegram-admin-state").textContent = `${cfg.adminUserCount || 0} users`;
         $("telegram-admin-state").className = cfg.adminUserCount > 0 ? "ok" : "warn";
+        applyTimeZoneOptions(cfg.timeZone);
         $("telegram-commands").checked = cfg.commandPollingEnabled !== false;
         $("telegram-speed-reports").checked = cfg.speedReportsEnabled !== false;
         $("telegram-report-mode").value = cfg.speedReportMode || "always";

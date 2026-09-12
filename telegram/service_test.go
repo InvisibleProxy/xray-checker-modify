@@ -2317,3 +2317,49 @@ func TestAgentCooldownStaysBelowTheConfirmationDelay(t *testing.T) {
 			agentautomation.DefaultCooldown, speedConfirmationRetryDelay)
 	}
 }
+
+func TestTimeZoneIsValidatedBeforeItIsSaved(t *testing.T) {
+	if _, err := time.LoadLocation("Europe/Moscow"); err != nil {
+		t.Skipf("zone database is unavailable: %v", err)
+	}
+	t.Cleanup(func() { setDisplayLocation(time.Local) })
+
+	statePath := filepath.Join(t.TempDir(), "telegram_config.json")
+	legacy := []byte(`{"enabled":false,"speedReportMode":"always","alertCheckMinutes":5}`)
+	if err := os.WriteFile(statePath, legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	service := NewService(statePath, testChecker(testProxies("alpha")), nil, 10000)
+	if err := service.Load(); err != nil {
+		t.Fatalf("load a config written before the setting existed: %v", err)
+	}
+	if got := service.Config().TimeZone; got != "" {
+		t.Fatalf("a config without the field got zone %q, want the process zone", got)
+	}
+
+	input := service.AdminConfig()
+	input.TimeZone = "Europe/Moscow"
+	if err := service.UpdateAdminConfig(input); err != nil {
+		t.Fatalf("a known zone was rejected: %v", err)
+	}
+	if got := service.AdminConfig().TimeZone; got != "Europe/Moscow" {
+		t.Fatalf("saved zone = %q, want Europe/Moscow", got)
+	}
+
+	input.TimeZone = "Mars/Olympus"
+	if err := service.UpdateAdminConfig(input); err == nil {
+		t.Fatal("an unknown zone must be rejected instead of silently falling back")
+	}
+	if got := service.AdminConfig().TimeZone; got != "Europe/Moscow" {
+		t.Fatalf("a rejected update changed the zone to %q", got)
+	}
+
+	restarted := NewService(statePath, testChecker(testProxies("alpha")), nil, 10000)
+	if err := restarted.Load(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := restarted.Config().TimeZone; got != "Europe/Moscow" {
+		t.Fatalf("zone after a restart = %q, want Europe/Moscow", got)
+	}
+}

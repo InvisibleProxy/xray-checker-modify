@@ -8,6 +8,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+	// The Telegram time zone is an IANA name, and a release binary may run on a
+	// host without the zone database. Embedding it keeps the setting working
+	// there; the system database still wins when it exists.
+	_ "time/tzdata"
 
 	"xray-checker/agentautomation"
 	"xray-checker/backup"

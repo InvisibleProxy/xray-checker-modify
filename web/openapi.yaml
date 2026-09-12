@@ -2899,6 +2899,12 @@ components:
           type: array
           items:
             type: string
+        timeZone:
+          type: string
+          description: >
+            IANA name the bot prints its timestamps in, for example `Europe/Moscow`. An empty value keeps the
+            process time zone. An unknown or unloadable name is rejected with `400`.
+          example: Europe/Moscow
         botTokenConfigured:
           type: boolean
           readOnly: true

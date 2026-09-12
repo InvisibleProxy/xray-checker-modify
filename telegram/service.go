@@ -167,6 +167,7 @@ func (s *Service) Load() error {
 	applyLegacyAlertRepeat(data, &cfg)
 	applyEnvOverrides(&cfg)
 	cfg.Normalize()
+	warnUnknownTimeZone(cfg)
 	disableInvalidEnabledConfig(&cfg)
 	s.setConfig(cfg)
 	s.loadAlertStateWithWarn()
@@ -203,6 +204,7 @@ func (s *Service) AdminConfig() AdminConfig {
 		MutedNodeIDs:                 mutedNodeIDs,
 		MutedSpeedNodeIDs:            mutedSpeedNodeIDs,
 		MutedAlertNodeIDs:            mutedAlertNodeIDs,
+		TimeZone:                     cfg.TimeZone,
 		BotTokenConfigured:           cfg.BotToken != "",
 		ChatConfigured:               cfg.ChatID != "",
 		MessageThreadConfigured:      cfg.MessageThreadID > 0,
@@ -230,9 +232,16 @@ func (s *Service) UpdateAdminConfig(input AdminConfig) error {
 	cfg.MutedNodeIDs = s.activeMutedNodeIDs(input.MutedNodeIDs)
 	cfg.MutedSpeedNodeIDs = s.activeMutedNodeIDs(input.MutedSpeedNodeIDs)
 	cfg.MutedAlertNodeIDs = s.activeMutedNodeIDs(input.MutedAlertNodeIDs)
+	cfg.TimeZone = input.TimeZone
 	cfg.Normalize()
 	if cfg.Enabled && cfg.BotToken == "" {
 		return fmt.Errorf("bot token is required when Telegram is enabled; set TELEGRAM_BOT_TOKEN")
+	}
+	if _, err := parseTimeZone(cfg.TimeZone); err != nil {
+		// Rejected here rather than silently ignored: a saved zone the host
+		// cannot resolve would leave every message in the process zone with
+		// nothing in the panel to explain it.
+		return fmt.Errorf("unknown time zone %q; use an IANA name such as Europe/Moscow", cfg.TimeZone)
 	}
 
 	if err := s.saveEditableConfig(cfg); err != nil {

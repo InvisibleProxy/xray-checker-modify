@@ -329,6 +329,24 @@ func TestAdminTemplateSeparatesGlobalSettingsFromNodeControls(t *testing.T) {
 	}
 }
 
+func TestAdminTemplateOffersTelegramTimeZoneSelection(t *testing.T) {
+	var rendered bytes.Buffer
+	if err := RenderAdmin(&rendered); err != nil {
+		t.Fatalf("RenderAdmin() error = %v", err)
+	}
+	html := rendered.String()
+	for _, marker := range []string{
+		`<select id="telegram-timezone">`,
+		`Intl.supportedValuesOf("timeZone")`,
+		`applyTimeZoneOptions(cfg.timeZone)`,
+		`timeZone: $("telegram-timezone").value || ""`,
+	} {
+		if !strings.Contains(html, marker) {
+			t.Errorf("admin template does not wire the Telegram time zone: %q", marker)
+		}
+	}
+}
+
 func TestAdminTemplateColorsAvailabilityDiagnosticsIndependently(t *testing.T) {
 	var rendered bytes.Buffer
 	if err := RenderAdmin(&rendered); err != nil {
@@ -449,6 +467,7 @@ func TestWebTemplatesExposeSharedEnglishRussianLocalization(t *testing.T) {
 		`"Location": "Локация"`,
 		`"Problems first": "Сначала проблемные"`,
 		`"Reset manual order": "Сбросить ручной порядок"`,
+		`"Time zone": "Часовой пояс", "Server time": "Время сервера"`,
 	} {
 		if !strings.Contains(localization, marker) {
 			t.Fatalf("localization asset does not contain %q", marker)

@@ -126,6 +126,8 @@
     "History": "История", "History retention": "Хранение истории", "Save History Settings": "Сохранить настройки истории",
     "The same retention period applies to Speedtest and Availability history for every node.": "Один срок хранения применяется к истории Speedtest и Availability всех нод.",
     "Sensitive Telegram values are read from environment variables only.": "Чувствительные значения Telegram читаются только из переменных окружения.",
+    "Time zone": "Часовой пояс", "Server time": "Время сервера",
+    "Every time the bot prints — alerts, reports, mute expiry — is shown in this zone. Server time keeps the checker's own zone, which is UTC unless the container sets one.": "Всё время, которое печатает бот — алерты, отчёты, окончание тишины — показывается в этом поясе. «Время сервера» оставляет собственный пояс checker-а: это UTC, если контейнеру не задан другой.",
     "Bot token": "Bot token", "Chat": "Чат", "Topic": "Топик", "Admins": "Администраторы",
     "Not set": "Не задано", "Availability alerts": "Availability-алерты", "Speed reports": "Speedtest-отчёты",
     "Report mode": "Режим отчёта", "Report rows": "Строк в отчёте", "Save Telegram": "Сохранить Telegram",
