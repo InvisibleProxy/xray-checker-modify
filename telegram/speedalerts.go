@@ -229,9 +229,13 @@ func automaticSpeedReportsEnabled(cfg Config) bool {
 // The reason is part of the identity of a pending confirmation, not decoration.
 // Keyed by node alone, a node already waiting on a slowdown could not open a
 // second wait when its next run failed outright: the failure changed character,
-// and the pending entry went on asking the old question. Error and PrimaryError
-// are still left untouched, and a deadline is still a technical failure rather
-// than a low-speed result.
+// and the pending entry went on asking the old question.
+//
+// A deadline is read by what it measured. A transfer the clock cut short that
+// still came in under the threshold is a slowdown and waits as one; only a
+// deadline with no rate to judge - or one that beat the threshold and stopped
+// anyway - is left as a technical failure. The stored-text check stays for
+// history written before a shortened transfer had a flag of its own.
 func speedConfirmationRetryTargets(results []speedtest.Result, threshold float64) []speedRetryTarget {
 	seen := make(map[speedRetryTarget]bool)
 	var targets []speedRetryTarget
@@ -239,8 +243,9 @@ func speedConfirmationRetryTargets(results []speedtest.Result, threshold float64
 		stableID := strings.TrimSpace(result.StableID)
 		effective := resultThreshold(result, threshold)
 		lowSpeed := effective > 0 && !result.Offline && result.Error == "" && result.Mbps < effective
-		unresolvedDeadline := resultHasContextDeadlineExceeded(result) &&
-			(result.Offline || result.Error != "" || (effective > 0 && result.Mbps < effective))
+		deadline := result.TimedOut || resultHasContextDeadlineExceeded(result)
+		unresolvedDeadline := deadline &&
+			(result.Offline || result.Error != "" || result.TimedOut || (effective > 0 && result.Mbps < effective))
 		if stableID == "" || (!lowSpeed && !unresolvedDeadline) {
 			continue
 		}
@@ -318,7 +323,8 @@ func successfulSpeedResultIDs(results []speedtest.Result, threshold float64) []s
 	for _, result := range results {
 		stableID := strings.TrimSpace(result.StableID)
 		effective := resultThreshold(result, threshold)
-		if stableID == "" || result.Offline || result.Error != "" || (effective > 0 && result.Mbps < effective) || seen[stableID] {
+		if stableID == "" || result.Offline || result.Error != "" || result.TimedOut ||
+			(effective > 0 && result.Mbps < effective) || seen[stableID] {
 			continue
 		}
 		seen[stableID] = true
@@ -662,7 +668,7 @@ func countSpeedIssues(results []speedtest.Result, threshold float64) (failed int
 			failed++
 			continue
 		}
-		if effective := resultThreshold(result, threshold); effective > 0 && result.Mbps < effective {
+		if effective := resultThreshold(result, threshold); (effective > 0 && result.Mbps < effective) || result.TimedOut {
 			slow++
 		}
 	}

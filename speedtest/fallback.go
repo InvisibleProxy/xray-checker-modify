@@ -317,6 +317,7 @@ func (m *Manager) testFallbackForPrimary(proxy *models.ProxyConfig, cfg TestConf
 		result.FallbackCountryCode = countryCode
 		result.PrimaryURL = primary.URL
 		result.PrimaryError = primary.Error
+		result.PrimaryTimedOut = primary.TimedOut
 		result.PrimaryMbps = primary.Mbps
 		result.FallbackAttempted = true
 		result.FallbackAttempts = attempted
@@ -333,7 +334,13 @@ func (m *Manager) testFallbackForPrimary(proxy *models.ProxyConfig, cfg TestConf
 }
 
 func shouldAttemptFallback(primary Result, threshold float64) bool {
-	return !primary.Offline && (primary.Error != "" || (threshold > 0 && primary.Mbps < threshold))
+	if primary.Offline {
+		return false
+	}
+	// A shortened transfer is a reason to try a reserve endpoint even when it
+	// beat the threshold: the run still failed to move the amount it asked
+	// for, and the endpoint is one of the things that can explain why.
+	return primary.Error != "" || primary.TimedOut || (threshold > 0 && primary.Mbps < threshold)
 }
 
 // SetLowSpeedThresholdMbps keeps country fallback selection aligned with the
@@ -360,8 +367,13 @@ func (m *Manager) LowSpeedThresholdMbps() float64 {
 	return m.fallbackLowSpeedThreshold()
 }
 
+// successfulSpeedResult is the bar a reserve endpoint has to clear before its
+// measurement replaces the primary one. A shortened transfer does not clear it:
+// the endpoint that could not deliver the requested amount in time is no better
+// an answer than the one being replaced, even though the rate it did reach is
+// still worth recording when it is the primary.
 func successfulSpeedResult(result Result) bool {
-	return !result.Offline && result.Error == "" && result.DownloadedBytes > 0
+	return !result.Offline && result.Error == "" && !result.TimedOut && result.DownloadedBytes > 0
 }
 
 func (m *Manager) executeTestAttempt(proxy *models.ProxyConfig, cfg TestConfig, source string) Result {

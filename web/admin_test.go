@@ -113,11 +113,17 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`class="chart-area"`,
 		`class="chart-gap-bridge"`,
 		`ordered.forEach((result) => {`,
-		`const singlePointTimes = new Set(successful.length === 1`,
+		// A success no line can reach keeps a visible dot and a column one check
+		// interval wide; without them a flapping node shows nothing but bridges.
+		`const singlePointTimes = new Set(isolatedRuns.map((items) => items[0].checkedAt))`,
+		`class="chart-area chart-area-sample"`,
+		`const singlePointRadius = Math.max(2, Math.min(5, isolatedSpacing * 0.45))`,
 		// Failures are drawn as merged runs, not one band per sample: stacked
 		// translucent rects are what smeared a long outage into a grey field.
+		// The runs stay a strip along the baseline instead of filling the plot.
 		`class="chart-error-band${statusClass}"`,
 		`failureRuns.push(openFailure)`,
+		`const failureTop = top + plotHeight - failureStripHeight`,
 		`const hasMeasuredScale = successful.length > 0`,
 		`class="chart-empty-note"`,
 		`class="chart-last-marker"`,

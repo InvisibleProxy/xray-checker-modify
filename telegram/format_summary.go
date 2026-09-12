@@ -75,6 +75,9 @@ func visibleSpeedResults(results []speedtest.Result, threshold float64, limit, b
 	used := 0
 	for i, result := range visible {
 		block := formatSpeedResultHTML(result, threshold) + formatSpeedAgentDiagnosticHTML(result.AgentDiagnostic)
+		if speedResultClass(result, threshold) != speedClassHealthy {
+			block = strings.Join(speedIssuesHTML([]speedtest.Result{result}, threshold), "\n")
+		}
 		used += utf8.RuneCountInString(block) + 16
 		if used > budget {
 			return visible[:i]
@@ -121,7 +124,7 @@ func buildSpeedReport(report speedtest.RunReport, cfg Config, issuesOnly bool, s
 			countLabel = "В отчёте"
 		}
 	}
-	summary := fmt.Sprintf("%s: <b>%d</b> · В норме: <b>%d</b> · Ниже порога: <b>%d</b> · Ошибки: <b>%d</b>", countLabel, len(report.Results), len(healthy), len(slow), len(failed))
+	summary := fmt.Sprintf("%s: <b>%d</b> · %s", countLabel, len(report.Results), speedCountsHTML(report.Results, cfg.LowSpeedThresholdMbps))
 	stamp := htmlEscape(reportSourceLabel(report.Source)) + " · " + htmlEscape(formatCheckedAt(report.FinishedAt))
 	lines := []string{"<b>" + htmlEscape(title) + "</b>", stamp, summary}
 	var rich strings.Builder
@@ -172,6 +175,38 @@ func buildSpeedReport(report speedtest.RunReport, cfg Config, issuesOnly bool, s
 		RichHTML:    rich.String(),
 		ReplyMarkup: speedReportMarkup(actions),
 	}
+}
+
+// A timeout above the threshold is neither healthy nor a low rate. Keep the
+// display categories disjoint without changing retry or attention grouping.
+func speedCountsHTML(results []speedtest.Result, threshold float64) string {
+	var healthy, slow, timedOut, failed int
+	for _, result := range results {
+		switch {
+		case result.Offline || result.Error != "":
+			failed++
+		case resultThreshold(result, threshold) > 0 && result.Mbps < resultThreshold(result, threshold):
+			slow++
+		case result.TimedOut:
+			timedOut++
+		default:
+			healthy++
+		}
+	}
+	text := fmt.Sprintf("В норме: <b>%d</b> · Ниже порога: <b>%d</b>", healthy, slow)
+	if timedOut > 0 {
+		text += fmt.Sprintf(" · Таймаут: <b>%d</b>", timedOut)
+	}
+	return text + fmt.Sprintf(" · Ошибки: <b>%d</b>", failed)
+}
+
+func speedAttentionLabel(results []speedtest.Result) string {
+	for _, result := range results {
+		if result.TimedOut {
+			return "Низкая скорость / таймаут"
+		}
+	}
+	return "Низкая скорость"
 }
 
 func (s *Service) buildIssuesSummary() formattedMessage {
