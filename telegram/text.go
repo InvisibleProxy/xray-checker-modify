@@ -68,6 +68,16 @@ func htmlCode(value string) string {
 	return "<code>" + htmlEscape(value) + "</code>"
 }
 
+// Alert bodies share their semantic content with the compact rendering.
+func richAlertBody(compactHTML string) string {
+	lines := strings.SplitN(compactHTML, "\n", 2)
+	body := "<h2>" + lines[0] + "</h2>"
+	if len(lines) > 1 {
+		body += "<p>" + strings.ReplaceAll(lines[1], "\n", "<br>") + "</p>"
+	}
+	return body
+}
+
 func compactText(value string, maxRunes int) string {
 	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
 	if maxRunes <= 0 {
@@ -87,7 +97,7 @@ func formatCheckedAt(value time.Time) string {
 	if value.IsZero() {
 		return "—"
 	}
-	return value.Format("2006-01-02 15:04:05")
+	return value.Format("02.01 15:04 -07:00")
 }
 
 func trimMessage(text string) string {
@@ -96,7 +106,7 @@ func trimMessage(text string) string {
 		return text
 	}
 	runes := []rune(text)
-	suffix := "\n...truncated"
+	suffix := "\n…Сообщение сокращено"
 	limit := 3900 - utf8.RuneCountInString(suffix)
 	return string(runes[:limit]) + suffix
 }
@@ -107,7 +117,7 @@ func trimHTMLMessage(text string) string {
 		return text
 	}
 
-	suffix := "\n...truncated"
+	suffix := "\n…Сообщение сокращено"
 	limit := 3900 - utf8.RuneCountInString(suffix)
 	visible := 0
 	truncated := false

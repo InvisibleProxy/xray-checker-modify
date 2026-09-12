@@ -78,7 +78,7 @@ func TestTrimHTMLMessageKeepsCompleteLinesAndTags(t *testing.T) {
 	if strings.Count(trimmed, "<code>") != strings.Count(trimmed, "</code>") {
 		t.Fatalf("trimmed HTML contains an unclosed code tag: %q", trimmed)
 	}
-	if !strings.HasSuffix(trimmed, "...truncated") {
+	if !strings.HasSuffix(trimmed, "…Сообщение сокращено") {
 		t.Fatalf("trimmed HTML does not contain truncation suffix: %q", trimmed)
 	}
 }
@@ -120,12 +120,12 @@ func TestSpeedIssuesHTMLIncludesLowSpeedOnlyBelowThreshold(t *testing.T) {
 		t.Fatalf("issue lines = %d, want 1: %#v", len(lines), lines)
 	}
 	line := lines[0]
-	for _, want := range []string{"low", "4.99 Mbps"} {
+	for _, want := range []string{"low", "4.99 Мбит/с"} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("low-speed issue line %q does not contain %q", line, want)
 		}
 	}
-	for _, noisy := range []string{"порог", "low-id", "MB", "ms"} {
+	for _, noisy := range []string{"low-id", "MB", "ms"} {
 		if strings.Contains(line, noisy) {
 			t.Fatalf("low-speed issue line contains repeated technical noise %q: %q", noisy, line)
 		}
@@ -281,10 +281,10 @@ func TestFormatSpeedReportLowSpeedModes(t *testing.T) {
 	text := message.HTML
 	for _, want := range []string{
 		"Speed-test завершён",
-		"Низкая скорость: <b>1</b>",
-		"Порог низкой скорости: <b>10.00 Mbps</b>",
-		"⚠️ <b>low</b> · <b>5.00 Mbps</b>",
-		"✅ <b>fast</b> · <b>50.00 Mbps</b>",
+		"Ниже порога: <b>1</b>",
+		"порог 10 Мбит/с",
+		"<b>low</b> · ⚠️ <b>5 Мбит/с</b>",
+		"<b>fast</b> · ✅ <b>50 Мбит/с</b>",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("manual report does not contain %q:\n%s", want, text)
@@ -293,12 +293,12 @@ func TestFormatSpeedReportLowSpeedModes(t *testing.T) {
 	if strings.Count(text, "low") != 1 {
 		t.Fatalf("low-speed node is duplicated in compact report:\n%s", text)
 	}
-	for _, want := range []string{"<table bordered>", "<details><summary>Технические детали", "<details><summary>Без проблем: 1"} {
+	for _, want := range []string{"В норме: <b>1</b>", "<details><summary>Технические детали", "<details><summary>В норме: 1"} {
 		if !strings.Contains(message.RichHTML, want) {
 			t.Fatalf("rich report does not contain %q:\n%s", want, message.RichHTML)
 		}
 	}
-	if strings.Contains(message.RichHTML, "<summary>Без проблем: 2</summary>") {
+	if strings.Contains(message.RichHTML, "<summary>В норме: 2</summary>") {
 		t.Fatalf("low-speed node is duplicated in the healthy rich-report section:\n%s", message.RichHTML)
 	}
 
@@ -308,8 +308,8 @@ func TestFormatSpeedReportLowSpeedModes(t *testing.T) {
 	for _, want := range []string{
 		"Speed-test: есть проблемы",
 		"расписание",
-		"Порог низкой скорости: <b>10.00 Mbps</b>",
-		"⚠️ <b>low</b> · <b>5.00 Mbps</b>",
+		"порог 10 Мбит/с",
+		"<b>low</b> · ⚠️ <b>5 Мбит/с</b>",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("schedule issues report does not contain %q:\n%s", want, text)
@@ -318,7 +318,7 @@ func TestFormatSpeedReportLowSpeedModes(t *testing.T) {
 	if strings.Contains(text, "Лучшие результаты") {
 		t.Fatalf("schedule issues-only report should not include best results:\n%s", text)
 	}
-	if strings.Contains(message.RichHTML, "Без проблем") {
+	if strings.Contains(message.RichHTML, "<summary>В норме") || strings.Contains(message.RichHTML, "<b>fast</b>") {
 		t.Fatalf("issues-only rich report should not include successful results:\n%s", message.RichHTML)
 	}
 }
@@ -346,8 +346,8 @@ func TestFormatSpeedReportSkipsMutedNodes(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Проверено: <b>1</b>",
-		"Успешно: <b>1</b>",
-		"Низкая скорость: <b>0</b>",
+		"В норме: <b>1</b>",
+		"Ниже порога: <b>0</b>",
 		"visible",
 	} {
 		if !strings.Contains(text, want) {
@@ -1004,7 +1004,7 @@ func TestAutomaticLowSpeedAlertRequiresFailedConfirmation(t *testing.T) {
 	if len(sent) != 1 {
 		t.Fatalf("failed confirmation sent %d reports, want 1", len(sent))
 	}
-	for _, want := range []string{"проблема подтверждена", "повтор через 30 минут", "4.00 Mbps"} {
+	for _, want := range []string{"проблема подтверждена", "повтор через 30 минут", "4 Мбит/с"} {
 		if !strings.Contains(sent[0].HTML, want) {
 			t.Fatalf("confirmed report does not contain %q:\n%s", want, sent[0].HTML)
 		}
@@ -1042,7 +1042,7 @@ func TestConfirmedSpeedAlertIncludesReadOnlyAgentEvidence(t *testing.T) {
 	if len(sent) != 1 || automation.awaits != 1 {
 		t.Fatalf("sent=%d awaits=%d, want the reproduced slowdown reported at once", len(sent), automation.awaits)
 	}
-	for _, want := range []string{"Agent EU probe / DE", "проблема воспроизведена", "Вероятнее общая проблема"} {
+	for _, want := range []string{"Агент EU probe", "проблема воспроизведена", "3 Мбит/с"} {
 		if !strings.Contains(sent[0].HTML, want) {
 			t.Fatalf("agent-enriched alert does not contain %q:\n%s", want, sent[0].HTML)
 		}
@@ -1132,7 +1132,7 @@ func TestExhaustedTechnicalFallbackWaitsForAgentEvidenceInImmediateAlert(t *test
 	if len(sent) != 1 || automation.starts != 1 || automation.awaits != 1 {
 		t.Fatalf("sent=%d starts=%d awaits=%d", len(sent), automation.starts, automation.awaits)
 	}
-	for _, want := range []string{"connection refused", "Agent US probe / US", "проблема не воспроизведена", "40 Mbps"} {
+	for _, want := range []string{"connection refused", "Агент US probe", "проблема не воспроизвелась", "40 Мбит/с"} {
 		if !strings.Contains(sent[0].HTML, want) {
 			t.Fatalf("technical fallback alert does not contain %q:\n%s", want, sent[0].HTML)
 		}
@@ -1338,7 +1338,7 @@ func TestConfirmationRetryForDeadlineLowSpeedResultIsNotDelayedAgain(t *testing.
 	if len(sent) != 1 {
 		t.Fatalf("low-speed confirmation sent %d reports, want 1", len(sent))
 	}
-	for _, want := range []string{"повтор через 30 минут", "Deadline node", "4.00 Mbps"} {
+	for _, want := range []string{"повтор через 30 минут", "Deadline node", "4 Мбит/с"} {
 		if !strings.Contains(sent[0].HTML, want) {
 			t.Fatalf("confirmation notification does not contain %q:\n%s", want, sent[0].HTML)
 		}

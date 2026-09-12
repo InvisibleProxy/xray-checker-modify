@@ -109,17 +109,7 @@ func (s *Service) formatRecentSpeedOverview() string {
 }
 
 func speedResultStatusHTML(result speedtest.Result, threshold float64) string {
-	effective := resultThreshold(result, threshold)
-	switch {
-	case result.Offline:
-		return "🔴 <b>недоступна</b>"
-	case result.Error != "":
-		return "❌ <b>ошибка</b>"
-	case effective > 0 && result.Mbps < effective:
-		return fmt.Sprintf("⚠️ <b>%.2f Mbps</b>", result.Mbps)
-	default:
-		return fmt.Sprintf("✅ <b>%.2f Mbps</b>", result.Mbps)
-	}
+	return formatSpeedStatusRich(result, threshold)
 }
 
 func (s *Service) formatRecentSpeedOverviewMessage() formattedMessage {
@@ -144,11 +134,7 @@ func (s *Service) formatRecentSpeedOverviewMessage() formattedMessage {
 		writeSpeedResultRows(&rich, healthy, cfg.LowSpeedThresholdMbps)
 		rich.WriteString("</details>")
 	}
-	if cfg.LowSpeedThresholdMbps > 0 {
-		fmt.Fprintf(&rich, "<footer>Порог: %.2f Mbps. Откройте ноду ниже, чтобы посмотреть историю.</footer>", cfg.LowSpeedThresholdMbps)
-	} else {
-		rich.WriteString("<footer>Откройте ноду ниже, чтобы посмотреть историю.</footer>")
-	}
+	rich.WriteString("<footer>Откройте ноду ниже, чтобы посмотреть историю.</footer>")
 	return formattedMessage{HTML: fallback, RichHTML: rich.String()}
 }
 
@@ -172,117 +158,24 @@ func writeSpeedResultRows(rich *strings.Builder, group []speedtest.Result, thres
 	rich.WriteString("</table>")
 }
 
-func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, failed int, slow int, issuesOnly bool) string {
-	successful := 0
-	for _, result := range report.Results {
-		if !result.Offline && result.Error == "" {
-			successful++
-		}
-	}
-
-	issues := speedIssuesHTML(report.Results, cfg.LowSpeedThresholdMbps)
-	if issuesOnly {
-		lines := []string{
-			fmt.Sprintf("<b>%s</b>", htmlEscape(speedReportTitle(report.Source, true))),
-			fmt.Sprintf("%s · %s", htmlEscape(reportSourceLabel(report.Source)), htmlEscape(formatCheckedAt(report.FinishedAt))),
-		}
-		if cfg.LowSpeedThresholdMbps > 0 {
-			lines = append(lines, fmt.Sprintf("Порог низкой скорости: <b>%.2f Mbps</b>", cfg.LowSpeedThresholdMbps))
-		}
-		lines = append(lines, "", "<b>Требует внимания</b>")
-		lines = append(lines, limitLines(issues, cfg.SpeedReportLimit)...)
-		return trimHTMLMessage(strings.Join(lines, "\n"))
-	}
-
-	lines := []string{
-		"<b>Speed-test завершён</b>",
-		fmt.Sprintf("%s · %s", htmlEscape(reportSourceLabel(report.Source)), htmlEscape(formatCheckedAt(report.FinishedAt))),
-		"",
-		fmt.Sprintf("Проверено: <b>%d</b> · Успешно: <b>%d</b> · Низкая скорость: <b>%d</b> · Ошибки: <b>%d</b>", len(report.Results), successful, slow, failed),
-	}
-	// Skipped nodes are named separately rather than folded into the checked
-	// count, so the breakdown always adds up to what is listed below it.
-	if report.Skipped > 0 {
-		lines = append(lines, fmt.Sprintf("Пропущено без замера: <b>%d</b> · нода стала недоступна до своей очереди", report.Skipped))
-	}
-	if cfg.LowSpeedThresholdMbps > 0 {
-		lines = append(lines, fmt.Sprintf("Порог низкой скорости: <b>%.2f Mbps</b>", cfg.LowSpeedThresholdMbps))
-	}
-
-	if len(issues) > 0 {
-		lines = append(lines, "", "<b>Требует внимания</b>")
-		lines = append(lines, limitLines(issues, cfg.SpeedReportLimit)...)
-	}
-
-	top := healthySpeedResults(report.Results, cfg.LowSpeedThresholdMbps)
-	if len(top) > 0 {
-		lines = append(lines, "", "<b>Лучшие результаты</b>")
-		for _, result := range limitResults(top, cfg.SpeedReportLimit) {
-			lines = append(lines, formatSpeedResultHTML(result, cfg.LowSpeedThresholdMbps))
-		}
-	}
-
-	return trimHTMLMessage(strings.Join(lines, "\n"))
+func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, failed int, slow int, issuesOnly bool, scopes ...speedReportScope) string {
+	return buildSpeedReport(report, cfg, issuesOnly, scopes).HTML
 }
 
-func (s *Service) formatSpeedReportMessage(report speedtest.RunReport, cfg Config, failed int, slow int, issuesOnly bool) formattedMessage {
-	fallback := s.formatSpeedReport(report, cfg, failed, slow, issuesOnly)
-	successful := successfulResults(report.Results)
-	healthy := healthySpeedResults(report.Results, cfg.LowSpeedThresholdMbps)
-	issues := speedIssueResults(report.Results, cfg.LowSpeedThresholdMbps)
-	title := speedReportTitle(report.Source, issuesOnly)
-
-	var rich strings.Builder
-	fmt.Fprintf(&rich, "<h2>%s</h2>", htmlEscape(title))
-	fmt.Fprintf(&rich, "<p>%s · %s</p>", htmlEscape(reportSourceLabel(report.Source)), htmlEscape(formatCheckedAt(report.FinishedAt)))
-	rich.WriteString("<table bordered><tr><th>Проверено</th><th>Успешно</th><th>Низкая</th><th>Ошибки</th></tr>")
-	fmt.Fprintf(&rich, "<tr><td>%d</td><td>%d</td><td>%d</td><td>%d</td></tr></table>", len(report.Results), len(successful), slow, failed)
-	if report.Skipped > 0 {
-		fmt.Fprintf(&rich, "<p>Пропущено без замера: <b>%d</b> — нода стала недоступна до своей очереди.</p>", report.Skipped)
-	}
-	if cfg.LowSpeedThresholdMbps > 0 {
-		fmt.Fprintf(&rich, "<footer>Порог низкой скорости: %.2f Mbps</footer>", cfg.LowSpeedThresholdMbps)
-	}
-	if len(issues) > 0 {
-		rich.WriteString("<h3>Требуют внимания</h3><ul>")
-		for _, result := range limitResults(issues, cfg.SpeedReportLimit) {
-			rich.WriteString(formatSpeedIssueRichItem(result, cfg.LowSpeedThresholdMbps))
-		}
-		rich.WriteString("</ul>")
-		rich.WriteString(formatSpeedDiagnosticsRichDetails(issues, cfg.SpeedReportLimit))
-	}
-	if !issuesOnly && len(healthy) > 0 {
-		visible := limitResults(healthy, cfg.SpeedReportLimit)
-		fmt.Fprintf(&rich, "<details><summary>Без проблем: %d</summary>", len(healthy))
-		rich.WriteString(formatSpeedResultsRichTable(visible))
-		rich.WriteString("</details>")
-	}
-	return formattedMessage{HTML: fallback, RichHTML: rich.String()}
+func (s *Service) formatSpeedReportMessage(report speedtest.RunReport, cfg Config, failed int, slow int, issuesOnly bool, scopes ...speedReportScope) formattedMessage {
+	return buildSpeedReport(report, cfg, issuesOnly, scopes)
 }
 
 func speedIssuesHTML(results []speedtest.Result, threshold float64) []string {
-	var lines []string
-	for _, result := range results {
-		if result.Offline {
-			diagnostics := formatSpeedResultDiagnosticsHTML(result)
-			if diagnostics == "" {
-				diagnostics = "диагностики нет"
-			}
-			lines = append(lines, fmt.Sprintf("• 🔴 <b>%s</b> · недоступна · %s", htmlEscape(result.Name), diagnostics))
-			lines = appendSpeedAgentDiagnostic(lines, result)
-			continue
+	var blocks []string
+	for _, result := range speedIssueResults(results, threshold) {
+		block := formatSpeedResultHTML(result, threshold)
+		if diagnostic := formatSpeedAgentDiagnosticHTML(result.AgentDiagnostic); diagnostic != "" {
+			block += "\n  ↳ " + diagnostic
 		}
-		if result.Error != "" {
-			lines = append(lines, fmt.Sprintf("• ❌ <b>%s</b> · %s", htmlEscape(result.Name), htmlEscape(compactText(result.Error, 120))))
-			lines = appendSpeedAgentDiagnostic(lines, result)
-			continue
-		}
-		if effective := resultThreshold(result, threshold); effective > 0 && result.Mbps < effective {
-			lines = append(lines, fmt.Sprintf("• ⚠️ <b>%s</b> · <b>%.2f Mbps</b>", htmlEscape(result.Name), result.Mbps))
-			lines = appendSpeedAgentDiagnostic(lines, result)
-		}
+		blocks = append(blocks, block)
 	}
-	return lines
+	return blocks
 }
 
 // Speed result classes, ordered so the worst reads first.
@@ -356,7 +249,11 @@ func speedIssueResults(results []speedtest.Result, threshold float64) []speedtes
 }
 
 func formatSpeedIssueRichItem(result speedtest.Result, threshold float64) string {
-	return fmt.Sprintf("<li><b>%s</b> — %s</li>", htmlEscape(result.Name), formatSpeedStatusRich(result, threshold))
+	item := fmt.Sprintf("<li><b>%s</b> — %s", htmlEscape(compactText(result.Name, 80)), formatSpeedStatusRich(result, threshold))
+	if diagnostic := formatSpeedAgentDiagnosticHTML(result.AgentDiagnostic); diagnostic != "" {
+		item += "<br>↳ " + diagnostic
+	}
+	return item + "</li>"
 }
 
 func formatSpeedStatusRich(result speedtest.Result, threshold float64) string {
@@ -364,12 +261,12 @@ func formatSpeedStatusRich(result speedtest.Result, threshold float64) string {
 		return "🔴 недоступна"
 	}
 	if result.Error != "" {
-		return "❌ " + htmlEscape(compactText(result.Error, 120))
+		return "❌ " + htmlEscape(compactText(result.Error, 90))
 	}
 	if effective := resultThreshold(result, threshold); effective > 0 && result.Mbps < effective {
-		return fmt.Sprintf("⚠️ <b>%.2f Mbps</b>", result.Mbps)
+		return fmt.Sprintf("⚠️ <b>%s</b> · порог %s", formatMbps(result.Mbps), formatMbps(effective))
 	}
-	return fmt.Sprintf("✅ <b>%.2f Mbps</b>", result.Mbps)
+	return "✅ <b>" + formatMbps(result.Mbps) + "</b>"
 }
 
 func formatSpeedDiagnosticsRichDetails(results []speedtest.Result, limit int) string {
@@ -386,7 +283,7 @@ func formatSpeedDiagnosticsRichDetails(results []speedtest.Result, limit int) st
 				parts = append(parts, diagnostics)
 			}
 		case result.Error != "":
-			parts = append(parts, htmlEscape(result.Error))
+			parts = append(parts, htmlEscape(compactText(result.Error, 1200)))
 		default:
 			parts = append(parts,
 				htmlEscape(formatBytes(result.DownloadedBytes)),
@@ -402,55 +299,54 @@ func formatSpeedDiagnosticsRichDetails(results []speedtest.Result, limit int) st
 	return "<details><summary>Технические детали</summary><ul>" + strings.Join(items, "") + "</ul></details>"
 }
 
-func appendSpeedAgentDiagnostic(lines []string, result speedtest.Result) []string {
-	diagnostic := formatSpeedAgentDiagnosticHTML(result.AgentDiagnostic)
-	if diagnostic == "" {
-		return lines
-	}
-	return append(lines, "  ↳ "+diagnostic)
-}
-
 func formatSpeedAgentDiagnosticHTML(diagnostic *speedtest.AgentDiagnostic) string {
 	if diagnostic == nil {
 		return ""
 	}
-	label := speedAgentDiagnosticLabel(diagnostic)
-	prefix := "🛰 <b>Agent"
-	if label != "" {
-		prefix += " " + htmlEscape(label)
+	name := diagnostic.AgentName
+	if strings.TrimSpace(name) == "" {
+		name = diagnostic.AgentID
 	}
-	prefix += "</b>"
-	detail := speedAgentDiagnosticDetail(diagnostic)
+	prefix := "Агент"
+	if name != "" {
+		prefix += " " + compactText(name, 48)
+	}
+	verdict := "результат неизвестен"
 	switch diagnostic.State {
 	case speedtest.AgentDiagnosticRunning:
-		return prefix + " · проверка запущена"
+		verdict = "проверка идёт"
 	case speedtest.AgentDiagnosticReproduced:
-		// The agent got through and still measured below the threshold. Saying
-		// only "воспроизведена" reads as "the node is down", which this very
-		// observation disproves: what was reproduced is the rate, not the outage.
+		verdict = "проблема воспроизведена"
 		if diagnostic.RemoteStatus == "online" {
-			return prefix + " · нода отвечает агенту, но медленнее порога" + detail + ". Вероятнее сама нода или её аплинк, а не маршрут checker-а."
+			verdict = "просадка воспроизведена"
 		}
-		return prefix + " · проблема воспроизведена" + detail + ". Вероятнее общая проблема ноды, сервера или конфигурации."
 	case speedtest.AgentDiagnosticNotReproduced:
+		verdict = "проблема не воспроизвелась"
 		if diagnostic.AlternativeStatus == "online" {
-			return prefix + " · основной endpoint агента не сработал, но альтернативный прошёл. Вероятна endpoint-specific проблема."
+			verdict = "основной URL не сработал, резервный доступен"
 		}
-		return prefix + " · проблема не воспроизведена" + detail + ". Вероятнее маршрут controller-а или его Test URL."
-	case speedtest.AgentDiagnosticUnreliable:
-		return prefix + " · данных недостаточно: " + htmlEscape(localizedSpeedDiagnosticDetail(diagnostic.Detail))
-	case speedtest.AgentDiagnosticUnavailable:
-		return prefix + " · данных недостаточно: " + htmlEscape(localizedSpeedDiagnosticDetail(diagnostic.Detail))
-	default:
-		return ""
+	case speedtest.AgentDiagnosticUnreliable, speedtest.AgentDiagnosticUnavailable:
+		verdict = localizedSpeedDiagnosticDetail(diagnostic.Detail)
 	}
+	rate := ""
+	if diagnostic.Mbps > 0 || (diagnostic.RemoteStatus == "online" && diagnostic.State == speedtest.AgentDiagnosticReproduced) {
+		rate = formatMbps(float64(diagnostic.Mbps)) + " · "
+	}
+	return "<b>" + htmlEscape(prefix) + "</b>: " + rate + htmlEscape(verdict)
 }
 
 func formatSpeedAgentDiagnosticRich(diagnostic *speedtest.AgentDiagnostic) string {
 	if diagnostic == nil {
 		return ""
 	}
-	return formatSpeedAgentDiagnosticHTML(diagnostic)
+	parts := []string{"Агент " + htmlEscape(speedAgentDiagnosticLabel(diagnostic))}
+	if detail := speedAgentDiagnosticDetail(diagnostic); detail != "" {
+		parts = append(parts, detail)
+	}
+	if diagnostic.Detail != "" {
+		parts = append(parts, htmlEscape(localizedSpeedDiagnosticDetail(diagnostic.Detail)))
+	}
+	return strings.Join(parts, " · ")
 }
 
 func speedAgentDiagnosticLabel(diagnostic *speedtest.AgentDiagnostic) string {
@@ -480,7 +376,7 @@ func speedAgentDiagnosticDetail(diagnostic *speedtest.AgentDiagnostic) string {
 		parts = append(parts, diagnostic.RemoteStatus)
 	}
 	if diagnostic.Mbps > 0 {
-		parts = append(parts, fmt.Sprintf("%d Mbps", diagnostic.Mbps))
+		parts = append(parts, formatMbps(float64(diagnostic.Mbps)))
 	}
 	if diagnostic.FailureCode != "" {
 		failure := diagnostic.FailureCode
@@ -498,25 +394,25 @@ func speedAgentDiagnosticDetail(diagnostic *speedtest.AgentDiagnostic) string {
 func localizedSpeedDiagnosticDetail(detail string) string {
 	switch detail {
 	case "automation capacity is busy":
-		return "все слоты автоматической диагностики заняты"
+		return "все слоты диагностики заняты"
 	case "no healthy idle diagnostic agent is connected":
-		return "нет свободного healthy-агента"
+		return "нет свободного доступного агента"
 	case "automatic diagnostics are paused by maintenance":
-		return "автоматическая диагностика приостановлена maintenance-режимом"
+		return "диагностика на паузе: обслуживание"
 	case "remote diagnostics are disabled":
-		return "Remote Diagnostics отключены"
+		return "диагностика агентами отключена"
 	case "automatic diagnostic could not be started":
-		return "автоматическую диагностику не удалось запустить"
+		return "не удалось запустить проверку"
 	case "diagnostic session is no longer available":
-		return "diagnostic session больше недоступна"
+		return "результат проверки больше недоступен"
 	case "no signed remote observation was received":
-		return "подписанный observation не получен до deadline"
+		return "агент не прислал результат вовремя"
 	case "agent direct connectivity control failed":
-		return "direct-connectivity control агента завершился ошибкой"
+		return "у агента не прошла контрольная проверка интернета"
 	case "agent download observation has no throughput evidence":
-		return "agent observation не содержит throughput evidence"
+		return "агент не передал данные о скорости"
 	default:
-		return "результат агента недоступен"
+		return "недостаточно данных для вывода"
 	}
 }
 
@@ -528,19 +424,6 @@ func nonEmptyStrings(values []string) []string {
 		}
 	}
 	return result
-}
-
-func formatSpeedResultsRichTable(results []speedtest.Result) string {
-	if len(results) == 0 {
-		return "<p>Нет результатов.</p>"
-	}
-	var rows strings.Builder
-	rows.WriteString("<table bordered striped><tr><th>Нода</th><th>Mbps</th><th>TTFB</th></tr>")
-	for _, result := range results {
-		fmt.Fprintf(&rows, "<tr><td>%s</td><td>%.2f</td><td>%d ms</td></tr>", htmlEscape(result.Name), result.Mbps, result.TTFBMs)
-	}
-	rows.WriteString("</table>")
-	return rows.String()
 }
 
 func formatSpeedHistoryRichTable(results []speedtest.Result, threshold float64) string {
@@ -564,31 +447,6 @@ func formatSpeedHistoryRichTable(results []speedtest.Result, threshold float64) 
 	return rows.String()
 }
 
-func successfulResults(results []speedtest.Result) []speedtest.Result {
-	var successful []speedtest.Result
-	for _, result := range results {
-		if !result.Offline && result.Error == "" {
-			successful = append(successful, result)
-		}
-	}
-	sort.Slice(successful, func(i, j int) bool {
-		return successful[i].Mbps > successful[j].Mbps
-	})
-	return successful
-}
-
-func healthySpeedResults(results []speedtest.Result, threshold float64) []speedtest.Result {
-	healthy := successfulResults(results)
-	result := healthy[:0]
-	for _, item := range healthy {
-		effective := resultThreshold(item, threshold)
-		if effective <= 0 || item.Mbps >= effective {
-			result = append(result, item)
-		}
-	}
-	return result
-}
-
 func limitResults(results []speedtest.Result, limit int) []speedtest.Result {
 	if limit <= 0 || len(results) <= limit {
 		return results
@@ -597,21 +455,13 @@ func limitResults(results []speedtest.Result, limit int) []speedtest.Result {
 }
 
 func formatSpeedResultHTML(result speedtest.Result, threshold float64) string {
+	line := fmt.Sprintf("• <b>%s</b> · %s", htmlEscape(compactText(result.Name, 80)), formatSpeedStatusRich(result, threshold))
 	if result.Offline {
-		diagnostics := formatSpeedResultDiagnosticsHTML(result)
-		if diagnostics == "" {
-			diagnostics = "диагностики нет"
+		if diagnostics := formatSpeedResultDiagnosticsHTML(result); diagnostics != "" {
+			line += " · " + diagnostics
 		}
-		return fmt.Sprintf("• 🔴 <b>%s</b> · %s", htmlEscape(result.Name), diagnostics)
 	}
-	if result.Error != "" {
-		return fmt.Sprintf("• ❌ <b>%s</b> · %s", htmlEscape(result.Name), htmlEscape(compactText(result.Error, 120)))
-	}
-
-	if effective := resultThreshold(result, threshold); effective <= 0 || result.Mbps >= effective {
-		return fmt.Sprintf("• ✅ <b>%s</b> · <b>%.2f Mbps</b>", htmlEscape(result.Name), result.Mbps)
-	}
-	return fmt.Sprintf("• ⚠️ <b>%s</b> · <b>%.2f Mbps</b>", htmlEscape(result.Name), result.Mbps)
+	return line
 }
 
 func reportSourceLabel(source string) string {
@@ -662,7 +512,11 @@ func formatSpeedHistoryLine(result speedtest.Result, threshold float64) string {
 	if result.TTFBMs > 0 {
 		ttfb = fmt.Sprintf(" · TTFB %d ms", result.TTFBMs)
 	}
-	return fmt.Sprintf("• %s · %s <b>%.2f Mbps</b>%s", htmlCode(prefix), marker, result.Mbps, ttfb)
+	value := formatMbps(result.Mbps)
+	if marker == "⚠️" {
+		value += " · порог " + formatMbps(resultThreshold(result, threshold))
+	}
+	return fmt.Sprintf("• %s · %s <b>%s</b>%s", htmlCode(prefix), marker, value, ttfb)
 }
 
 func formatSpeedResultDiagnosticsHTML(result speedtest.Result) string {

@@ -19,8 +19,9 @@ import (
 )
 
 type formattedMessage struct {
-	HTML     string
-	RichHTML string
+	HTML        string
+	RichHTML    string
+	ReplyMarkup string
 }
 
 type inputRichMessage struct {

@@ -44,7 +44,9 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 	}
 
 	speedMuted := s.speedMuteSet(cfg)
+	scope := speedReportScope{Measured: len(report.Results)}
 	report = filterRunReportByMuteSet(report, speedMuted)
+	scope.Muted = scope.Measured - len(report.Results)
 	var diagnosticHandles map[string]agentautomation.Handle
 	if automaticSpeedReportsEnabled(cfg) {
 		diagnosticHandles = s.startSpeedDiagnostics(report, cfg)
@@ -61,10 +63,14 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 			// whether the problem persists is a different question, and only a
 			// later measurement answers it.
 			annotations = s.awaitSpeedDiagnostics(diagnosticHandlesForResults(diagnosticHandles, report.Results))
+			before := len(report.Results)
 			report = excludeSpeedResults(report, unconfirmedRetryIDs(targets, annotations))
+			scope.Pending = before - len(report.Results)
 		}
 	}
+	before := len(report.Results)
 	report = filterTelegramAlertSuppressedRunReport(report)
+	scope.Suppressed = before - len(report.Results)
 	failed, slow, issuesOnly, shouldSend := speedReportDecisionWithMutes(report, cfg, speedMuted)
 	if !shouldSend {
 		return
@@ -84,7 +90,7 @@ func (s *Service) NotifySpeedTest(report speedtest.RunReport) {
 		report = attachSpeedDiagnostics(report, annotations)
 	}
 
-	content := s.formatSpeedReportMessage(report, cfg, failed, slow, issuesOnly)
+	content := s.formatSpeedReportMessage(report, cfg, failed, slow, issuesOnly, scope)
 	s.sendSpeedTestReport(cfg, cfg.ChatID, cfg.MessageThreadID, content)
 }
 
@@ -200,7 +206,11 @@ func (s *Service) sendSpeedTestReport(cfg Config, chatID string, threadID int, c
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
 	defer cancel()
 
-	if _, err := s.sendFormattedToWithMarkup(ctx, chatID, threadID, content, backToMenuMarkup()); err != nil {
+	markup := content.ReplyMarkup
+	if markup == "" {
+		markup = backToMenuMarkup()
+	}
+	if _, err := s.sendFormattedToWithMarkup(ctx, chatID, threadID, content, markup); err != nil {
 		logger.Warn("Failed to send Telegram speed-test report: %v", err)
 	}
 }

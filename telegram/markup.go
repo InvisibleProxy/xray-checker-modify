@@ -40,6 +40,28 @@ func backToMenuMarkup() string {
 	})
 }
 
+// Callbacks use StableID and retain the existing authorization checks.
+func speedReportMarkup(results []speedtest.Result) string {
+	var rows [][]inlineKeyboardButton
+	seen := make(map[string]bool)
+	for _, result := range results {
+		if result.StableID == "" || seen[result.StableID] {
+			continue
+		}
+		seen[result.StableID] = true
+		rows = append(rows, []inlineKeyboardButton{
+			{Text: "Открыть " + shortButtonText(result.Name), CallbackData: "node:" + result.StableID},
+			{Text: "История", CallbackData: "speed:" + result.StableID},
+		})
+	}
+	rows = append(rows, []inlineKeyboardButton{
+		{Text: "Все замеры", CallbackData: "speed:list"},
+		{Text: "Проблемы", CallbackData: "issues"},
+	})
+	rows = append(rows, []inlineKeyboardButton{{Text: "Меню", CallbackData: "back_to_menu"}})
+	return encodeMarkup(rows)
+}
+
 func statusMarkup() string {
 	return encodeMarkup([][]inlineKeyboardButton{
 		{{Text: "Обновить", CallbackData: "status:refresh"}},
@@ -159,6 +181,13 @@ func issuesMarkup() string {
 			{Text: "⚠️ Проблемы", CallbackData: "issues"},
 			{Text: "Меню", CallbackData: "back_to_menu"},
 		},
+	})
+}
+
+func issuesSummaryMarkup() string {
+	return encodeMarkup([][]inlineKeyboardButton{
+		{{Text: "Все статусы", CallbackData: "status"}, {Text: "Все замеры", CallbackData: "speed:list"}},
+		{{Text: "Ноды", CallbackData: "nodes:list"}, {Text: "Меню", CallbackData: "back_to_menu"}},
 	})
 }
 

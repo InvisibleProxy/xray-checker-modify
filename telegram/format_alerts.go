@@ -97,25 +97,24 @@ func formatProxyRichItem(proxy *models.ProxyConfig, details checker.ProxyStatusD
 
 func formatNodeDown(proxy *models.ProxyConfig, state nodeAlertState, now time.Time) string {
 	proxyFailure := nodeAlertStatus(state) == checker.AvailabilityStateProxyFailure
-	title := "⚠️ Нода недоступна"
+	title := "недоступна"
 	marker := "🔴"
 	durationLabel := "Простой"
 	if proxyFailure {
-		title = "⚠️ Proxy failure"
+		title = "Proxy failure"
 		marker = "🟡"
 		durationLabel = "Proxy failure"
 	}
 	if state.AlertCount > 1 {
 		if proxyFailure {
-			title = "⚠️ Proxy failure продолжается"
+			title = "Proxy failure продолжается"
 		} else {
-			title = "⚠️ Нода всё ещё недоступна"
+			title = "всё ещё недоступна"
 		}
 	}
 
 	lines := []string{
-		fmt.Sprintf("<b>%s</b>", htmlEscape(title)),
-		fmt.Sprintf("%s <b>%s</b>", marker, htmlEscape(proxy.Name)),
+		fmt.Sprintf("%s <b>%s</b> · %s", marker, htmlEscape(proxy.Name), htmlEscape(title)),
 	}
 	if since := nodeAlertIssueSince(state); !since.IsZero() {
 		lines = append(lines, fmt.Sprintf("%s: <b>%s</b> · с %s", durationLabel, htmlEscape(formatDuration(now.Sub(since))), htmlEscape(formatCheckedAt(since))))
@@ -136,32 +135,8 @@ func formatNodeDown(proxy *models.ProxyConfig, state nodeAlertState, now time.Ti
 
 func formatNodeDownMessage(proxy *models.ProxyConfig, state nodeAlertState, now time.Time) formattedMessage {
 	fallback := formatNodeDown(proxy, state, now)
-	title := "Нода недоступна"
-	marker := "🔴"
-	durationLabel := "Простой"
-	if nodeAlertStatus(state) == checker.AvailabilityStateProxyFailure {
-		title = "Proxy failure"
-		marker = "🟡"
-		durationLabel = "Proxy failure"
-	}
-	if state.AlertCount > 1 {
-		if nodeAlertStatus(state) == checker.AvailabilityStateProxyFailure {
-			title = "Proxy failure продолжается"
-		} else {
-			title = "Нода всё ещё недоступна"
-		}
-	}
 	var rich strings.Builder
-	fmt.Fprintf(&rich, "<h2>⚠️ %s</h2><p>%s <b>%s</b></p>", htmlEscape(title), marker, htmlEscape(proxy.Name))
-	if since := nodeAlertIssueSince(state); !since.IsZero() {
-		fmt.Fprintf(&rich, "<p>%s: <b>%s</b> · с %s</p>", durationLabel, htmlEscape(formatDuration(now.Sub(since))), htmlEscape(formatCheckedAt(since)))
-	}
-	if failure := formatFailureHTML(state.Failure); failure != "" {
-		fmt.Fprintf(&rich, "<p>%s</p>", failure)
-	}
-	if diagnostics := formatHostDiagnosticsHTML(state.HostCheck, state.PingCheck); diagnostics != "" {
-		fmt.Fprintf(&rich, "<blockquote>%s</blockquote>", diagnostics)
-	}
+	rich.WriteString(richAlertBody(fallback))
 	rich.WriteString("<details><summary>Технические данные</summary><table bordered>")
 	fmt.Fprintf(&rich, "<tr><th>StableID</th><td><code>%s</code></td></tr><tr><th>Протокол</th><td>%s</td></tr><tr><th>Провалов подряд</th><td>%d</td></tr>",
 		htmlEscape(proxy.StableID), htmlEscape(strings.ToUpper(proxy.Protocol)), state.FailCount)
@@ -428,34 +403,18 @@ func formatNodeRecovery(proxy *models.ProxyConfig, latency time.Duration, downSi
 
 func formatNodeRecoveryMessage(proxy *models.ProxyConfig, latency time.Duration, previous nodeAlertState, recoveredAt time.Time) formattedMessage {
 	since := nodeAlertIssueSince(previous)
-	proxyFailure := nodeAlertStatus(previous) == checker.AvailabilityStateProxyFailure
-	if !proxyFailure {
-		fallback := formatNodeRecovery(proxy, latency, since, recoveredAt)
-		latencyText := "—"
+	fallback := formatNodeRecovery(proxy, latency, since, recoveredAt)
+	if nodeAlertStatus(previous) == checker.AvailabilityStateProxyFailure {
+		latencyText, duration := "—", "—"
 		if latency > 0 {
 			latencyText = fmt.Sprintf("%d ms", latency.Milliseconds())
 		}
-		downtime := "—"
 		if !since.IsZero() {
-			downtime = formatDuration(recoveredAt.Sub(since))
+			duration = formatDuration(recoveredAt.Sub(since))
 		}
-		rich := fmt.Sprintf("<h2>✅ Нода снова доступна</h2><p><b>%s</b></p><table bordered><tr><th>Простой</th><td>%s</td></tr><tr><th>Задержка</th><td>%s</td></tr></table><details><summary>StableID</summary><p><code>%s</code></p></details>",
-			htmlEscape(proxy.Name), htmlEscape(downtime), htmlEscape(latencyText), htmlEscape(proxy.StableID))
-		return formattedMessage{HTML: fallback, RichHTML: rich}
+		fallback = fmt.Sprintf("✅ <b>%s</b>: proxy снова работает\nProxy failure: <b>%s</b> · задержка %s", htmlEscape(proxy.Name), htmlEscape(duration), htmlEscape(latencyText))
 	}
-
-	latencyText := "—"
-	if latency > 0 {
-		latencyText = fmt.Sprintf("%d ms", latency.Milliseconds())
-	}
-	duration := "—"
-	if !since.IsZero() {
-		duration = formatDuration(recoveredAt.Sub(since))
-	}
-	fallback := fmt.Sprintf("✅ <b>%s</b>: proxy снова работает\nProxy failure: <b>%s</b>\nЗадержка: <b>%s</b>", htmlEscape(proxy.Name), htmlEscape(duration), htmlEscape(latencyText))
-	rich := fmt.Sprintf("<h2>✅ Proxy снова работает</h2><p><b>%s</b></p><table bordered><tr><th>Proxy failure</th><td>%s</td></tr><tr><th>Задержка</th><td>%s</td></tr></table><details><summary>StableID</summary><p><code>%s</code></p></details>",
-		htmlEscape(proxy.Name), htmlEscape(duration), htmlEscape(latencyText), htmlEscape(proxy.StableID))
-	return formattedMessage{HTML: fallback, RichHTML: rich}
+	return formattedMessage{HTML: fallback, RichHTML: richAlertBody(fallback)}
 }
 
 func formatFailureHTML(failure checker.FailureDetails) string {

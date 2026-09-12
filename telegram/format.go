@@ -55,20 +55,10 @@ func (s *Service) formatHelpMessage(cfg Config) formattedMessage {
 
 func (s *Service) formatMenu(cfg Config, isAdmin bool) string {
 	total, online, proxyFailures, offline := s.nodeCounts()
-	speedReports := "выключены"
-	if cfg.SpeedReportsEnabled && cfg.SpeedReportMode != "disabled" {
-		speedReports = "включены"
-		if cfg.SpeedReportMode == "issues" {
-			speedReports = "только проблемы"
-		}
-	}
-	alerts := "выключены"
-	if cfg.NodeAlertsEnabled {
-		alerts = "включены"
-	}
+	alerts, speedReports := s.notificationLabels(cfg)
 	thresholdText := "не задан"
 	if cfg.LowSpeedThresholdMbps > 0 {
-		thresholdText = fmt.Sprintf("%.2f Mbps", cfg.LowSpeedThresholdMbps)
+		thresholdText = formatMbps(cfg.LowSpeedThresholdMbps)
 	}
 	adminHint := ""
 	if isAdmin {
@@ -79,7 +69,7 @@ func (s *Service) formatMenu(cfg Config, isAdmin bool) string {
 		"<b>InvisibleProxyChecker</b>",
 		"",
 		fmt.Sprintf("🟢 <b>%d</b> из %d · 🟡 <b>%d</b> · 🔴 <b>%d</b>", online, total, proxyFailures, offline),
-		fmt.Sprintf("⚡ Отчёты: <b>%s</b> · порог %s", htmlEscape(speedReports), htmlEscape(thresholdText)),
+		fmt.Sprintf("⚡ Отчёты: <b>%s</b> · общий порог %s", htmlEscape(speedReports), htmlEscape(thresholdText)),
 		fmt.Sprintf("🔔 Алерты: <b>%s</b>%s", htmlEscape(alerts), htmlEscape(adminHint)),
 		"",
 		"Выберите раздел:",
@@ -89,27 +79,17 @@ func (s *Service) formatMenu(cfg Config, isAdmin bool) string {
 func (s *Service) formatMenuMessage(cfg Config, isAdmin bool) formattedMessage {
 	fallback := s.formatMenu(cfg, isAdmin)
 	total, online, proxyFailures, offline := s.nodeCounts()
-	speedReports := "выключены"
-	if cfg.SpeedReportsEnabled && cfg.SpeedReportMode != "disabled" {
-		speedReports = "все"
-		if cfg.SpeedReportMode == "issues" {
-			speedReports = "только проблемы"
-		}
-	}
+	alerts, speedReports := s.notificationLabels(cfg)
 	threshold := "не задан"
 	if cfg.LowSpeedThresholdMbps > 0 {
-		threshold = fmt.Sprintf("%.2f Mbps", cfg.LowSpeedThresholdMbps)
-	}
-	alerts := "выключены"
-	if cfg.NodeAlertsEnabled {
-		alerts = "включены"
+		threshold = formatMbps(cfg.LowSpeedThresholdMbps)
 	}
 
 	rich := strings.Join([]string{
 		"<h2>InvisibleProxyChecker</h2>",
 		"<table bordered>",
 		"<tr><th>Ноды</th><td>🟢 " + strconv.Itoa(online) + " / " + strconv.Itoa(total) + " · 🟡 " + strconv.Itoa(proxyFailures) + " · 🔴 " + strconv.Itoa(offline) + "</td></tr>",
-		"<tr><th>Speed-test</th><td>" + htmlEscape(speedReports) + " · " + htmlEscape(threshold) + "</td></tr>",
+		"<tr><th>Замеры</th><td>" + htmlEscape(speedReports) + " · общий порог " + htmlEscape(threshold) + "</td></tr>",
 		"<tr><th>Алерты</th><td>" + htmlEscape(alerts) + "</td></tr>",
 		"</table>",
 		"<footer>Выберите раздел кнопкой ниже.</footer>",
@@ -241,9 +221,7 @@ func (s *Service) formatNodeDetails(stableID string) string {
 
 	lines := []string{
 		fmt.Sprintf("<b>%s</b>", htmlEscape(proxy.Name)),
-		fmt.Sprintf("ID: %s", htmlCode(proxy.StableID)),
 		fmt.Sprintf("Статус: <b>%s</b> · %s", htmlEscape(status), htmlEscape(latencyText)),
-		fmt.Sprintf("Протокол: %s", htmlCode(proxy.Protocol)),
 	}
 	if availabilityStatus == checker.AvailabilityStateOffline && !details.DownSince.IsZero() {
 		lines = append(lines, fmt.Sprintf("Недоступна с: <b>%s</b>", htmlEscape(formatCheckedAt(details.DownSince))))
@@ -261,13 +239,6 @@ func (s *Service) formatNodeDetails(stableID string) string {
 			lines = append(lines, fmt.Sprintf("Диагностика: %s", diagnostics))
 		}
 	}
-	if proxy.SubName != "" {
-		lines = append(lines, fmt.Sprintf("Подписка: <b>%s</b>", htmlEscape(proxy.SubName)))
-	}
-	if proxy.Server != "" {
-		lines = append(lines, fmt.Sprintf("Сервер: %s", htmlCode(fmt.Sprintf("%s:%d", proxy.Server, proxy.Port))))
-	}
-
 	history := s.speedManager.ResultHistory(proxy.StableID)
 	if len(history) == 0 {
 		if result := s.latestSpeedResult(proxy.StableID); result != nil {
@@ -282,6 +253,14 @@ func (s *Service) formatNodeDetails(stableID string) string {
 		for _, result := range limitResults(history, 5) {
 			lines = append(lines, formatSpeedHistoryLine(result, cfg.LowSpeedThresholdMbps))
 		}
+	}
+	lines = append(lines, "", "<b>Технические данные</b>", "ID: "+htmlCode(proxy.StableID))
+	lines = append(lines, "Протокол: "+htmlEscape(strings.ToUpper(proxy.Protocol)))
+	if proxy.SubName != "" {
+		lines = append(lines, "Подписка: "+htmlEscape(proxy.SubName))
+	}
+	if proxy.Server != "" {
+		lines = append(lines, "Сервер: "+htmlCode(fmt.Sprintf("%s:%d", proxy.Server, proxy.Port)))
 	}
 	return trimHTMLMessage(strings.Join(lines, "\n"))
 }
@@ -311,7 +290,7 @@ func (s *Service) formatNodeDetailsMessage(stableID string) formattedMessage {
 
 	var rich strings.Builder
 	fmt.Fprintf(&rich, "<h2>%s</h2>", htmlEscape(proxy.Name))
-	fmt.Fprintf(&rich, "<p><b>%s</b> · %s · %s</p>", htmlEscape(status), htmlEscape(strings.ToUpper(proxy.Protocol)), htmlEscape(latency))
+	fmt.Fprintf(&rich, "<p><b>%s</b> · %s</p>", htmlEscape(status), htmlEscape(latency))
 	if availabilityStatus == checker.AvailabilityStateOffline && !details.DownSince.IsZero() {
 		fmt.Fprintf(&rich, "<p>Простой: <b>%s</b> · с %s</p>", htmlEscape(formatDuration(time.Since(details.DownSince))), htmlEscape(formatCheckedAt(details.DownSince)))
 	}
@@ -329,6 +308,7 @@ func (s *Service) formatNodeDetailsMessage(stableID string) formattedMessage {
 
 	rich.WriteString("<details><summary>Технические данные</summary><table bordered>")
 	fmt.Fprintf(&rich, "<tr><th>StableID</th><td><code>%s</code></td></tr>", htmlEscape(proxy.StableID))
+	fmt.Fprintf(&rich, "<tr><th>Протокол</th><td>%s</td></tr>", htmlEscape(strings.ToUpper(proxy.Protocol)))
 	if proxy.SubName != "" {
 		fmt.Fprintf(&rich, "<tr><th>Подписка</th><td>%s</td></tr>", htmlEscape(proxy.SubName))
 	}
@@ -481,82 +461,9 @@ func formatNodeAvailabilityCheckStartedMessage(proxy *models.ProxyConfig) format
 }
 
 func (s *Service) formatIssuesSummary() string {
-	cfg := s.Config()
-	muted := s.alertMuteSet(cfg)
-	var issueLines []string
-	for _, proxy := range s.sortedProxies() {
-		if proxy.StableID == "" {
-			proxy.StableID = proxy.GenerateStableID()
-		}
-		if muted[proxy.StableID] {
-			continue
-		}
-		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
-		if err != nil {
-			details.Status = checker.AvailabilityStateOffline
-		}
-		if details.EffectiveStatus() != checker.AvailabilityStateOnline {
-			issueLines = append(issueLines, formatProxyLineHTML(proxy, details))
-		}
-	}
-
-	speedLines := speedIssuesHTML(filterSpeedResultsByMuteSet(s.activeSpeedResults(s.speedManager.Snapshot().Results), s.speedMuteSet(cfg)), cfg.LowSpeedThresholdMbps)
-	lines := []string{
-		"<b>Проблемные ноды</b>",
-	}
-	if len(issueLines) == 0 && len(speedLines) == 0 {
-		lines = append(lines, "", "Проблем не найдено.")
-		return strings.Join(lines, "\n")
-	}
-	if len(issueLines) > 0 {
-		lines = append(lines, "", "<b>Проблемы доступности</b>")
-		lines = append(lines, limitLines(issueLines, 12)...)
-	}
-	if len(speedLines) > 0 {
-		lines = append(lines, "", "<b>Speed-test ниже порога или с ошибками</b>")
-		lines = append(lines, limitLines(speedLines, cfg.SpeedReportLimit)...)
-	}
-	return trimHTMLMessage(strings.Join(lines, "\n"))
+	return s.buildIssuesSummary().HTML
 }
 
 func (s *Service) formatIssuesSummaryMessage() formattedMessage {
-	fallback := s.formatIssuesSummary()
-	cfg := s.Config()
-	muted := s.alertMuteSet(cfg)
-	var issueItems []string
-	for _, proxy := range s.sortedProxies() {
-		if muted[proxy.StableID] {
-			continue
-		}
-		details, err := s.proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
-		if err != nil {
-			details.Status = checker.AvailabilityStateOffline
-		}
-		if details.EffectiveStatus() != checker.AvailabilityStateOnline {
-			issueItems = append(issueItems, formatProxyRichItem(proxy, details))
-		}
-	}
-	speedResults := speedIssueResults(filterSpeedResultsByMuteSet(s.activeSpeedResults(s.speedManager.Snapshot().Results), s.speedMuteSet(cfg)), cfg.LowSpeedThresholdMbps)
-
-	var rich strings.Builder
-	rich.WriteString("<h2>Проблемные ноды</h2>")
-	if len(issueItems) == 0 && len(speedResults) == 0 {
-		rich.WriteString("<p>✅ Проблем не найдено.</p>")
-		return formattedMessage{HTML: fallback, RichHTML: rich.String()}
-	}
-	fmt.Fprintf(&rich, "<p>⚠️ Доступность: <b>%d</b> · ⚡ Speed-test: <b>%d</b></p>", len(issueItems), len(speedResults))
-	if len(issueItems) > 0 {
-		rich.WriteString("<h3>Проблемы доступности</h3><ul>")
-		rich.WriteString(strings.Join(limitRichItems(issueItems, 12), ""))
-		rich.WriteString("</ul>")
-	}
-	if len(speedResults) > 0 {
-		rich.WriteString("<h3>Speed-test</h3><ul>")
-		for _, result := range limitResults(speedResults, cfg.SpeedReportLimit) {
-			rich.WriteString(formatSpeedIssueRichItem(result, cfg.LowSpeedThresholdMbps))
-		}
-		rich.WriteString("</ul>")
-		rich.WriteString(formatSpeedDiagnosticsRichDetails(speedResults, cfg.SpeedReportLimit))
-	}
-	return formattedMessage{HTML: fallback, RichHTML: rich.String()}
+	return s.buildIssuesSummary()
 }

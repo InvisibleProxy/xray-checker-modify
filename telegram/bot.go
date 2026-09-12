@@ -231,7 +231,7 @@ func (s *Service) handleCallback(cb *callbackQuery) {
 		s.handleStatusRefreshCallback(cb)
 	case data == "issues":
 		s.answerCallback(cb.ID, "")
-		s.editFormattedCommandMessage(cb.Message, s.formatIssuesSummaryMessage(), backToMenuMarkup())
+		s.editFormattedCommandMessage(cb.Message, s.formatIssuesSummaryMessage(), issuesSummaryMarkup())
 	case data == "nodes:list" || strings.HasPrefix(data, "nodes:list:"):
 		s.answerCallback(cb.ID, "")
 		page := parsePage(strings.TrimPrefix(strings.TrimPrefix(data, "nodes:list"), ":"))
