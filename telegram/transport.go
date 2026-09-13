@@ -89,6 +89,10 @@ type message struct {
 	Text            string `json:"text"`
 	Chat            chat   `json:"chat"`
 	From            *user  `json:"from"`
+
+	// Local callback state; never serialized or persisted as Telegram content.
+	sendAsNew   bool
+	replyFailed bool
 }
 
 type chat struct {
@@ -164,6 +168,9 @@ func (s *Service) sendFormattedCommandReply(msg *message, content formattedMessa
 }
 
 func (s *Service) editCommandMessage(msg *message, text string, replyMarkup string) bool {
+	if msg.sendAsNew || msg.replyFailed {
+		return s.editFormattedCommandMessage(msg, formattedMessage{HTML: text}, replyMarkup)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.Config().TimeoutSec)*time.Second)
 	defer cancel()
 	if err := s.editTextWithMarkup(ctx, strconv.FormatInt(msg.Chat.ID, 10), msg.MessageID, text, replyMarkup); err != nil {
@@ -177,8 +184,28 @@ func (s *Service) editCommandMessage(msg *message, text string, replyMarkup stri
 }
 
 func (s *Service) editFormattedCommandMessage(msg *message, content formattedMessage, replyMarkup string) bool {
+	if msg.replyFailed {
+		return false
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.Config().TimeoutSec)*time.Second)
 	defer cancel()
+	if msg.sendAsNew {
+		// A failed or ambiguous send must never fall back to editing the alert
+		// or be repeated by an asynchronous completion callback.
+		msg.replyFailed = true
+		sent, err := s.sendFormattedToWithMarkup(ctx, strconv.FormatInt(msg.Chat.ID, 10), msg.MessageThreadID, content, replyMarkup)
+		if err != nil {
+			logger.Warn("Failed to open Telegram alert action: %v", err)
+			return false
+		}
+		if sent == nil || sent.MessageID <= 0 {
+			return false
+		}
+		sent.Chat = msg.Chat
+		sent.MessageThreadID = msg.MessageThreadID
+		*msg = *sent
+		return true
+	}
 	if err := s.editFormattedWithMarkup(ctx, strconv.FormatInt(msg.Chat.ID, 10), msg.MessageID, content, replyMarkup); err != nil {
 		if isMessageNotModified(err) {
 			return true

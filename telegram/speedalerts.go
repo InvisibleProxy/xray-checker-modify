@@ -210,7 +210,7 @@ func (s *Service) sendSpeedTestReport(cfg Config, chatID string, threadID int, c
 	if markup == "" {
 		markup = backToMenuMarkup()
 	}
-	if _, err := s.sendFormattedToWithMarkup(ctx, chatID, threadID, content, markup); err != nil {
+	if _, err := s.sendFormattedToWithMarkup(ctx, chatID, threadID, content, alertMarkup(markup)); err != nil {
 		logger.Warn("Failed to send Telegram speed-test report: %v", err)
 	}
 }

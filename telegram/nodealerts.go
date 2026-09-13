@@ -371,7 +371,7 @@ func (s *Service) sendNodeAlertMessageWithMarkup(cfg Config, content formattedMe
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSec)*time.Second)
 	defer cancel()
-	if _, err := s.sendFormattedToWithMarkup(ctx, cfg.ChatID, cfg.MessageThreadID, content, replyMarkup); err != nil {
+	if _, err := s.sendFormattedToWithMarkup(ctx, cfg.ChatID, cfg.MessageThreadID, content, alertMarkup(replyMarkup)); err != nil {
 		logger.Warn("Failed to send Telegram node alert: %v", err)
 		return err
 	}

@@ -9,6 +9,37 @@ import (
 	"xray-checker/speedtest"
 )
 
+const alertCallbackPrefix = "alert:"
+
+// Alert actions open a separate message instead of editing the notification.
+func alertMarkup(markup string) string {
+	var keyboard inlineKeyboardMarkup
+	if json.Unmarshal([]byte(markup), &keyboard) != nil {
+		return ""
+	}
+	var rows [][]inlineKeyboardButton
+	for _, row := range keyboard.InlineKeyboard {
+		var buttons []inlineKeyboardButton
+		for _, button := range row {
+			if button.CallbackData != "" {
+				button.CallbackData = alertCallbackPrefix + button.CallbackData
+				// Never truncate an identity or leave an unprotected callback.
+				if len(button.CallbackData) > 64 {
+					continue
+				}
+			}
+			buttons = append(buttons, button)
+		}
+		if len(buttons) > 0 {
+			rows = append(rows, buttons)
+		}
+	}
+	if len(rows) == 0 {
+		return ""
+	}
+	return encodeMarkup(rows)
+}
+
 func mainMenuMarkup(isAdmin bool) string {
 	rows := [][]inlineKeyboardButton{
 		{

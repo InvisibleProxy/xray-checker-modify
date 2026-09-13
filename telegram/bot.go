@@ -219,6 +219,16 @@ func (s *Service) handleCallback(cb *callbackQuery) {
 		s.answerCallback(cb.ID, "Нет доступа")
 		return
 	}
+	if strings.HasPrefix(data, alertCallbackPrefix) {
+		data = strings.TrimPrefix(data, alertCallbackPrefix)
+		// Keep the received alert intact, including when an action runs async.
+		callbackCopy := *cb
+		messageCopy := *cb.Message
+		messageCopy.sendAsNew = true
+		callbackCopy.Message = &messageCopy
+		callbackCopy.Data = data
+		cb = &callbackCopy
+	}
 
 	switch {
 	case data == "back_to_menu" || data == "menu" || data == "menu:refresh":
