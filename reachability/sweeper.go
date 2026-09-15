@@ -43,10 +43,16 @@ type AgentSource interface {
 type Target struct {
 	StableID string
 	Name     string
-	// Subscription is the feed the node came from. The sweep does not read it —
-	// every target is asked about the same way — but the view carries it so a
-	// matrix built from several subscriptions can be read one at a time.
+	// Subscription is the feed the node came from. A pass asks about every
+	// target the same way, and the view carries the name so a matrix built from
+	// several subscriptions can be read one at a time.
 	Subscription string
+	// Environment marks a node from a subscription the deployment configures
+	// itself. Only those are visited by the scheduled pass: agent time is spent
+	// on the service this deployment runs, and a node an operator added from
+	// the panel is somebody else's. Such a node is still swept — but only when
+	// an operator asks for it from the Reachability tab.
+	Environment bool
 }
 
 type Config struct {
@@ -135,14 +141,22 @@ func (s *Sweeper) Run(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
-		s.SweepOnce(ctx)
+		s.sweepScheduled(ctx)
 		timer.Reset(s.config.Interval)
 	}
 }
 
-// SweepOnce runs one full pass and reports what it managed to observe.
+// sweepScheduled is the pass the timer runs. It visits the environment's own
+// nodes only; see Target.Environment for why the panel-added ones wait for an
+// operator to ask.
+func (s *Sweeper) sweepScheduled(ctx context.Context) Summary {
+	return s.sweep(ctx, "", true)
+}
+
+// SweepOnce runs one full pass and reports what it managed to observe. It is
+// the operator asking, so it covers every node, panel-added ones included.
 func (s *Sweeper) SweepOnce(ctx context.Context) Summary {
-	return s.sweep(ctx, "")
+	return s.sweep(ctx, "", false)
 }
 
 // SweepNode re-asks every agent about a single node.
@@ -158,11 +172,16 @@ func (s *Sweeper) SweepNode(ctx context.Context, stableID string) Summary {
 	if stableID == "" {
 		return Summary{}
 	}
-	return s.sweep(ctx, stableID)
+	return s.sweep(ctx, stableID, false)
 }
 
 // sweep runs a pass over every node, or over one when stableID is set.
-func (s *Sweeper) sweep(ctx context.Context, stableID string) Summary {
+//
+// A scheduled pass narrows the targets to the environment's own subscriptions;
+// an operator's pass narrows nothing. Either way the retained rows come from
+// the full target list, so a node the schedule skips keeps its column and its
+// last known cells rather than disappearing from the matrix.
+func (s *Sweeper) sweep(ctx context.Context, stableID string, scheduled bool) Summary {
 	if !s.Enabled() {
 		return Summary{}
 	}
@@ -183,6 +202,17 @@ func (s *Sweeper) sweep(ctx context.Context, stableID string) Summary {
 	all := s.targets()
 	agents := s.eligibleAgents()
 	targets := all
+	skipped := 0
+	if scheduled {
+		targets = nil
+		for _, target := range all {
+			if target.Environment {
+				targets = append(targets, target)
+				continue
+			}
+			skipped++
+		}
+	}
 	if !full {
 		targets = nil
 		for _, target := range all {
@@ -223,7 +253,7 @@ func (s *Sweeper) sweep(ctx context.Context, stableID string) Summary {
 		s.matrix.BeginSweep()
 	}
 	if len(targets) == 0 || len(agents) == 0 {
-		empty := Summary{Agents: len(agents), Nodes: len(targets)}
+		empty := Summary{Agents: len(agents), Nodes: len(targets), Foreign: skipped}
 		empty.SaveError = s.finish(full, false)
 		s.report(empty)
 		return empty
@@ -232,7 +262,7 @@ func (s *Sweeper) sweep(ctx context.Context, stableID string) Summary {
 	var (
 		wg      sync.WaitGroup
 		mu      sync.Mutex
-		summary = Summary{Agents: len(agents), Nodes: len(targets)}
+		summary = Summary{Agents: len(agents), Nodes: len(targets), Foreign: skipped}
 	)
 	for _, agent := range agents {
 		wg.Add(1)
@@ -410,9 +440,14 @@ type Summary struct {
 	// Node names the single node a targeted recheck covered, and is empty for a
 	// full pass. Without it a one-line log cannot say whether "1 node" means the
 	// matrix has one node or that only one was rechecked.
-	Node      string
-	Agents    int
-	Nodes     int
+	Node   string
+	Agents int
+	Nodes  int
+	// Foreign counts the monitored nodes a scheduled pass left out because they
+	// came from a panel-added subscription. Without it the node count of a
+	// scheduled pass silently disagrees with the matrix, and there is nothing
+	// in the log to say why.
+	Foreign   int
 	Recorded  int
 	Divergent int
 	Confirmed int

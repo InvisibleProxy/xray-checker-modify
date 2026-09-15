@@ -223,6 +223,10 @@ func main() {
 		Cooldown:      time.Duration(config.CLIConfig.RemoteDiagnostics.AutomationCooldownMinutes) * time.Minute,
 		AlertWait:     time.Duration(config.CLIConfig.RemoteDiagnostics.AutomationAlertWaitSeconds) * time.Second,
 		MaxConcurrent: config.CLIConfig.RemoteDiagnostics.AutomationMaxConcurrent,
+		// Agents work for the deployment's own subscriptions. A panel-added
+		// node is still measured and still reported; it just gets an agent only
+		// when an operator asks for one from the Reachability tab.
+		EnvironmentSourced: proxyChecker.EnvironmentSourced,
 	}, remoteDiagnosticController, probeAgentRegistry)
 	if err != nil {
 		logger.Fatal("Failed to configure diagnostic automation: %v", err)
@@ -239,8 +243,15 @@ func main() {
 			if summary.Skipped {
 				return
 			}
-			logger.Info("Reachability sweep: %d agents, %d nodes, %d cells, %d confirmed divergences, %d timeouts, %d errors",
-				summary.Agents, summary.Nodes, summary.Recorded, summary.Confirmed, summary.Timeouts, summary.Errors)
+			// The skipped count is only ever non-zero for a scheduled pass, and
+			// saying so is what keeps a shrunken node count from reading as
+			// nodes gone missing.
+			skipped := ""
+			if summary.Foreign > 0 {
+				skipped = fmt.Sprintf(", %d panel-sourced nodes left to manual sweeps", summary.Foreign)
+			}
+			logger.Info("Reachability sweep: %d agents, %d nodes, %d cells, %d confirmed divergences, %d timeouts, %d errors%s",
+				summary.Agents, summary.Nodes, summary.Recorded, summary.Confirmed, summary.Timeouts, summary.Errors, skipped)
 		},
 	}, remoteDiagnosticController, probeAgentRegistry, func() []reachability.Target {
 		return reachabilityTargets(proxyChecker)
@@ -885,7 +896,12 @@ func reachabilityTargets(proxyChecker *checker.ProxyChecker) []reachability.Targ
 		if stableID == "" || !proxyChecker.MonitoringEnabled(stableID) {
 			continue
 		}
-		targets = append(targets, reachability.Target{StableID: stableID, Name: proxy.Name, Subscription: proxy.SubName})
+		targets = append(targets, reachability.Target{
+			StableID:     stableID,
+			Name:         proxy.Name,
+			Subscription: proxy.SubName,
+			Environment:  proxyChecker.EnvironmentSourced(stableID),
+		})
 	}
 	return targets
 }

@@ -75,7 +75,7 @@ func TestSpeedAutomationCandidatesRankShortenedTransfersByShortfall(t *testing.T
 	candidates := speedAutomationCandidates([]speedtest.Result{
 		{StableID: "mild", Mbps: 80, DownloadedBytes: 21 * 1024 * 1024, TimedOut: true},
 		{StableID: "severe", Mbps: 5.79, DownloadedBytes: 21 * 1024 * 1024, TimedOut: true},
-	}, "schedule", 100)
+	}, "schedule", 100, nil)
 
 	if len(candidates) != 2 {
 		t.Fatalf("candidates = %d, want 2", len(candidates))

@@ -34,6 +34,14 @@ type Config struct {
 	MaxConcurrent int
 	PollInterval  time.Duration
 	Now           func() time.Time
+	// EnvironmentSourced separates the subscription the deployment configures
+	// itself from the ones an operator added in the panel. Automatic agent work
+	// is about the service this deployment runs, so a panel-added node is
+	// measured and reported like any other but never spends an agent slot on
+	// its own: an agent visits it only when an operator asks from the
+	// Reachability tab. A nil gate treats every node as the environment's,
+	// which is what a deployment with no panel sources has.
+	EnvironmentSourced func(string) bool
 }
 
 type Snapshot struct {
@@ -158,7 +166,7 @@ func (c *Coordinator) StartSpeedDiagnostics(report speedtest.RunReport, threshol
 	if !c.Enabled() {
 		return nil
 	}
-	candidates := speedAutomationCandidates(report.Results, report.Source, threshold)
+	candidates := speedAutomationCandidates(report.Results, report.Source, threshold, c.config.EnvironmentSourced)
 	if len(candidates) == 0 {
 		return nil
 	}
@@ -197,7 +205,10 @@ type startRequest struct {
 // describe the same moment: a rate that drifts is not settled by measuring it
 // again half an hour later. A technical failure gets a yes/no answer instead,
 // and the confirmation retry re-measures it anyway.
-func speedAutomationCandidates(results []speedtest.Result, source string, threshold float64) []startRequest {
+//
+// A node from a panel-added subscription is never a candidate: see
+// Config.EnvironmentSourced.
+func speedAutomationCandidates(results []speedtest.Result, source string, threshold float64, environmentSourced func(string) bool) []startRequest {
 	source = strings.TrimSpace(source)
 	if source == "" {
 		source = "unknown"
@@ -212,6 +223,10 @@ func speedAutomationCandidates(results []speedtest.Result, source string, thresh
 		}
 		stableID := strings.TrimSpace(result.StableID)
 		if seen[stableID] {
+			continue
+		}
+		if environmentSourced != nil && !environmentSourced(stableID) {
+			seen[stableID] = true
 			continue
 		}
 		seen[stableID] = true
