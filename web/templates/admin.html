@@ -3268,6 +3268,7 @@
         reachability: null,
         reachabilityPoll: null,
         reachabilitySubscription: "",
+        reachabilitySubscriptionTouched: false,
         remnawave: null,
         nodesOverviewSort: "avgMbps",
         nodesOverviewSortDir: "desc",
@@ -8297,10 +8298,18 @@
       // The subscription filter narrows what is read, never what is swept: the
       // counters above the table keep describing the whole matrix, because a
       // filter is a way to look at findings, not a way to stop having them.
+      //
+      // Until the operator picks for themselves the tab opens on the
+      // deployment's own subscription. That is where the scheduled sweep works;
+      // a panel-added node is only observed when somebody asks from here, so
+      // opening on everything puts rows nothing refreshes beside the ones that
+      // are current. A choice the operator made outranks it, "All" included.
       function renderReachabilitySubscriptions(nodes) {
         const select = $("reachability-sub-filter");
         if (!select) return "";
-        const previous = state.reachabilitySubscription || "";
+        const previous = state.reachabilitySubscriptionTouched
+          ? (state.reachabilitySubscription || "")
+          : environmentSubscriptionName();
         const subscriptions = [...new Set(nodes.map((node) => node.subscription).filter(Boolean))].sort();
         select.innerHTML = `<option value="">${escapeHtml(tr("All"))}</option>`
           + subscriptions.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("");
@@ -9821,6 +9830,7 @@
       $("reachability-sweep").addEventListener("click", () => sweepReachability());
       $("reachability-sub-filter").addEventListener("change", (event) => {
         state.reachabilitySubscription = event.target.value || "";
+        state.reachabilitySubscriptionTouched = true;
         try {
           localStorage.setItem(reachabilityFilterKey, state.reachabilitySubscription);
         } catch {
@@ -10164,13 +10174,21 @@
         });
       });
       ["nodes-overview-search", "nodes-overview-status", "nodes-overview-country", "nodes-overview-sub", "nodes-overview-geo", "nodes-overview-sort"].forEach((id) => {
-        $(id).addEventListener("input", renderNodesOverview);
-        $(id).addEventListener("change", () => {
+        const control = $(id);
+        const applyFilter = () => {
           // A subscription the operator chose outranks the environment default
-          // from here on, "All" included.
+          // from here on, "All" included. The flag has to be set before the
+          // render and not by one of the two events: a render that runs while
+          // it is still unset puts the environment subscription back, and the
+          // choice is spent without ever being applied.
           if (id === "nodes-overview-sub") state.nodesOverviewSubTouched = true;
           renderNodesOverview();
-        });
+        };
+        // One choice in a select fires input and then change, so a select needs
+        // the later of the two alone; the text search reacts per keystroke and
+        // keeps input.
+        if (control.tagName !== "SELECT") control.addEventListener("input", applyFilter);
+        control.addEventListener("change", applyFilter);
       });
       function activateNodesOverviewSort(header) {
         const sort = header.dataset.sort;
@@ -10212,7 +10230,14 @@
 
       restoreDashboardOrderState();
       try {
-        state.reachabilitySubscription = localStorage.getItem(reachabilityFilterKey) || "";
+        // A stored value, the empty string included, is a choice the operator
+        // already made; only its absence leaves the environment default to
+        // decide what the tab opens on.
+        const storedReachabilitySubscription = localStorage.getItem(reachabilityFilterKey);
+        if (storedReachabilitySubscription !== null) {
+          state.reachabilitySubscription = storedReachabilitySubscription;
+          state.reachabilitySubscriptionTouched = true;
+        }
       } catch {
       }
       syncDashboardOrderControls();
