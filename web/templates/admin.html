@@ -539,6 +539,21 @@
         justify-content: center;
         font-weight: 700;
       }
+      /* A flag carries no weight and needs no tracking; it only needs to be
+         large enough to tell apart at a glance. */
+      .country-flag {
+        font-size: 1rem;
+        font-weight: 400;
+        letter-spacing: 0;
+        line-height: 1;
+        padding-block: 2px;
+      }
+      /* Inside a verdict chip the word carries the meaning and the flag only
+         says where, but it still has to be large enough to resolve. */
+      .chip-flag {
+        font-size: 0.9375rem;
+        line-height: 1;
+      }
       .nodes-table {
         min-width: 900px;
       }
@@ -5386,14 +5401,34 @@
         return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       }
 
+      // ISO 3166-1 alpha-2 turned into the regional-indicator pair that renders
+      // as a flag. Anything that is not two latin letters has no flag, so the
+      // caller keeps showing the code itself.
+      function countryFlagEmoji(code) {
+        const value = String(code || "").trim().toUpperCase();
+        if (!/^[A-Z]{2}$/.test(value)) return "";
+        return String.fromCodePoint(...[...value].map((letter) => 0x1f1e6 + letter.charCodeAt(0) - 65));
+      }
+
+      // A flag is read at a glance where a two-letter code has to be decoded,
+      // so the marker shows one and keeps the code in the tooltip and in the
+      // accessible name.
+      function countryMarker(code, tone, title) {
+        const value = String(code || "").trim().toUpperCase();
+        const flag = countryFlagEmoji(value);
+        const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
+        if (!flag) return `<span class="chip ${tone} country-chip"${titleAttr}>${escapeHtml(value || "--")}</span>`;
+        return `<span class="chip ${tone} country-chip country-flag"${titleAttr} aria-label="${escapeHtml(value)}">${flag}</span>`;
+      }
+
       function countryChip(node) {
         const code = String(node.claimedCountryCode || "").trim().toUpperCase();
-        if (code) return `<span class="chip blue country-chip">${escapeHtml(code)}</span>`;
+        if (code) return countryMarker(code, "blue", countryText(node));
         // Sources that disagree get no single code to show; the Geo column
         // carries that case, so the marker stays empty rather than picking one.
         const geoOnly = geoOnlyCountries(node);
         if (geoOnly.length === 1) {
-          return `<span class="chip neutral country-chip" title="From geo lookup; the name claims no country">${escapeHtml(geoOnly[0].code)}</span>`;
+          return countryMarker(geoOnly[0].code, "neutral", `${geoOnlyText(node)} · from geo lookup; the name claims no country`);
         }
         return `<span class="chip blue country-chip">--</span>`;
       }
@@ -5419,7 +5454,14 @@
           // Blue is informational, not a verdict; disagreeing sources are the
           // one thing here worth warning about.
           const tone = codes.length > 1 ? "warn" : "blue";
-          return `<span class="chip ${tone}">Geo ${escapeHtml(codes.join(" / "))}</span>`;
+          // The cell's own tooltip already names every source and its country,
+          // so the chip can show the flag alone and stay short when the sources
+          // disagree; a code without a flag keeps its letters.
+          const labels = codes.map((code) => {
+            const flag = countryFlagEmoji(code);
+            return flag ? `<span class="chip-flag">${flag}</span>` : escapeHtml(code);
+          });
+          return `<span class="chip ${tone}">Geo ${labels.join(" / ")}</span>`;
         }
         return `<span class="chip neutral">Unknown</span>`;
       }
