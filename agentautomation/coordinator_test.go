@@ -261,6 +261,52 @@ func TestTransientRefusalDoesNotOccupyTheCooldown(t *testing.T) {
 	}
 }
 
+// Being left with only the node's own host is the same situation as being left
+// with no idle agent: the vantage point that is missing is usually busy and frees
+// up inside the wait, so the start is retried. A name that did not resolve is
+// final for the run, because every retry would repeat the lookup under the
+// coordinator's lock. Either way the record says why, instead of claiming that
+// no agent was connected.
+func TestAgentPlacementRefusalsNameTheirReason(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		err     error
+		detail  string
+		retried bool
+	}{
+		{"only the node host agent is idle", remoteprobe.ErrOnlyNodeHostAgent, "only an agent on the node's own host is idle", true},
+		{"the node name did not resolve", remoteprobe.ErrNodeAddressUnresolved, "node address could not be resolved", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			controller := &fakeSessionController{enabled: true, err: test.err}
+			coordinator, err := New(Config{
+				Enabled: true, Cooldown: time.Minute, AlertWait: time.Second, MaxConcurrent: 2,
+				PollInterval: time.Millisecond,
+			}, controller, fakeAgentSource{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			report := speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{
+				{StableID: "node-one", Error: "context deadline exceeded"},
+			}}
+			handles := coordinator.StartSpeedDiagnostics(report, 10)
+
+			// Well past the ten poll intervals a deferred start waits before it
+			// asks again.
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			annotation := coordinator.Await(ctx, handles)["node-one"]
+
+			if annotation.State != speedtest.AgentDiagnosticUnavailable || annotation.Detail != test.detail {
+				t.Fatalf("annotation = %+v, want unavailable with %q", annotation, test.detail)
+			}
+			if retried := len(controller.requests) > 1; retried != test.retried {
+				t.Fatalf("automatic creates = %d, want retried = %v", len(controller.requests), test.retried)
+			}
+		})
+	}
+}
+
 // The agent reports whole Mbps, so its true rate lies in [Mbps, Mbps+1). Only a
 // whole interval below the threshold proves a slowdown; an interval straddling it
 // must not be announced as reproduced.

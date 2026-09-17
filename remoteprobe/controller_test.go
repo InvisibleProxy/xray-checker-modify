@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/netip"
 	"path/filepath"
@@ -23,9 +24,29 @@ type controllerFixture struct {
 	controller         *Controller
 	registry           *probeagent.Registry
 	proxyChecker       *checker.ProxyChecker
+	resolver           *fakeResolver
 	agentID            string
 	observationPrivate ed25519.PrivateKey
 	now                time.Time
+}
+
+// fakeResolver answers from a fixed table, so the tests that decide where an
+// agent runs never depend on real DNS.
+type fakeResolver struct {
+	hosts   map[string][]string
+	lookups int
+}
+
+func (f *fakeResolver) LookupIPAddr(_ context.Context, host string) ([]net.IPAddr, error) {
+	f.lookups++
+	addresses := make([]net.IPAddr, 0, len(f.hosts[host]))
+	for _, value := range f.hosts[host] {
+		addresses = append(addresses, net.IPAddr{IP: net.ParseIP(value)})
+	}
+	if len(addresses) == 0 {
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+	return addresses, nil
 }
 
 // bringAgentOnline enrolls a created agent and lands one signed heartbeat, so
@@ -58,6 +79,14 @@ func bringAgentOnline(t *testing.T, registry *probeagent.Registry, created probe
 
 func newControllerFixture(t *testing.T) controllerFixture {
 	t.Helper()
+	return newControllerFixtureForServer(t, "node.example.com")
+}
+
+// newControllerFixtureForServer publishes the node under the given server. The
+// name the default fixture uses resolves to an address no agent has, so a test
+// only meets an agent on the node's host when it puts one there.
+func newControllerFixtureForServer(t *testing.T, server string) controllerFixture {
+	t.Helper()
 	now := time.Now().UTC()
 	registry, err := probeagent.NewRegistry(probeagent.RegistryConfig{
 		Path: filepath.Join(t.TempDir(), "diagnostic_agents.json"), Enabled: true,
@@ -75,15 +104,16 @@ func newControllerFixture(t *testing.T) controllerFixture {
 	}
 	observationPrivate := bringAgentOnline(t, registry, created, "203.0.113.40", now)
 	proxy := &models.ProxyConfig{
-		StableID: "node-one", Name: "Node One", Protocol: "vless", Server: "node.example.com",
+		StableID: "node-one", Name: "Node One", Protocol: "vless", Server: server,
 		Port: 443, UUID: "11111111-1111-1111-1111-111111111111", Security: "tls", SNI: "node.example.com",
 	}
 	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "https://api.ipify.org?format=text", 30, "http://cp.cloudflare.com/generate_204", "https://proof.ovh.net/files/1Mb.dat", 60, 51200, "status")
-	controller, err := NewController(Config{Enabled: true, CheckMethod: "status"}, registry, proxyChecker)
+	resolver := &fakeResolver{hosts: map[string][]string{"node.example.com": {"198.51.100.20"}}}
+	controller, err := NewController(Config{Enabled: true, CheckMethod: "status", Resolver: resolver}, registry, proxyChecker)
 	if err != nil {
 		t.Fatalf("new controller: %v", err)
 	}
-	return controllerFixture{controller: controller, registry: registry, proxyChecker: proxyChecker, agentID: created.Agent.AgentID, observationPrivate: observationPrivate, now: now}
+	return controllerFixture{controller: controller, registry: registry, proxyChecker: proxyChecker, resolver: resolver, agentID: created.Agent.AgentID, observationPrivate: observationPrivate, now: now}
 }
 
 func TestManualJobCompletesWithoutOperationalSideEffectsOrCredentialExport(t *testing.T) {
@@ -443,7 +473,7 @@ func TestCreateAutomaticAsksTheVantagePointThePreferenceRanksFirst(t *testing.T)
 	}
 
 	preference := &fakeAgentPreference{order: []string{preferred, livenessWinner}}
-	controller, err := NewController(Config{Enabled: true, CheckMethod: "status", AgentPreference: preference}, fixture.registry, fixture.proxyChecker)
+	controller, err := NewController(Config{Enabled: true, CheckMethod: "status", AgentPreference: preference, Resolver: fixture.resolver}, fixture.registry, fixture.proxyChecker)
 	if err != nil {
 		t.Fatalf("new controller: %v", err)
 	}
@@ -474,7 +504,7 @@ func TestCreateAutomaticAsksTheVantagePointThePreferenceRanksFirst(t *testing.T)
 func TestCreateAutomaticFallsBackToLivenessOrderWhenThePreferenceRanksNothing(t *testing.T) {
 	fixture := newControllerFixture(t)
 	preference := &fakeAgentPreference{order: []string{"agent-that-does-not-exist"}}
-	controller, err := NewController(Config{Enabled: true, CheckMethod: "status", AgentPreference: preference}, fixture.registry, fixture.proxyChecker)
+	controller, err := NewController(Config{Enabled: true, CheckMethod: "status", AgentPreference: preference, Resolver: fixture.resolver}, fixture.registry, fixture.proxyChecker)
 	if err != nil {
 		t.Fatalf("new controller: %v", err)
 	}
@@ -490,6 +520,106 @@ func TestCreateAutomaticFallsBackToLivenessOrderWhenThePreferenceRanksNothing(t 
 	}
 	if len(created.Session.RequestedAgents) != 1 || created.Session.RequestedAgents[0] != fixture.agentID {
 		t.Fatalf("selected agents = %+v, want the only free agent", created.Session.RequestedAgents)
+	}
+}
+
+func speedFallbackRequest() CreateAutomaticRequest {
+	return CreateAutomaticRequest{
+		StableID: "node-one", Trigger: diagnostics.TriggerAutoSpeedFallback, ProfileID: diagnostics.ProfileDownload,
+		AutomationContext: diagnostics.AutomationContext{
+			Kind: diagnostics.AutomationKindSpeedFallback, Outcome: diagnostics.AutomationOutcomeLowSpeed,
+			Source: "schedule", ThresholdMbps: 100, ObservedMbps: 37, FallbackAttempts: 1,
+		},
+	}
+}
+
+// An agent on the node's own host reaches the node without leaving the machine,
+// so its answer says nothing about the path a client takes. It is also the
+// fastest vantage point that node has, which is why a ranking would pick it: here
+// the preference puts it first and is overruled.
+func TestCreateAutomaticNeverAsksTheAgentOnTheNodeOwnHost(t *testing.T) {
+	fixture := newControllerFixture(t)
+	onHost, err := fixture.registry.Create(probeagent.CreateAgentRequest{
+		DisplayName: "Node host probe", ExpectedSourceIP: "198.51.100.20",
+		ControllerIP: "198.51.100.10", ControllerURL: "https://checker.example.com",
+	})
+	if err != nil {
+		t.Fatalf("create agent on the node host: %v", err)
+	}
+	bringAgentOnline(t, fixture.registry, onHost, "198.51.100.20", fixture.now)
+
+	preference := &fakeAgentPreference{order: []string{onHost.Agent.AgentID, fixture.agentID}}
+	controller, err := NewController(Config{Enabled: true, CheckMethod: "status", AgentPreference: preference, Resolver: fixture.resolver}, fixture.registry, fixture.proxyChecker)
+	if err != nil {
+		t.Fatalf("new controller: %v", err)
+	}
+	created, err := controller.CreateAutomatic(speedFallbackRequest())
+	if err != nil {
+		t.Fatalf("create automatic diagnostics: %v", err)
+	}
+	if got := created.Session.RequestedAgents; len(got) != 1 || got[0] != fixture.agentID {
+		t.Fatalf("selected agents = %+v, want %q rather than the agent on the node host", got, fixture.agentID)
+	}
+}
+
+// With only the node's own host free, the automatic diagnostic is refused rather
+// than run from there, and refused by name, so an alert does not claim that no
+// agent was connected. Manual diagnostics and the sweep name their agent
+// themselves and keep working with that very agent.
+func TestCreateAutomaticRefusesWhenOnlyTheNodeHostAgentIsIdle(t *testing.T) {
+	fixture := newControllerFixture(t)
+	// Several addresses, the agent's among them in its IPv4-mapped form.
+	fixture.resolver.hosts["node.example.com"] = []string{"2001:db8::20", "::ffff:203.0.113.40"}
+
+	if _, err := fixture.controller.CreateAutomatic(speedFallbackRequest()); !errors.Is(err, ErrOnlyNodeHostAgent) {
+		t.Fatalf("automatic diagnostics error = %v, want ErrOnlyNodeHostAgent", err)
+	}
+	if sessions := fixture.controller.Sessions(""); len(sessions) != 0 {
+		t.Fatalf("a refused automatic diagnostic left sessions behind: %+v", sessions)
+	}
+
+	manual, err := fixture.controller.CreateManual(CreateManualRequest{StableID: "node-one", AgentID: fixture.agentID})
+	if err != nil {
+		t.Fatalf("manual diagnostics from the node host agent: %v", err)
+	}
+	// The manual job would otherwise hold the node and agent pair.
+	if err := fixture.controller.Delete(manual.Session.SessionID); err != nil {
+		t.Fatalf("delete manual session: %v", err)
+	}
+	if _, err := fixture.controller.CreateSweep(CreateSweepRequest{StableID: "node-one", AgentID: fixture.agentID}); err != nil {
+		t.Fatalf("sweep from the node host agent: %v", err)
+	}
+}
+
+// A node published as an address is compared as published. Only a name costs a
+// lookup, so the addresses subscriptions publish today need no DNS at all.
+func TestCreateAutomaticComparesAPublishedAddressWithoutALookup(t *testing.T) {
+	fixture := newControllerFixtureForServer(t, "203.0.113.40")
+	if _, err := fixture.controller.CreateAutomatic(speedFallbackRequest()); !errors.Is(err, ErrOnlyNodeHostAgent) {
+		t.Fatalf("automatic diagnostics error = %v, want ErrOnlyNodeHostAgent", err)
+	}
+	if fixture.resolver.lookups != 0 {
+		t.Fatalf("resolver was asked %d times about a node published as an address", fixture.resolver.lookups)
+	}
+}
+
+// Without the node's addresses there is no telling whether an agent runs on its
+// host, and letting the diagnostic through would guess in the one direction the
+// rule exists to prevent. The refusal does not carry the server's name, which is
+// execution material.
+func TestCreateAutomaticRefusesANodeWhoseNameDoesNotResolve(t *testing.T) {
+	fixture := newControllerFixture(t)
+	delete(fixture.resolver.hosts, "node.example.com")
+
+	_, err := fixture.controller.CreateAutomatic(speedFallbackRequest())
+	if !errors.Is(err, ErrNodeAddressUnresolved) {
+		t.Fatalf("automatic diagnostics error = %v, want ErrNodeAddressUnresolved", err)
+	}
+	if strings.Contains(err.Error(), "node.example.com") {
+		t.Fatalf("refusal leaked the node's server: %v", err)
+	}
+	if sessions := fixture.controller.Sessions(""); len(sessions) != 0 {
+		t.Fatalf("a refused automatic diagnostic left sessions behind: %+v", sessions)
 	}
 }
 

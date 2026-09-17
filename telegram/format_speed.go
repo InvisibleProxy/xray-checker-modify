@@ -449,6 +449,10 @@ func localizedSpeedDiagnosticDetail(detail string) string {
 		return "все слоты диагностики заняты"
 	case "no healthy idle diagnostic agent is connected":
 		return "нет свободного доступного агента"
+	case "only an agent on the node's own host is idle":
+		return "свободен только агент на самой ноде"
+	case "node address could not be resolved":
+		return "адрес ноды не разрешился в IP"
 	case "automatic diagnostics are paused by maintenance":
 		return "диагностика на паузе: обслуживание"
 	case "remote diagnostics are disabled":

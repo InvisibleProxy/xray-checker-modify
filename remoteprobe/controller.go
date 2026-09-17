@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync"
@@ -21,6 +23,11 @@ const (
 	DefaultAgentSocksPort = 18080
 	DefaultManualJobTTL   = 5 * time.Minute
 	DefaultLongPollWait   = 15 * time.Second
+	// nodeHostLookupTimeout bounds the lookup of a node published under a name.
+	// The automation coordinator holds its own lock across CreateAutomatic, so a
+	// resolver that stops answering has to cost a short wait, not the platform's
+	// retry schedule.
+	nodeHostLookupTimeout = 3 * time.Second
 )
 
 var (
@@ -30,6 +37,14 @@ var (
 	ErrUnknownProfile     = errors.New("unknown diagnostic profile")
 	ErrUnsupportedByAgent = errors.New("diagnostic agent does not support this profile")
 	ErrAutomaticPaused    = errors.New("automatic remote diagnostics are paused")
+	// ErrOnlyNodeHostAgent refuses an automatic diagnostic when every agent free
+	// to take it runs on the node's own host; see CreateAutomatic for why such
+	// an agent is never asked.
+	ErrOnlyNodeHostAgent = errors.New("every idle diagnostic agent runs on the node's own host")
+	// ErrNodeAddressUnresolved refuses an automatic diagnostic for a node whose
+	// name did not resolve: without its addresses there is no telling whether an
+	// agent runs on its host.
+	ErrNodeAddressUnresolved = errors.New("node address could not be resolved")
 )
 
 type Config struct {
@@ -40,6 +55,17 @@ type Config struct {
 	// AgentPreference ranks the vantage points an automatic diagnostic may use.
 	// It is optional; without it every node falls back to liveness order.
 	AgentPreference AgentPreference
+	// Resolver looks up a node published under a name, so an automatic
+	// diagnostic can tell an agent on the node's own host from one elsewhere.
+	// It is optional; nil uses the system resolver. A node published as an
+	// address never reaches it.
+	Resolver HostResolver
+}
+
+// HostResolver is the one lookup the controller makes itself. *net.Resolver
+// satisfies it; it is an interface so tests do not depend on real DNS.
+type HostResolver interface {
+	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
 }
 
 // AgentPreference orders the vantage points an automatic diagnostic should try
@@ -107,6 +133,9 @@ func NewController(config Config, registry *probeagent.Registry, proxyChecker *c
 	}
 	if config.SocksPort == 0 {
 		config.SocksPort = DefaultAgentSocksPort
+	}
+	if config.Resolver == nil {
+		config.Resolver = net.DefaultResolver
 	}
 	if registry == nil || proxyChecker == nil || config.JobTTL < 30*time.Second || config.SocksPort < 1024 || config.SocksPort > 65535 {
 		return nil, fmt.Errorf("invalid remote diagnostic controller configuration")
@@ -314,9 +343,79 @@ func (c *Controller) preferredAgent(stableID string, eligible []probeagent.Agent
 	return eligible[0]
 }
 
+// nodeHostAddresses lists the addresses a node's server stands for. A published
+// address is taken as it is; a name is resolved, because subscriptions publish
+// addresses today and nothing guarantees they will tomorrow.
+//
+// A name that does not resolve is an error rather than an empty list. An empty
+// list matches no agent, which would let the node's own one through — the one
+// outcome the comparison exists to prevent.
+func (c *Controller) nodeHostAddresses(server string) ([]netip.Addr, error) {
+	server = strings.TrimSpace(server)
+	if address, err := netip.ParseAddr(server); err == nil {
+		return []netip.Addr{address.Unmap()}, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), nodeHostLookupTimeout)
+	defer cancel()
+	resolved, err := c.config.Resolver.LookupIPAddr(ctx, server)
+	if err != nil {
+		// The lookup error names the server, which is execution material, so it
+		// stops here instead of travelling up with the refusal.
+		return nil, ErrNodeAddressUnresolved
+	}
+	addresses := make([]netip.Addr, 0, len(resolved))
+	for _, entry := range resolved {
+		// A resolver may hand an IPv4 answer back in its 16-byte form, which
+		// would never equal the 4-byte source IP the registry keeps.
+		if address, ok := netip.AddrFromSlice(entry.IP); ok {
+			addresses = append(addresses, address.Unmap())
+		}
+	}
+	if len(addresses) == 0 {
+		return nil, ErrNodeAddressUnresolved
+	}
+	return addresses, nil
+}
+
+// runsOnNodeHost reports whether an agent's expected source IP is one of the
+// node's own addresses.
+func runsOnNodeHost(agent probeagent.AgentSnapshot, nodeHost []netip.Addr) bool {
+	source, err := netip.ParseAddr(strings.TrimSpace(agent.ExpectedSourceIP))
+	if err != nil {
+		return false
+	}
+	source = source.Unmap()
+	for _, address := range nodeHost {
+		if address == source {
+			return true
+		}
+	}
+	return false
+}
+
 // CreateAutomatic selects one healthy idle agent and creates the same bounded,
 // generation-bound assignment as the manual workflow. The returned session is
 // diagnostic evidence only; this method has no operational callbacks.
+//
+// An agent on the node's own host is never selected. It reaches the node
+// without its traffic leaving the machine, so the provider's network, the route
+// and whatever filters traffic in front of the node — the part a client depends
+// on, and the part that usually breaks — never enter its measurement. Its answer
+// comes back "not reproduced" almost regardless of the fault, which sends the
+// operator to the checker's route while the node is the one in trouble, and
+// keeps the alert waiting for its confirmation retry — only a reproduced
+// problem lets it go out at once. No ranking can be trusted to avoid it either:
+// such an agent reaches its own node faster than anyone, so evidence-based
+// preference would pick it first.
+//
+// Placement is read from the agent's expected source IP. The registry refuses
+// every control request from any other address, so that is where the agent
+// actually is, and it is compared against every address the node's server
+// stands for.
+//
+// Manual sessions and the reachability sweep name their agent themselves and
+// are deliberately left alone: an operator may want the view from inside the
+// host, and the sweep asks every agent about every node by design.
 func (c *Controller) CreateAutomatic(request CreateAutomaticRequest) (SessionView, error) {
 	if !c.Enabled() {
 		return SessionView{}, probeagent.ErrDisabled
@@ -340,6 +439,12 @@ func (c *Controller) CreateAutomatic(request CreateAutomaticRequest) (SessionVie
 	if snapshot.Maintenance || c.checker.ProjectMaintenanceEnabled() {
 		return SessionView{}, ErrAutomaticPaused
 	}
+	// Resolved before the lock is taken: a lookup can take seconds, and the same
+	// lock serves every agent's job poll.
+	nodeHost, err := c.nodeHostAddresses(snapshot.Proxy.Server)
+	if err != nil {
+		return SessionView{}, err
+	}
 
 	agents := c.registry.Snapshot()
 	sort.Slice(agents, func(i, j int) bool {
@@ -358,15 +463,26 @@ func (c *Controller) CreateAutomatic(request CreateAutomaticRequest) (SessionVie
 		busyAgents[queued.assignment.Job.AgentID] = true
 	}
 	eligible := make([]probeagent.AgentSnapshot, 0, len(agents))
+	onNodeHost := false
 	for _, candidate := range agents {
 		if !candidate.Enabled || !candidate.Connected || candidate.Health != "healthy" || busyAgents[candidate.AgentID] ||
 			!contains(candidate.Capabilities, diagnostics.CapabilityControlV1) ||
 			!contains(candidate.Capabilities, descriptor.Capability) {
 			continue
 		}
+		// Checked after every other condition, so the refusal below names the
+		// node's host only when an agent that could otherwise have taken the job
+		// was turned away for it.
+		if runsOnNodeHost(candidate, nodeHost) {
+			onNodeHost = true
+			continue
+		}
 		eligible = append(eligible, candidate)
 	}
 	if len(eligible) == 0 {
+		if onNodeHost {
+			return SessionView{}, ErrOnlyNodeHostAgent
+		}
 		return SessionView{}, ErrUnavailableAgent
 	}
 	agent := c.preferredAgent(snapshot.Proxy.StableID, eligible)

@@ -341,6 +341,16 @@ func (c *Coordinator) startSpeed(request startRequest) Handle {
 			// sweep holds every agent for the length of a pass, and a manual
 			// session holds one. Both clear well inside a single alert wait.
 			transient = true
+		case errors.Is(err, remoteprobe.ErrOnlyNodeHostAgent):
+			detail = "only an agent on the node's own host is idle"
+			// The same situation as above seen from one node: the vantage point
+			// it is missing is usually just busy, and frees up inside the wait.
+			transient = true
+		case errors.Is(err, remoteprobe.ErrNodeAddressUnresolved):
+			// Final for this run. Retrying would repeat the lookup while this
+			// coordinator's lock is held, for as long as the resolver takes to
+			// fail, on every retry of the wait; the next run asks again.
+			detail = "node address could not be resolved"
 		case errors.Is(err, remoteprobe.ErrAutomaticPaused):
 			detail = "automatic diagnostics are paused by maintenance"
 		case errors.Is(err, probeagent.ErrDisabled):

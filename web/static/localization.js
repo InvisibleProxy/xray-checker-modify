@@ -49,6 +49,8 @@
     "Endpoint": "Endpoint", "Failed at": "Сбой на шаге", "Agent version": "Версия агента",
     "No signed observation was recorded for this probe.": "Для этой пробы не записано подписанное наблюдение.",
     "no healthy idle diagnostic agent is connected": "нет свободного исправного диагностического агента",
+    "only an agent on the node's own host is idle": "свободен только агент на самой ноде",
+    "node address could not be resolved": "адрес ноды не разрешился в IP",
     "automation capacity is busy": "все слоты автоматики заняты",
     "automatic diagnostics are paused by maintenance": "автоматическая диагностика приостановлена обслуживанием",
     "remote diagnostics are disabled": "удалённая диагностика выключена",

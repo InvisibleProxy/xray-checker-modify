@@ -25,7 +25,7 @@
 - временный Xray config с mode `0600` внутри tmpfs, loopback-only SOCKS inbound, embedded Xray lifecycle и обязательное удаление после job;
 - proxy-check, TCP/ping evidence, direct-connectivity control, отдельная observation-подпись и generation/fingerprint recheck перед приёмом;
 - cancel, sanitized JSON export и вероятностная summary без operational side effects.
-- opt-in `auto_speed_fallback`, выбирающий одну healthy idle probe — по ранжированию матрицы достижимости, когда sweep её поддерживает, — с per-node cooldown, concurrency limit, повтором отложенного старта внутри окна ожидания алерта, bounded read-only alert enrichment и справочной записью пробы в speedtest history.
+- opt-in `auto_speed_fallback`, выбирающий одну healthy idle probe — по ранжированию матрицы достижимости, когда sweep её поддерживает, и никогда не ту, чей expected source IP совпадает с адресом проверяемой ноды (имя ноды резолвится; не разрешилось — проба не запускается), — с per-node cooldown, concurrency limit, повтором отложенного старта внутри окна ожидания алерта, bounded read-only alert enrichment и справочной записью пробы в speedtest history.
 - opt-in `reachability_sweep`: периодический обход «каждая нода × каждый подключённый агент» с persisted матрицей вердиктов, hysteresis по streak и отдельной вкладкой `Reachability`.
 
 Manager diagnostic sessions связан с отдельным manual admin workflow, agent endpoints, узким automation coordinator-ом и sweep-ом достижимости. Он не является writer-ом availability или speedtest workflow: код не меняет status/incidents/retries/Remnawave и не влияет на классификацию замеров. Единственная запись в persisted state — справочная копия автоматической пробы рядом с вызвавшим её замером, которую переносит `speedprobe/`; сам manager и координатор по-прежнему без callbacks в operational state. Automatic trigger реализован для неразрешённого замера скорости и для периодического sweep-а; availability-trigger по-прежнему не реализован.
@@ -207,7 +207,7 @@ State
 
 - одновременно разрешена одна активная auto-session на `StableID + trigger`;
 - повторный локальный результат прикрепляется к существующей сессии либо игнорируется до её завершения;
-- после auto-session действует configurable cooldown; отказ, при котором session так и не стартовала — нет свободного healthy-агента либо исчерпан concurrency limit — cooldown не занимает и повторяется на следующем прогоне;
+- после auto-session действует configurable cooldown; отказ, при котором session так и не стартовала — нет свободного healthy-агента, свободен только агент на хосте самой ноды, не разрешилось имя ноды либо исчерпан concurrency limit — cooldown не занимает и повторяется на следующем прогоне;
 - manual session может обходить cooldown, но остаётся под global/per-agent concurrency limit;
 - session имеет deadline и не ждёт недоступного агента бесконечно;
 - controller ограничивает число нод и агентов в одном запуске.
@@ -219,7 +219,7 @@ Controller должен:
 1. Регистрировать, включать, отключать и отзывать probe-agent'ов.
 2. Хранить `AgentID`, display name, network condition, public key, capabilities, version и last seen.
 3. Создавать manual и automatic diagnostic sessions.
-4. Выбирать агента по требуемым условиям, а не по quorum-весу.
+4. Выбирать агента по требуемым условиям, а не по quorum-весу; для automatic session — никогда не агента, стоящего на хосте проверяемой ноды: его путь до ноды не выходит за пределы машины.
 5. Формировать задания только для active `StableID` текущей effective-конфигурации.
 6. Привязывать задание к `SessionID`, `JobID`, generation, config fingerprint и сроку действия.
 7. Передавать минимальную конфигурацию, необходимую для выполнения проверки.
