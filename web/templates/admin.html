@@ -5398,6 +5398,24 @@
         return geoOnly ? `${geoOnly} · geo` : "Unknown";
       }
 
+      // The Country column names the country by its ISO code: a scan down the
+      // column needs no more, and the full name only widens the table, so it
+      // moves to the tooltip. Same order as countryText: a claim wins over geo.
+      // Empty when nothing is known.
+      function countryCodeLabel(node) {
+        const claimed = String(node.claimedCountryCode || "").trim().toUpperCase()
+          || String(node.claimedCountry || "").trim();
+        if (claimed) return claimed;
+        const codes = geoOnlyCountries(node).map((entry) => entry.code);
+        return codes.length > 0 ? `${codes.join(" / ")} · geo` : "";
+      }
+
+      function countryCell(node) {
+        const label = countryCodeLabel(node);
+        if (!label) return "Unknown";
+        return `<span title="${escapeHtml(countryText(node))}">${escapeHtml(label)}</span>`;
+      }
+
       function escapeRegExp(value) {
         return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       }
@@ -5715,8 +5733,11 @@
         if (key === "lastSeenAt") return node.lastSeenAt ? new Date(node.lastSeenAt).getTime() : 0;
         if (key === "active") return node.active ? 1 : 0;
         // Both columns show more than the raw field holds, and sorting by what
-        // is not on screen groups rows the operator sees as alike apart.
-        if (key === "claimedCountry") return countryText(node).toLowerCase();
+        // is not on screen groups rows the operator sees as alike apart. A row
+        // nothing is known about sorts as empty, the way a missing speed sorts
+        // as zero; the word "Unknown" among the codes would land between UA
+        // and US.
+        if (key === "claimedCountry") return countryCodeLabel(node).toLowerCase();
         if (key === "countryMatch") return effectiveCountryMatch(node);
         if (["avgMbps", "minMbps", "maxMbps", "failedResults"].includes(key)) return Number(node[key] || 0);
         return String(node[key] || "").toLowerCase();
@@ -5784,7 +5805,7 @@
               </td>
               <td>${statusChip}</td>
               <td class="mono">${ipLink}${node.port ? `:${escapeHtml(node.port)}` : ""}${ipDetailsLink}</td>
-              <td>${escapeHtml(countryText(node))}</td>
+              <td>${countryCell(node)}</td>
               <td>${geoCell(node)}</td>
               <td class="${speedClass}">${node.successfulResults ? formatMbps(node.avgMbps) : "n/a"}</td>
               <td>${node.successfulResults ? formatMbps(node.minMbps) : "n/a"}</td>
