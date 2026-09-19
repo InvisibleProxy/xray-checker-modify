@@ -52,18 +52,21 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`id="selection-check"`,
 		`id="selection-run"`,
 		`id="select-all-nodes"`,
-		`selectAll.indeterminate = selectedVisible > 0 && selectedVisible < visibleIDs.length`,
-		`filteredProxies().forEach((proxy) => {`,
+		// The master checkbox answers for the nodes in view; a folded
+		// maintenance group is filtered in but out of sight.
+		`selectAll.indeterminate = selectedVisible > 0 && selectedVisible < reachableIDs.length`,
+		`visibleDashboardProxies().forEach((proxy) => {`,
 		`data-check-id="${escapeHtml(proxy.stableId)}"`,
 		`data-run-id="${escapeHtml(proxy.stableId)}"`,
 		`id="toggle-maintenance"`,
 		`function renderMaintenanceControl()`,
 		`button.dataset.maintenanceId = proxy.stableId`,
-		// A paused node keeps its measured latency in the value; the pause moves
-		// to the label instead of replacing the number.
+		// A paused node's value is the pause itself: read first, it no longer
+		// reads as an outage. The probe it keeps running moves to the caption.
 		`function proxyAvailabilityText(proxy)`,
 		`if (proxy.maintenance && !proxy.checkedAt) return "Not checked yet"`,
-		`availabilityLabel: state.projectMaintenance?.enabled || proxy.maintenance ? "Maintenance" : "Availability"`,
+		`(proxy.maintenance ? "Maintenance" : proxyAvailabilityText(proxy))`,
+		"(proxy.maintenance ? `Probe · ${proxyAvailabilityText(proxy)}` : \"Availability\")",
 		`data-node-availability-label`,
 		`view === "availability" && result.maintenance`,
 		`checkDisabled: state.availabilityCheckRunning || maintenanceUpdating`,
@@ -347,6 +350,58 @@ func TestAdminTemplateOffersTelegramTimeZoneSelection(t *testing.T) {
 	}
 }
 
+// The layout decisions made for the operator have to survive later edits:
+// paused nodes step back into a group of their own, a lone subscription is
+// not repeated on every row, every screen shows one country marker, the fleet's
+// history is laid side by side, repeated incidents collapse into one row, and
+// the controls open with the selection instead of holding a quarter of the
+// width for disabled forms.
+func TestAdminTemplateKeepsOperatorLayoutDecisions(t *testing.T) {
+	var rendered bytes.Buffer
+	if err := RenderAdmin(&rendered); err != nil {
+		t.Fatalf("RenderAdmin() error = %v", err)
+	}
+	html := rendered.String()
+	for _, marker := range []string{
+		`if (state.projectMaintenance?.enabled || proxy.maintenance) return "row-paused";`,
+		`return groupPausedLast(sortDashboardProxies(filtered));`,
+		`function syncDashboardPausedGroup(container, proxies)`,
+		`data-toggle-paused-group`,
+		`state.dashboardRowsShowSubscription = new Set(proxies.map((proxy) => proxy.subName || "")).size > 1;`,
+		`classList.toggle("hide-subscription", !showSubscription)`,
+		`return node ? countryChip(node, false) : "";`,
+		`function nameWithoutCountryPrefix(name, code)`,
+		`>Speed</th>`,
+		`function formatRelativeTime(iso)`,
+		`function nodeDetailStatsHTML(proxy)`,
+		`data-node-metric-chart="speed-history"`,
+		`async function loadHistoryHeatmap(force = false)`,
+		`function renderHistoryHeatmap()`,
+		`$("history-table").classList.toggle("hide-url", singleURL);`,
+		`id="incidents-group"`,
+		`function groupIncidentRepeats(incidents, enabled)`,
+		`class="settings-layout"`,
+		`aria-orientation="vertical"`,
+		`id="toggle-controls"`,
+		`function controlsOpen()`,
+		`.dashboard-grid.controls-closed .control-panel`,
+	} {
+		if !strings.Contains(html, marker) {
+			t.Errorf("admin template does not contain %q", marker)
+		}
+	}
+	if strings.Contains(html, `disabled title="Active nodes are managed by subscription">Delete</button>`) {
+		t.Error("Nodes Overview still renders a Delete button that active nodes can never use")
+	}
+	// The controls open beside the list, on its right, so opening them never
+	// moves the checkboxes an operator is clicking.
+	list := strings.Index(html, `id="nodes" class="nodes-list"`)
+	controls := strings.Index(html, `id="dashboard-controls"`)
+	if list < 0 || controls < 0 || controls < list {
+		t.Errorf("dashboard controls are not placed after the node list: list=%d controls=%d", list, controls)
+	}
+}
+
 func TestAdminTemplateColorsAvailabilityDiagnosticsIndependently(t *testing.T) {
 	var rendered bytes.Buffer
 	if err := RenderAdmin(&rendered); err != nil {
@@ -359,7 +414,8 @@ func TestAdminTemplateColorsAvailabilityDiagnosticsIndependently(t *testing.T) {
 		`availability-diagnostic ${proxy.pingCheckOnline ? "ok" : "error"}`,
 		`class="availability-separator"`,
 		`${nodeAvailabilityDetailsHTML(proxy)}`,
-		`availability.innerHTML = nodeAvailabilityDetailsHTML(proxy)`,
+		// Polling rebuilds the facts above the chart, availability included.
+		`const html = nodeDetailStatsHTML(proxy);`,
 		`.node-detail-stat .availability-diagnostic.ok`,
 		`.node-detail-stat .availability-diagnostic.error`,
 	} {

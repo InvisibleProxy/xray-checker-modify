@@ -121,9 +121,34 @@
       }
       .dashboard-grid {
         display: grid;
-        grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
+        grid-template-columns: minmax(0, 1fr) minmax(320px, 360px);
         gap: 16px;
         align-items: start;
+      }
+      .dashboard-grid.controls-closed {
+        grid-template-columns: minmax(0, 1fr);
+      }
+      .dashboard-grid.controls-closed .control-panel {
+        display: none;
+      }
+      .dashboard-grid:not(.controls-closed) .control-panel {
+        animation: controls-enter 0.18s ease both;
+      }
+      @keyframes controls-enter {
+        from {
+          opacity: 0;
+          transform: translateX(8px);
+        }
+      }
+      #toggle-controls[aria-expanded="true"] {
+        border-color: var(--blue);
+        background: var(--blue-soft);
+        color: var(--text);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .dashboard-grid:not(.controls-closed) .control-panel {
+          animation: none;
+        }
       }
       .panel {
         background: var(--panel);
@@ -170,11 +195,41 @@
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 8px;
       }
-      .global-settings-nav {
-        grid-template-columns: repeat(5, minmax(0, 1fr));
+      .settings-layout {
+        display: grid;
+        grid-template-columns: minmax(160px, 200px) minmax(0, 1fr);
+        gap: 20px;
+        align-items: start;
       }
-      .settings-panel {
-        width: min(100%, 920px);
+      .global-settings-nav {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        position: sticky;
+        top: 104px;
+      }
+      .global-settings-nav button.settings-tab {
+        text-align: left;
+      }
+      /* Forms read badly stretched across a wide screen: the section keeps a
+         comfortable measure beside the menu. */
+      .settings-content {
+        min-width: 0;
+        max-width: 960px;
+      }
+      @media (max-width: 960px) {
+        .settings-layout {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .global-settings-nav {
+          position: static;
+          flex-direction: row;
+          overflow-x: auto;
+          scrollbar-width: none;
+        }
+        .global-settings-nav button.settings-tab {
+          flex: 0 0 auto;
+        }
       }
       button.settings-tab {
         background: transparent;
@@ -191,6 +246,12 @@
       /* .panel.stack sets an explicit display, which otherwise wins over the
          hidden attribute and leaves a "hidden" panel on screen. */
       .panel[hidden] {
+        display: none;
+      }
+      /* label sets display: grid, which beats the hidden attribute the same
+         way, so a field hidden for having nothing to choose from stayed. */
+      label[hidden],
+      .node-card[hidden] {
         display: none;
       }
       #message:empty {
@@ -499,8 +560,11 @@
       .dot.proxy-failure {
         background: var(--yellow);
       }
+      /* Hollow, because a paused node is not watched: there is no state to
+         fill the dot with, rather than a state that warns. */
       .dot.maintenance {
-        background: var(--yellow);
+        background: transparent;
+        box-shadow: inset 0 0 0 2px var(--muted);
       }
       .table-wrap {
         overflow-x: auto;
@@ -528,11 +592,39 @@
         min-width: 180px;
         overflow-wrap: anywhere;
       }
+      /* The marker keeps its place at the start of the line and a long name
+         wraps beside it, instead of the whole name dropping under the flag. */
       .node-title-row {
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         gap: 8px;
-        flex-wrap: wrap;
+      }
+      .node-title-row > .chip {
+        flex: 0 0 auto;
+      }
+      .node-title-name {
+        min-width: 0;
+        padding-top: 1px;
+        overflow-wrap: anywhere;
+      }
+      /* An address split after its colon and a rate split before its unit
+         read as two values each. */
+      .overview-nowrap {
+        white-space: nowrap;
+      }
+      .nodes-overview-table.hide-subscription .col-subscription,
+      #incidents-table.hide-scope .col-scope {
+        display: none;
+      }
+      .incidents-controls {
+        grid-template-columns: 1.7fr repeat(4, minmax(120px, 1fr)) auto;
+      }
+      /* Sits on the baseline of the selects beside it rather than under a
+         label it does not have. */
+      label.incidents-toggle {
+        align-self: end;
+        min-height: 38px;
+        white-space: nowrap;
       }
       .country-chip {
         min-width: 34px;
@@ -617,6 +709,89 @@
       }
       .history-table {
         min-width: 980px;
+      }
+      .history-table.hide-url .col-url,
+      .history-table.hide-error .col-error {
+        display: none;
+      }
+      #history-url-note {
+        margin-bottom: 8px;
+        overflow-wrap: anywhere;
+      }
+      .speed-heatmap {
+        display: grid;
+        gap: 3px;
+        overflow-x: auto;
+      }
+      .heatmap-row {
+        display: grid;
+        grid-template-columns: minmax(150px, 210px) minmax(0, 1fr);
+        gap: 10px;
+        align-items: center;
+        min-width: 620px;
+      }
+      button.heatmap-label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+        padding: 2px 6px;
+        border-color: transparent;
+        background: transparent;
+        color: var(--text);
+        text-align: left;
+      }
+      button.heatmap-label > span:not(.chip) {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .heatmap-row.selected button.heatmap-label {
+        border-color: var(--blue);
+        background: var(--blue-soft);
+      }
+      .heatmap-error {
+        color: var(--red);
+        font-weight: 700;
+      }
+      .heatmap-cells {
+        display: grid;
+        grid-template-columns: repeat(var(--heatmap-columns), minmax(2px, 1fr));
+        gap: 2px;
+        height: 18px;
+      }
+      /* Blue as on the charts: an ordinary result. Its strength follows the
+         node's own best, so a paler cell is a slower test on that node. */
+      .heat-cell {
+        border-radius: 2px;
+        background: rgba(127, 140, 158, 0.08);
+      }
+      .heat-cell.ok {
+        background: rgba(110, 168, 254, var(--heat, 1));
+      }
+      .heat-cell.low {
+        background: var(--yellow);
+      }
+      .heat-cell.fail {
+        background: var(--red);
+      }
+      .heatmap-axis {
+        position: relative;
+        height: 16px;
+      }
+      .heatmap-axis span {
+        position: absolute;
+        top: 0;
+        transform: translateX(-50%);
+        color: var(--muted);
+        font-size: 0.6875rem;
+        white-space: nowrap;
+      }
+      .heatmap-axis span:first-child {
+        transform: none;
+      }
+      .heatmap-axis span:last-child {
+        transform: translateX(-100%);
       }
       .history-url {
         min-width: 260px;
@@ -709,7 +884,9 @@
         grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 12px;
       }
-      .history-stats-grid {
+      /* Both classes, so the laptop breakpoint's three-column overview grid does
+         not leave the fourth figure alone on a second row. */
+      .overview-grid.history-stats-grid {
         grid-template-columns: repeat(4, minmax(0, 1fr));
       }
       .kpi-card {
@@ -990,6 +1167,57 @@
       .node-card.row-warn {
         border-color: rgba(242, 184, 75, 0.42);
       }
+      /* A paused node steps back rather than warning: the dashed edge says it
+         is not watched, and the values it still carries stay, but muted. */
+      .node-card.row-paused {
+        border-style: dashed;
+        border-color: rgba(127, 140, 158, 0.34);
+        background: var(--panel-3-solid);
+      }
+      .node-card.row-paused .node-title-text {
+        color: var(--muted);
+      }
+      .node-group-divider {
+        display: flex;
+        align-items: center;
+        gap: 6px 12px;
+        flex-wrap: wrap;
+        margin-top: 6px;
+        padding-top: 12px;
+        border-top: 1px dashed var(--border);
+      }
+      button.node-group-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 4px 10px;
+        background: transparent;
+        color: var(--text);
+        font-weight: 600;
+      }
+      .node-group-toggle svg {
+        transition: transform 0.18s ease;
+      }
+      .node-group-divider.collapsed .node-group-toggle svg {
+        transform: rotate(-90deg);
+      }
+      .node-group-count {
+        min-width: 1.6em;
+        border-radius: 999px;
+        padding: 0 7px;
+        background: rgba(127, 140, 158, 0.16);
+        color: var(--muted);
+        text-align: center;
+      }
+      .node-group-hint {
+        color: var(--muted);
+        font-size: 0.75rem;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .node-group-toggle svg {
+          transition: none;
+        }
+      }
       .node-card-head {
         display: grid;
         grid-template-columns: auto minmax(210px, 1.3fr) minmax(140px, 0.72fr) minmax(140px, 0.72fr) auto auto;
@@ -1085,6 +1313,11 @@
       .node-speed-summary strong.warn {
         color: var(--yellow);
       }
+      .node-current strong.paused,
+      .node-speed-summary strong.paused,
+      .node-detail-stat strong.paused {
+        color: var(--muted);
+      }
       .node-card-actions {
         display: flex;
         align-items: center;
@@ -1133,7 +1366,9 @@
       .node-detail-stat {
         min-width: 0;
       }
-      .node-detail-stat span {
+      /* The caption only: the value may carry spans of its own, and the port
+         of the address is one — as a block it dropped to a line of its own. */
+      .node-detail-stat > span {
         display: block;
         color: var(--muted);
         font-size: 0.75rem;
@@ -1144,6 +1379,18 @@
         font-size: 1rem;
         font-weight: 600;
         overflow-wrap: anywhere;
+      }
+      /* An address split after its colon reads as two values. It stays on one
+         line and is cut, not wrapped; the whole of it is in the tooltip, and
+         clicking it still copies all of it. */
+      .node-detail-server strong {
+        overflow: hidden;
+        overflow-wrap: normal;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .node-detail-wide {
+        grid-column: span 2;
       }
       .node-chart-stats {
         grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(220px, 1.35fr);
@@ -1775,7 +2022,7 @@
          beside the list, but at its full width it leaves the node rows cramped. */
       @media (max-width: 1400px) {
         .dashboard-grid {
-          grid-template-columns: minmax(280px, 310px) minmax(0, 1fr);
+          grid-template-columns: minmax(0, 1fr) minmax(280px, 310px);
         }
         .overview-grid {
           grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1785,7 +2032,8 @@
         .dashboard-grid {
           grid-template-columns: 1fr;
         }
-        .overview-grid {
+        .overview-grid,
+        .overview-grid.history-stats-grid {
           grid-template-columns: repeat(2, minmax(0, 1fr));
         }
         .node-card-head {
@@ -1808,6 +2056,8 @@
              trap the controls in a short box instead of freeing them. */
           max-height: none;
           overflow-y: visible;
+          /* Stacked, the controls come before the list they act on. */
+          order: -1;
         }
         .remnawave-policy-grid {
           grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1873,12 +2123,109 @@
       </section>
 
       <section id="dashboard-view" class="view dashboard-grid" role="tabpanel" aria-labelledby="tab-dashboard">
-      <aside class="panel stack control-panel">
+
+      <section class="stack">
+        <section class="stack">
+          <div class="panel-actions">
+            <h2>Overview</h2>
+            <span id="overview-state" class="table-meta"></span>
+            <div class="row">
+              <span id="subscription-state" class="pill"></span>
+              <button id="refresh-subscription" class="secondary small" type="button">Update Subscription</button>
+            </div>
+          </div>
+          <!-- Shown only with more than one subscription: with a single feed it
+               would be a row with one button and nothing to switch between. -->
+          <nav id="subscription-switch" class="chart-ranges" aria-label="Subscription" hidden></nav>
+          <div class="overview-grid">
+            <div class="kpi-card ok">
+              <span>Servers online</span>
+              <strong id="kpi-online">0 / 0</strong>
+              <div id="kpi-online-detail" class="metric-detail">0%</div>
+            </div>
+            <div class="kpi-card blue">
+              <span>Avg speed</span>
+              <strong id="kpi-avg-speed">n/a</strong>
+              <div class="metric-detail">latest successful checks</div>
+            </div>
+            <div class="kpi-card">
+              <span>Last speed test</span>
+              <strong id="kpi-last-check">n/a</strong>
+              <div id="kpi-last-source" class="metric-detail">no results</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel panel-strong stack">
+          <div class="panel-actions">
+            <div class="nodes-heading">
+              <label class="nodes-select-all" title="Select all visible nodes">
+                <input id="select-all-nodes" type="checkbox" aria-label="Select all visible nodes" />
+              </label>
+              <h2>Nodes</h2>
+            </div>
+            <span id="nodes-summary" class="table-meta">0 nodes</span>
+            <div class="nodes-order-controls" role="group" aria-label="Node ordering">
+              <label class="nodes-sort-field" for="nodes-sort">
+                <span>Sort</span>
+                <select id="nodes-sort">
+                  <option value="source">Default order</option>
+                  <option value="manual">Manual order</option>
+                  <option value="name">Name</option>
+                  <option value="status">Status</option>
+                  <option value="location">Location</option>
+                  <option value="latency">Latency</option>
+                  <option value="speed">Speed</option>
+                  <option value="subscription">Subscription</option>
+                </select>
+              </label>
+              <button id="nodes-sort-direction" class="secondary small nodes-sort-direction" type="button" title="Ascending" aria-label="Ascending">↑</button>
+              <button id="nodes-reset-order" class="secondary small" type="button" hidden>Reset manual order</button>
+              <button id="toggle-controls" class="secondary small" type="button" aria-controls="dashboard-controls" aria-expanded="false">Controls</button>
+            </div>
+            <div id="selection-action-bar" class="action-bar" hidden>
+              <span id="selection-count" class="muted">0 selected</span>
+              <button id="selection-check" class="secondary" type="button">Check</button>
+              <button id="selection-run" class="primary" type="button">Run</button>
+              <button id="selection-mute" class="secondary" type="button">Mute</button>
+              <button id="selection-unmute" class="secondary" type="button">Unmute</button>
+              <button id="selection-history" class="secondary" type="button">History</button>
+            </div>
+          </div>
+          <div id="nodes" class="nodes-list"></div>
+        </section>
+
+        <section class="panel panel-strong stack">
+          <h2>Results</h2>
+          <div class="table-wrap">
+            <table class="results-table">
+              <thead>
+                <tr>
+                  <th>Node</th>
+                  <th>Speed</th>
+                  <th>Downloaded</th>
+                  <th>Duration</th>
+                  <th>TTFB</th>
+                  <th>Checked</th>
+                  <th>Reason</th>
+                </tr>
+              </thead>
+              <tbody id="results"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <!-- Opens on its own while nodes are selected, or on the Controls button;
+           the rest of the time the node list has the width to itself. It sits on
+           the right, so opening it never moves the checkboxes being clicked. -->
+      <aside id="dashboard-controls" class="panel stack control-panel" aria-label="Controls">
         <div class="panel-header">
           <div>
             <h2>Controls</h2>
             <div class="muted">Actions for selected nodes</div>
           </div>
+          <button id="close-controls" class="secondary small" type="button">Hide</button>
         </div>
 
         <nav class="settings-nav" aria-label="Node controls" role="tablist">
@@ -2044,97 +2391,6 @@
           </div>
         </section>
       </aside>
-
-      <section class="stack">
-        <section class="stack">
-          <div class="panel-actions">
-            <h2>Overview</h2>
-            <span id="overview-state" class="table-meta"></span>
-            <div class="row">
-              <span id="subscription-state" class="pill"></span>
-              <button id="refresh-subscription" class="secondary small" type="button">Update Subscription</button>
-            </div>
-          </div>
-          <!-- Shown only with more than one subscription: with a single feed it
-               would be a row with one button and nothing to switch between. -->
-          <nav id="subscription-switch" class="chart-ranges" aria-label="Subscription" hidden></nav>
-          <div class="overview-grid">
-            <div class="kpi-card ok">
-              <span>Servers online</span>
-              <strong id="kpi-online">0 / 0</strong>
-              <div id="kpi-online-detail" class="metric-detail">0%</div>
-            </div>
-            <div class="kpi-card blue">
-              <span>Avg speed</span>
-              <strong id="kpi-avg-speed">n/a</strong>
-              <div class="metric-detail">latest successful checks</div>
-            </div>
-            <div class="kpi-card">
-              <span>Last speed test</span>
-              <strong id="kpi-last-check">n/a</strong>
-              <div id="kpi-last-source" class="metric-detail">no results</div>
-            </div>
-          </div>
-        </section>
-
-        <section class="panel panel-strong stack">
-          <div class="panel-actions">
-            <div class="nodes-heading">
-              <label class="nodes-select-all" title="Select all visible nodes">
-                <input id="select-all-nodes" type="checkbox" aria-label="Select all visible nodes" />
-              </label>
-              <h2>Nodes</h2>
-            </div>
-            <span id="nodes-summary" class="table-meta">0 nodes</span>
-            <div class="nodes-order-controls" role="group" aria-label="Node ordering">
-              <label class="nodes-sort-field" for="nodes-sort">
-                <span>Sort</span>
-                <select id="nodes-sort">
-                  <option value="source">Default order</option>
-                  <option value="manual">Manual order</option>
-                  <option value="name">Name</option>
-                  <option value="status">Status</option>
-                  <option value="location">Location</option>
-                  <option value="latency">Latency</option>
-                  <option value="speed">Speed</option>
-                  <option value="subscription">Subscription</option>
-                </select>
-              </label>
-              <button id="nodes-sort-direction" class="secondary small nodes-sort-direction" type="button" title="Ascending" aria-label="Ascending">↑</button>
-              <button id="nodes-reset-order" class="secondary small" type="button" hidden>Reset manual order</button>
-            </div>
-            <div id="selection-action-bar" class="action-bar" hidden>
-              <span id="selection-count" class="muted">0 selected</span>
-              <button id="selection-check" class="secondary" type="button">Check</button>
-              <button id="selection-run" class="primary" type="button">Run</button>
-              <button id="selection-mute" class="secondary" type="button">Mute</button>
-              <button id="selection-unmute" class="secondary" type="button">Unmute</button>
-              <button id="selection-history" class="secondary" type="button">History</button>
-            </div>
-          </div>
-          <div id="nodes" class="nodes-list"></div>
-        </section>
-
-        <section class="panel panel-strong stack">
-          <h2>Results</h2>
-          <div class="table-wrap">
-            <table class="results-table">
-              <thead>
-                <tr>
-                  <th>Node</th>
-                  <th>Speed</th>
-                  <th>Downloaded</th>
-                  <th>Duration</th>
-                  <th>TTFB</th>
-                  <th>Checked</th>
-                  <th>Reason</th>
-                </tr>
-              </thead>
-              <tbody id="results"></tbody>
-            </table>
-          </div>
-        </section>
-      </section>
       </section>
 
       <section id="settings-view" class="view stack" role="tabpanel" aria-labelledby="tab-settings" hidden>
@@ -2146,7 +2402,11 @@
             </div>
           </div>
 
-          <nav class="settings-nav global-settings-nav" aria-label="Global settings" role="tablist">
+          <!-- Sections on the left, the chosen one beside them: six buttons in a
+               five-column grid left one alone on a second row, and the panel
+               held half the screen while the other half stayed empty. -->
+          <div class="settings-layout">
+          <nav class="settings-nav global-settings-nav" aria-label="Global settings" aria-orientation="vertical" role="tablist">
             <button id="global-settings-tab-project" class="settings-tab active" type="button" role="tab" aria-selected="true" aria-controls="global-settings-pane-project" tabindex="0">Project</button>
             <button id="global-settings-tab-subscriptions" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="global-settings-pane-subscriptions" tabindex="-1">Subscriptions</button>
             <button id="global-settings-tab-history" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="global-settings-pane-history" tabindex="-1">History</button>
@@ -2154,6 +2414,7 @@
             <button id="global-settings-tab-agents" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="global-settings-pane-agents" tabindex="-1">Agents</button>
             <button id="global-settings-tab-backup" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="global-settings-pane-backup" tabindex="-1">Backup</button>
           </nav>
+          <div class="settings-content">
 
           <section id="global-settings-pane-project" class="settings-pane stack" role="tabpanel" aria-labelledby="global-settings-tab-project">
             <div class="control-group">
@@ -2499,6 +2760,8 @@
               <button id="restore-backup" class="secondary" type="button" disabled>Restore on Restart</button>
             </div>
           </section>
+          </div>
+          </div>
         </section>
       </section>
 
@@ -2591,14 +2854,12 @@
                   <th class="sortable" data-sort="server" tabindex="0" aria-sort="none">IP / Server</th>
                   <th class="sortable" data-sort="claimedCountry" tabindex="0" aria-sort="none">Country</th>
                   <th class="sortable" data-sort="countryMatch" tabindex="0" aria-sort="none">Geo</th>
-                  <th class="sortable" data-sort="avgMbps" tabindex="0" aria-sort="descending">Avg</th>
-                  <th class="sortable" data-sort="minMbps" tabindex="0" aria-sort="none">Min</th>
-                  <th class="sortable" data-sort="maxMbps" tabindex="0" aria-sort="none">Max</th>
+                  <th class="sortable" data-sort="avgMbps" tabindex="0" aria-sort="descending" title="Average; below it, minimum–maximum over the retained history">Speed</th>
                   <th class="sortable" data-sort="failedResults" tabindex="0" aria-sort="none">Failures</th>
                   <th class="sortable" data-sort="totalDowntimeSec" tabindex="0" aria-sort="none">Downtime</th>
                   <th class="sortable" data-sort="totalProxyFailureSec" tabindex="0" aria-sort="none">Proxy failure</th>
-                  <th class="sortable" data-sort="lastSeenAt" tabindex="0" aria-sort="none">Last seen</th>
-                  <th class="sortable" data-sort="subName" tabindex="0" aria-sort="none">Subscription</th>
+                  <th class="sortable" data-sort="lastSeenAt" tabindex="0" aria-sort="none" title="For retired nodes: when the subscription last listed them">Last seen</th>
+                  <th class="sortable col-subscription" data-sort="subName" tabindex="0" aria-sort="none">Subscription</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -2957,15 +3218,58 @@
             </div>
             <button id="refresh-incidents" class="secondary" type="button">Refresh Incidents</button>
           </div>
+          <div class="overview-controls incidents-controls">
+            <label>
+              Search
+              <input id="incidents-search" type="search" autocomplete="off" placeholder="Node, subscription, cause" />
+            </label>
+            <label>
+              Status
+              <select id="incidents-status">
+                <option value="">All</option>
+                <option value="active">Active</option>
+                <option value="resolved">Resolved</option>
+              </select>
+            </label>
+            <label>
+              Period
+              <select id="incidents-period">
+                <option value="">All</option>
+                <option value="1d">24 h</option>
+                <option value="7d">7 d</option>
+                <option value="30d">30 d</option>
+              </select>
+            </label>
+            <label>
+              Duration
+              <select id="incidents-duration">
+                <option value="0">Any</option>
+                <option value="60">≥ 1 min</option>
+                <option value="300">≥ 5 min</option>
+                <option value="900">≥ 15 min</option>
+                <option value="3600">≥ 1 h</option>
+              </select>
+            </label>
+            <label id="incidents-sub-field">
+              Subscription
+              <select id="incidents-sub">
+                <option value="">All</option>
+              </select>
+            </label>
+            <label class="row incidents-toggle" title="Repeats of the same failure less than 30 minutes apart are shown as one row">
+              <input id="incidents-group" type="checkbox" checked />
+              Group repeats
+            </label>
+          </div>
           <span id="incidents-state" class="table-meta">0 incidents</span>
         </section>
         <section class="panel panel-strong stack">
           <div class="table-wrap">
-            <table>
+            <table id="incidents-table">
               <thead>
                 <tr>
                   <th>Status</th>
-                  <th>Scope</th>
+                  <th class="col-scope">Scope</th>
                   <th>Affected</th>
                   <th>Cause</th>
                   <th>Started</th>
@@ -3092,6 +3396,33 @@
           </div>
         </section>
 
+        <!-- Every node of the subscription on one time axis. A dip that hits
+             all of them at once is the network or the test server, not a node,
+             and on one node's chart it cannot be told apart from the node's own. -->
+        <section class="panel stack">
+          <div class="panel-actions">
+            <div>
+              <h2>All nodes</h2>
+              <div class="muted">One row per node, one cell per slice of the period. Paler is slower than the node's own best, yellow is below the low-speed threshold, red is a failed test.</div>
+            </div>
+            <span id="history-heatmap-meta" class="table-meta"></span>
+          </div>
+          <div id="history-heatmap" class="speed-heatmap"></div>
+        </section>
+
+        <section class="panel stack">
+          <div class="panel-actions">
+            <h2>Measured speed</h2>
+            <span id="history-chart-meta" class="table-meta"></span>
+          </div>
+          <div id="history-chart" class="speed-chart-wrap" data-node-metric-chart="speed-history" data-chart-view="speedtest"></div>
+          <div class="chart-legend">
+            <span><i class="legend-dot"></i>Normal speed</span>
+            <span><i class="legend-dot warn"></i>Below configured threshold</span>
+            <span><i class="legend-dot error"></i>Error or offline</span>
+          </div>
+        </section>
+
         <section class="panel stack">
           <div class="panel-actions">
             <h2>Speed Stats</h2>
@@ -3123,7 +3454,8 @@
 
         <section class="panel stack">
           <div class="table-wrap">
-            <table class="history-table">
+            <div id="history-url-note" class="table-meta" hidden></div>
+            <table id="history-table" class="history-table">
               <thead>
                 <tr>
                   <th>Checked</th>
@@ -3132,8 +3464,8 @@
                   <th>Duration</th>
                   <th>TTFB</th>
                   <th>Source</th>
-                  <th>Test URL</th>
-                  <th>Error</th>
+                  <th class="col-url">Test URL</th>
+                  <th class="col-error">Error</th>
                   <th>Agent probe</th>
                 </tr>
               </thead>
@@ -3276,6 +3608,16 @@
         dashboardSortDirection: "asc",
         dashboardManualOrder: [],
         dashboardPointerDrag: null,
+        // Whether the maintenance group at the end of the node list is folded.
+        dashboardPausedCollapsed: false,
+        dashboardRowsShowSubscription: false,
+        // Controls open on their own while nodes are selected ("auto"), stay
+        // open because the operator asked ("open"), or stay shut after the
+        // operator closed them ("closed") until the selection is cleared.
+        controlsMode: "auto",
+        incidentFilters: { search: "", status: "", period: "", minDurationSec: 0, subscription: "", groupRepeats: true },
+        historyChart: null,
+        historyHeatmap: { loading: false, error: "", rows: [], request: 0 },
         speedPollRunning: false,
         loadRunning: false,
         speedRunStarting: false,
@@ -3310,6 +3652,8 @@
       const speedDraftKey = "xray-checker-admin-speed-test";
       const filterStateKey = "xray-checker-admin-filters";
       const dashboardOrderStateKey = "xray-checker-admin-node-order";
+      const dashboardPausedGroupKey = "xray-checker-admin-paused-group";
+      const controlsModeKey = "xray-checker-admin-controls";
       const reachabilityFilterKey = "xray-checker-admin-reachability-subscription";
       const pendingNodeMergeKey = "xray-checker-admin-pending-node-merge";
       const dashboardSortModes = new Set(["source", "manual", "name", "status", "location", "latency", "speed", "subscription"]);
@@ -4074,15 +4418,11 @@
         return 2;
       }
 
+      // Sorting by location follows the marker on the card, geo-located nodes
+      // included; otherwise they all sink to the end as unplaced.
       function dashboardLocation(proxy) {
         const overview = overviewNodeFor(proxy.stableId);
-        if (!overview) return "";
-        const code = String(overview.claimedCountryCode || "").trim().toUpperCase();
-        if (code) return code;
-        // Sorting by location follows the marker on the card, geo-located
-        // nodes included; otherwise they all sink to the end as unplaced.
-        const geoOnly = geoOnlyCountries(overview);
-        return geoOnly.length === 1 ? geoOnly[0].code : "";
+        return overview ? countryMarkerCode(overview) : "";
       }
 
       function sortDashboardProxies(proxies) {
@@ -4366,6 +4706,9 @@
         const index = visibleIDs.indexOf(stableId);
         const nextIndex = index + offset;
         if (index < 0 || nextIndex < 0 || nextIndex >= visibleIDs.length) return false;
+        // The maintenance group is placed by state, not by order: a node moved
+        // across its edge would be put straight back on the next render.
+        if (dashboardPausedNode(proxyFor(stableId)) !== dashboardPausedNode(proxyFor(visibleIDs[nextIndex]))) return false;
         [visibleIDs[index], visibleIDs[nextIndex]] = [visibleIDs[nextIndex], visibleIDs[index]];
         return commitDashboardVisibleOrder(visibleIDs, { animate: true, movedStableId: stableId });
       }
@@ -4414,8 +4757,12 @@
       }
 
       function dashboardDropTargetAt(drag, centerY) {
+        // A card lands only among its own group, and never on a folded card.
+        const draggedPaused = dashboardPausedNode(proxyFor(drag.stableId));
         const cards = [...$("nodes").querySelectorAll("[data-node-card]")]
-          .filter((card) => card.dataset.nodeCard !== drag.stableId);
+          .filter((card) => card.dataset.nodeCard !== drag.stableId
+            && !card.hidden
+            && dashboardPausedNode(proxyFor(card.dataset.nodeCard)) === draggedPaused);
         if (cards.length === 0) return null;
         let closest = null;
         cards.forEach((card) => {
@@ -4480,7 +4827,7 @@
           }
           return true;
         });
-        return sortDashboardProxies(filtered);
+        return groupPausedLast(sortDashboardProxies(filtered));
       }
 
       function resultFor(stableId) {
@@ -4624,6 +4971,20 @@
         return `in ${formatDurationSec(seconds)}`;
       }
 
+      // How long ago, in one unit. A bare clock time does not say which day it
+      // belongs to; the exact moment stays in the tooltip of whatever shows this.
+      function formatRelativeTime(iso) {
+        if (!iso || String(iso).startsWith("0001-")) return "n/a";
+        const seconds = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+        if (!Number.isFinite(seconds)) return "n/a";
+        if (seconds < 60) return "just now";
+        const minutes = Math.floor(seconds / 60);
+        if (minutes < 60) return `${minutes} min ago`;
+        const hours = Math.floor(minutes / 60);
+        if (hours < 48) return `${hours} h ago`;
+        return `${Math.floor(hours / 24)} d ago`;
+      }
+
       function percent(part, total) {
         if (!total) return "0%";
         return `${Math.round((part / total) * 100)}%`;
@@ -4751,6 +5112,15 @@
 
       function dashboardRangeBounds(history) {
         const now = new Date();
+        // "All" has no fixed start: the axis begins at the oldest measurement
+        // there is, which is whatever the retention left.
+        if (history.range === "all") {
+          const times = dashboardDataset(history).results
+            .map((result) => new Date(result.checkedAt).getTime())
+            .filter((time) => Number.isFinite(time) && time > 0);
+          const oldest = times.length ? Math.min(...times) : now.getTime() - 7 * 24 * 60 * 60 * 1000;
+          return { from: new Date(Math.min(oldest, now.getTime() - 60 * 60 * 1000)), to: now };
+        }
         if (history.range === "custom") {
           if (!history.from || !history.to) {
             return { error: "Choose both start and end dates" };
@@ -5169,7 +5539,7 @@
           const wrap = svg.closest("[data-node-metric-chart]");
           const stableId = wrap?.dataset.nodeMetricChart || "";
           const view = wrap?.dataset.chartView === "availability" ? "availability" : "speedtest";
-          const history = state.dashboardCardHistory.get(stableId);
+          const history = metricChartHistory(stableId);
           const cursor = svg.querySelector(".chart-cursor");
           if (!history || !cursor) return;
           const dataset = dashboardDataset(history, view);
@@ -5364,8 +5734,10 @@
         return historyNodes().filter((node) => (node.subName || "") === subscription);
       }
 
-      function nodeOverviewLabel(node) {
-        return [node.name || "Unnamed", node.subName, node.server].filter(Boolean).join(" / ");
+      // The operator's label is the name shown everywhere else. The feed is
+      // left out where every node in the list shares it.
+      function nodeOverviewLabel(node, withSubscription = true) {
+        return [node.displayName || node.name || "Unnamed", withSubscription ? node.subName : "", node.server].filter(Boolean).join(" / ");
       }
 
       function effectiveDowntimeSec(node) {
@@ -5440,26 +5812,50 @@
         return `<span class="chip ${tone} country-chip country-flag"${titleAttr} aria-label="${escapeHtml(value)}">${flag}</span>`;
       }
 
-      function countryChip(node) {
+      // The country the marker beside a node's name shows, or "" for none.
+      // Sources that disagree get no single code to show; the Geo column
+      // carries that case, so the marker stays empty rather than picking one.
+      function countryMarkerCode(node) {
         const code = String(node.claimedCountryCode || "").trim().toUpperCase();
-        if (code) return countryMarker(code, "blue", countryText(node));
-        // Sources that disagree get no single code to show; the Geo column
-        // carries that case, so the marker stays empty rather than picking one.
+        if (code) return code;
         const geoOnly = geoOnlyCountries(node);
-        if (geoOnly.length === 1) {
-          return countryMarker(geoOnly[0].code, "neutral", `${geoOnlyText(node)} · from geo lookup; the name claims no country`);
-        }
-        return `<span class="chip blue country-chip">--</span>`;
+        return geoOnly.length === 1 ? geoOnly[0].code : "";
       }
 
+      // The same marker in every list. A table keeps the "--" placeholder so
+      // the names stay aligned; a card has no column to hold and shows nothing.
+      function countryChip(node, withPlaceholder = true) {
+        const code = countryMarkerCode(node);
+        if (!code) return withPlaceholder ? `<span class="chip blue country-chip">--</span>` : "";
+        if (String(node.claimedCountryCode || "").trim()) return countryMarker(code, "blue", countryText(node));
+        return countryMarker(code, "neutral", `${geoOnlyText(node)} · from geo lookup; the name claims no country`);
+      }
+
+      // The marker already names the country, so a name that opens with the
+      // same flag or code says it twice. Only that country is taken off: a
+      // different flag at the front is information the marker does not carry.
+      function nameWithoutCountryPrefix(name, code) {
+        let value = String(name || "").trim();
+        if (!code) return value;
+        const flag = countryFlagEmoji(code);
+        if (flag && value.startsWith(flag)) value = value.slice(flag.length).trimStart();
+        return value.replace(new RegExp(`^${escapeRegExp(code)}\\s+`, "i"), "");
+      }
+
+      // The operator's label wins here as it does on every other screen; the
+      // subscription's own name stays in the tooltip and in search.
       function displayNodeName(node) {
-        const code = String(node.claimedCountryCode || "").trim().toUpperCase();
-        let name = String(node.name || "Unnamed").trim();
-        name = name.replace(/^[\u{1F1E6}-\u{1F1FF}]{2}\s*/u, "");
-        if (code) {
-          name = name.replace(new RegExp(`^${escapeRegExp(code)}\\s+`, "i"), "");
-        }
-        return name || "Unnamed";
+        const name = String(node.displayName || node.name || "Unnamed").trim();
+        return nameWithoutCountryPrefix(name, countryMarkerCode(node)) || name || "Unnamed";
+      }
+
+      function dashboardNodeName(proxy) {
+        const name = proxy.name || "Unnamed";
+        const node = overviewNodeFor(proxy.stableId);
+        // Until the overview arrives there is no marker, and the flag in the
+        // name is the only place the country shows.
+        if (!node) return name;
+        return nameWithoutCountryPrefix(name, countryMarkerCode(node)) || name;
       }
 
       function countryMatchChip(node) {
@@ -5704,6 +6100,7 @@
           if (filters.search) {
             const haystack = [
               node.name,
+              node.displayName,
               node.stableId,
               node.server,
               node.subName,
@@ -5738,6 +6135,7 @@
         // as zero; the word "Unknown" among the codes would land between UA
         // and US.
         if (key === "claimedCountry") return countryCodeLabel(node).toLowerCase();
+        if (key === "name") return displayNodeName(node).toLowerCase();
         if (key === "countryMatch") return effectiveCountryMatch(node);
         if (["avgMbps", "minMbps", "maxMbps", "failedResults"].includes(key)) return Number(node[key] || 0);
         return String(node[key] || "").toLowerCase();
@@ -5769,21 +6167,38 @@
         $("nodes-overview-summary").textContent = state.projectMaintenance?.enabled
           ? `${rows.length} shown · ${active - maintenance} project-paused · ${maintenance} node maintenance · ${retired} retired`
           : `${rows.length} shown · ${active - maintenance} monitored · ${maintenance} maintenance · ${retired} retired`;
+        // The column only tells rows apart when they come from more than one
+        // feed; filtered down to one, it is the same title on every row.
+        const showSubscription = new Set(rows.map((node) => node.subName || "")).size > 1;
+        document.querySelector(".nodes-overview-table")?.classList.toggle("hide-subscription", !showSubscription);
         $("nodes-overview").innerHTML = rows.map((node) => {
           const ipLink = copyIPButton(node.server);
           const ipDetailsLink = node.ipInfoUrl
             ? ` <a href="${escapeHtml(node.ipInfoUrl)}" target="_blank" rel="noopener noreferrer" title="Open IP details" aria-label="Open IP details">↗</a>`
             : "";
           const speedClass = node.successfulResults > 0 ? "ok" : node.failedResults > 0 ? "error" : "neutral";
+          // One column for the three numbers: the average is the answer and
+          // the range beside it only qualifies it. Min and max stay sortable
+          // from the Sort list.
+          const speedCell = node.successfulResults
+            ? `<strong class="${speedClass}">${escapeHtml(formatMbps(node.avgMbps))}</strong><div class="muted">${escapeHtml(`${Number(node.minMbps || 0).toFixed(2)}–${Number(node.maxMbps || 0).toFixed(2)}`)}</div>`
+            : `<span class="${speedClass}">n/a</span>`;
+          // An active node is listed by the subscription right now, so its
+          // "last seen" is always a moment ago and only a retired one has one
+          // worth reading.
+          const lastSeen = node.active
+            ? `<span class="muted" title="Listed by the subscription now">—</span>`
+            : escapeHtml(formatTime(node.lastSeenAt) || "n/a");
           const statusChip = node.active
             ? (node.maintenance
-              ? `<span class="chip warn" title="Paused since ${escapeHtml(formatTime(node.maintenanceSince) || "n/a")}">Maintenance</span>`
+              ? `<span class="chip neutral" title="Paused since ${escapeHtml(formatTime(node.maintenanceSince) || "n/a")}">Maintenance</span>`
               : `<span class="chip ok">Active</span>`)
             : `<span class="chip neutral">Retired</span>`;
+          // Deleting belongs to retired records only; an active node is the
+          // subscription's, and a button that can never be pressed was noise.
           const nodeActions = node.active
             ? `<div class="node-actions">
                 <button class="secondary small" type="button" data-maintenance-node="${escapeHtml(node.stableId || "")}" data-maintenance-enabled="${node.maintenance ? "false" : "true"}">${node.maintenance ? "Resume" : "Maintenance"}</button>
-                <button class="secondary small" type="button" disabled title="Active nodes are managed by subscription">Delete</button>
               </div>`
             : `<div class="node-actions">
                 <button class="secondary small" type="button" data-merge-node="${escapeHtml(node.stableId || "")}">Merge</button>
@@ -5799,26 +6214,24 @@
           return `
             <tr>
               <td class="node-name">
-                <div class="node-title-row">${countryChip(node)}<span>${escapeHtml(displayNodeName(node))}</span></div>
+                <div class="node-title-row">${countryChip(node)}<span class="node-title-name"${node.displayName && node.displayName !== node.name ? ` title="${escapeHtml(node.name || "")}"` : ""}>${escapeHtml(displayNodeName(node))}</span></div>
                 <div class="muted mono">${escapeHtml(node.stableId || "")}</div>
                 ${mergedFrom}
               </td>
               <td>${statusChip}</td>
-              <td class="mono">${ipLink}${node.port ? `:${escapeHtml(node.port)}` : ""}${ipDetailsLink}</td>
+              <td class="mono overview-nowrap">${ipLink}${node.port ? `:${escapeHtml(node.port)}` : ""}${ipDetailsLink}</td>
               <td>${countryCell(node)}</td>
               <td>${geoCell(node)}</td>
-              <td class="${speedClass}">${node.successfulResults ? formatMbps(node.avgMbps) : "n/a"}</td>
-              <td>${node.successfulResults ? formatMbps(node.minMbps) : "n/a"}</td>
-              <td>${node.successfulResults ? formatMbps(node.maxMbps) : "n/a"}</td>
+              <td class="overview-nowrap">${speedCell}</td>
               <td>${Number(node.failedResults || 0)}<div class="muted">${Number(node.resultCount || 0)} total</div></td>
               <td>${formatDurationSec(effectiveDowntimeSec(node))}<div class="muted">${Number(node.incidentCount || 0)} incidents</div></td>
               <td>${formatDurationSec(effectiveProxyFailureSec(node))}<div class="muted">${Number(node.proxyFailureCount || 0)} events</div></td>
-              <td>${formatTime(node.lastSeenAt) || "n/a"}</td>
-              <td>${escapeHtml(node.subName || "n/a")}</td>
+              <td>${lastSeen}</td>
+              <td class="col-subscription">${escapeHtml(node.subName || "n/a")}</td>
               <td class="node-actions-cell">${nodeActions}</td>
             </tr>
           `;
-        }).join("") || `<tr><td colspan="14" class="muted">No nodes found</td></tr>`;
+        }).join("") || `<tr><td colspan="${showSubscription ? 12 : 11}" class="muted">No nodes found</td></tr>`;
         renderNodeMergeNotice();
       }
 
@@ -5833,8 +6246,9 @@
       }
 
       function nodeRowClass(proxy, result, muted) {
-		if (state.projectMaintenance?.enabled) return "row-warn";
-        if (proxy.maintenance) return "row-warn";
+        // A pause is a decision, not a fault: the row steps back instead of
+        // warning, whatever the probe it keeps running happens to say.
+        if (state.projectMaintenance?.enabled || proxy.maintenance) return "row-paused";
         if (proxyAvailabilityStatus(proxy) === "offline" || (result && (result.offline || result.error))) return "row-error";
         if (proxyAvailabilityStatus(proxy) === "proxy_failure") return "row-warn";
         if (muted || isLowSpeed(result)) return "row-warn";
@@ -5878,14 +6292,7 @@
 
       function nodeCountryMarker(stableId) {
         const node = overviewNodeFor(stableId);
-        if (!node) return "";
-        const code = String(node.claimedCountryCode || "").trim().toUpperCase();
-        if (code) return `<span class="chip blue country-chip">${escapeHtml(code)}</span>`;
-        const geoOnly = geoOnlyCountries(node);
-        if (geoOnly.length === 1) {
-          return `<span class="chip neutral country-chip" title="From geo lookup; the name claims no country">${escapeHtml(geoOnly[0].code)}</span>`;
-        }
-        return "";
+        return node ? countryChip(node, false) : "";
       }
 
       function dashboardRangeControls(stableId, history) {
@@ -6446,9 +6853,35 @@
         }
       }
 
-      function nodeDetailHTML(proxy, result, history) {
+      // The most recent failed check the archive remembers, of either kind.
+      // The node came back on the check after it, so this is also, to within
+      // one check interval, how long it has been fine.
+      function lastNodeIssue(overview) {
+        if (!overview) return null;
+        const issues = [
+          { at: overview.lastOfflineAt, label: "Last offline check" },
+          { at: overview.lastProxyFailureAt, label: "Last proxy failure" },
+        ].filter((issue) => issue.at && !String(issue.at).startsWith("0001-") && Number.isFinite(new Date(issue.at).getTime()));
+        return issues.sort((a, b) => new Date(b.at) - new Date(a.at))[0] || null;
+      }
+
+      // The facts above the chart. A node with nothing wrong used to spend two
+      // of them saying so, "No active issue" and "No current failure", which is
+      // one statement and not the useful one: how long it has been fine is.
+      function nodeDetailStatsHTML(proxy) {
         const overview = overviewNodeFor(proxy.stableId);
         const availabilityStatus = proxyAvailabilityStatus(proxy);
+        const paused = state.projectMaintenance?.enabled || proxy.maintenance;
+        const availabilityClass = paused ? "paused" : (availabilityStatus === "proxy_failure" ? "warn" : (availabilityStatus === "online" ? "ok" : "error"));
+        const address = `${proxy.server}:${proxy.port}`;
+        const server = `<div class="node-detail-stat node-detail-server"><span>Server</span><strong class="mono" title="${escapeHtml(address)}">${copyIPButton(proxy.server, "data-node-detail-ip")}:<span data-node-detail-port>${escapeHtml(proxy.port)}</span></strong></div>`;
+        const availability = `<div class="node-detail-stat"><span>Availability</span><strong class="${availabilityClass}" data-node-detail-availability>${nodeAvailabilityDetailsHTML(proxy)}</strong></div>`;
+        if (!paused && availabilityStatus === "online" && !proxy.failureSummary) {
+          const issue = lastNodeIssue(overview);
+          const status = issue ? `Healthy · last issue ${formatRelativeTime(issue.at)}` : "Healthy · no issues recorded";
+          const title = issue ? ` title="${escapeHtml(`${issue.label}: ${formatTime(issue.at)}`)}"` : "";
+          return `${server}${availability}<div class="node-detail-stat node-detail-wide"><span>Status</span><strong class="ok" data-node-detail-down${title}>${escapeHtml(status)}</strong></div>`;
+        }
         const statusSince = state.projectMaintenance?.enabled
           ? `Project paused ${formatTime(state.projectMaintenance.since) || "now"}`
           : (proxy.maintenance
@@ -6459,6 +6892,12 @@
         const failure = proxy.failureSummary
           ? `${proxy.failureSummary}${proxy.failureCode ? ` · ${proxy.failureCode}` : ""}`
           : "No current failure";
+        return `${server}${availability}
+          <div class="node-detail-stat"><span>Status since</span><strong data-node-detail-down>${escapeHtml(statusSince)}</strong></div>
+          <div class="node-detail-stat"><span>Failure</span><strong data-node-detail-failure title="${escapeHtml(proxy.failureDetail || "")}">${escapeHtml(failure)}</strong></div>`;
+      }
+
+      function nodeDetailHTML(proxy, result, history) {
         const speed = result ? formatSpeedStatus(result) : "No speed test";
         const checked = result ? formatTime(result.checkedAt) : "n/a";
         const view = history.view === "availability" ? "availability" : "speedtest";
@@ -6485,12 +6924,7 @@
              <span><i class="legend-dot error"></i>Error or offline</span>
              <span>Latest: ${escapeHtml(speed)} · ${escapeHtml(checked)}</span>`;
         return `<div class="node-card-detail">
-          <div class="node-detail-grid">
-            <div class="node-detail-stat"><span>Server</span><strong class="mono">${copyIPButton(proxy.server, "data-node-detail-ip")}:<span data-node-detail-port>${escapeHtml(proxy.port)}</span></strong></div>
-            <div class="node-detail-stat"><span>Availability</span><strong class="${proxy.maintenance || availabilityStatus === "proxy_failure" ? "warn" : (availabilityStatus === "online" ? "ok" : "error")}" data-node-detail-availability>${nodeAvailabilityDetailsHTML(proxy)}</strong></div>
-            <div class="node-detail-stat"><span>Status since</span><strong data-node-detail-down>${escapeHtml(statusSince)}</strong></div>
-            <div class="node-detail-stat"><span>Failure</span><strong data-node-detail-failure title="${escapeHtml(proxy.failureDetail || "")}">${escapeHtml(failure)}</strong></div>
-          </div>
+          <div class="node-detail-grid" data-node-detail-grid>${nodeDetailStatsHTML(proxy)}</div>
           ${dashboardRangeControls(proxy.stableId, history)}
           ${view === "availability" ? nodeAvailabilityStatsHTML(dataset.results) : nodeSpeedStatsHTML(dataset.results)}
           <div class="speed-chart-wrap" data-node-metric-chart="${escapeHtml(proxy.stableId)}" data-chart-view="${view}">${renderNodeMetricChart(dataset.results, proxy.stableId, history, view)}</div>
@@ -6515,6 +6949,10 @@
       function selectedSubscription() {
         const select = $("sub-filter");
         return select ? select.value : "";
+      }
+
+      function dashboardSubscriptionCount() {
+        return new Set(state.proxies.map((proxy) => proxy.subName || "")).size;
       }
 
       function subscriptionScopedProxies() {
@@ -6574,12 +7012,20 @@
         const latest = latestResult();
         const nextRun = nextScheduledRunAt();
 
+        // A zero is not news: "0 offline" beside "10 / 10" repeats what the
+        // headline already says, so only the counts that are not zero are named.
+        const counted = (count, label) => (count > 0 ? `${count} ${label}` : "");
         $("kpi-online").textContent = state.projectMaintenance?.enabled ? `— / ${monitored}` : `${online} / ${monitored}`;
-        $("kpi-online-detail").textContent = state.projectMaintenance?.enabled
-          ? `${monitored} project-paused · ${maintenance} node maintenance · ${muted} muted`
-          : `${percent(online, monitored)} proxy healthy · ${proxyFailures} proxy failure · ${offline} offline · ${maintenance} maintenance · ${muted} muted`;
+        $("kpi-online-detail").textContent = (state.projectMaintenance?.enabled
+          ? [`${monitored} project-paused`, counted(maintenance, "node maintenance"), counted(muted, "muted")]
+          : [`${percent(online, monitored)} proxy healthy`, counted(proxyFailures, "proxy failure"), counted(offline, "offline"), counted(maintenance, "maintenance"), counted(muted, "muted")])
+          .filter(Boolean)
+          .join(" · ");
         $("kpi-avg-speed").textContent = successful.length ? formatMbps(avgMbps) : "n/a";
-        $("kpi-last-check").textContent = latest ? formatShortTime(latest.checkedAt) : "n/a";
+        // How long ago reads at a glance where a clock time needs a date beside
+        // it; the exact time stays in the tooltip.
+        $("kpi-last-check").textContent = latest ? formatRelativeTime(latest.checkedAt) : "n/a";
+        $("kpi-last-check").title = latest ? formatTime(latest.checkedAt) : "";
         $("kpi-last-source").textContent = latest ? (latest.source || "speed-test") : "no results";
         if (state.projectMaintenance?.enabled) {
           $("overall-status").textContent = "Project maintenance";
@@ -6590,7 +7036,9 @@
             ? "All monitored systems operational"
             : `${proxyFailures} proxy failure · ${offline} offline`;
           $("overall-status").className = `chip ${monitored > 0 && proxyFailures === 0 && offline === 0 ? "ok" : offline > 0 ? "error" : proxyFailures > 0 ? "warn" : "neutral"}`;
-          const scope = selectedSubscription() ? `${selectedSubscription()} · ` : "";
+          // With one subscription the scope is the whole deployment and naming
+          // it only repeats the feed's title on every refresh.
+          const scope = selectedSubscription() && dashboardSubscriptionCount() > 1 ? `${selectedSubscription()} · ` : "";
           $("overview-state").textContent = nextRun
             ? `${scope}${results.length} latest results · next test ${formatTimeUntil(nextRun)}`
             : `${scope}${results.length} latest results`;
@@ -6806,6 +7254,7 @@
         const checking = state.availabilityCheckRunning && state.availabilityCheckIDs.has(proxy.stableId);
         const maintenanceUpdating = state.maintenanceUpdatingIDs.has(proxy.stableId);
         const availabilityStatus = proxyAvailabilityStatus(proxy);
+        const paused = state.projectMaintenance?.enabled || proxy.maintenance;
         return {
           result,
           rowClass: nodeRowClass(proxy, result, muted),
@@ -6815,15 +7264,18 @@
           maintenanceUpdating,
           checkDisabled: state.availabilityCheckRunning || maintenanceUpdating,
           runDisabled: state.speedRunStarting || Boolean(run && run.running) || maintenanceUpdating,
-          availabilityClass: state.projectMaintenance?.enabled || proxy.maintenance || availabilityStatus === "proxy_failure" ? "warn" : (availabilityStatus === "online" ? "ok" : "error"),
+          availabilityClass: paused ? "paused" : (availabilityStatus === "proxy_failure" ? "warn" : (availabilityStatus === "online" ? "ok" : "error")),
+          // The pause is what the operator needs to read first, so it is the
+          // value. A paused node keeps being probed and the probe keeps a real
+          // answer, which moves to the caption — muted, because nothing acts on
+          // it while the node is paused.
           availabilityText: state.projectMaintenance?.enabled
             ? "Project maintenance"
-            : proxyAvailabilityText(proxy),
-          // A paused node keeps being probed, so it keeps a real latency. The
-          // label carries the pause instead, which is why the value no longer
-          // has to spend itself saying "Maintenance".
-          availabilityLabel: state.projectMaintenance?.enabled || proxy.maintenance ? "Maintenance" : "Availability",
-          speedClass: result ? speedStatusClass(result) : "",
+            : (proxy.maintenance ? "Maintenance" : proxyAvailabilityText(proxy)),
+          availabilityLabel: state.projectMaintenance?.enabled
+            ? "Monitoring paused"
+            : (proxy.maintenance ? `Probe · ${proxyAvailabilityText(proxy)}` : "Availability"),
+          speedClass: result ? (paused ? "paused" : speedStatusClass(result)) : "",
           speedText: result ? formatSpeedStatus(result) : "No result",
           speedChecked: result ? formatShortTime(result.checkedAt) : "Last speed test",
         };
@@ -6849,7 +7301,10 @@
         // after a routing tag shows the group whose human name the tag replaced.
         // Both answer the same question: where did this thing come from?
         const origin = proxy.sourceName || proxy.groupName || "";
-        const prefix = [proxy.subName, origin, proxy.protocol, transport].filter(Boolean).map(escapeHtml).join(" · ");
+        // The feed's title only tells rows apart when more than one feed is on
+        // screen; with one it is the same long string on every card.
+        const subscription = state.dashboardRowsShowSubscription ? proxy.subName : "";
+        const prefix = [subscription, origin, proxy.protocol, transport].filter(Boolean).map(escapeHtml).join(" · ");
         const address = copyIPButton(proxy.server);
         return prefix ? `${prefix} · ${address}` : address;
       }
@@ -6880,7 +7335,7 @@
                 </label>
               </div>
               <div class="node-identity">
-                <div class="node-title"><span data-node-country>${nodeCountryMarker(proxy.stableId)}</span><span class="dot ${state.projectMaintenance?.enabled || proxy.maintenance ? "maintenance" : (proxyAvailabilityStatus(proxy) === "online" ? "online" : (proxyAvailabilityStatus(proxy) === "proxy_failure" ? "proxy-failure" : "offline"))}" data-node-dot></span><span class="node-title-text" data-node-name>${escapeHtml(proxy.name || "Unnamed")}</span></div>
+                <div class="node-title"><span data-node-country>${nodeCountryMarker(proxy.stableId)}</span><span class="dot ${state.projectMaintenance?.enabled || proxy.maintenance ? "maintenance" : (proxyAvailabilityStatus(proxy) === "online" ? "online" : (proxyAvailabilityStatus(proxy) === "proxy_failure" ? "proxy-failure" : "offline"))}" data-node-dot></span><span class="node-title-text" data-node-name>${escapeHtml(dashboardNodeName(proxy))}</span></div>
                 <div class="node-subline" data-node-subline>${nodeSublineHTML(proxy)}</div>
               </div>
               <div class="node-current">
@@ -6903,36 +7358,25 @@
           </article>`;
       }
 
+      // The facts switch between a healthy node's single status and a failing
+      // node's two, so they are rebuilt rather than patched — but only when
+      // something changed, so a poll does not drop the hover off the address.
+      const nodeDetailStatsRendered = new WeakMap();
+
       function updateNodeDetailSummary(card, proxy) {
-        const server = card.querySelector("[data-node-detail-ip]");
-        if (!server) return;
-        const availability = card.querySelector("[data-node-detail-availability]");
-        const down = card.querySelector("[data-node-detail-down]");
-        const failure = card.querySelector("[data-node-detail-failure]");
-        server.dataset.copyIp = proxy.server;
-        server.textContent = proxy.server;
-        card.querySelector("[data-node-detail-port]").textContent = proxy.port;
-        availability.innerHTML = nodeAvailabilityDetailsHTML(proxy);
-        const availabilityStatus = proxyAvailabilityStatus(proxy);
-        availability.className = state.projectMaintenance?.enabled || proxy.maintenance || availabilityStatus === "proxy_failure" ? "warn" : (availabilityStatus === "online" ? "ok" : "error");
-        const overview = overviewNodeFor(proxy.stableId);
-        down.textContent = state.projectMaintenance?.enabled
-          ? `Project paused ${formatTime(state.projectMaintenance.since) || "now"}`
-          : (proxy.maintenance
-          ? `Paused ${formatTime(overview && overview.maintenanceSince) || "now"}`
-          : (availabilityStatus === "proxy_failure"
-            ? (proxy.proxyFailureSince ? `${formatTime(proxy.proxyFailureSince)} · ${formatDurationSec(proxy.proxyFailureSec)}` : "Proxy failure active")
-            : (proxy.downSince ? `${formatTime(proxy.downSince)} · ${formatDurationSec(proxy.downtimeSec)}` : "No active issue")));
-        failure.textContent = proxy.failureSummary
-          ? `${proxy.failureSummary}${proxy.failureCode ? ` · ${proxy.failureCode}` : ""}`
-          : "No current failure";
-        failure.title = proxy.failureDetail || "";
+        const grid = card.querySelector("[data-node-detail-grid]");
+        if (!grid) return;
+        const html = nodeDetailStatsHTML(proxy);
+        if (nodeDetailStatsRendered.get(grid) === html) return;
+        grid.innerHTML = html;
+        nodeDetailStatsRendered.set(grid, html);
       }
 
       function applyNodeCard(card, proxy) {
         const view = nodeCardPresentation(proxy);
         card.classList.toggle("row-error", view.rowClass === "row-error");
         card.classList.toggle("row-warn", view.rowClass === "row-warn");
+        card.classList.toggle("row-paused", view.rowClass === "row-paused");
         const checkbox = card.querySelector("input[data-id]");
         checkbox.checked = state.selected.has(proxy.stableId);
         // On the input itself: a label wrapper carrying aria-label does not give
@@ -6951,7 +7395,7 @@
         dot.classList.toggle("proxy-failure", !state.projectMaintenance?.enabled && !proxy.maintenance && availabilityStatus === "proxy_failure");
         dot.classList.toggle("offline", !state.projectMaintenance?.enabled && !proxy.maintenance && availabilityStatus === "offline");
         dot.classList.toggle("maintenance", state.projectMaintenance?.enabled || proxy.maintenance);
-        card.querySelector("[data-node-name]").textContent = proxy.name || "Unnamed";
+        card.querySelector("[data-node-name]").textContent = dashboardNodeName(proxy);
         card.querySelector("[data-node-subline]").innerHTML = nodeSublineHTML(proxy);
         const availability = card.querySelector("[data-node-availability]");
         availability.className = view.availabilityClass;
@@ -6981,6 +7425,7 @@
         const container = $("nodes");
         syncDashboardOrderControls();
         const proxies = filteredProxies();
+        state.dashboardRowsShowSubscription = new Set(proxies.map((proxy) => proxy.subName || "")).size > 1;
         const renderedCards = [...container.children].filter((element) => element.dataset.nodeCard);
         const renderedByID = new Map(renderedCards.map((card) => [card.dataset.nodeCard, card]));
         const sameOrder = proxies.length > 0
@@ -7009,7 +7454,86 @@
             if (nodeCardElement(stableId)) syncNodePanel(stableId, { immediate: true });
           });
         }
+        syncDashboardPausedGroup(container, proxies);
         renderSelectionCount();
+      }
+
+      // Nodes in maintenance close the list in a group of their own. A pause is
+      // the operator's decision, not a finding, and left among the monitored
+      // rows — or above them, where a manual order may have put them — a paused
+      // node reads as the outage the dashboard is there to show. During project
+      // maintenance every node is paused and there is nothing to set apart.
+      function dashboardPausedNode(proxy) {
+        return Boolean(proxy) && !state.projectMaintenance?.enabled && Boolean(proxy.maintenance);
+      }
+
+      function dashboardPausedGrouped(proxies) {
+        const paused = proxies.filter(dashboardPausedNode).length;
+        return paused > 0 && paused < proxies.length;
+      }
+
+      function groupPausedLast(proxies) {
+        if (!dashboardPausedGrouped(proxies)) return proxies;
+        return [...proxies.filter((proxy) => !dashboardPausedNode(proxy)), ...proxies.filter(dashboardPausedNode)];
+      }
+
+      // What the operator can see and reach: a folded maintenance group is out
+      // of view, so "select all visible" must not reach into it.
+      function visibleDashboardProxies() {
+        const proxies = filteredProxies();
+        if (!state.dashboardPausedCollapsed || !dashboardPausedGrouped(proxies)) return proxies;
+        return proxies.filter((proxy) => !dashboardPausedNode(proxy));
+      }
+
+      function restoreDashboardPausedGroup() {
+        try {
+          state.dashboardPausedCollapsed = localStorage.getItem(dashboardPausedGroupKey) === "collapsed";
+        } catch {
+        }
+      }
+
+      function setDashboardPausedCollapsed(collapsed) {
+        state.dashboardPausedCollapsed = collapsed;
+        try {
+          localStorage.setItem(dashboardPausedGroupKey, collapsed ? "collapsed" : "expanded");
+        } catch {
+        }
+        renderNodes();
+      }
+
+      // The divider is placed after the cards are reconciled, so the reuse of
+      // existing cards above never has to know it exists.
+      function syncDashboardPausedGroup(container, proxies) {
+        let divider = container.querySelector("[data-node-group-divider]");
+        const grouped = dashboardPausedGrouped(proxies);
+        const paused = grouped ? proxies.filter(dashboardPausedNode) : [];
+        const pausedIDs = new Set(paused.map((proxy) => proxy.stableId));
+        const collapsed = grouped && state.dashboardPausedCollapsed;
+        container.querySelectorAll("[data-node-card]").forEach((card) => {
+          card.hidden = collapsed && pausedIDs.has(card.dataset.nodeCard);
+        });
+        if (!grouped) {
+          divider?.remove();
+          return;
+        }
+        if (!divider) {
+          divider = document.createElement("div");
+          divider.className = "node-group-divider";
+          divider.dataset.nodeGroupDivider = "maintenance";
+          divider.innerHTML = `<button class="node-group-toggle" type="button" data-toggle-paused-group>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+              <span>Maintenance</span>
+              <span class="node-group-count" data-node-group-count></span>
+            </button>
+            <span class="node-group-hint">Paused by the operator: not monitored and not alerted, only probed</span>`;
+        }
+        const first = nodeCardElement(paused[0].stableId);
+        if (first && divider.nextElementSibling !== first) container.insertBefore(divider, first);
+        divider.querySelector("[data-node-group-count]").textContent = String(paused.length);
+        divider.classList.toggle("collapsed", collapsed);
+        const toggle = divider.querySelector("[data-toggle-paused-group]");
+        toggle.setAttribute("aria-expanded", String(!collapsed));
+        toggle.title = collapsed ? "Show nodes in maintenance" : "Hide nodes in maintenance";
       }
 
       // The table sits under the node list and answers for what that list
@@ -7076,9 +7600,10 @@
 
         select.disabled = false;
         $("refresh-history").disabled = false;
+        const showSubscription = new Set(nodes.map((node) => node.subName || "")).size > 1;
         select.innerHTML = nodes.map((node) => {
           const suffix = node.active === false ? " · retired" : "";
-          const label = `${nodeOverviewLabel(node)} (${node.stableId})${suffix}`;
+          const label = `${nodeOverviewLabel(node, showSubscription)} (${node.stableId})${suffix}`;
           return `<option value="${escapeHtml(node.stableId)}">${escapeHtml(label)}</option>`;
         }).join("");
         select.value = state.historyStableId;
@@ -7100,8 +7625,20 @@
         const results = state.historyResults || [];
         $("history-count").textContent = `${results.length} results`;
         renderHistoryStats(results);
+        renderHistoryChart();
+        // One URL down every row is one fact, not a column: it is said once
+        // above the table, and the column returns as soon as two differ.
+        const urls = [...new Set(results.map((result) => result.url || "").filter(Boolean))];
+        const singleURL = urls.length <= 1;
+        const issueOf = (result) => result.error || formatSpeedDiagnostics(result) || (isShortenedResult(result) ? formatTimeoutReason(result) : "");
+        const anyIssue = results.some((result) => issueOf(result));
+        $("history-table").classList.toggle("hide-url", singleURL);
+        $("history-table").classList.toggle("hide-error", !anyIssue);
+        $("history-url-note").hidden = !(singleURL && urls.length === 1);
+        $("history-url-note").textContent = urls.length === 1 ? `Test URL: ${urls[0]}` : "";
+        const columns = 9 - (singleURL ? 1 : 0) - (anyIssue ? 0 : 1);
         if (!state.historyStableId) {
-          $("history-results").innerHTML = `<tr><td colspan="9" class="muted">Select a node</td></tr>`;
+          $("history-results").innerHTML = `<tr><td colspan="${columns}" class="muted">Select a node</td></tr>`;
           return;
         }
         $("history-results").innerHTML = results.map((result) => {
@@ -7122,12 +7659,198 @@
               <td>${result.offline ? "n/a" : `${result.durationMs || 0} ms`}</td>
               <td>${result.offline ? "n/a" : `${result.ttfbMs || 0} ms`}</td>
               <td>${escapeHtml(result.source || "")}</td>
-              <td class="mono history-url">${escapeHtml(result.url || "")}</td>
-              <td class="history-error ${issueClass}">${escapeHtml(issue)}</td>
+              <td class="mono history-url col-url">${escapeHtml(result.url || "")}</td>
+              <td class="history-error col-error ${issueClass}">${escapeHtml(issue)}</td>
               <td>${agentProbeCellHTML(result)}</td>
             </tr>
           `;
-        }).join("") || `<tr><td colspan="9" class="muted">No speed history for this node</td></tr>`;
+        }).join("") || `<tr><td colspan="${columns}" class="muted">No speed history for this node</td></tr>`;
+      }
+
+      // The chart of the selected node reuses the dashboard card's, so both
+      // read the same way. It needs the card's history shape, which is kept
+      // here under its own key instead of among the cards' histories.
+      const historyChartKey = "speed-history";
+
+      function historyChartState() {
+        if (!state.historyChart) {
+          state.historyChart = {
+            view: "speedtest",
+            range: "7d",
+            from: "",
+            to: "",
+            datasets: {
+              speedtest: { results: [], loading: false, error: "", request: 0, loaded: true },
+              availability: { results: [], loading: false, error: "", request: 0, loaded: true },
+            },
+          };
+        }
+        const chart = state.historyChart;
+        chart.range = state.historyRange;
+        chart.from = $("history-from").value;
+        chart.to = $("history-to").value;
+        chart.datasets.speedtest.results = state.historyResults || [];
+        return chart;
+      }
+
+      function metricChartHistory(key) {
+        return key === historyChartKey ? historyChartState() : state.dashboardCardHistory.get(key);
+      }
+
+      function renderHistoryChart() {
+        const container = $("history-chart");
+        if (!container) return;
+        if (!state.historyStableId) {
+          container.innerHTML = `<div class="chart-empty">Select a node</div>`;
+          $("history-chart-meta").textContent = "";
+          return;
+        }
+        const chart = historyChartState();
+        container.innerHTML = renderNodeMetricChart(chart.datasets.speedtest.results, historyChartKey, chart, "speedtest");
+        const node = historyNodes().find((item) => item.stableId === state.historyStableId);
+        $("history-chart-meta").textContent = node ? displayNodeName(node) : "";
+        bindMetricChartInteractions($("history-view"));
+      }
+
+      // The fleet view is fetched per node: the history API answers for one
+      // StableID, and a handful of parallel requests for a fleet this size is
+      // cheaper than a new endpoint. It is refetched when the period or the
+      // subscription changes, on Refresh, and at most every five minutes
+      // otherwise — picking another node only moves the highlight.
+      const historyHeatmapMaxAgeMs = 5 * 60 * 1000;
+
+      function historyHeatmapKey() {
+        const custom = state.historyRange === "custom";
+        return [state.historyRange, custom ? $("history-from").value : "", custom ? $("history-to").value : "", state.historySubName].join("|");
+      }
+
+      async function loadHistoryHeatmap(force = false) {
+        const current = state.historyHeatmap;
+        const key = historyHeatmapKey();
+        if (!force && current.key === key && !current.error && Date.now() - (current.loadedAt || 0) < historyHeatmapMaxAgeMs) {
+          renderHistoryHeatmap();
+          return;
+        }
+        const bounds = historyRangeBounds();
+        const nodes = historySubscriptionNodes().filter((node) => node.active !== false);
+        const requestID = (current.request || 0) + 1;
+        state.historyHeatmap = { ...current, key, request: requestID, loading: true, error: "" };
+        if (bounds.error || nodes.length === 0) {
+          state.historyHeatmap = { key, request: requestID, loading: false, error: bounds.error || "", rows: [], loadedAt: Date.now(), bounds };
+          renderHistoryHeatmap();
+          return;
+        }
+        renderHistoryHeatmap();
+        const path = (stableId) => {
+          const query = new URLSearchParams({ stableId });
+          if (bounds.from && bounds.to) {
+            query.set("from", bounds.from.toISOString());
+            query.set("to", bounds.to.toISOString());
+          }
+          return `/speed-tests/history?${query.toString()}`;
+        };
+        const rows = new Array(nodes.length);
+        let next = 0;
+        const worker = async () => {
+          while (next < nodes.length) {
+            const index = next;
+            next += 1;
+            try {
+              rows[index] = { node: nodes[index], results: await request(path(nodes[index].stableId)) || [] };
+            } catch (err) {
+              rows[index] = { node: nodes[index], results: [], error: err.message };
+            }
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(4, nodes.length) }, worker));
+        if (state.historyHeatmap.request !== requestID) return;
+        state.historyHeatmap = { key, request: requestID, loading: false, error: "", rows, loadedAt: Date.now(), bounds };
+        renderHistoryHeatmap();
+      }
+
+      function heatmapCellHTML(items, startMs, bucketMs, threshold, rowMax) {
+        if (items.length === 0) return `<span class="heat-cell"></span>`;
+        const when = `${formatTime(new Date(startMs).toISOString())} – ${formatShortTime(new Date(startMs + bucketMs).toISOString())}`;
+        const successes = items.filter(isSuccessfulResult);
+        const failed = items.length - successes.length;
+        if (successes.length === 0) {
+          return `<span class="heat-cell fail" title="${escapeHtml(`${when}\n${failed} × ${tr("failed")}`)}"></span>`;
+        }
+        const speeds = successes.map((result) => Number(result.mbps) || 0).sort((a, b) => a - b);
+        const median = speeds[Math.floor((speeds.length - 1) / 2)];
+        // A dip is anything a test would flag: below the threshold the run
+        // judged it by (or the node's current one), cut short by the deadline,
+        // or a failure beside the tests that passed.
+        const low = failed > 0 || successes.some((result) => {
+          const limit = Number(result.lowSpeedThresholdMbps || 0) || threshold;
+          return (limit > 0 && Number(result.mbps) < limit) || isShortenedResult(result);
+        });
+        const level = rowMax > 0 ? Math.max(0.22, Math.min(1, median / rowMax)) : 1;
+        const lines = [when, `${formatMbps(median)}${speeds.length > 1 ? ` · ${speeds.length} tests, ${formatMbps(speeds[0])}–${formatMbps(speeds[speeds.length - 1])}` : ""}`];
+        if (failed > 0) lines.push(`${failed} × ${tr("failed")}`);
+        return `<span class="heat-cell ${low ? "low" : "ok"}" style="--heat: ${level.toFixed(2)}" title="${escapeHtml(lines.join("\n"))}"></span>`;
+      }
+
+      function renderHistoryHeatmap() {
+        const container = $("history-heatmap");
+        if (!container) return;
+        const heatmap = state.historyHeatmap;
+        const rows = (heatmap.rows || []).filter(Boolean);
+        const meta = $("history-heatmap-meta");
+        if (heatmap.error) {
+          container.innerHTML = `<div class="chart-empty warn">${escapeHtml(tr(heatmap.error))}</div>`;
+          meta.textContent = "";
+          return;
+        }
+        if (rows.length === 0) {
+          container.innerHTML = `<div class="chart-empty">${heatmap.loading ? "Loading every node's speed history…" : "No active nodes"}</div>`;
+          meta.textContent = "";
+          return;
+        }
+        const now = Date.now();
+        const times = rows.flatMap((row) => row.results.map((result) => new Date(result.checkedAt).getTime()))
+          .filter((time) => Number.isFinite(time) && time > 0);
+        const bounded = heatmap.bounds && heatmap.bounds.from && heatmap.bounds.to;
+        const fromMs = bounded ? heatmap.bounds.from.getTime() : (times.length ? Math.min(...times) : now - 7 * 24 * 60 * 60 * 1000);
+        const toMs = bounded ? heatmap.bounds.to.getTime() : now;
+        const spanMs = Math.max(60 * 1000, toMs - fromMs);
+        // A slice as long as the usual gap between tests puts about one test in
+        // each cell, bounded so a long period stays readable and a short one
+        // still has more than a dozen columns.
+        const intervals = [];
+        rows.forEach((row) => {
+          const own = row.results.map((result) => new Date(result.checkedAt).getTime()).filter(Number.isFinite).sort((a, b) => a - b);
+          for (let index = 1; index < own.length; index += 1) intervals.push(own[index] - own[index - 1]);
+        });
+        intervals.sort((a, b) => a - b);
+        const medianInterval = intervals.length ? intervals[Math.floor(intervals.length / 2)] : 0;
+        const bucketMs = Math.max(spanMs / 96, Math.min(medianInterval || spanMs / 48, spanMs / 12));
+        const count = Math.max(1, Math.ceil(spanMs / bucketMs));
+        const rowsHTML = rows
+          .map((row) => ({ ...row, label: displayNodeName(row.node) }))
+          .sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: "base" }))
+          .map((row) => {
+            const threshold = nodeThreshold(row.node.stableId) || lowSpeedThreshold();
+            const buckets = Array.from({ length: count }, () => []);
+            row.results.forEach((result) => {
+              const time = new Date(result.checkedAt).getTime();
+              if (!Number.isFinite(time) || time < fromMs || time > toMs) return;
+              buckets[Math.min(count - 1, Math.floor((time - fromMs) / bucketMs))].push(result);
+            });
+            const rowMax = row.results.filter(isSuccessfulResult).reduce((max, result) => Math.max(max, Number(result.mbps) || 0), 0);
+            const cells = buckets.map((items, index) => heatmapCellHTML(items, fromMs + index * bucketMs, bucketMs, threshold, rowMax)).join("");
+            const selected = row.node.stableId === state.historyStableId;
+            const failure = row.error ? `<span class="heatmap-error" title="${escapeHtml(row.error)}">!</span>` : "";
+            return `<div class="heatmap-row${selected ? " selected" : ""}">
+              <button class="heatmap-label" type="button" data-history-heatmap-node="${escapeHtml(row.node.stableId)}" aria-pressed="${selected}" title="${escapeHtml(nodeOverviewLabel(row.node))}">${countryChip(row.node, false)}<span>${escapeHtml(row.label)}</span>${failure}</button>
+              <div class="heatmap-cells" style="--heatmap-columns: ${count}">${cells}</div>
+            </div>`;
+          }).join("");
+        const ticks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => (
+          `<span style="left: ${(ratio * 100).toFixed(2)}%">${escapeHtml(speedChartAxisTime(fromMs + ratio * spanMs, spanMs))}</span>`
+        )).join("");
+        container.innerHTML = `${rowsHTML}<div class="heatmap-row heatmap-axis-row" aria-hidden="true"><span></span><div class="heatmap-axis">${ticks}</div></div>`;
+        meta.textContent = `${rows.length} nodes · ${count} × ${formatDurationSec(Math.round(bucketMs / 1000))}${heatmap.loading ? " · refreshing" : ""}`;
       }
 
       // The cell carries the verdict rather than the agent's raw status: the
@@ -7383,11 +8106,14 @@
         const anyMuted = telegramAnyMutedNodeSet();
         const ids = selectedIDs();
         const visibleIDs = filteredProxies().map((proxy) => proxy.stableId);
-        const selectedVisible = visibleIDs.filter((id) => state.selected.has(id)).length;
+        // The master checkbox answers for what is on screen: a folded
+        // maintenance group is filtered in, but not in view.
+        const reachableIDs = visibleDashboardProxies().map((proxy) => proxy.stableId);
+        const selectedVisible = reachableIDs.filter((id) => state.selected.has(id)).length;
         const selectAll = $("select-all-nodes");
-        selectAll.disabled = visibleIDs.length === 0;
-        selectAll.checked = visibleIDs.length > 0 && selectedVisible === visibleIDs.length;
-        selectAll.indeterminate = selectedVisible > 0 && selectedVisible < visibleIDs.length;
+        selectAll.disabled = reachableIDs.length === 0;
+        selectAll.checked = reachableIDs.length > 0 && selectedVisible === reachableIDs.length;
+        selectAll.indeterminate = selectedVisible > 0 && selectedVisible < reachableIDs.length;
         selectAll.title = selectAll.checked ? "Clear visible node selection" : "Select all visible nodes";
         // The bar carries the only Cancel button on this screen, so clearing the
         // selection mid-run must not take it away.
@@ -7422,6 +8148,60 @@
         renderNodeNameForm();
         renderMaintenanceControl();
         renderTelegramMuteControls();
+        renderControlsPanel();
+      }
+
+      // Controls hold the forms for the selected nodes, the filters and the
+      // schedule. Always open, they took a quarter of the width for forms that
+      // stay disabled until something is selected. Now they open with the
+      // selection or on the button, and the list has the width otherwise.
+      function controlsOpen() {
+        if (state.controlsMode === "open") return true;
+        if (state.controlsMode === "closed") return false;
+        return state.selected.size > 0;
+      }
+
+      function dashboardFiltersActive() {
+        const filters = currentFilters();
+        return Boolean(filters.status || filters.protocol || filters.search || (filters.subName && dashboardSubscriptionCount() > 1));
+      }
+
+      function renderControlsPanel() {
+        // Closing them with nodes selected holds until the selection is
+        // cleared; the next selection opens them again.
+        if (state.controlsMode === "closed" && state.selected.size === 0) state.controlsMode = "auto";
+        const open = controlsOpen();
+        $("dashboard-view").classList.toggle("controls-closed", !open);
+        const toggle = $("toggle-controls");
+        toggle.setAttribute("aria-expanded", String(open));
+        // With the panel shut, the filters in it are out of sight; the button
+        // is what says the list is narrowed.
+        toggle.textContent = dashboardFiltersActive() ? "Controls · filtered" : "Controls";
+        toggle.title = open ? "Hide the controls" : "Filters, schedule and settings for the selected nodes";
+      }
+
+      function setControlsMode(mode) {
+        state.controlsMode = mode;
+        try {
+          localStorage.setItem(controlsModeKey, mode === "open" ? "open" : "auto");
+        } catch {
+        }
+        renderControlsPanel();
+      }
+
+      function toggleControls() {
+        if (controlsOpen()) {
+          setControlsMode(state.selected.size > 0 ? "closed" : "auto");
+        } else {
+          setControlsMode("open");
+        }
+      }
+
+      function restoreControlsMode() {
+        try {
+          state.controlsMode = localStorage.getItem(controlsModeKey) === "open" ? "open" : "auto";
+        } catch {
+        }
       }
 
       function renderNodeNameForm() {
@@ -7887,9 +8667,19 @@
         $("history-custom-range").hidden = state.historyRange !== "custom";
       }
 
-      async function loadHistory() {
+      async function loadHistory(options = {}) {
         renderHistoryNodeOptions();
         renderHistoryRanges();
+        await Promise.all([
+          loadSelectedHistory(),
+          loadHistoryHeatmap(options.force === true).catch((err) => {
+            state.historyHeatmap = { ...state.historyHeatmap, loading: false, error: err.message };
+            renderHistoryHeatmap();
+          }),
+        ]);
+      }
+
+      async function loadSelectedHistory() {
         if (!state.historyStableId) {
           state.historyResults = [];
           renderHistoryResults();
@@ -8189,30 +8979,144 @@
         }
       }
 
+      const incidentPeriodsMs = { "1d": 24 * 60 * 60 * 1000, "7d": 7 * 24 * 60 * 60 * 1000, "30d": 30 * 24 * 60 * 60 * 1000 };
+      // Repeats of one failure closer together than this are one flapping
+      // episode, not separate incidents.
+      const incidentRepeatGapMs = 30 * 60 * 1000;
+
+      function incidentScopeLabel(incident) {
+        return incident.scope === "global" ? "All subscriptions" : (incident.subscription || incident.scope || "n/a");
+      }
+
+      function incidentNames(incident) {
+        return Array.isArray(incident.nodeNames) ? incident.nodeNames.filter(Boolean) : [];
+      }
+
+      function incidentElapsedSec(incident) {
+        return incident.status === "active" && incident.startedAt
+          ? Math.max(0, Math.floor((Date.now() - new Date(incident.startedAt).getTime()) / 1000))
+          : Number(incident.durationSec || 0);
+      }
+
+      function incidentEndMs(incident) {
+        if (incident.status === "active") return Date.now();
+        const resolved = new Date(incident.resolvedAt || 0).getTime();
+        if (Number.isFinite(resolved) && resolved > 0) return resolved;
+        return new Date(incident.startedAt).getTime() + incidentElapsedSec(incident) * 1000;
+      }
+
+      function readIncidentFilters() {
+        state.incidentFilters = {
+          search: $("incidents-search").value.trim().toLowerCase(),
+          status: $("incidents-status").value,
+          period: $("incidents-period").value,
+          minDurationSec: Number($("incidents-duration").value || 0),
+          subscription: $("incidents-sub").value,
+          groupRepeats: $("incidents-group").checked,
+        };
+        return state.incidentFilters;
+      }
+
+      function filterIncidents(incidents, filters) {
+        const since = incidentPeriodsMs[filters.period] ? Date.now() - incidentPeriodsMs[filters.period] : 0;
+        return incidents.filter((incident) => {
+          if (filters.status === "active" && incident.status !== "active") return false;
+          if (filters.status === "resolved" && incident.status === "active") return false;
+          if (since && new Date(incident.startedAt).getTime() < since) return false;
+          if (filters.minDurationSec && incidentElapsedSec(incident) < filters.minDurationSec) return false;
+          if (filters.subscription && incidentScopeLabel(incident) !== filters.subscription) return false;
+          if (filters.search) {
+            const haystack = [incidentScopeLabel(incident), ...incidentNames(incident), incident.causeSummary, incident.causeCode, incident.kind]
+              .join(" ")
+              .toLowerCase();
+            if (!haystack.includes(filters.search)) return false;
+          }
+          return true;
+        });
+      }
+
+      // A node that drops for a minute every few minutes fills the page with
+      // one-minute rows, and the page reads as many outages when it was one
+      // flapping episode. Repeats of the same failure — same node or outage
+      // scope, same cause — that follow each other within the gap become one
+      // row saying how many times it happened and how long it was down in all.
+      function groupIncidentRepeats(incidents, enabled) {
+        if (!enabled) return incidents.map((incident) => [incident]);
+        const ordered = [...incidents].sort((a, b) => new Date(a.startedAt) - new Date(b.startedAt));
+        const open = new Map();
+        const groups = [];
+        ordered.forEach((incident) => {
+          const key = [incident.kind, incident.scope, (incident.stableIds || []).join(","), incident.causeCode].join("|");
+          const previous = open.get(key);
+          if (previous && new Date(incident.startedAt).getTime() - previous.endMs <= incidentRepeatGapMs) {
+            previous.items.push(incident);
+            previous.endMs = Math.max(previous.endMs, incidentEndMs(incident));
+            return;
+          }
+          const group = { items: [incident], endMs: incidentEndMs(incident) };
+          open.set(key, group);
+          groups.push(group);
+        });
+        const latestStart = (group) => new Date(group.items[group.items.length - 1].startedAt).getTime();
+        return groups.sort((a, b) => latestStart(b) - latestStart(a)).map((group) => group.items);
+      }
+
+      function incidentRowHTML(items) {
+        const first = items[0];
+        const last = items[items.length - 1];
+        const active = items.some((incident) => incident.status === "active");
+        const names = [...new Set(items.flatMap(incidentNames))];
+        // "1 / 1" told nothing the node's name does not; the counts only mean
+        // something for an outage spread over several nodes.
+        const affected = first.kind && first.kind !== "node"
+          ? `${Number(last.affectedCount || names.length || 0)} / ${Number(last.totalCount || 0)}`
+          : "";
+        const totalSec = items.reduce((sum, incident) => sum + incidentElapsedSec(incident), 0);
+        const repeats = items.length;
+        const windowSec = Math.max(0, Math.round((incidentEndMs(last) - new Date(first.startedAt).getTime()) / 1000));
+        const occurrences = repeats > 1
+          ? ` title="${escapeHtml(items.map((incident) => `${formatTime(incident.startedAt)} · ${formatDurationSec(incidentElapsedSec(incident))}`).join("\n"))}"`
+          : "";
+        const nameList = `${escapeHtml(names.slice(0, 3).join(", "))}${names.length > 3 ? "…" : ""}`;
+        return `<tr${occurrences}>
+          <td><span class="${active ? "error" : "ok"}">${active ? "Active" : "Resolved"}</span><div class="muted">${escapeHtml(first.kind || "node")}${repeats > 1 ? ` · ${repeats}×` : ""}</div></td>
+          <td class="col-scope">${escapeHtml(incidentScopeLabel(first))}</td>
+          <td title="${escapeHtml(names.join(", "))}">${affected ? `${escapeHtml(affected)}<div class="muted">${nameList}</div>` : nameList}</td>
+          <td><strong>${escapeHtml(last.causeSummary || "Unknown")}</strong><div class="muted mono">${escapeHtml(last.causeCode || "unknown")}</div></td>
+          <td>${escapeHtml(formatTime(repeats > 1 ? last.startedAt : first.startedAt) || "n/a")}${repeats > 1 ? `<div class="muted">first ${escapeHtml(formatTime(first.startedAt))}</div>` : ""}</td>
+          <td>${escapeHtml(formatDurationSec(totalSec))}${repeats > 1 ? `<div class="muted">within ${escapeHtml(formatDurationSec(windowSec))}</div>` : ""}</td>
+        </tr>`;
+      }
+
+      function renderIncidentSubscriptionOptions(incidents) {
+        const select = $("incidents-sub");
+        const current = select.value;
+        const scopes = [...new Set(incidents.map(incidentScopeLabel))].sort();
+        select.innerHTML = `<option value="">All</option>` + scopes
+          .map((scope) => `<option value="${escapeHtml(scope)}">${escapeHtml(scope)}</option>`)
+          .join("");
+        select.value = scopes.includes(current) ? current : "";
+        // With one feed there is nothing to narrow down to.
+        $("incidents-sub-field").hidden = scopes.length < 2;
+      }
+
       function renderIncidents() {
         const incidents = Array.isArray(state.incidents) ? state.incidents : [];
-        const rows = incidents.map((incident) => {
-          const active = incident.status === "active";
-          const scope = incident.scope === "global"
-            ? "All subscriptions"
-            : (incident.subscription || incident.scope || "n/a");
-          const names = Array.isArray(incident.nodeNames) ? incident.nodeNames.filter(Boolean) : [];
-          const affected = `${Number(incident.affectedCount || names.length || 0)} / ${Number(incident.totalCount || 0)}`;
-          const elapsed = active && incident.startedAt
-            ? Math.max(0, Math.floor((Date.now() - new Date(incident.startedAt).getTime()) / 1000))
-            : Number(incident.durationSec || 0);
-          return `<tr>
-            <td><span class="${active ? "error" : "ok"}">${active ? "Active" : "Resolved"}</span><div class="muted">${escapeHtml(incident.kind || "node")}</div></td>
-            <td>${escapeHtml(scope)}</td>
-            <td title="${escapeHtml(names.join(", "))}">${escapeHtml(affected)}<div class="muted">${escapeHtml(names.slice(0, 3).join(", "))}${names.length > 3 ? "…" : ""}</div></td>
-            <td><strong>${escapeHtml(incident.causeSummary || "Unknown")}</strong><div class="muted mono">${escapeHtml(incident.causeCode || "unknown")}</div></td>
-            <td>${escapeHtml(formatTime(incident.startedAt) || "n/a")}</td>
-            <td>${escapeHtml(formatDurationSec(elapsed))}</td>
-          </tr>`;
-        });
-        $("incidents").innerHTML = rows.join("") || `<tr><td colspan="6" class="muted">No incidents recorded</td></tr>`;
+        renderIncidentSubscriptionOptions(incidents);
+        const filters = readIncidentFilters();
+        const filtered = filterIncidents(incidents, filters);
+        const groups = groupIncidentRepeats(filtered, filters.groupRepeats);
+        // The scope names the feed; when every row shares one it only repeats
+        // the feed's title down the page.
+        const showScope = new Set(filtered.map(incidentScopeLabel)).size > 1;
+        $("incidents-table").classList.toggle("hide-scope", !showScope);
+        const empty = incidents.length > 0 ? "No incidents match the filters" : "No incidents recorded";
+        $("incidents").innerHTML = groups.map(incidentRowHTML).join("")
+          || `<tr><td colspan="${showScope ? 6 : 5}" class="muted">${empty}</td></tr>`;
         const activeCount = incidents.filter((incident) => incident.status === "active").length;
-        $("incidents-state").textContent = `${incidents.length} incidents · ${activeCount} active`;
+        const count = filtered.length !== incidents.length ? `${filtered.length} of ${incidents.length}` : `${incidents.length}`;
+        const rows = groups.length !== filtered.length ? ` · ${groups.length} ${groups.length === 1 ? "row" : "rows"}` : "";
+        $("incidents-state").textContent = `${count} incidents · ${activeCount} active${rows}`;
       }
 
       async function loadIncidents() {
@@ -8828,8 +9732,12 @@
 
       function bindTabListKeyboardNavigation() {
         document.querySelectorAll('[role="tablist"]').forEach((tabList) => {
+          // A vertical list, like the settings menu, moves with Up and Down.
+          const vertical = tabList.getAttribute("aria-orientation") === "vertical";
+          const previousKey = vertical ? "ArrowUp" : "ArrowLeft";
+          const nextKey = vertical ? "ArrowDown" : "ArrowRight";
           tabList.addEventListener("keydown", (event) => {
-            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+            if (![previousKey, nextKey, "Home", "End"].includes(event.key)) return;
             const tabs = [...tabList.querySelectorAll('[role="tab"]')].filter((tab) => !tab.hidden && !tab.disabled);
             const currentIndex = tabs.indexOf(document.activeElement);
             if (currentIndex < 0 || tabs.length === 0) return;
@@ -8837,8 +9745,8 @@
             let nextIndex = currentIndex;
             if (event.key === "Home") nextIndex = 0;
             if (event.key === "End") nextIndex = tabs.length - 1;
-            if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
-            if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % tabs.length;
+            if (event.key === previousKey) nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+            if (event.key === nextKey) nextIndex = (currentIndex + 1) % tabs.length;
             tabs[nextIndex].focus();
             tabs[nextIndex].click();
           });
@@ -9755,6 +10663,10 @@
       $("nodes").addEventListener("click", (event) => {
         const target = event.target instanceof Element ? event.target : null;
         if (!target) return;
+        if (target.closest("[data-toggle-paused-group]")) {
+          setDashboardPausedCollapsed(!state.dashboardPausedCollapsed);
+          return;
+        }
         const check = target.closest("[data-check-id]");
         if (check) {
           checkAvailability([check.dataset.checkId]);
@@ -9909,6 +10821,10 @@
       $("resume-project-maintenance").addEventListener("click", () => updateProjectMaintenance(false));
       $("refresh-nodes-overview").addEventListener("click", loadNodesOverview);
       $("refresh-incidents").addEventListener("click", loadIncidents);
+      $("incidents-search").addEventListener("input", renderIncidents);
+      ["incidents-status", "incidents-period", "incidents-duration", "incidents-sub", "incidents-group"].forEach((id) => {
+        $(id).addEventListener("change", renderIncidents);
+      });
       $("remnawave-save").addEventListener("click", saveRemnawave);
       $("remnawave-sync").addEventListener("click", syncRemnawave);
       $("remnawave-message-constructor").addEventListener("input", renderRemnawaveMessagePreviews);
@@ -10086,9 +11002,16 @@
           event.clientY >= box.top && event.clientY <= box.bottom;
         if (!inside) dialog.close();
       });
-      $("refresh-history").addEventListener("click", loadHistory);
+      $("refresh-history").addEventListener("click", () => loadHistory({ force: true }));
       $("history-node").addEventListener("change", () => {
         state.historyStableId = $("history-node").value;
+        loadHistory();
+      });
+      // A row of the fleet view opens that node below it.
+      $("history-heatmap").addEventListener("click", (event) => {
+        const row = event.target instanceof Element ? event.target.closest("[data-history-heatmap-node]") : null;
+        if (!row || row.dataset.historyHeatmapNode === state.historyStableId) return;
+        state.historyStableId = row.dataset.historyHeatmapNode;
         loadHistory();
       });
       $("history-sub").addEventListener("change", () => {
@@ -10096,9 +11019,14 @@
         const previous = state.historyStableId;
         // Narrowing the list can drop the node in scope, and the picker then
         // falls to the first one of the subscription. Only that reselection
-        // needs a fetch; a filter that keeps the node on screen changes nothing.
+        // needs the node's history refetched; the fleet view always follows
+        // the subscription.
         renderHistoryNodeOptions();
-        if (state.historyStableId !== previous) loadHistory();
+        if (state.historyStableId !== previous) {
+          loadHistory();
+        } else {
+          loadHistoryHeatmap().catch(() => {});
+        }
       });
       $("run").addEventListener("click", () => (speedRunActive() ? cancelSpeedRun() : runSelected()));
       $("toggle-maintenance").addEventListener("click", (event) => {
@@ -10143,7 +11071,7 @@
       $("test-telegram").addEventListener("click", testTelegram);
       $("select-all-nodes").addEventListener("change", () => {
         const selectAll = $("select-all-nodes");
-        filteredProxies().forEach((proxy) => {
+        visibleDashboardProxies().forEach((proxy) => {
           if (selectAll.checked) {
             state.selected.add(proxy.stableId);
           } else {
@@ -10153,7 +11081,7 @@
         renderNodes();
       });
       $("select-visible").addEventListener("click", () => {
-        filteredProxies().forEach((proxy) => state.selected.add(proxy.stableId));
+        visibleDashboardProxies().forEach((proxy) => state.selected.add(proxy.stableId));
         renderNodes();
       });
       $("clear-selection").addEventListener("click", () => {
@@ -10250,6 +11178,11 @@
       }, true);
 
       restoreDashboardOrderState();
+      restoreDashboardPausedGroup();
+      restoreControlsMode();
+      renderControlsPanel();
+      $("toggle-controls").addEventListener("click", toggleControls);
+      $("close-controls").addEventListener("click", toggleControls);
       try {
         // A stored value, the empty string included, is a choice the operator
         // already made; only its absence leaves the environment default to
