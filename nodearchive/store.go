@@ -898,7 +898,7 @@ func (s *Store) Summaries(history map[string][]speedtest.Result) []Summary {
 			NodeRecord:          record,
 			MergedFromStableIDs: append([]string(nil), mergedNodes[stableID]...),
 		}
-		summary.IPInfoURL = ipInfoURL(record.Server)
+		summary.IPInfoURL = ipInfoURL(record)
 		summary.GeoSources = geoSources(record)
 		summary.GeoBlacklistHits = geoBlacklistHits(summary.GeoSources)
 		summary.GeoBlacklisted = len(summary.GeoBlacklistHits) > 0
@@ -1867,12 +1867,35 @@ func countryMatch(record NodeRecord) string {
 	return "mismatch"
 }
 
-func ipInfoURL(server string) string {
-	server = serverHost(server)
-	if server == "" {
+func ipInfoURL(record NodeRecord) string {
+	address := ipInfoAddress(record)
+	if address == "" {
 		return ""
 	}
-	return "https://ipinfo.io/" + url.PathEscape(server)
+	return "https://ipinfo.io/" + url.PathEscape(address)
+}
+
+// ipInfoAddress is the address the IP details link opens. ipinfo.io describes
+// an address, not a name: handed a hostname it searches for the name instead
+// of showing where the node sits. A hostname is linked through the address the
+// geo lookups resolved it to — the one the Geo verdict is about. A source that
+// failed is passed over, since the address it still holds may be left from an
+// older lookup, and until some source has answered a hostname has no address
+// to link at all.
+func ipInfoAddress(record NodeRecord) string {
+	host := serverHost(record.Server)
+	if host == "" || net.ParseIP(host) != nil {
+		return host
+	}
+	for _, source := range geoSources(record) {
+		if strings.TrimSpace(source.Error) != "" {
+			continue
+		}
+		if ip := net.ParseIP(strings.TrimSpace(source.IP)); ip != nil {
+			return ip.String()
+		}
+	}
+	return ""
 }
 
 func geoCountryCodes(record NodeRecord) []string {

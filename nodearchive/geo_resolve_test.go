@@ -101,6 +101,87 @@ func TestGeoLookupReportsAResolveFailureOnce(t *testing.T) {
 	}
 }
 
+// ipinfo.io describes an address; handed a hostname it searches for the name.
+// The IP details link of a node published by name has to lead to the address
+// the geo lookups resolved, and the link is absent until one has.
+func TestIPInfoURLOfAHostnameLeadsToTheResolvedAddress(t *testing.T) {
+	store := NewStore("", nil)
+	store.nodes["node"] = NodeRecord{StableID: "node", Name: "DE node", Server: "node.example-vpn.net", Port: 443, Active: true}
+	store.resolveHost = func(_ context.Context, _ string) (string, error) {
+		return "198.51.100.7", nil
+	}
+	store.httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "ifconfig.net" {
+			return jsonResponse(`{"ip":"198.51.100.7","country":"Germany","country_iso":"DE"}`), nil
+		}
+		return jsonResponse(`{"ip":"198.51.100.7","country":"DE"}`), nil
+	})}
+
+	if got := store.Summaries(nil)[0].IPInfoURL; got != "" {
+		t.Fatalf("before any lookup IPInfoURL = %q, want no link rather than a search for the name", got)
+	}
+	if _, err := store.RefreshGeo(context.Background(), nil); err != nil {
+		t.Fatalf("RefreshGeo() error = %v", err)
+	}
+	if got := store.Summaries(nil)[0].IPInfoURL; got != "https://ipinfo.io/198.51.100.7" {
+		t.Fatalf("IPInfoURL = %q, want the resolved address", got)
+	}
+}
+
+func TestIPInfoURLNeverCarriesAName(t *testing.T) {
+	tests := []struct {
+		name   string
+		record NodeRecord
+		want   string
+	}{
+		{
+			name:   "address published by the subscription",
+			record: NodeRecord{Server: "203.0.113.9"},
+			want:   "https://ipinfo.io/203.0.113.9",
+		},
+		{
+			name:   "address with a port",
+			record: NodeRecord{Server: "203.0.113.9:443"},
+			want:   "https://ipinfo.io/203.0.113.9",
+		},
+		{
+			name: "ipinfo failed and still holds an older address",
+			record: NodeRecord{
+				Server:              "node.example-vpn.net",
+				GeoIP:               "192.0.2.1",
+				GeoError:            "ipinfo status 429",
+				IfconfigIP:          "198.51.100.7",
+				IfconfigCountryCode: "DE",
+			},
+			want: "https://ipinfo.io/198.51.100.7",
+		},
+		{
+			name: "every lookup failed",
+			record: NodeRecord{
+				Server:        "node.example-vpn.net",
+				GeoIP:         "192.0.2.1",
+				GeoError:      "resolve node.example-vpn.net: no such host",
+				IfconfigIP:    "192.0.2.1",
+				IfconfigError: "resolve node.example-vpn.net: no such host",
+			},
+			want: "",
+		},
+		{
+			name:   "no server",
+			record: NodeRecord{},
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ipInfoURL(tt.record); got != tt.want {
+				t.Fatalf("ipInfoURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolveGeoTargetPassesAddressesThrough(t *testing.T) {
 	for _, address := range []string{"203.0.113.9", "2606:4700::1111"} {
 		resolved, err := resolveGeoTarget(context.Background(), address)

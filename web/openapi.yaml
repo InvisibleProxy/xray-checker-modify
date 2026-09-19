@@ -2768,6 +2768,7 @@ components:
           format: date-time
         ipInfoUrl:
           type: string
+          description: ipinfo.io page for the node's address. A hostname is linked through the address a successful geo lookup resolved it to; empty until one has.
         countryMatch:
           type: string
         geoSources:
