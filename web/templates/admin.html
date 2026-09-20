@@ -5021,12 +5021,26 @@
         return Math.max(0, Number((state.telegram && state.telegram.lowSpeedThresholdMbps) || 0));
       }
 
+      // What counted as slow for one measurement. The run stamps the threshold
+      // it judged by onto the result - the node's own override when it has one -
+      // so the table, the chart and the Telegram report reach the same verdict.
+      // Reading the global setting here instead said "Low speed < 100.00 Mbps"
+      // beside a node overridden to 50, and reclassified past results whenever
+      // the global one changed. Records written before the stamp existed carry
+      // no threshold; they fall back to the node's current one.
+      function resultLowSpeedThreshold(result) {
+        if (!result) return 0;
+        const recorded = Math.max(0, Number(result.lowSpeedThresholdMbps || 0));
+        if (recorded > 0) return recorded;
+        return nodeThreshold(result.stableId) || lowSpeedThreshold();
+      }
+
       function isSuccessfulResult(result) {
         return !!result && !result.offline && !result.error && Number(result.mbps || 0) > 0;
       }
 
       function isLowSpeed(result) {
-        const threshold = lowSpeedThreshold();
+        const threshold = resultLowSpeedThreshold(result);
         return isSuccessfulResult(result) && threshold > 0 && Number(result.mbps || 0) < threshold;
       }
 
@@ -5250,7 +5264,11 @@
         // so the grid and the unit are dropped and the failure strip along the
         // baseline is left to say when the checks happened.
         const hasMeasuredScale = successful.length > 0;
-        const threshold = view === "speedtest" ? lowSpeedThreshold() : 0;
+        // One line for the whole series, so it is the threshold the latest
+        // measurement was judged by: a node with its own override is drawn
+        // against that override and not against the fleet-wide setting, which
+        // put the line at 100 under points a 50 Mbps node passes.
+        const threshold = view === "speedtest" ? resultLowSpeedThreshold(ordered[ordered.length - 1]) : 0;
         const observedMax = successful.reduce((max, result) => Math.max(max, chartResultValue(result, view)), 0);
         const availabilityScale = view === "availability" ? availabilityChartScale(ordered) : null;
         const yMax = availabilityScale ? availabilityScale.yMax : niceSpeedMax(Math.max(observedMax, threshold));
@@ -5719,7 +5737,7 @@
         // Both facts matter and neither replaces the other: how fast the node
         // was, and that it never delivered the amount the run asked for.
         if (isLowSpeed(result)) {
-          const low = `${tr("Low speed")} < ${lowSpeedThreshold().toFixed(2)} Mbps`;
+          const low = `${tr("Low speed")} < ${resultLowSpeedThreshold(result).toFixed(2)} Mbps`;
           return isShortenedResult(result) ? `${low} · ${tr("timed out")}` : low;
         }
         if (isShortenedResult(result)) return formatTimeoutReason(result);
@@ -7793,7 +7811,7 @@
         renderHistoryHeatmap();
       }
 
-      function heatmapCellHTML(items, startMs, bucketMs, threshold, rowMax) {
+      function heatmapCellHTML(items, startMs, bucketMs, rowMax) {
         if (items.length === 0) return `<span class="heat-cell"></span>`;
         const when = `${formatTime(new Date(startMs).toISOString())} – ${formatShortTime(new Date(startMs + bucketMs).toISOString())}`;
         const successes = items.filter(isSuccessfulResult);
@@ -7807,7 +7825,7 @@
         // judged it by (or the node's current one), cut short by the deadline,
         // or a failure beside the tests that passed.
         const low = failed > 0 || successes.some((result) => {
-          const limit = Number(result.lowSpeedThresholdMbps || 0) || threshold;
+          const limit = resultLowSpeedThreshold(result);
           return (limit > 0 && Number(result.mbps) < limit) || isShortenedResult(result);
         });
         const level = rowMax > 0 ? Math.max(0.22, Math.min(1, median / rowMax)) : 1;
@@ -7855,7 +7873,6 @@
           .map((row) => ({ ...row, label: displayNodeName(row.node) }))
           .sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: "base" }))
           .map((row) => {
-            const threshold = nodeThreshold(row.node.stableId) || lowSpeedThreshold();
             const buckets = Array.from({ length: count }, () => []);
             row.results.forEach((result) => {
               const time = new Date(result.checkedAt).getTime();
@@ -7863,7 +7880,7 @@
               buckets[Math.min(count - 1, Math.floor((time - fromMs) / bucketMs))].push(result);
             });
             const rowMax = row.results.filter(isSuccessfulResult).reduce((max, result) => Math.max(max, Number(result.mbps) || 0), 0);
-            const cells = buckets.map((items, index) => heatmapCellHTML(items, fromMs + index * bucketMs, bucketMs, threshold, rowMax)).join("");
+            const cells = buckets.map((items, index) => heatmapCellHTML(items, fromMs + index * bucketMs, bucketMs, rowMax)).join("");
             const selected = row.node.stableId === state.historyStableId;
             const failure = row.error ? `<span class="heatmap-error" title="${escapeHtml(row.error)}">!</span>` : "";
             return `<div class="heatmap-row${selected ? " selected" : ""}">
@@ -8008,7 +8025,7 @@
       // above the sections; a copied report has room to spell it out, and
       // without it the probe reads as an answer to a question nobody wrote down.
       function agentProbeMeasurementFacts(result) {
-        const threshold = Number(result.lowSpeedThresholdMbps || 0);
+        const threshold = resultLowSpeedThreshold(result);
         return [
           ["Node", [result.name, result.stableId].filter(Boolean).join(" · ")],
           ["Checked", formatTime(result.checkedAt)],

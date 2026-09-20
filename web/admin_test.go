@@ -434,6 +434,37 @@ func TestAdminTemplateColorsAvailabilityDiagnosticsIndependently(t *testing.T) {
 	}
 }
 
+// A measurement is read by the threshold it was judged against, exactly as the
+// report and the automation read it. The admin UI used to compare every result
+// with the current global setting, so a node overridden to 50 Mbps was labelled
+// "Low speed < 100.00 Mbps", and a change to the global value silently
+// reclassified history nobody had re-measured.
+func TestAdminTemplateJudgesResultsByTheirOwnThreshold(t *testing.T) {
+	var rendered bytes.Buffer
+	if err := RenderAdmin(&rendered); err != nil {
+		t.Fatalf("RenderAdmin() error = %v", err)
+	}
+	html := rendered.String()
+	for _, marker := range []string{
+		`function resultLowSpeedThreshold(result)`,
+		`const recorded = Math.max(0, Number(result.lowSpeedThresholdMbps || 0));`,
+		`return nodeThreshold(result.stableId) || lowSpeedThreshold();`,
+		`const threshold = resultLowSpeedThreshold(result);`,
+		`${tr("Low speed")} < ${resultLowSpeedThreshold(result).toFixed(2)} Mbps`,
+		`const limit = resultLowSpeedThreshold(result);`,
+		`const threshold = view === "speedtest" ? resultLowSpeedThreshold(ordered[ordered.length - 1]) : 0;`,
+	} {
+		if !strings.Contains(html, marker) {
+			t.Errorf("admin template does not judge a result by its own threshold: %q missing", marker)
+		}
+	}
+	// The global setting has exactly two readers left: its own accessor and the
+	// fallback for records written before the run stamped a threshold on them.
+	if count := strings.Count(html, "lowSpeedThreshold()"); count != 2 {
+		t.Errorf("global low-speed threshold is read %d times, want only the accessor and the fallback", count)
+	}
+}
+
 func TestWebTemplatesCopyNodeAddressesAndRefreshLiveData(t *testing.T) {
 	var dashboard bytes.Buffer
 	if err := RenderIndex(&dashboard, PageData{
