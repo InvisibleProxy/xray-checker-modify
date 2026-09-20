@@ -142,7 +142,7 @@
         background: var(--bg-tertiary);
         border: 1px solid var(--border);
         color: var(--text-secondary);
-        transition: all 0.15s ease;
+        transition: border-color 0.15s ease, color 0.15s ease;
       }
       .btn:hover {
         border-color: var(--border-hover);
@@ -333,6 +333,18 @@
       }
       .proxy-card.animate:nth-child(n + 10) {
         animation-delay: 180ms;
+      }
+
+      /* What goes is the movement: the card entrance, and the ring that expands
+         behind every online dot for as long as the page is open. The refresh
+         spinner stays - it reports that work is in progress, not decoration. */
+      @media (prefers-reduced-motion: reduce) {
+        .proxy-card.animate {
+          animation: none;
+        }
+        .pulse::after {
+          display: none;
+        }
       }
 
       /* Latency segments */
@@ -975,7 +987,7 @@
           >
         <template x-for="(proxy, idx) in group.proxies" :key="proxy.stableId">
           <div
-            class="proxy-card group card rounded-lg px-3 py-2.5 flex items-center gap-3 transition-all duration-150"
+            class="proxy-card group card rounded-lg px-3 py-2.5 flex items-center gap-3 transition-colors duration-150"
             :class="initialLoad && 'animate'"
           >
             <!-- Status dot -->
@@ -1040,7 +1052,7 @@
             <!-- Copy -->
             <button
               @click="copyUrl(proxy)"
-              class="hidden sm:block p-1.5 rounded text-muted btn-icon transition-all"
+              class="hidden sm:block p-1.5 rounded text-muted btn-icon transition-colors"
               title="Copy URL"
             >
               <svg

@@ -35,6 +35,9 @@
         --red-soft: rgba(255, 93, 93, 0.12);
         --yellow-soft: rgba(242, 184, 75, 0.14);
         --blue-soft: rgba(110, 168, 254, 0.14);
+        /* The built-in easings are too weak to read at these durations: a
+           hundred-millisecond press on the browser default barely registers. */
+        --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
       }
       * {
         box-sizing: border-box;
@@ -132,7 +135,7 @@
         display: none;
       }
       .dashboard-grid:not(.controls-closed) .control-panel {
-        animation: controls-enter 0.18s ease both;
+        animation: controls-enter 0.18s var(--ease-out) both;
       }
       @keyframes controls-enter {
         from {
@@ -254,8 +257,26 @@
       .node-card[hidden] {
         display: none;
       }
+      /* The status line carries the reason a command failed, and it appears
+         above a list the eye is already on. Fading it in is what makes it
+         noticed; it costs nothing, because only the appearance animates and the
+         aria-live announcement is untouched. */
+      #message {
+        transition:
+          opacity 180ms var(--ease-out),
+          transform 180ms var(--ease-out),
+          display 180ms allow-discrete;
+      }
       #message:empty {
         display: none;
+        opacity: 0;
+        transform: translateY(-2px);
+      }
+      @starting-style {
+        #message:not(:empty) {
+          opacity: 0;
+          transform: translateY(-2px);
+        }
       }
       .control-group {
         display: grid;
@@ -441,7 +462,7 @@
         transform: translateZ(0) scale(1);
         transform-origin: center;
         transition:
-          transform 100ms ease-out,
+          transform 100ms var(--ease-out),
           border-color 140ms ease-out,
           background-color 140ms ease-out,
           color 140ms ease-out,
@@ -550,6 +571,12 @@
         height: 8px;
         border-radius: 50%;
         background: var(--muted);
+        /* A node changing state is what the operator is watching for, and an
+           automatic refresh rewrites the dot with nothing to say it changed.
+           The cross-fade is the only thing on the row that moves, so the eye
+           lands on it; the class is toggled to the same value on every poll,
+           which starts no transition. */
+        transition: background-color 180ms ease;
       }
       .dot.online {
         background: var(--green);
@@ -684,6 +711,23 @@
         box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
         color: var(--text);
         padding: 10px 14px;
+        /* It sits on the bottom edge, so it arrives and leaves through it.
+           Transitions rather than keyframes: copying twice in a second is
+           normal, and the second toast must retarget instead of restarting. */
+        transition:
+          opacity 180ms var(--ease-out),
+          transform 180ms var(--ease-out),
+          display 180ms allow-discrete;
+      }
+      .copy-toast[hidden] {
+        opacity: 0;
+        transform: translateY(8px);
+      }
+      @starting-style {
+        .copy-toast:not([hidden]) {
+          opacity: 0;
+          transform: translateY(8px);
+        }
       }
       .reason-cell {
         min-width: 190px;
@@ -1116,8 +1160,8 @@
         }
       }
       @keyframes chart-line-enter {
-        from { stroke-dashoffset: 1; }
-        to { stroke-dashoffset: 0; }
+        from { stroke-dasharray: 1; stroke-dashoffset: 1; }
+        to { stroke-dasharray: 1; stroke-dashoffset: 0; }
       }
       @keyframes chart-layer-enter {
         from { opacity: 0; }
@@ -1151,7 +1195,7 @@
         box-shadow: 0 3px 0 var(--blue);
       }
       .node-card.entering {
-        animation: node-card-enter 0.34s ease both;
+        animation: node-card-enter 0.28s var(--ease-out) both;
         animation-delay: calc(var(--node-card-index, 0) * 40ms);
       }
       .node-card:hover,
@@ -1196,7 +1240,7 @@
         font-weight: 600;
       }
       .node-group-toggle svg {
-        transition: transform 0.18s ease;
+        transition: transform 0.18s var(--ease-out);
       }
       .node-group-divider.collapsed .node-group-toggle svg {
         transform: rotate(-90deg);
@@ -1261,7 +1305,7 @@
         color: var(--muted);
         cursor: grab;
         touch-action: none;
-        transition: transform 100ms ease-out, border-color 140ms ease-out, color 140ms ease-out;
+        transition: transform 100ms var(--ease-out), border-color 140ms ease-out, color 140ms ease-out;
       }
       .node-drag-handle:active {
         cursor: grabbing;
@@ -1486,13 +1530,22 @@
         stroke-width: 2.5;
         stroke-linecap: round;
         stroke-linejoin: round;
-        stroke-dasharray: 1;
-        stroke-dashoffset: 1;
-        animation: chart-line-enter 0.48s ease-out forwards;
       }
       .chart-area {
         stroke: none;
-        animation: chart-layer-enter 0.38s ease-out both;
+      }
+      /* The draw-in explains a chart the operator just opened or re-ranged. A
+         background refresh replaces the same chart on its own every 30s, and
+         redrawing it then reads as data arriving when nothing has changed - so
+         the entrance lives on a class the render decides, not on the shape. */
+      .chart-animate .chart-line {
+        animation: chart-line-enter 0.48s var(--ease-out) both;
+      }
+      .chart-animate .chart-area {
+        animation: chart-layer-enter 0.38s var(--ease-out) both;
+      }
+      .chart-animate .chart-error-band {
+        animation: chart-layer-enter 0.3s var(--ease-out) both;
       }
       .chart-gap-bridge {
         fill: none;
@@ -1506,7 +1559,6 @@
       .chart-error-band {
         fill: rgba(247, 118, 142, 0.62);
         transition: fill 0.15s ease;
-        animation: chart-layer-enter 0.3s ease-out both;
       }
       .chart-empty-note {
         fill: var(--muted);
@@ -1649,12 +1701,12 @@
         .chart-area,
         .chart-error-band,
         .chart-point,
-        .speed-chart-tooltip {
+        .speed-chart-tooltip,
+        .dot,
+        #message,
+        .copy-toast {
           animation: none !important;
           transition-duration: 0.01ms !important;
-        }
-        .chart-line {
-          stroke-dashoffset: 0;
         }
         button:active {
           transform: none !important;
@@ -1898,7 +1950,7 @@
         backdrop-filter: blur(4px);
       }
       dialog.quicklook[open] {
-        animation: quicklook-in 160ms cubic-bezier(0.2, 0.8, 0.3, 1);
+        animation: quicklook-in 160ms var(--ease-out);
       }
       @keyframes quicklook-in {
         from { opacity: 0; transform: scale(0.97); }
@@ -6960,7 +7012,7 @@
           <div class="node-detail-grid" data-node-detail-grid>${nodeDetailStatsHTML(proxy)}</div>
           ${dashboardRangeControls(proxy.stableId, history)}
           ${view === "availability" ? nodeAvailabilityStatsHTML(dataset.results) : nodeSpeedStatsHTML(dataset.results)}
-          <div class="speed-chart-wrap" data-node-metric-chart="${escapeHtml(proxy.stableId)}" data-chart-view="${view}">${renderNodeMetricChart(dataset.results, proxy.stableId, history, view)}</div>
+          <div class="speed-chart-wrap chart-animate" data-node-metric-chart="${escapeHtml(proxy.stableId)}" data-chart-view="${view}">${renderNodeMetricChart(dataset.results, proxy.stableId, history, view)}</div>
           <div class="chart-legend">
             ${legend}
           </div>
@@ -7740,19 +7792,45 @@
         return key === historyChartKey ? historyChartState() : state.dashboardCardHistory.get(key);
       }
 
+      // What the chart is of, as opposed to what it currently shows: the markup
+      // changes with every new sample, the identity only when the operator picks
+      // another node or period.
+      const historyChartRendered = new WeakMap();
+
+      function historyChartIdentity() {
+        const custom = state.historyRange === "custom";
+        return [
+          state.historyStableId,
+          state.historyRange,
+          custom ? $("history-from")?.value || "" : "",
+          custom ? $("history-to")?.value || "" : "",
+          state.historySubName || "",
+        ].join("|");
+      }
+
       function renderHistoryChart() {
         const container = $("history-chart");
         if (!container) return;
-        if (!state.historyStableId) {
-          container.innerHTML = `<div class="chart-empty">Select a node</div>`;
+        const chart = state.historyStableId ? historyChartState() : null;
+        const identity = chart ? historyChartIdentity() : "";
+        const markup = chart
+          ? renderNodeMetricChart(chart.datasets.speedtest.results, historyChartKey, chart, "speedtest")
+          : `<div class="chart-empty">Select a node</div>`;
+        const previous = historyChartRendered.get(container);
+        // A refresh that brings nothing new must not touch the DOM: replacing the
+        // same chart drops the hover and replays the draw-in.
+        if (!previous || previous.markup !== markup) {
+          container.classList.toggle("chart-animate", Boolean(chart) && (!previous || previous.identity !== identity));
+          container.innerHTML = markup;
+          historyChartRendered.set(container, { identity, markup });
+          bindMetricChartInteractions($("history-view"));
+        }
+        if (!chart) {
           $("history-chart-meta").textContent = "";
           return;
         }
-        const chart = historyChartState();
-        container.innerHTML = renderNodeMetricChart(chart.datasets.speedtest.results, historyChartKey, chart, "speedtest");
         const node = historyNodes().find((item) => item.stableId === state.historyStableId);
         $("history-chart-meta").textContent = node ? displayNodeName(node) : "";
-        bindMetricChartInteractions($("history-view"));
       }
 
       // The fleet view is fetched per node: the history API answers for one
