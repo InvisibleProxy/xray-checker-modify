@@ -61,12 +61,15 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`id="toggle-maintenance"`,
 		`function renderMaintenanceControl()`,
 		`button.dataset.maintenanceId = proxy.stableId`,
-		// A paused node's value is the pause itself: read first, it no longer
-		// reads as an outage. The probe it keeps running moves to the caption.
+		// A paused node keeps being probed, so the probe's answer is the value
+		// and the pause is the caption. The colour follows that answer, except
+		// where the pause means nothing has been measured to colour.
 		`function proxyAvailabilityText(proxy)`,
 		`if (proxy.maintenance && !proxy.checkedAt) return "Not checked yet"`,
-		`(proxy.maintenance ? "Maintenance" : proxyAvailabilityText(proxy))`,
-		"(proxy.maintenance ? `Probe · ${proxyAvailabilityText(proxy)}` : \"Availability\")",
+		`function availabilityToneClass(proxy)`,
+		`if (proxy.maintenance && !proxy.checkedAt) return "paused";`,
+		`availabilityText: projectPaused ? "Project maintenance" : proxyAvailabilityText(proxy)`,
+		`(proxy.maintenance ? "Maintenance" : "Availability")`,
 		`data-node-availability-label`,
 		`view === "availability" && result.maintenance`,
 		`checkDisabled: state.availabilityCheckRunning || maintenanceUpdating`,

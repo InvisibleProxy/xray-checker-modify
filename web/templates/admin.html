@@ -4809,6 +4809,18 @@
         return proxy.downSince ? `Offline · ${formatDurationSec(proxy.downtimeSec)}` : "Offline";
       }
 
+      // A paused node keeps being probed, so the colour describes what the probe
+      // found. Two cases have nothing measured behind them and stay muted rather
+      // than claiming a verdict: a project-wide pause, which stops probing, and
+      // the gap between pausing a node and its next sweep.
+      function availabilityToneClass(proxy) {
+        if (state.projectMaintenance?.enabled) return "paused";
+        if (proxy.maintenance && !proxy.checkedAt) return "paused";
+        const status = proxyAvailabilityStatus(proxy);
+        if (status === "proxy_failure") return "warn";
+        return status === "online" ? "ok" : "error";
+      }
+
       function availabilitySampleStatus(result) {
         if (["online", "proxy_failure", "offline"].includes(result && result.status)) return result.status;
         return result && result.online === true ? "online" : "offline";
@@ -6875,7 +6887,7 @@
         const overview = overviewNodeFor(proxy.stableId);
         const availabilityStatus = proxyAvailabilityStatus(proxy);
         const paused = state.projectMaintenance?.enabled || proxy.maintenance;
-        const availabilityClass = paused ? "paused" : (availabilityStatus === "proxy_failure" ? "warn" : (availabilityStatus === "online" ? "ok" : "error"));
+        const availabilityClass = availabilityToneClass(proxy);
         const address = `${proxy.server}:${proxy.port}`;
         const server = `<div class="node-detail-stat node-detail-server"><span>Server</span><strong class="mono" title="${escapeHtml(address)}">${copyIPButton(proxy.server, "data-node-detail-ip")}:<span data-node-detail-port>${escapeHtml(proxy.port)}</span></strong></div>`;
         const availability = `<div class="node-detail-stat"><span>Availability</span><strong class="${availabilityClass}" data-node-detail-availability>${nodeAvailabilityDetailsHTML(proxy)}</strong></div>`;
@@ -7256,8 +7268,8 @@
         const runRunning = !state.speedRunStarting && Boolean(run && run.running) && runRequested;
         const checking = state.availabilityCheckRunning && state.availabilityCheckIDs.has(proxy.stableId);
         const maintenanceUpdating = state.maintenanceUpdatingIDs.has(proxy.stableId);
-        const availabilityStatus = proxyAvailabilityStatus(proxy);
-        const paused = state.projectMaintenance?.enabled || proxy.maintenance;
+        const projectPaused = Boolean(state.projectMaintenance?.enabled);
+        const paused = projectPaused || proxy.maintenance;
         return {
           result,
           rowClass: nodeRowClass(proxy, result, muted),
@@ -7267,17 +7279,17 @@
           maintenanceUpdating,
           checkDisabled: state.availabilityCheckRunning || maintenanceUpdating,
           runDisabled: state.speedRunStarting || Boolean(run && run.running) || maintenanceUpdating,
-          availabilityClass: paused ? "paused" : (availabilityStatus === "proxy_failure" ? "warn" : (availabilityStatus === "online" ? "ok" : "error")),
-          // The pause is what the operator needs to read first, so it is the
-          // value. A paused node keeps being probed and the probe keeps a real
-          // answer, which moves to the caption — muted, because nothing acts on
-          // it while the node is paused.
-          availabilityText: state.projectMaintenance?.enabled
-            ? "Project maintenance"
-            : (proxy.maintenance ? "Maintenance" : proxyAvailabilityText(proxy)),
-          availabilityLabel: state.projectMaintenance?.enabled
+          availabilityClass: availabilityToneClass(proxy),
+          // The pause is already written all over the card — dashed edge, muted
+          // name, its own group — so spending the value on it buries the one
+          // thing the operator cannot see from there: what the probe found. The
+          // probe's answer takes the value, the pause moves to the caption.
+          // A project-wide pause is different: nothing is probed under it, so it
+          // has no answer to show and says so itself.
+          availabilityText: projectPaused ? "Project maintenance" : proxyAvailabilityText(proxy),
+          availabilityLabel: projectPaused
             ? "Monitoring paused"
-            : (proxy.maintenance ? `Probe · ${proxyAvailabilityText(proxy)}` : "Availability"),
+            : (proxy.maintenance ? "Maintenance" : "Availability"),
           speedClass: result ? (paused ? "paused" : speedStatusClass(result)) : "",
           speedText: result ? formatSpeedStatus(result) : "No result",
           speedChecked: result ? formatShortTime(result.checkedAt) : "Last speed test",
