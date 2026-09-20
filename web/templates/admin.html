@@ -3611,6 +3611,9 @@
         // Whether the maintenance group at the end of the node list is folded.
         dashboardPausedCollapsed: false,
         dashboardRowsShowSubscription: false,
+        // The names the subscription gave our own nodes, so a config group named
+        // after one of them can be told from a group that names something else.
+        dashboardOwnNodeNames: new Set(),
         // Controls open on their own while nodes are selected ("auto"), stay
         // open because the operator asked ("open"), or stay shut after the
         // operator closed them ("closed") until the selection is cleared.
@@ -7300,7 +7303,12 @@
         // A renamed node shows what its subscription calls it, and a node named
         // after a routing tag shows the group whose human name the tag replaced.
         // Both answer the same question: where did this thing come from?
-        const origin = proxy.sourceName || proxy.groupName || "";
+        // A group named after a node already on the list answers nothing: a panel
+        // that injects every host into its neighbours' configs makes that remarks
+        // a sibling's name, repeated on card after card. A real balancer group
+        // has no node of its own and still shows.
+        const group = state.dashboardOwnNodeNames.has((proxy.groupName || "").trim()) ? "" : proxy.groupName;
+        const origin = proxy.sourceName || group || "";
         // The feed's title only tells rows apart when more than one feed is on
         // screen; with one it is the same long string on every card.
         const subscription = state.dashboardRowsShowSubscription ? proxy.subName : "";
@@ -7426,6 +7434,11 @@
         syncDashboardOrderControls();
         const proxies = filteredProxies();
         state.dashboardRowsShowSubscription = new Set(proxies.map((proxy) => proxy.subName || "")).size > 1;
+        // Built from every node, not the filtered ones: whether a group names a
+        // node of ours does not change because a filter hid that node.
+        state.dashboardOwnNodeNames = new Set(state.proxies
+          .map((proxy) => (proxy.sourceName || proxy.name || "").trim())
+          .filter(Boolean));
         const renderedCards = [...container.children].filter((element) => element.dataset.nodeCard);
         const renderedByID = new Map(renderedCards.map((card) => [card.dataset.nodeCard, card]));
         const sameOrder = proxies.length > 0

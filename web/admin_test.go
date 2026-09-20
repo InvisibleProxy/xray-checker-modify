@@ -79,7 +79,10 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`function renderNodeNameForm()`,
 		`async function saveNodeDisplayName(name)`,
 		`request("/nodes-overview/name"`,
-		`const origin = proxy.sourceName || proxy.groupName || ""`,
+		`const origin = proxy.sourceName || group || ""`,
+		// A config group named after one of our own nodes is the panel injecting
+		// neighbours, not a group worth naming on every card.
+		`const group = state.dashboardOwnNodeNames.has((proxy.groupName || "").trim()) ? "" : proxy.groupName;`,
 		// A source's observation mode and its switch.
 		`id="subscription-source-mode"`,
 		`function subscriptionSourceObservationHTML(source)`,
@@ -368,6 +371,9 @@ func TestAdminTemplateKeepsOperatorLayoutDecisions(t *testing.T) {
 		`function syncDashboardPausedGroup(container, proxies)`,
 		`data-toggle-paused-group`,
 		`state.dashboardRowsShowSubscription = new Set(proxies.map((proxy) => proxy.subName || "")).size > 1;`,
+		// Own names come from every node, so hiding one behind a filter cannot
+		// bring a neighbour's group name back onto the cards.
+		`state.dashboardOwnNodeNames = new Set(state.proxies`,
 		`classList.toggle("hide-subscription", !showSubscription)`,
 		`return node ? countryChip(node, false) : "";`,
 		`function nameWithoutCountryPrefix(name, code)`,
