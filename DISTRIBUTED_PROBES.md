@@ -425,7 +425,7 @@ Metadata network condition используется только для выбо
 - Реализованы per-`StableID` deduplication/cooldown, общий concurrency limit и bounded alert wait.
 - Реализованы direct connectivity и alternative endpoint probes; automatic download использует status как alternative.
 - Operational retry/alert decision выполняется до ожидания агента; automatic session остаётся полностью изолированной.
-- Opt-in запуск при переходе availability в `proxy_failure` остаётся отдельным следующим расширением.
+- Реализован opt-in `auto_proxy_failure` (`PROBE_AUTOMATION_PROXY_FAILURE_ENABLED`): одна проба на эпизод `proxy_failure` профилем, соответствующим `CHECK_METHOD`. Повтор — только если проба не дала observation. Лимит одновременных сессий общий с `auto_speed_fallback`. Вердикт дополняет уже решённый down-алерт и не влияет ни на его отправку, ни на время.
 
 ### Этап 3. Несколько агентов и улучшение подсказок
 
@@ -442,7 +442,7 @@ Metadata network condition используется только для выбо
 2. Automatic trigger не задерживает и не меняет локальный availability/speedtest result или постановку retry.
 3. Observation никогда не вызывает запись в nodearchive или Availability history.
 4. Завершение session не открывает и не закрывает incident.
-5. Ни success, ни failure агента не создают и не подавляют Telegram notification; они могут только дополнить уже разрешённый speed alert.
+5. Ни success, ни failure агента не создают и не подавляют Telegram notification; они могут только дополнить уже разрешённый speed alert или down-алерт о `proxy_failure`.
 6. Agent result не запускает Remnawave reconcile и не меняет `announce`.
 7. Agent result не создаёт и не отменяет speedtest/retry.
 8. Один или несколько одинаковых remote results остаются observations, а не общим status.

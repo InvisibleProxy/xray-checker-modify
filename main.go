@@ -17,6 +17,7 @@ import (
 	"xray-checker/backup"
 	"xray-checker/checker"
 	"xray-checker/config"
+	"xray-checker/diagnostics"
 	"xray-checker/logger"
 	"xray-checker/metrics"
 	"xray-checker/models"
@@ -226,7 +227,9 @@ func main() {
 		// Agents work for the deployment's own subscriptions. A panel-added
 		// node is still measured and still reported; it just gets an agent only
 		// when an operator asks for one from the Reachability tab.
-		EnvironmentSourced: proxyChecker.EnvironmentSourced,
+		EnvironmentSourced:    proxyChecker.EnvironmentSourced,
+		ProxyFailureEnabled:   config.CLIConfig.RemoteDiagnostics.AutomationProxyFailure,
+		ProxyFailureProfileID: proxyFailureProfileID(config.CLIConfig.Proxy.CheckMethod),
 	}, remoteDiagnosticController, probeAgentRegistry)
 	if err != nil {
 		logger.Fatal("Failed to configure diagnostic automation: %v", err)
@@ -340,6 +343,7 @@ func main() {
 	)
 	telegramService.SetProjectMaintenance(projectMaintenance.Enabled())
 	telegramService.SetSpeedDiagnosticAutomation(diagnosticAutomation)
+	telegramService.SetProxyFailureDiagnostics(diagnosticAutomation)
 	handleStateLoadError("Telegram", telegramService.Load())
 	if projectMaintenance.Enabled() {
 		if err := telegramService.ClearAllMonitoringState(); err != nil {
@@ -411,6 +415,8 @@ func main() {
 			}
 			remnawaveService.Trigger()
 			notifyRecoveredNodes(recovered)
+			// Off the request path: starting a session may resolve a node name.
+			go diagnosticAutomation.StartProxyFailureDiagnostics(proxyFailureEpisodes(proxyChecker))
 		}
 		return checkErr
 	}
@@ -532,7 +538,12 @@ func main() {
 			logger.Warn("Failed to record node availability: %v", err)
 		}
 		remnawaveService.ObserveFullCheck()
+		failures := proxyFailureEpisodes(proxyChecker)
 		go func() {
+			// Before the alert pass, so an alert due in this pass finds the probe
+			// already asked for. Its result stays evidence: it can add a line to
+			// that alert, never decide whether the alert is sent.
+			diagnosticAutomation.StartProxyFailureDiagnostics(failures)
 			if !telegramService.NotifyNodeStatuses() {
 				notifyRecoveredNodes(recovered)
 			}
@@ -904,6 +915,42 @@ func reachabilityTargets(proxyChecker *checker.ProxyChecker) []reachability.Targ
 		})
 	}
 	return targets
+}
+
+// proxyFailureEpisodes lists every node the last check left in proxy_failure,
+// with the start of its episode. Only nodes whose availability is accounted
+// qualify: a node in maintenance or on a paused source has no verdict for an
+// agent to second.
+func proxyFailureEpisodes(proxyChecker *checker.ProxyChecker) []agentautomation.ProxyFailure {
+	var failures []agentautomation.ProxyFailure
+	for _, proxy := range proxyChecker.GetProxies() {
+		if proxy == nil {
+			continue
+		}
+		stableID := proxy.StableID
+		if stableID == "" {
+			stableID = proxy.GenerateStableID()
+		}
+		if !proxyChecker.AvailabilityAccounted(stableID) {
+			continue
+		}
+		details, err := proxyChecker.GetProxyStatusDetailsByStableID(stableID)
+		if err != nil || !details.IsProxyFailure() {
+			continue
+		}
+		failures = append(failures, agentautomation.ProxyFailure{StableID: stableID, Since: details.ProxyFailureSince})
+	}
+	return failures
+}
+
+// proxyFailureProfileID asks the agent the question the availability check
+// itself failed. An unknown method falls back to the status probe every agent
+// supports, which is also what the reachability sweep defaults to.
+func proxyFailureProfileID(checkMethod string) string {
+	if descriptor, ok := diagnostics.ProfileForCheckMethod(checkMethod); ok {
+		return descriptor.ID
+	}
+	return diagnostics.ProfileStatus
 }
 
 func unavailableStableIDSet(proxyChecker *checker.ProxyChecker) map[string]bool {

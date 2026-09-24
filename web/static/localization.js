@@ -30,6 +30,7 @@
     "Fallback attempts": "Попытки резервных URL",
     "Cooldown": "Cooldown", "Alert wait": "Ожидание для алерта", "Concurrency": "Параллельные сессии",
     "A failed or slow measurement starts an isolated agent probe. Its evidence is stored with that measurement and enriches the Telegram alert; it never changes status, classification, incidents, retries or Remnawave.": "Замер с ошибкой или ниже порога запускает изолированную пробу агента. Её свидетельство сохраняется рядом с этим замером и дополняет Telegram-алерт; статус, классификацию, incidents, retries и Remnawave оно не меняет.",
+    "When the proxy-failure trigger is on, a node entering proxy_failure gets one agent probe per episode. The answer appears among the node's diagnostic sessions and in its Telegram down alert; it never decides whether that alert is sent.": "Если триггер proxy failure включён, нода, перешедшая в proxy_failure, получает одну пробу агента на эпизод. Ответ виден среди диагностических сессий ноды и в её Telegram-алерте о сбое; отправку алерта он не решает.",
     "Agent probe": "Проба агента", "Open the agent probe": "Открыть пробу агента", "Close agent probe": "Закрыть пробу агента",
     "Copy": "Копировать", "Copy the probe as text": "Скопировать пробу текстом",
     "Agent probe copied!": "Проба агента скопирована!", "Copy failed": "Не удалось скопировать",

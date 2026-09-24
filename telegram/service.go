@@ -86,6 +86,17 @@ type Service struct {
 	nodeAlertSendFunc   func(Config, formattedMessage) error
 	projectMaintenance  atomic.Bool
 	speedDiagnostics    SpeedDiagnosticAutomation
+	proxyFailureProbes  ProxyFailureDiagnostics
+}
+
+// ProxyFailureDiagnostics is the read side of the proxy-failure automation. The
+// probes are started by the availability loop, not here, so a node gets its
+// probe whether or not Telegram is configured; an alert only reads the answer.
+type ProxyFailureDiagnostics interface {
+	ProxyFailureEnabled() bool
+	AlertWait() time.Duration
+	ProxyFailureAnnotations([]string) map[string]speedtest.AgentDiagnostic
+	AwaitProxyFailure(context.Context, []string) map[string]speedtest.AgentDiagnostic
 }
 
 type SpeedDiagnosticAutomation interface {
@@ -129,6 +140,10 @@ func (s *Service) SetAvailabilityCheckFunc(check func([]string) error) {
 
 func (s *Service) SetSpeedDiagnosticAutomation(automation SpeedDiagnosticAutomation) {
 	s.speedDiagnostics = automation
+}
+
+func (s *Service) SetProxyFailureDiagnostics(probes ProxyFailureDiagnostics) {
+	s.proxyFailureProbes = probes
 }
 
 func (s *Service) SetProjectMaintenance(enabled bool) {

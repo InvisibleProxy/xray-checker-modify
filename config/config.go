@@ -89,6 +89,7 @@ type CLI struct {
 		AutomationCooldownMinutes  int    `name:"probe-automation-cooldown" help:"Cooldown per StableID after an automatic diagnostic session, in minutes; keep it below the 30-minute confirmation retry so the retry gets a fresh probe" default:"15" env:"PROBE_AUTOMATION_COOLDOWN_MINUTES"`
 		AutomationAlertWaitSeconds int    `name:"probe-automation-alert-wait" help:"Maximum time a background Telegram speed alert waits for agent evidence" default:"90" env:"PROBE_AUTOMATION_ALERT_WAIT_SECONDS"`
 		AutomationMaxConcurrent    int    `name:"probe-automation-max-concurrent" help:"Maximum concurrent automatic diagnostic sessions" default:"2" env:"PROBE_AUTOMATION_MAX_CONCURRENT"`
+		AutomationProxyFailure     bool   `name:"probe-automation-proxy-failure" help:"Also run one isolated agent probe per episode when the availability check puts a node into proxy_failure; requires automation to be enabled" default:"false" env:"PROBE_AUTOMATION_PROXY_FAILURE_ENABLED"`
 		ReachabilityEnabled        bool   `name:"reachability-sweep-enabled" help:"Periodically ask every connected agent whether it can reach every node, and record the disagreements" default:"false" env:"REACHABILITY_SWEEP_ENABLED"`
 		ReachabilityIntervalMin    int    `name:"reachability-sweep-interval" help:"Gap between the end of one reachability sweep and the start of the next, in minutes" default:"60" env:"REACHABILITY_SWEEP_INTERVAL_MINUTES"`
 		ReachabilityTimeoutSeconds int    `name:"reachability-sweep-timeout" help:"How long one reachability probe may take before the sweep moves on, in seconds" default:"120" env:"REACHABILITY_SWEEP_TIMEOUT_SECONDS"`
@@ -133,6 +134,11 @@ func (c *CLI) Validate() error {
 	}
 	if c.RemoteDiagnostics.AutomationEnabled && !c.RemoteDiagnostics.Enabled {
 		return fmt.Errorf("remote diagnostic automation requires Remote Diagnostics to be enabled")
+	}
+	// Refused rather than ignored: a flag that does nothing reads, months later,
+	// as a trigger that fired and found nothing.
+	if c.RemoteDiagnostics.AutomationProxyFailure && !c.RemoteDiagnostics.AutomationEnabled {
+		return fmt.Errorf("--probe-automation-proxy-failure requires --remote-diagnostics-automation-enabled")
 	}
 	if c.RemoteDiagnostics.ReachabilityEnabled {
 		if !c.RemoteDiagnostics.Enabled {

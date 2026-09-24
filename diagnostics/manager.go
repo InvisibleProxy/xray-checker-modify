@@ -576,6 +576,13 @@ func validateCreateSessionRequest(request CreateSessionRequest, now time.Time, m
 			context.MeasuredBytes < 0 || context.FallbackAttempts < 0 {
 			return fmt.Errorf("%w: invalid speed fallback automation context", ErrInvalidRequest)
 		}
+	} else if request.Trigger == TriggerAutoProxyFailure {
+		// Nothing about a run belongs here: the local verdict is already in the
+		// LocalResultSnapshot, and a speed field on this context could only be a
+		// caller mixing the two automations up.
+		if request.AutomationContext != ProxyFailureAutomationContext() {
+			return fmt.Errorf("%w: invalid proxy failure automation context", ErrInvalidRequest)
+		}
 	} else if request.AutomationContext != (AutomationContext{}) {
 		return fmt.Errorf("%w: automation context does not match trigger", ErrInvalidRequest)
 	}

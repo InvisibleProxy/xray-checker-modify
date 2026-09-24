@@ -9,12 +9,16 @@ import (
 	"xray-checker/checker"
 	"xray-checker/logger"
 	"xray-checker/models"
+	"xray-checker/speedtest"
 )
 
 type nodeDownAlert struct {
 	Proxy     *models.ProxyConfig
 	State     nodeAlertState
 	NextAfter time.Duration
+	// Agent is what a probe agent found for a proxy failure. It is attached
+	// after the decision to send is made and never feeds back into it.
+	Agent *speedtest.AgentDiagnostic
 }
 
 type nodeDownIncidentGroup struct {
@@ -207,15 +211,16 @@ func (s *Service) NotifyNodeStatuses() bool {
 			stateChanged = true
 		}
 	}
-	if s.ProjectMaintenanceEnabled() {
-		return false
-	}
-
 	downAlerts := make([]nodeDownAlert, 0, len(dueAlertProxies))
 	for _, proxy := range dueAlertProxies {
 		if alert, ok := s.pendingNodeDownAlert(proxy, cfg, now); ok {
 			downAlerts = append(downAlerts, alert)
 		}
+	}
+	downAlerts = s.attachProxyFailureDiagnostics(downAlerts)
+	// Checked after the agent wait, which can outlast a switch into maintenance.
+	if s.ProjectMaintenanceEnabled() {
+		return false
 	}
 
 	for _, alert := range recoveryAlerts {
@@ -246,7 +251,7 @@ func (s *Service) NotifyNodeStatuses() bool {
 			if alert.Proxy != nil {
 				markup = nodeAlertMarkup(alert.Proxy.StableID)
 			}
-			if err := s.sendNodeAlertMessageWithMarkup(cfg, formatNodeDownMessage(alert.Proxy, alert.State, now), markup); err == nil {
+			if err := s.sendNodeAlertMessageWithMarkup(cfg, formatNodeDownAlertMessage(alert, now), markup); err == nil {
 				if s.confirmNodeDownAlertsSent([]nodeDownAlert{alert}, time.Now(), cfg) {
 					stateChanged = true
 				}
@@ -408,6 +413,45 @@ func (s *Service) pendingNodeDownAlert(proxy *models.ProxyConfig, cfg Config, no
 		State:     alertState,
 		NextAfter: alertState.NextAlert.Sub(now),
 	}, true
+}
+
+// attachProxyFailureDiagnostics adds the agent's answer to every due alert about
+// a proxy failure. The alerts are already decided: this can make one wait for a
+// probe still in flight, bounded by the automation's alert wait, but it neither
+// adds an alert nor holds one back. A probe normally answered a whole check
+// interval ago, and then nothing waits at all.
+func (s *Service) attachProxyFailureDiagnostics(alerts []nodeDownAlert) []nodeDownAlert {
+	probes := s.proxyFailureProbes
+	if probes == nil || len(alerts) == 0 || !probes.ProxyFailureEnabled() {
+		return alerts
+	}
+	stableIDs := make([]string, 0, len(alerts))
+	for _, alert := range alerts {
+		if alert.Proxy != nil && nodeAlertStatus(alert.State) == checker.AvailabilityStateProxyFailure {
+			stableIDs = append(stableIDs, alert.Proxy.StableID)
+		}
+	}
+	if len(stableIDs) == 0 {
+		return alerts
+	}
+	var annotations map[string]speedtest.AgentDiagnostic
+	if wait := probes.AlertWait(); wait > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), wait)
+		annotations = probes.AwaitProxyFailure(ctx, stableIDs)
+		cancel()
+	} else {
+		annotations = probes.ProxyFailureAnnotations(stableIDs)
+	}
+	for index := range alerts {
+		if alerts[index].Proxy == nil || nodeAlertStatus(alerts[index].State) != checker.AvailabilityStateProxyFailure {
+			continue
+		}
+		if annotation, ok := annotations[alerts[index].Proxy.StableID]; ok {
+			copyValue := annotation
+			alerts[index].Agent = &copyValue
+		}
+	}
+	return alerts
 }
 
 func shouldNotifyNodeRecovery(state nodeAlertState, cfg Config, isMuted bool) bool {

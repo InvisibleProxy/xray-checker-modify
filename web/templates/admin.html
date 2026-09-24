@@ -2704,6 +2704,7 @@
                 <span id="diagnostic-automation-state" class="pill">Loading</span>
               </div>
               <div class="hint">A failed or slow measurement starts an isolated agent probe. Its evidence is stored with that measurement and enriches the Telegram alert; it never changes status, classification, incidents, retries or Remnawave.</div>
+              <div class="hint">When the proxy-failure trigger is on, a node entering proxy_failure gets one agent probe per episode. The answer appears among the node's diagnostic sessions and in its Telegram down alert; it never decides whether that alert is sent.</div>
               <div class="config-status">
                 <div><span>Trigger</span><strong id="diagnostic-automation-trigger">Speed fallback</strong></div>
                 <div><span>Cooldown</span><strong id="diagnostic-automation-cooldown">—</strong></div>
@@ -9921,7 +9922,10 @@
         if (!status) return;
         status.textContent = automation.enabled ? "Enabled" : "Disabled by environment";
         status.className = `pill ${automation.enabled ? "ok" : "warn"}`;
-        $("diagnostic-automation-trigger").textContent = automation.speedFallbackEnabled ? "Speed fallback" : "Disabled";
+        const triggers = [];
+        if (automation.speedFallbackEnabled) triggers.push(tr("Speed fallback"));
+        if (automation.proxyFailureEnabled) triggers.push(tr("Proxy failure"));
+        $("diagnostic-automation-trigger").textContent = triggers.length ? triggers.join(" · ") : tr("Disabled");
         $("diagnostic-automation-cooldown").textContent = automation.cooldownSeconds ? `${Math.round(automation.cooldownSeconds / 60)} ${tr("min")}` : "—";
         $("diagnostic-automation-wait").textContent = automation.alertWaitSeconds >= 0 ? `${automation.alertWaitSeconds || 0} ${tr("sec")}` : "—";
         $("diagnostic-automation-concurrency").textContent = automation.maxConcurrent ? `${automation.active || 0} / ${automation.maxConcurrent}` : "—";

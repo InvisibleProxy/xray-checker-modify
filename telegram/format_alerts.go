@@ -8,6 +8,7 @@ import (
 
 	"xray-checker/checker"
 	"xray-checker/models"
+	"xray-checker/speedtest"
 )
 
 func formatHostDiagnosticsHTML(hostCheck checker.HostCheckDetails, pingCheck checker.PingCheckDetails) string {
@@ -95,7 +96,7 @@ func formatProxyRichItem(proxy *models.ProxyConfig, details checker.ProxyStatusD
 	return "<li>" + strings.Join(parts, " · ") + "</li>"
 }
 
-func formatNodeDown(proxy *models.ProxyConfig, state nodeAlertState, now time.Time) string {
+func formatNodeDown(proxy *models.ProxyConfig, state nodeAlertState, agent *speedtest.AgentDiagnostic, now time.Time) string {
 	proxyFailure := nodeAlertStatus(state) == checker.AvailabilityStateProxyFailure
 	title := "недоступна"
 	marker := "🔴"
@@ -117,7 +118,7 @@ func formatNodeDown(proxy *models.ProxyConfig, state nodeAlertState, now time.Ti
 		fmt.Sprintf("%s <b>%s</b> · %s", marker, htmlEscape(proxy.Name), htmlEscape(title)),
 	}
 	if since := nodeAlertIssueSince(state); !since.IsZero() {
-		lines = append(lines, htmlEscape(messageTimezone(since)))
+		lines = append(lines, htmlEscape(messageTimezone(since, agentCheckedAt(agent))))
 		lines = append(lines, fmt.Sprintf("%s: <b>%s</b> · с %s", durationLabel, htmlEscape(formatDuration(now.Sub(since))), htmlEscape(formatCheckedAt(since))))
 	}
 	if failure := formatFailureHTML(state.Failure); failure != "" {
@@ -128,14 +129,43 @@ func formatNodeDown(proxy *models.ProxyConfig, state nodeAlertState, now time.Ti
 	} else {
 		lines = append(lines, "Диагностики пока нет")
 	}
+	if line := formatNodeAgentDiagnosticHTML(agent); line != "" {
+		lines = append(lines, line)
+	}
 	if nextAfter := state.NextAlert.Sub(now); nextAfter > 0 {
 		lines = append(lines, fmt.Sprintf("Следующее напоминание через <b>%s</b>", htmlEscape(formatDuration(nextAfter))))
 	}
 	return strings.Join(lines, "\n")
 }
 
+// formatNodeAgentDiagnosticHTML is the agent's verdict on a proxy failure, with
+// the time it was taken. An episode gets one probe, so a reminder hours later
+// repeats the same answer, and without the time it would read as fresh.
+func formatNodeAgentDiagnosticHTML(agent *speedtest.AgentDiagnostic) string {
+	line := formatSpeedAgentDiagnosticHTML(agent)
+	if line == "" {
+		return ""
+	}
+	if checkedAt := agentCheckedAt(agent); !checkedAt.IsZero() {
+		line += " · " + htmlEscape(formatCheckedAt(checkedAt))
+	}
+	return line
+}
+
+func agentCheckedAt(agent *speedtest.AgentDiagnostic) time.Time {
+	if agent == nil || agent.State == speedtest.AgentDiagnosticRunning {
+		return time.Time{}
+	}
+	return agent.CheckedAt
+}
+
 func formatNodeDownMessage(proxy *models.ProxyConfig, state nodeAlertState, now time.Time) formattedMessage {
-	fallback := formatNodeDown(proxy, state, now)
+	return formatNodeDownAlertMessage(nodeDownAlert{Proxy: proxy, State: state}, now)
+}
+
+func formatNodeDownAlertMessage(alert nodeDownAlert, now time.Time) formattedMessage {
+	proxy, state := alert.Proxy, alert.State
+	fallback := formatNodeDown(proxy, state, alert.Agent, now)
 	var rich strings.Builder
 	rich.WriteString(richAlertBody(fallback))
 	rich.WriteString("<details><summary>Технические данные</summary><table bordered>")
@@ -319,8 +349,14 @@ func formatMassNodeDownMessage(group nodeDownIncidentGroup, now time.Time) forma
 			marker = "🟡"
 			durationLabel = "proxy failure"
 		}
-		lines = append(lines, fmt.Sprintf("• %s <b>%s</b> · %s %s", marker, htmlEscape(alert.Proxy.Name), durationLabel, htmlEscape(duration)))
-		items = append(items, fmt.Sprintf("<li>%s <b>%s</b> — %s %s</li>", marker, htmlEscape(alert.Proxy.Name), durationLabel, htmlEscape(duration)))
+		// Per node: in a mass failure the agent's answer is what tells a broken
+		// provider from a broken checker route, and it can differ node by node.
+		agent := ""
+		if line := formatNodeAgentDiagnosticHTML(alert.Agent); line != "" {
+			agent = " · " + line
+		}
+		lines = append(lines, fmt.Sprintf("• %s <b>%s</b> · %s %s%s", marker, htmlEscape(alert.Proxy.Name), durationLabel, htmlEscape(duration), agent))
+		items = append(items, fmt.Sprintf("<li>%s <b>%s</b> — %s %s%s</li>", marker, htmlEscape(alert.Proxy.Name), durationLabel, htmlEscape(duration), agent))
 	}
 	fallback := trimHTMLMessage(strings.Join(lines, "\n"))
 	rich := fmt.Sprintf("<h2>🚨 Массовый сбой нод</h2><p>%s · <b>%d из %d</b></p><blockquote>Причина: <b>%s</b> · <code>%s</code></blockquote><ul>%s</ul>",
@@ -352,6 +388,9 @@ func formatNodeDownGroup(alerts []nodeDownAlert, now time.Time) string {
 			diagnostics = "Диагностика: нет данных"
 		}
 		parts = append(parts, diagnostics)
+		if agent := formatNodeAgentDiagnosticHTML(alert.Agent); agent != "" {
+			parts = append(parts, agent)
+		}
 		lines = append(lines, fmt.Sprintf("• <b>%s</b>\n  %s", htmlEscape(alert.Proxy.Name), strings.Join(parts, " · ")))
 	}
 	return trimHTMLMessage(strings.Join(lines, "\n"))
@@ -378,6 +417,9 @@ func formatNodeDownGroupMessage(alerts []nodeDownAlert, now time.Time) formatted
 		marker := "🔴"
 		if nodeAlertStatus(state) == checker.AvailabilityStateProxyFailure {
 			marker = "🟡"
+		}
+		if agent := formatNodeAgentDiagnosticHTML(alert.Agent); agent != "" {
+			diagnostics += " · " + agent
 		}
 		items = append(items, fmt.Sprintf("<li>%s <b>%s</b> — %s · %s · %s</li>", marker, htmlEscape(alert.Proxy.Name), htmlEscape(duration), htmlEscape(cause), diagnostics))
 		details = append(details, fmt.Sprintf("<li><b>%s</b> — <code>%s</code> · %s</li>", htmlEscape(alert.Proxy.Name), htmlEscape(alert.Proxy.StableID), htmlEscape(strings.ToUpper(alert.Proxy.Protocol))))

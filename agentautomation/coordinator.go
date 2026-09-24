@@ -42,11 +42,21 @@ type Config struct {
 	// Reachability tab. A nil gate treats every node as the environment's,
 	// which is what a deployment with no panel sources has.
 	EnvironmentSourced func(string) bool
+	// ProxyFailureEnabled adds the availability trigger on top of the speed one.
+	// It is a separate opt-in because it spends agent slots on a different
+	// schedule: every node that enters proxy_failure, not only the ones a speed
+	// run happened to measure.
+	ProxyFailureEnabled bool
+	// ProxyFailureProfileID is the probe a proxy-failure session asks for. It
+	// should match the controller's own availability check method, so the agent
+	// is asked the same question the check failed; empty means the status probe.
+	ProxyFailureProfileID string
 }
 
 type Snapshot struct {
 	Enabled              bool `json:"enabled"`
 	SpeedFallbackEnabled bool `json:"speedFallbackEnabled"`
+	ProxyFailureEnabled  bool `json:"proxyFailureEnabled"`
 	CooldownSeconds      int  `json:"cooldownSeconds"`
 	AlertWaitSeconds     int  `json:"alertWaitSeconds"`
 	MaxConcurrent        int  `json:"maxConcurrent"`
@@ -102,6 +112,13 @@ type Coordinator struct {
 	controller SessionController
 	agents     AgentSource
 	entries    map[string]entry
+	// proxyFailures is kept apart from entries on purpose. The two automations
+	// ask different questions of the same node — a transfer against a threshold,
+	// and whether the tunnel carries traffic at all — so a speed run must not
+	// read its verdict off a proxy-failure session or the other way round. They
+	// share the concurrency limit and the idle wait, because the agents they
+	// spend are the same.
+	proxyFailures map[string]proxyFailureEntry
 }
 
 func New(config Config, controller SessionController, agents AgentSource) (*Coordinator, error) {
@@ -117,11 +134,23 @@ func New(config Config, controller SessionController, agents AgentSource) (*Coor
 	if config.Now == nil {
 		config.Now = time.Now
 	}
+	config.ProxyFailureProfileID = strings.TrimSpace(config.ProxyFailureProfileID)
+	if config.ProxyFailureProfileID == "" {
+		config.ProxyFailureProfileID = diagnostics.ProfileStatus
+	}
 	if controller == nil || agents == nil || config.Cooldown < time.Minute || config.AlertWait < 0 ||
 		config.MaxConcurrent < 1 || config.PollInterval <= 0 {
 		return nil, errors.New("invalid agent automation configuration")
 	}
-	return &Coordinator{config: config, controller: controller, agents: agents, entries: make(map[string]entry)}, nil
+	if descriptor, ok := diagnostics.ProfileByID(config.ProxyFailureProfileID); !ok || !descriptor.Tunnelled {
+		// A transport probe cannot answer this trigger: the host already answers
+		// TCP and ping, and what failed is traffic through the tunnel.
+		return nil, errors.New("invalid agent automation configuration: proxy failure profile must be a tunnelled probe")
+	}
+	return &Coordinator{
+		config: config, controller: controller, agents: agents,
+		entries: make(map[string]entry), proxyFailures: make(map[string]proxyFailureEntry),
+	}, nil
 }
 
 func (c *Coordinator) Enabled() bool {
@@ -146,6 +175,7 @@ func (c *Coordinator) Snapshot() Snapshot {
 	return Snapshot{
 		Enabled:              c.Enabled(),
 		SpeedFallbackEnabled: c.Enabled(),
+		ProxyFailureEnabled:  c.ProxyFailureEnabled(),
 		CooldownSeconds:      int(c.config.Cooldown / time.Second),
 		AlertWaitSeconds:     int(c.config.AlertWait / time.Second),
 		MaxConcurrent:        c.config.MaxConcurrent,
@@ -181,7 +211,11 @@ func (c *Coordinator) StartSpeedDiagnostics(report speedtest.RunReport, threshol
 // start needs, so a start refused for a transient reason can be attempted again
 // from the handle alone, without the report it came from.
 type startRequest struct {
-	stableID         string
+	stableID string
+	// kind and profileID say which automation made the request and which probe
+	// it asked for; requestTask reads them back when no session exists.
+	kind             string
+	profileID        string
 	source           string
 	outcome          string
 	threshold        float64
@@ -231,7 +265,8 @@ func speedAutomationCandidates(results []speedtest.Result, source string, thresh
 		}
 		seen[stableID] = true
 		candidate := startRequest{
-			stableID: stableID, source: source, outcome: outcome, threshold: effective,
+			stableID: stableID, kind: diagnostics.AutomationKindSpeedFallback, profileID: diagnostics.ProfileDownload,
+			source: source, outcome: outcome, threshold: effective,
 			observedMbps: result.Mbps, measuredBytes: result.DownloadedBytes,
 			fallbackAttempts: result.FallbackAttempts,
 		}
@@ -332,30 +367,7 @@ func (c *Coordinator) startSpeed(request startRequest) Handle {
 		},
 	})
 	if err != nil {
-		detail := "automatic diagnostic could not be started"
-		transient := false
-		switch {
-		case errors.Is(err, remoteprobe.ErrUnavailableAgent):
-			detail = "no healthy idle diagnostic agent is connected"
-			// Occupied is far more common than absent: the periodic reachability
-			// sweep holds every agent for the length of a pass, and a manual
-			// session holds one. Both clear well inside a single alert wait.
-			transient = true
-		case errors.Is(err, remoteprobe.ErrOnlyNodeHostAgent):
-			detail = "only an agent on the node's own host is idle"
-			// The same situation as above seen from one node: the vantage point
-			// it is missing is usually just busy, and frees up inside the wait.
-			transient = true
-		case errors.Is(err, remoteprobe.ErrNodeAddressUnresolved):
-			// Final for this run. Retrying would repeat the lookup while this
-			// coordinator's lock is held, for as long as the resolver takes to
-			// fail, on every retry of the wait; the next run asks again.
-			detail = "node address could not be resolved"
-		case errors.Is(err, remoteprobe.ErrAutomaticPaused):
-			detail = "automatic diagnostics are paused by maintenance"
-		case errors.Is(err, probeagent.ErrDisabled):
-			detail = "remote diagnostics are disabled"
-		}
+		detail, transient := refusalDetail(err)
 		// Not recorded: the cooldown exists to stop a session from being repeated,
 		// and no session started here. Burning it on a transient refusal - no idle
 		// agent right now - would silence the node for the whole cooldown even
@@ -375,6 +387,33 @@ func (c *Coordinator) startSpeed(request startRequest) Handle {
 	}
 	c.entries[request.stableID] = entry{handle: handle}
 	return handle
+}
+
+// refusalDetail names why the controller refused an automatic session, in the
+// fixed phrases alerts translate, and whether the refusal clears on its own.
+func refusalDetail(err error) (string, bool) {
+	switch {
+	case errors.Is(err, remoteprobe.ErrUnavailableAgent):
+		// Occupied is far more common than absent: the periodic reachability
+		// sweep holds every agent for the length of a pass, and a manual
+		// session holds one. Both clear well inside a single alert wait.
+		return "no healthy idle diagnostic agent is connected", true
+	case errors.Is(err, remoteprobe.ErrOnlyNodeHostAgent):
+		// The same situation as above seen from one node: the vantage point
+		// it is missing is usually just busy, and frees up inside the wait.
+		return "only an agent on the node's own host is idle", true
+	case errors.Is(err, remoteprobe.ErrNodeAddressUnresolved):
+		// Final for this run. Retrying would repeat the lookup while this
+		// coordinator's lock is held, for as long as the resolver takes to
+		// fail, on every retry of the wait; the next run asks again.
+		return "node address could not be resolved", false
+	case errors.Is(err, remoteprobe.ErrAutomaticPaused):
+		return "automatic diagnostics are paused by maintenance", false
+	case errors.Is(err, probeagent.ErrDisabled):
+		return "remote diagnostics are disabled", false
+	default:
+		return "automatic diagnostic could not be started", false
+	}
 }
 
 // deferredHandle records a refusal the wait window may outlive. The handle
@@ -483,6 +522,16 @@ func (c *Coordinator) measuringCount(wanted map[string]bool) int {
 	c.mu.Lock()
 	sessions := make([]string, 0, len(c.entries))
 	for stableID, current := range c.entries {
+		if len(wanted) > 0 && !wanted[stableID] {
+			continue
+		}
+		if current.handle.SessionID != "" {
+			sessions = append(sessions, current.handle.SessionID)
+		}
+	}
+	// A proxy-failure probe holds the node just the same: a speed run started
+	// under it would share the node's capacity with the agent's own transfer.
+	for stableID, current := range c.proxyFailures {
 		if len(wanted) > 0 && !wanted[stableID] {
 			continue
 		}
@@ -650,9 +699,16 @@ func requestTask(request startRequest) *speedtest.AgentProbeTask {
 	if strings.TrimSpace(request.stableID) == "" {
 		return nil
 	}
+	profileID, kind := request.profileID, request.kind
+	if profileID == "" {
+		profileID = diagnostics.ProfileDownload
+	}
+	if kind == "" {
+		kind = diagnostics.AutomationKindSpeedFallback
+	}
 	return &speedtest.AgentProbeTask{
-		ProfileID:        diagnostics.ProfileDownload,
-		Kind:             diagnostics.AutomationKindSpeedFallback,
+		ProfileID:        profileID,
+		Kind:             kind,
 		Outcome:          request.outcome,
 		Source:           request.source,
 		ThresholdMbps:    request.threshold,
@@ -795,15 +851,27 @@ func (c *Coordinator) abandonedLocked(handle Handle) bool {
 	return view.Session.State.Terminal() && len(view.Session.AgentObservations) == 0
 }
 
+// activeLocked counts sessions of both automations: the limit is on agents
+// spent, and a speed probe and a proxy-failure probe spend the same ones.
 func (c *Coordinator) activeLocked() int {
 	active := 0
 	for _, current := range c.entries {
-		if current.handle.SessionID == "" {
-			continue
+		if c.inFlightLocked(current.handle) {
+			active++
 		}
-		if view, ok := c.controller.Session(current.handle.SessionID); ok && !view.Session.State.Terminal() {
+	}
+	for _, current := range c.proxyFailures {
+		if c.inFlightLocked(current.handle) {
 			active++
 		}
 	}
 	return active
+}
+
+func (c *Coordinator) inFlightLocked(handle Handle) bool {
+	if handle.SessionID == "" {
+		return false
+	}
+	view, ok := c.controller.Session(handle.SessionID)
+	return ok && !view.Session.State.Terminal()
 }

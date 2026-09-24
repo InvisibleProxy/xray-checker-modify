@@ -422,7 +422,7 @@ func (c *Controller) CreateAutomatic(request CreateAutomaticRequest) (SessionVie
 	}
 	request.StableID = strings.TrimSpace(request.StableID)
 	request.ProfileID = strings.TrimSpace(request.ProfileID)
-	if !request.Trigger.Automatic() || request.Trigger != diagnostics.TriggerAutoSpeedFallback {
+	if request.Trigger != diagnostics.TriggerAutoSpeedFallback && request.Trigger != diagnostics.TriggerAutoProxyFailure {
 		return SessionView{}, fmt.Errorf("unsupported automatic diagnostic trigger %q", request.Trigger)
 	}
 	if c.checker.ProjectMaintenanceEnabled() {
@@ -854,6 +854,16 @@ func summarize(session diagnostics.DiagnosticSession) string {
 			return "The speed-test problem was not reproduced from another network; the controller route or its Test URLs are more likely involved."
 		}
 		return "The speed-test problem was reproduced from another network; a shared node, server or configuration issue is likely."
+	}
+	if session.Trigger == diagnostics.TriggerAutoProxyFailure && remote.Status != diagnostics.ProbeStatusOnline {
+		// Read before the generic comparison below, which only calls a failure
+		// reproduced when both sides report the same code. A tunnel that fails
+		// for the agent at a different stage still fails: that is the answer to
+		// the question this trigger asks, and "no stable pattern" would bury it.
+		if alternative := remote.AlternativeEndpoint; alternative != nil && alternative.Status == diagnostics.ProbeStatusOnline {
+			return "The agent's primary endpoint failed but its alternative tunnelled endpoint worked; the tunnel carries traffic from another network, so an endpoint-specific problem is likely."
+		}
+		return "The proxy failure was reproduced from another network; the node's proxy service, its configuration or the hosting network is likely involved."
 	}
 	if local.Status != diagnostics.ProbeStatusOnline && remote.Status == diagnostics.ProbeStatusOnline {
 		return "The problem was not reproduced from another network; a local ISP, route, DNS or DPI issue is likely."

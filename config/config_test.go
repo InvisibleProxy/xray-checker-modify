@@ -139,6 +139,13 @@ func TestValidateRemoteDiagnosticsConfiguration(t *testing.T) {
 		t.Fatal("agent automation without Remote Diagnostics was accepted")
 	}
 
+	proxyFailureWithoutAutomation := cfg
+	proxyFailureWithoutAutomation.RemoteDiagnostics.AutomationEnabled = false
+	proxyFailureWithoutAutomation.RemoteDiagnostics.AutomationProxyFailure = true
+	if err := proxyFailureWithoutAutomation.Validate(); err == nil {
+		t.Fatal("the proxy-failure trigger without agent automation was accepted")
+	}
+
 	invalidAutomation := cfg
 	invalidAutomation.RemoteDiagnostics.AutomationMaxConcurrent = 0
 	if err := invalidAutomation.Validate(); err == nil {

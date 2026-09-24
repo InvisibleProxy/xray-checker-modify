@@ -403,6 +403,32 @@ func TestSpeedFallbackAutomationContextIsValidatedAndStored(t *testing.T) {
 	}
 }
 
+// A proxy-failure session carries its fixed context and nothing else: the local
+// verdict is in the snapshot, and a speed field here could only be a mix-up.
+func TestProxyFailureAutomationContextIsValidated(t *testing.T) {
+	fixture := newManagerFixture(t)
+	request := CreateSessionRequest{
+		StableID:            "stable-node-1",
+		Trigger:             TriggerAutoProxyFailure,
+		ConfigGeneration:    7,
+		ConfigFingerprint:   ConfigFingerprint([]byte("config")),
+		LocalResultSnapshot: LocalResultSnapshot{Status: ProbeStatusProxyFailure, CheckedAt: *fixture.now, Failure: FailureEvidence{Code: "proxy_timeout", Stage: FailureStageProxy}},
+		RequestedAgents:     []string{"agent-eu"},
+		AutomationContext:   ProxyFailureAutomationContext(),
+	}
+	if _, err := fixture.manager.CreateSession(request); err != nil {
+		t.Fatalf("create proxy failure session: %v", err)
+	}
+	request.AutomationContext.ThresholdMbps = 10
+	if _, err := fixture.manager.CreateSession(request); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("proxy failure session with a speed field error = %v", err)
+	}
+	request.AutomationContext = AutomationContext{}
+	if _, err := fixture.manager.CreateSession(request); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("proxy failure session without its context error = %v", err)
+	}
+}
+
 func TestManagerCancellationStopsOutstandingJobs(t *testing.T) {
 	fixture := newManagerFixture(t)
 	if err := fixture.manager.MarkJobRunning(fixture.job.JobID); err != nil {

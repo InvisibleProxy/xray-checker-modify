@@ -222,7 +222,20 @@ const (
 	AutomationKindSpeedFallback = "speed_fallback"
 	AutomationOutcomeTechnical  = "technical_error"
 	AutomationOutcomeLowSpeed   = "low_speed"
+	// AutomationKindProxyFailure is the availability check reporting a node whose
+	// host answers but whose tunnel does not. The local failure itself travels in
+	// the session's LocalResultSnapshot, so the context carries nothing else.
+	AutomationKindProxyFailure = "proxy_failure"
+	// AutomationSourceAvailability names the periodic availability check as the
+	// origin of a proxy-failure session, the way a speed session names its run.
+	AutomationSourceAvailability = "availability"
 )
+
+// ProxyFailureAutomationContext is the only context a proxy-failure session
+// accepts; see validateCreateSessionRequest.
+func ProxyFailureAutomationContext() AutomationContext {
+	return AutomationContext{Kind: AutomationKindProxyFailure, Source: AutomationSourceAvailability}
+}
 
 // AutomationContext records only the bounded facts that explain why the
 // controller created an automatic session. It intentionally excludes URLs and

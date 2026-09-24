@@ -342,6 +342,64 @@ func TestCreateAutomaticSelectsAHealthyAgentAndBindsSpeedFallbackContext(t *test
 	}
 }
 
+func TestCreateAutomaticAcceptsTheProxyFailureTriggerAndRefusesTheUnimplementedOnes(t *testing.T) {
+	fixture := newControllerFixture(t)
+	created, err := fixture.controller.CreateAutomatic(CreateAutomaticRequest{
+		StableID: "node-one", Trigger: diagnostics.TriggerAutoProxyFailure, ProfileID: diagnostics.ProfileStatus,
+		AutomationContext: diagnostics.ProxyFailureAutomationContext(),
+	})
+	if err != nil {
+		t.Fatalf("create proxy failure diagnostics: %v", err)
+	}
+	if created.Session.Trigger != diagnostics.TriggerAutoProxyFailure {
+		t.Fatalf("automatic session = %+v", created.Session)
+	}
+	assignment, err := fixture.controller.Claim(context.Background(), fixture.agentID)
+	if err != nil {
+		t.Fatalf("claim automatic job: %v", err)
+	}
+	if assignment.Job.Profile.ID != diagnostics.ProfileStatus || assignment.Job.Profile.AlternativeProfileID != diagnostics.ProfileIP {
+		t.Fatalf("automatic profile = %+v", assignment.Job.Profile)
+	}
+
+	for _, trigger := range []diagnostics.Trigger{diagnostics.TriggerManual, diagnostics.TriggerAutoCheckEndpoint, diagnostics.TriggerReachabilitySweep} {
+		if _, err := newControllerFixture(t).controller.CreateAutomatic(CreateAutomaticRequest{
+			StableID: "node-one", Trigger: trigger, ProfileID: diagnostics.ProfileStatus,
+		}); err == nil {
+			t.Fatalf("automatic session with trigger %q was accepted", trigger)
+		}
+	}
+}
+
+// A tunnel that fails for the agent at another stage than for the checker still
+// fails. The generic comparison, which wants equal failure codes, would call
+// that "no stable pattern" and hide the one answer this trigger exists for.
+func TestProxyFailureSummaryReadsAnyRemoteTunnelFailureAsReproduced(t *testing.T) {
+	session := diagnostics.DiagnosticSession{
+		Trigger:             diagnostics.TriggerAutoProxyFailure,
+		LocalResultSnapshot: diagnostics.LocalResultSnapshot{Status: diagnostics.ProbeStatusProxyFailure, Failure: diagnostics.FailureEvidence{Code: "proxy_timeout"}},
+		AgentObservations: []diagnostics.AcceptedObservation{{Reliable: true, Observation: diagnostics.Observation{
+			Status: diagnostics.ProbeStatusProxyFailure, Failure: diagnostics.FailureEvidence{Code: "http_status"},
+			DirectConnectivity: diagnostics.CheckEvidence{Checked: true, Online: true},
+		}}},
+	}
+	if summary := summarize(session); !strings.Contains(summary, "proxy failure was reproduced") {
+		t.Fatalf("summary = %q, want the failure reproduced", summary)
+	}
+
+	session.AgentObservations[0].Observation.AlternativeEndpoint = &diagnostics.AlternativeEndpointObservation{Status: diagnostics.ProbeStatusOnline}
+	if summary := summarize(session); !strings.Contains(summary, "endpoint-specific") {
+		t.Fatalf("summary = %q, want an endpoint-specific reading", summary)
+	}
+
+	session.AgentObservations[0].Observation = diagnostics.Observation{
+		Status: diagnostics.ProbeStatusOnline, DirectConnectivity: diagnostics.CheckEvidence{Checked: true, Online: true},
+	}
+	if summary := summarize(session); !strings.Contains(summary, "not reproduced") {
+		t.Fatalf("summary = %q, want the failure not reproduced", summary)
+	}
+}
+
 func TestCreateAutomaticSkipsProjectAndNodeMaintenance(t *testing.T) {
 	request := CreateAutomaticRequest{
 		StableID: "node-one", Trigger: diagnostics.TriggerAutoSpeedFallback, ProfileID: diagnostics.ProfileDownload,

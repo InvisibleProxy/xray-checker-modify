@@ -3524,10 +3524,11 @@ components:
 
     DiagnosticAutomationSnapshot:
       type: object
-      required: [enabled, speedFallbackEnabled, cooldownSeconds, alertWaitSeconds, maxConcurrent, active]
+      required: [enabled, speedFallbackEnabled, proxyFailureEnabled, cooldownSeconds, alertWaitSeconds, maxConcurrent, active]
       properties:
         enabled: {type: boolean}
         speedFallbackEnabled: {type: boolean}
+        proxyFailureEnabled: {type: boolean}
         cooldownSeconds: {type: integer, minimum: 0}
         alertWaitSeconds: {type: integer, minimum: 0}
         maxConcurrent: {type: integer, minimum: 0}
