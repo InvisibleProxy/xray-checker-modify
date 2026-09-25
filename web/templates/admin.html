@@ -3692,6 +3692,8 @@
         dashboardCardsAnimated: false,
         nodeMergeSourceID: "",
         nodeMergePreview: null,
+        // PROXY_CHECK_INTERVAL in seconds, 0 until /api/v1/config answers.
+        checkIntervalSec: 0,
       };
       const motionControllers = new WeakMap();
 
@@ -3757,7 +3759,12 @@
       }
 
       async function request(path, options = {}) {
-        const res = await fetch(api(path), {
+        return requestURL(api(path), options);
+      }
+
+      // The same envelope for the few reads that live outside /api/v1/admin.
+      async function requestURL(url, options = {}) {
+        const res = await fetch(url, {
           headers: { "Content-Type": "application/json" },
           ...options,
         });
@@ -5292,6 +5299,27 @@
         };
       }
 
+      function medianSampleInterval(samples) {
+        const intervals = [];
+        for (let index = 1; index < samples.length; index += 1) {
+          intervals.push(new Date(samples[index].checkedAt) - new Date(samples[index - 1].checkedAt));
+        }
+        intervals.sort((a, b) => a - b);
+        return intervals.length ? intervals[Math.floor(intervals.length / 2)] : 0;
+      }
+
+      // Silence longer than two and a half check intervals is a gap. For
+      // availability the interval is the configured one, not the spacing of
+      // the samples: the recovery loop re-checks a down node every few
+      // seconds, so in a window with an outage its checks outnumber the
+      // ordinary ones, their spacing became the median, and every ordinary
+      // interval between two online checks was drawn as a gap.
+      function chartGapLimit(view, sampleInterval) {
+        const configured = view === "availability" ? state.checkIntervalSec * 1000 : 0;
+        const interval = configured > 0 ? configured : sampleInterval;
+        return interval > 0 ? interval * 2.5 : Number.POSITIVE_INFINITY;
+      }
+
       function renderNodeMetricChart(results, stableId, history, view) {
         const dataset = dashboardDataset(history, view);
         if (dataset.loading && results.length === 0) {
@@ -5357,30 +5385,28 @@
           grid.push(`<text class="chart-axis-label" x="${x}" y="${height - 10}" text-anchor="${anchor}">${escapeHtml(speedChartAxisTime(timestamp, spanMs))}</text>`);
         }
 
-        const medianIntervalOf = (samples) => {
-          const intervals = [];
-          for (let index = 1; index < samples.length; index += 1) {
-            intervals.push(new Date(samples[index].checkedAt) - new Date(samples[index - 1].checkedAt));
-          }
-          intervals.sort((a, b) => a - b);
-          return intervals.length ? intervals[Math.floor(intervals.length / 2)] : 0;
-        };
-        const medianInterval = medianIntervalOf(ordered);
-        const gapLimit = medianInterval > 0 ? medianInterval * 2.5 : Number.POSITIVE_INFINITY;
+        const medianInterval = medianSampleInterval(ordered);
+        const gapLimit = chartGapLimit(view, medianInterval);
         const runs = [];
+        // Runs that start after a failed check rather than after silence.
+        const afterFailure = new Set();
         let run = [];
         let previous = null;
+        let failedSinceRun = false;
         ordered.forEach((result) => {
           if (!chartResultSuccessful(result, view)) {
             if (run.length) runs.push(run);
             run = [];
             previous = null;
+            failedSinceRun = true;
             return;
           }
           if (previous && new Date(result.checkedAt) - new Date(previous.checkedAt) > gapLimit) {
             if (run.length) runs.push(run);
             run = [];
           }
+          if (failedSinceRun) afterFailure.add(run);
+          failedSinceRun = false;
           run.push(result);
           previous = result;
         });
@@ -5420,9 +5446,10 @@
         }).join("");
         // A success surrounded by failures has no neighbour to draw a line to,
         // and the run above needs two samples, so on a flapping node the check
-        // would leave nothing but a dashed bridge. It gets a column one check
-        // interval wide instead, faded at both edges like every other area: the
-        // shape says a measurement happened here, not that it lasted.
+        // would leave nothing but a dashed bridge, and on the availability
+        // chart, which bridges no failure, not even that. It gets a column one
+        // check interval wide instead, faded at both edges like every other
+        // area: the shape says a measurement happened here, not that it lasted.
         // One mask in bounding-box units serves every column, because a flapping
         // day produces hundreds of them and a mask each would bloat the defs.
         if (isolatedRuns.length > 0) {
@@ -5458,9 +5485,15 @@
           }).join(" ");
           return `<path class="chart-line" pathLength="1" d="${path}" />`;
         }).join("");
+        // A bridge spans a stretch without a value. A failed speed test is one,
+        // and the bridge keeps it from reading as a fall to zero. A failed
+        // availability check is a verdict, not a missing value: bridged, it
+        // drew a latency the node never had over the strip that says it was
+        // down. There the bridge spans only a stretch nobody checked.
         const gapBridges = runs.slice(1).map((items, index) => {
           const previousRun = runs[index];
           if (!previousRun.length || !items.length) return "";
+          if (view === "availability" && afterFailure.has(items)) return "";
           const previous = previousRun[previousRun.length - 1];
           const next = items[0];
           return `<path class="chart-gap-bridge" d="M ${xOf(previous.checkedAt).toFixed(1)} ${yOf(chartResultValue(previous, view)).toFixed(1)} L ${xOf(next.checkedAt).toFixed(1)} ${yOf(chartResultValue(next, view)).toFixed(1)}" aria-hidden="true" />`;
@@ -6422,7 +6455,37 @@
         </div>`;
       }
 
-      function nodeAvailabilityStatsHTML(results) {
+      // The share of the checked time the node was online. The share of
+      // successful checks said something else: the recovery loop re-checks a
+      // down node every few seconds, so an hour down outweighed a day up. A
+      // check stands for the time until the next one, but for no longer than
+      // the chart draws as one stretch, since past that nobody looked. A paused
+      // node's probe is no verdict and counts neither way, as in downtime.
+      // Without the configured interval the stretch is not known, and the
+      // spacing of the samples, recovery checks and all, brought back the
+      // skew this replaced, so there is no figure rather than a wrong one.
+      function availabilityUptime(results, history) {
+        if (!(state.checkIntervalSec > 0)) return null;
+        const ordered = (results || [])
+          .filter((result) => result.checkedAt && !result.checkedAt.startsWith("0001-"))
+          .sort((a, b) => new Date(a.checkedAt) - new Date(b.checkedAt));
+        const bounds = dashboardRangeBounds(history);
+        const endMs = bounds.error ? Date.now() : Math.min(Date.now(), bounds.to.getTime());
+        const gapLimit = chartGapLimit("availability", 0);
+        let covered = 0;
+        let online = 0;
+        ordered.forEach((result, index) => {
+          if (result.maintenance) return;
+          const start = new Date(result.checkedAt).getTime();
+          const end = index + 1 < ordered.length ? new Date(ordered[index + 1].checkedAt).getTime() : endMs;
+          const span = Math.min(Math.max(0, end - start), gapLimit);
+          covered += span;
+          if (availabilitySampleStatus(result) === "online") online += span;
+        });
+        return covered > 0 ? online / covered : null;
+      }
+
+      function nodeAvailabilityStatsHTML(results, history) {
         const checks = results || [];
         const online = checks.filter((result) => availabilitySampleStatus(result) === "online");
         const proxyFailures = checks.filter((result) => availabilitySampleStatus(result) === "proxy_failure").length;
@@ -6433,11 +6496,16 @@
           min: Math.min(...latencies),
           max: Math.max(...latencies),
         } : null;
+        const uptime = availabilityUptime(checks, history);
+        // Rounded down, so any downtime at all keeps the node under 100%.
+        const uptimeText = uptime === null ? "" : ` · ${Math.floor(uptime * 100)}% uptime`;
+        const succeeded = `${online.length} of ${checks.length} proxy checks succeeded`;
+        const checksTitle = uptime === null ? succeeded : `Uptime counts time, not checks: a node that is down is re-checked more often. ${succeeded}`;
         return `<div class="node-detail-grid node-chart-stats">
           <div class="node-detail-stat"><span>Average</span><strong>${stats ? escapeHtml(formatLatencyMs(stats.avg)) : "n/a"}</strong></div>
           <div class="node-detail-stat"><span>Minimum</span><strong>${stats ? escapeHtml(formatLatencyMs(stats.min)) : "n/a"}</strong></div>
           <div class="node-detail-stat"><span>Maximum</span><strong>${stats ? escapeHtml(formatLatencyMs(stats.max)) : "n/a"}</strong></div>
-          <div class="node-detail-stat"><span>Checks</span><strong title="${online.length} of ${checks.length} proxy checks succeeded">${online.length} online · ${proxyFailures} proxy failure · ${offline} offline · ${percent(online.length, checks.length)}</strong></div>
+          <div class="node-detail-stat"><span>Checks</span><strong title="${escapeHtml(checksTitle)}">${online.length} online · ${proxyFailures} proxy failure · ${offline} offline${uptimeText}</strong></div>
         </div>`;
       }
 
@@ -7012,7 +7080,7 @@
         return `<div class="node-card-detail">
           <div class="node-detail-grid" data-node-detail-grid>${nodeDetailStatsHTML(proxy)}</div>
           ${dashboardRangeControls(proxy.stableId, history)}
-          ${view === "availability" ? nodeAvailabilityStatsHTML(dataset.results) : nodeSpeedStatsHTML(dataset.results)}
+          ${view === "availability" ? nodeAvailabilityStatsHTML(dataset.results, history) : nodeSpeedStatsHTML(dataset.results)}
           <div class="speed-chart-wrap chart-animate" data-node-metric-chart="${escapeHtml(proxy.stableId)}" data-chart-view="${view}">${renderNodeMetricChart(dataset.results, proxy.stableId, history, view)}</div>
           <div class="chart-legend">
             ${legend}
@@ -10144,9 +10212,13 @@
           ]);
           // Remote diagnostics is optional, so a failure there must never keep
           // the dashboard from rendering availability and speed-test state.
-          const [diagnosticAgents, diagnosticSessions] = await Promise.allSettled([
+          // The check interval is optional the same way: without it the
+          // availability chart falls back to the spacing of its samples. It
+          // only changes with a restart, so it is asked for until it arrives.
+          const [diagnosticAgents, diagnosticSessions, checkerConfig] = await Promise.allSettled([
             request("/diagnostic-agents"),
             request("/diagnostic-sessions"),
+            state.checkIntervalSec > 0 ? null : requestURL(`${basePath}/api/v1/config`),
           ]);
           state.proxies = proxies;
           state.snapshot = snapshot;
@@ -10159,6 +10231,9 @@
           if (normalizeDashboardManualOrder()) saveDashboardOrderState();
           if (diagnosticAgents.status === "fulfilled") state.diagnosticAgents = diagnosticAgents.value;
           if (diagnosticSessions.status === "fulfilled") state.diagnosticSessions = diagnosticSessions.value;
+          if (checkerConfig.status === "fulfilled" && checkerConfig.value) {
+            state.checkIntervalSec = Math.max(0, Number(checkerConfig.value.checkInterval) || 0);
+          }
           state.lastUpdatedAt = new Date();
           if (initial) {
             renderFilters();

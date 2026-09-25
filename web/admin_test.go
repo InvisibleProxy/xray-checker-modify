@@ -122,6 +122,17 @@ func TestAdminTemplateExposesRowAndGroupCheckRunActions(t *testing.T) {
 		`class="chart-area"`,
 		`class="chart-gap-bridge"`,
 		`ordered.forEach((result) => {`,
+		// Gaps are measured against the configured check interval: the recovery
+		// loop's checks of a down node made the sample spacing a few seconds,
+		// and every ordinary interval then broke the availability line.
+		"requestURL(`${basePath}/api/v1/config`)",
+		`const configured = view === "availability" ? state.checkIntervalSec * 1000 : 0`,
+		`const gapLimit = chartGapLimit(view, medianInterval)`,
+		// A failed availability check is a verdict, so no bridge crosses it.
+		`if (view === "availability" && afterFailure.has(items)) return "";`,
+		// The percentage is uptime by time, not a share of checks.
+		`const span = Math.min(Math.max(0, end - start), gapLimit)`,
+		`% uptime`,
 		// A success no line can reach keeps a visible dot and a column one check
 		// interval wide; without them a flapping node shows nothing but bridges.
 		`const singlePointTimes = new Set(isolatedRuns.map((items) => items[0].checkedAt))`,
