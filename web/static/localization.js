@@ -318,6 +318,10 @@
     "Each Announce location requires at least one server member": "В каждой локации Announce должен быть хотя бы один сервер",
     "No announce headers are currently tracked.": "Сейчас checker не отслеживает ни один announce header.",
     "Token stays in": "Token остаётся в", ". Required token scopes:": ". Нужные token scopes:",
+    "for the panel line on node cards and in Telegram.": "— для строки панели в карточках нод и в Telegram.",
+    "Waiting for the first poll": "Ждёт первого опроса",
+    "Node telemetry": "Телеметрия нод", "Panel": "Панель", "Off": "Выключено",
+    "Reconnecting": "Переподключается", "Not connected": "Нет связи", "Disabled in panel": "Выключена в панели",
     "Reconcile runs after a confirmed outage, a change in affected locations, a partial/total transition, stable recovery, or saved settings. Manual checks and the fast recovery loop do not count as outage confirmations by themselves. A confirmed failed member of an otherwise healthy location uses the partial-availability scenarios. Unknown state and probable": "Reconcile запускается после подтверждённого outage, изменения affected locations, перехода partial/total, stable recovery или сохранения настроек. Manual checks и fast recovery loop сами по себе не считаются подтверждениями outage. Confirmed failed member в остальном healthy location использует partial-availability scenarios. Unknown state и вероятностные",
     "incidents do not create a new message.": "инциденты не создают новое сообщение.",
     "A maintenance node is evaluated by its probe result. A separate maintenance scenario is used only when every member of the location is both offline and in maintenance.": "Maintenance-нода оценивается по результату probe. Отдельный maintenance-сценарий используется только тогда, когда все участники локации одновременно offline и находятся на обслуживании.",
@@ -466,6 +470,16 @@
   };
 
   const patterns = [
+    [/^(\d+) nodes · (.+)$/u, "$1 нод · $2"],
+    [/^Remnawave node (.+), as of (.+)$/u, "Нода Remnawave $1, данные на $2"],
+    [/^Not connected \((.+)\)$/u, "Нет связи ($1)"],
+    [/^(\d+) online \((\d+) before the failure\)$/u, "$1 онлайн ($2 до сбоя)"],
+    [/^(\d+) online$/u, "$1 онлайн"],
+    [/^mem (\d+)%$/u, "память $1%"],
+    [/^load (.+)$/u, "нагрузка $1"],
+    [/^Xray (\d+) min$/u, "Xray $1 мин"],
+    [/^Xray (\d+) h$/u, "Xray $1 ч"],
+    [/^Xray (\d+) d$/u, "Xray $1 д"],
     [/^Last updated: (.+)$/u, "Последнее обновление: $1"],
     [/^Check: (.+) · Interval: (.+) · Timeout: (.+)$/u, "Проверка: $1 · Интервал: $2 · Таймаут: $3"],
     [/^Running (\d+)\/(\d+)$/u, "Выполняется $1/$2"],

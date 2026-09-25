@@ -3,7 +3,6 @@ package telegram
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"xray-checker/diagnostics"
 	"xray-checker/paneltelemetry"
@@ -69,7 +68,9 @@ func formatAvailabilityAgentHTML(agent *speedtest.AgentDiagnostic) string {
 	return "<b>" + htmlEscape(prefix) + "</b>: " + htmlEscape(verdict)
 }
 
-// formatPanelStatusHTML is the panel's view of a node on one line.
+// formatPanelStatusHTML is the panel's view of a node on one line. The facts
+// and their rounding come from paneltelemetry.View, which the node card of the
+// admin panel shows as well; only the wording here is Telegram's.
 //
 // The online count comes first: it is the one number here about the clients
 // themselves, and a count that fell when the failure began says the outage is
@@ -78,54 +79,52 @@ func formatPanelStatusHTML(status *paneltelemetry.Status) string {
 	if status == nil {
 		return ""
 	}
+	view := status.View()
 	parts := make([]string, 0, 6)
-	switch {
-	case status.Disabled:
+	switch view.Link {
+	case paneltelemetry.LinkDisabled:
 		parts = append(parts, "нода отключена в панели")
-	case !status.Connected && status.Connecting:
+	case paneltelemetry.LinkConnecting:
 		parts = append(parts, "🟡 панель переподключается к ноде")
-	case !status.Connected:
+	case paneltelemetry.LinkDisconnected:
 		line := "🔴 панель не видит ноду"
-		if status.Message != "" {
-			line += " (" + status.Message + ")"
+		if view.Message != "" {
+			line += " (" + view.Message + ")"
 		}
 		parts = append(parts, line)
 	default:
 		parts = append(parts, "🟢 связь есть")
 	}
-	online := fmt.Sprintf("онлайн %d", status.UsersOnline)
-	if status.HasBefore && status.UsersOnlineBefore != status.UsersOnline {
-		online += fmt.Sprintf(" (до сбоя %d)", status.UsersOnlineBefore)
+	online := fmt.Sprintf("онлайн %d", view.UsersOnline)
+	if view.UsersOnlineBefore != nil {
+		online += fmt.Sprintf(" (до сбоя %d)", *view.UsersOnlineBefore)
 	}
 	parts = append(parts, online)
-	if status.MemoryUsedPercent > 0 {
-		parts = append(parts, fmt.Sprintf("память %.0f%%", status.MemoryUsedPercent))
+	if view.MemoryUsedPercent > 0 {
+		parts = append(parts, fmt.Sprintf("память %d%%", view.MemoryUsedPercent))
 	}
-	if status.Load1 > 0 {
-		load := fmt.Sprintf("load %.2f", status.Load1)
-		if status.CPUs > 0 {
-			load += fmt.Sprintf("/%d CPU", status.CPUs)
+	if view.Load1 > 0 {
+		load := fmt.Sprintf("load %.2f", view.Load1)
+		if view.CPUs > 0 {
+			load += fmt.Sprintf("/%d CPU", view.CPUs)
 		}
 		parts = append(parts, load)
 	}
-	if status.RxMbps > 0 || status.TxMbps > 0 {
-		parts = append(parts, fmt.Sprintf("трафик ↓%.0f ↑%.0f Мбит/с", status.RxMbps, status.TxMbps))
+	if view.RxMbps > 0 || view.TxMbps > 0 {
+		parts = append(parts, fmt.Sprintf("трафик ↓%d ↑%d Мбит/с", view.RxMbps, view.TxMbps))
 	}
-	if status.XrayUptime > 0 {
-		parts = append(parts, "xray "+formatUptime(status.XrayUptime))
+	if view.XrayUptime != nil {
+		parts = append(parts, "xray "+formatUptime(*view.XrayUptime))
 	}
 	return "<b>Панель</b>: " + htmlEscape(strings.Join(parts, " · "))
 }
 
-// formatUptime is a coarse age: an operator reads "restarted an hour ago" or
-// "up for twelve days", not minutes.
-func formatUptime(value time.Duration) string {
-	switch {
-	case value >= 48*time.Hour:
-		return fmt.Sprintf("%d д", int(value/(24*time.Hour)))
-	case value >= time.Hour:
-		return fmt.Sprintf("%d ч", int(value/time.Hour))
-	default:
-		return fmt.Sprintf("%d мин", int(value/time.Minute))
-	}
+var uptimeUnits = map[string]string{
+	paneltelemetry.UptimeMinutes: "мин",
+	paneltelemetry.UptimeHours:   "ч",
+	paneltelemetry.UptimeDays:    "д",
+}
+
+func formatUptime(value paneltelemetry.Uptime) string {
+	return fmt.Sprintf("%d %s", value.Value, uptimeUnits[value.Unit])
 }

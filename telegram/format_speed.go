@@ -191,7 +191,7 @@ func (s *Service) speedPanelLines(results []speedtest.Result, threshold float64)
 		if !ok {
 			continue
 		}
-		if line := formatPanelStatusHTML(s.panelStatus(proxy, time.Time{})); line != "" {
+		if line := formatPanelStatusHTML(s.nodePanelStatus(proxy)); line != "" {
 			lines[result.StableID] = line
 		}
 	}

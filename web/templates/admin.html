@@ -1492,6 +1492,10 @@
       .node-detail-wide {
         grid-column: span 2;
       }
+      /* One line of facts, the one the Telegram bot quotes, not a figure. */
+      .node-panel-telemetry strong {
+        font-weight: 500;
+      }
       .node-chart-stats {
         grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(220px, 1.35fr);
       }
@@ -3013,11 +3017,16 @@
               <span>Last reconcile</span>
               <strong id="remnawave-reconcile-state">Never</strong>
             </div>
+            <div>
+              <span>Node telemetry</span>
+              <strong id="remnawave-telemetry-state">Loading</strong>
+            </div>
           </div>
           <div class="hint">
             Token stays in <code>REMNAWAVE_API_TOKEN</code>. Required token scopes:
             <code>hosts:list</code>, <code>internal-squads:list</code>,
-            <code>external-squads:list</code>, <code>external-squads:update</code>.
+            <code>external-squads:list</code>, <code>external-squads:update</code>;
+            <code>nodes:list</code> for the panel line on node cards and in Telegram.
           </div>
           <div id="remnawave-state" class="muted" role="status" aria-live="polite"></div>
         </section>
@@ -4283,12 +4292,38 @@
 
       async function loadRemnawave() {
         $("remnawave-state").textContent = "Loading Remnawave settings";
+        loadRemnawaveTelemetry();
         try {
           state.remnawave = await request("/remnawave");
           renderRemnawave();
         } catch (err) {
           $("remnawave-state").textContent = err.message;
           $("remnawave-state").className = "error";
+        }
+      }
+
+      // Read when the tab opens, not polled: it answers why the node cards have no
+      // panel line, which does not change from one poll to the next.
+      async function loadRemnawaveTelemetry() {
+        const target = $("remnawave-telemetry-state");
+        try {
+          const telemetry = await request("/remnawave/telemetry");
+          if (!telemetry || !telemetry.enabled) {
+            target.textContent = "Off";
+            target.className = "warn";
+          } else if (telemetry.error) {
+            target.textContent = telemetry.error;
+            target.className = "error";
+          } else if (!telemetry.fetchedAt || String(telemetry.fetchedAt).startsWith("0001-")) {
+            target.textContent = "Waiting for the first poll";
+            target.className = "warn";
+          } else {
+            target.textContent = `${telemetry.nodes} nodes · ${formatTime(telemetry.fetchedAt)}`;
+            target.className = "ok";
+          }
+        } catch (err) {
+          target.textContent = err.message;
+          target.className = "error";
         }
       }
 
@@ -7168,6 +7203,52 @@
           <div class="node-detail-stat"><span>Failure</span><strong data-node-detail-failure title="${escapeHtml(proxy.failureDetail || "")}">${escapeHtml(failure)}</strong></div>`;
       }
 
+      // The panel's view of the server behind the node: the facts, their order
+      // and rounding the Telegram bot quotes (paneltelemetry.View), in the
+      // admin's words. Absent while telemetry is off or stale, or the panel does
+      // not list the node's address.
+      const panelLinks = {
+        connected: ["ok", "Connected"],
+        connecting: ["warn", "Reconnecting"],
+        disconnected: ["error", "Not connected"],
+        disabled: ["muted", "Disabled in panel"],
+      };
+
+      function nodePanelTelemetryHTML(proxy) {
+        const panel = proxy.panel;
+        if (!panel) return "";
+        const [tone, label] = panelLinks[panel.link] || ["", panel.link || "Unknown"];
+        const link = panel.link === "disconnected" && panel.message ? `${label} (${panel.message})` : label;
+        const facts = [`${panel.usersOnline} online${Number.isInteger(panel.usersOnlineBefore) ? ` (${panel.usersOnlineBefore} before the failure)` : ""}`];
+        if (panel.memoryUsedPercent) facts.push(`mem ${panel.memoryUsedPercent}%`);
+        if (panel.load1) facts.push(`load ${panel.load1.toFixed(2)}${panel.cpus ? `/${panel.cpus} CPU` : ""}`);
+        if (panel.rxMbps || panel.txMbps) facts.push(`↓${panel.rxMbps || 0} ↑${panel.txMbps || 0} Mbps`);
+        if (panel.xrayUptime) facts.push(`Xray ${panel.xrayUptime.value} ${panel.xrayUptime.unit}`);
+        const title = `Remnawave node ${panel.name || ""}, as of ${formatTime(panel.fetchedAt)}`;
+        return `<div class="node-detail-stat"><span><span>Panel</span>${panel.name ? ` · ${escapeHtml(panel.name)}` : ""}</span><strong title="${escapeHtml(title)}"><span class="${tone}">${escapeHtml(link)}</span> · ${facts.map((fact) => `<span>${escapeHtml(fact)}</span>`).join(" · ")}</strong></div>`;
+      }
+
+      // Its own block, refreshed on its own: the online count and the traffic
+      // move every minute, and rebuilding the facts grid for them would drop the
+      // hover off the address on every poll.
+      const nodePanelTelemetryRendered = new WeakMap();
+
+      function updateNodePanelTelemetry(card, proxy) {
+        const block = card.querySelector("[data-node-panel-telemetry]");
+        if (!block) return;
+        const html = nodePanelTelemetryHTML(proxy);
+        if (nodePanelTelemetryRendered.get(block) === html) return;
+        const panel = card.querySelector("[data-node-panel]");
+        const previousHeight = panel ? panel.getBoundingClientRect().height : 0;
+        const wasHidden = block.hidden;
+        block.innerHTML = html;
+        block.hidden = !html;
+        nodePanelTelemetryRendered.set(block, html);
+        if (wasHidden !== block.hidden && panel && state.openNodeStableIds.has(proxy.stableId)) {
+          syncNodePanel(proxy.stableId, { fromHeight: previousHeight });
+        }
+      }
+
       function nodeDetailHTML(proxy, result, history) {
         const speed = result ? formatSpeedStatus(result) : "No speed test";
         const checked = result ? formatTime(result.checkedAt) : "n/a";
@@ -7194,8 +7275,10 @@
              <span><i class="legend-dot warn"></i>Below configured threshold</span>
              <span><i class="legend-dot error"></i>Error or offline</span>
              <span>Latest: ${escapeHtml(speed)} · ${escapeHtml(checked)}</span>`;
+        const panelTelemetry = nodePanelTelemetryHTML(proxy);
         return `<div class="node-card-detail">
           <div class="node-detail-grid" data-node-detail-grid>${nodeDetailStatsHTML(proxy)}</div>
+          <div class="node-panel-telemetry" data-node-panel-telemetry${panelTelemetry ? "" : " hidden"}>${panelTelemetry}</div>
           ${dashboardRangeControls(proxy.stableId, history)}
           ${view === "availability" ? nodeAvailabilityStatsHTML(dataset.results, history) : nodeSpeedStatsHTML(dataset.results)}
           <div class="speed-chart-wrap chart-animate" data-node-metric-chart="${escapeHtml(proxy.stableId)}" data-chart-view="${view}">${renderNodeMetricChart(dataset.results, proxy.stableId, history, view)}</div>
@@ -7693,6 +7776,7 @@
           renderNodePanel(proxy.stableId);
         } else if (open) {
           updateNodeDetailSummary(card, proxy);
+          updateNodePanelTelemetry(card, proxy);
           updateNodeDiagnostics(card, proxy);
         }
       }

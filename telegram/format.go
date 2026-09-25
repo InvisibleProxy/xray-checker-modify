@@ -246,6 +246,9 @@ func (s *Service) formatNodeDetails(stableID string) string {
 			lines = append(lines, fmt.Sprintf("Диагностика: %s", diagnostics))
 		}
 	}
+	if panel := formatPanelStatusHTML(s.nodePanelStatus(proxy)); panel != "" {
+		lines = append(lines, panel)
+	}
 	history := s.speedManager.ResultHistory(proxy.StableID)
 	if len(history) == 0 {
 		if result := s.latestSpeedResult(proxy.StableID); result != nil {
@@ -315,6 +318,9 @@ func (s *Service) formatNodeDetailsMessage(stableID string) formattedMessage {
 		if diagnostics := formatHostDiagnosticsHTML(details.HostCheck, details.PingCheck); diagnostics != "" {
 			fmt.Fprintf(&rich, "<blockquote>%s</blockquote>", diagnostics)
 		}
+	}
+	if panel := formatPanelStatusHTML(s.nodePanelStatus(proxy)); panel != "" {
+		fmt.Fprintf(&rich, "<p>%s</p>", panel)
 	}
 
 	rich.WriteString("<details><summary>Технические данные</summary><table bordered>")

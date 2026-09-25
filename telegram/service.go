@@ -168,6 +168,25 @@ func (s *Service) SetPanelTelemetry(telemetry PanelTelemetry) {
 	s.panelTelemetry = telemetry
 }
 
+// nodePanelStatus reads the panel's view of the node behind a proxy, with the
+// online count compared against the start of the node's current failure. The
+// admin panel asks with the same moment, so an alert, the node card here and
+// the node card there all quote the same "before" sample. The start is the
+// continuous one: the timer of the current state restarts whenever a lost ping
+// reclassifies the failure, and by then the count has usually fallen already.
+func (s *Service) nodePanelStatus(proxy *models.ProxyConfig) *paneltelemetry.Status {
+	if s.panelTelemetry == nil || proxy == nil {
+		return nil
+	}
+	var before time.Time
+	if s.proxyChecker != nil {
+		if details, err := s.proxyChecker.GetProxyStatusDetailsIncludingMaintenance(proxy.StableID); err == nil {
+			before = details.ServiceFailureSince()
+		}
+	}
+	return s.panelStatus(proxy, before)
+}
+
 // panelStatus reads the panel's view of the node behind a proxy.
 func (s *Service) panelStatus(proxy *models.ProxyConfig, before time.Time) *paneltelemetry.Status {
 	if s.panelTelemetry == nil || proxy == nil {

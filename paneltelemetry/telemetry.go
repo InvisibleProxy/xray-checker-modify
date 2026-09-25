@@ -252,7 +252,9 @@ func (p *Poller) State() State {
 
 // NodeStatus finds the panel node a checker node runs on, by the address the
 // subscription publishes, and describes it. before is the moment the online
-// count should be compared against — the start of an outage — and may be zero.
+// count should be compared against: the start of the node's current failure,
+// checker.ProxyStatusDetails.ServiceFailureSince, on every surface that quotes
+// the panel, and zero while the node is fine.
 //
 // The match is by address because that is the one thing both sides agree on: a
 // subscription host is named for clients, a panel node for operators, and the

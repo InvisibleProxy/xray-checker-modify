@@ -856,8 +856,13 @@ func main() {
 	protectedHandler.Handle("/api/v1/openapi.yaml", web.APIOpenAPIHandler())
 	protectedHandler.Handle("/admin", web.AdminHandler())
 	protectedHandler.Handle("/admin/", web.AdminHandler())
-	protectedHandler.Handle("/api/v1/admin/proxies", web.AdminProxiesHandler(proxyChecker, config.CLIConfig.Xray.StartPort))
-	protectedHandler.Handle("/api/v1/admin/proxies/check", web.AdminProxyCheckHandler(runAdminAvailabilityCheck, proxyChecker, config.CLIConfig.Xray.StartPort))
+	// The node cards quote the panel from the same poller as the Telegram bot.
+	var adminPanel web.AdminPanelTelemetry
+	if panelTelemetry != nil {
+		adminPanel = panelTelemetry
+	}
+	protectedHandler.Handle("/api/v1/admin/proxies", web.AdminProxiesHandler(proxyChecker, config.CLIConfig.Xray.StartPort, adminPanel))
+	protectedHandler.Handle("/api/v1/admin/proxies/check", web.AdminProxyCheckHandler(runAdminAvailabilityCheck, proxyChecker, config.CLIConfig.Xray.StartPort, adminPanel))
 	protectedHandler.Handle("/api/v1/admin/proxies/check/cancel", web.AdminProxyCheckCancelHandler(proxyChecker.CancelCheck))
 	protectedHandler.Handle("/api/v1/admin/subscription/refresh/progress", web.AdminSubscriptionRefreshProgressHandler(refreshProgress))
 	protectedHandler.Handle("/api/v1/admin/subscription/refresh", web.AdminSubscriptionRefreshHandler(func(request web.AdminSubscriptionRefreshRequest) (web.AdminSubscriptionRefreshResult, error) {

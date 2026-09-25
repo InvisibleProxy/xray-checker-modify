@@ -225,7 +225,7 @@ func (s *Service) NotifyNodeStatuses() bool {
 	}
 	downAlerts = s.attachAvailabilityDiagnostics(downAlerts)
 	for index := range downAlerts {
-		downAlerts[index].Panel = s.panelStatus(downAlerts[index].Proxy, nodeAlertIssueSince(downAlerts[index].State))
+		downAlerts[index].Panel = s.nodePanelStatus(downAlerts[index].Proxy)
 	}
 	// Checked after the agent wait, which can outlast a switch into maintenance.
 	if s.ProjectMaintenanceEnabled() {

@@ -18,6 +18,7 @@ import (
 	"xray-checker/models"
 	"xray-checker/nodearchive"
 	"xray-checker/nodemerge"
+	"xray-checker/paneltelemetry"
 	"xray-checker/projectmaintenance"
 	"xray-checker/remnawave"
 	"xray-checker/speedtest"
@@ -77,6 +78,33 @@ type AdminProxyInfo struct {
 	FailureCode        string `json:"failureCode,omitempty"`
 	FailureSummary     string `json:"failureSummary,omitempty"`
 	FailureDetail      string `json:"failureDetail,omitempty"`
+	// Panel is the Remnawave panel's view of the server the node runs on, the
+	// same facts the Telegram bot quotes. Absent for a node of a subscription
+	// added from the panel, one the panel does not list, or while telemetry is
+	// off or stale.
+	Panel *paneltelemetry.View `json:"panel,omitempty"`
+}
+
+// AdminPanelTelemetry is the panel's view of the nodes, as the Telegram bot
+// reads it too.
+type AdminPanelTelemetry interface {
+	NodeStatus(server string, before time.Time) (paneltelemetry.Status, bool)
+}
+
+// withPanelView adds the panel's view of the server an own-subscription node
+// runs on. The online count is compared with the start of the node's current
+// failure, the moment the bot's alerts and node card compare with as well.
+func withPanelView(info AdminProxyInfo, proxy *models.ProxyConfig, details checker.ProxyStatusDetails, panel []AdminPanelTelemetry) AdminProxyInfo {
+	if len(panel) == 0 || panel[0] == nil || !info.EnvSource {
+		return info
+	}
+	status, ok := panel[0].NodeStatus(proxy.Server, details.ServiceFailureSince())
+	if !ok {
+		return info
+	}
+	view := status.View()
+	info.Panel = &view
+	return info
 }
 
 // AdminNodeTestURLRequest carries the per-node speed-test overrides. Each
@@ -436,7 +464,7 @@ func AdminBackupRestoreHandler(restorer *backup.Restorer, guards ...AdminBackupR
 	}
 }
 
-func AdminProxiesHandler(proxyChecker *checker.ProxyChecker, startPort int) http.HandlerFunc {
+func AdminProxiesHandler(proxyChecker *checker.ProxyChecker, startPort int, panel ...AdminPanelTelemetry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -454,13 +482,14 @@ func AdminProxiesHandler(proxyChecker *checker.ProxyChecker, startPort int) http
 				details.Online = online
 				details.Latency = latency
 			}
-			result = append(result, adminProxyInfo(proxy, details, startPort, !proxyChecker.MonitoringEnabled(proxy.StableID), proxyChecker.DisplayName(proxy.StableID)))
+			info := adminProxyInfo(proxy, details, startPort, !proxyChecker.MonitoringEnabled(proxy.StableID), proxyChecker.DisplayName(proxy.StableID))
+			result = append(result, withPanelView(info, proxy, details, panel))
 		}
 		writeJSON(w, result)
 	}
 }
 
-func AdminProxyCheckHandler(check AdminProxyCheckFunc, proxyChecker *checker.ProxyChecker, startPort int) http.HandlerFunc {
+func AdminProxyCheckHandler(check AdminProxyCheckFunc, proxyChecker *checker.ProxyChecker, startPort int, panel ...AdminPanelTelemetry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -504,7 +533,8 @@ func AdminProxyCheckHandler(check AdminProxyCheckFunc, proxyChecker *checker.Pro
 			details, _ := proxyChecker.GetProxyStatusDetailsIncludingMaintenance(stableID)
 			proxyCopy := *proxy
 			proxyCopy.StableID = stableID
-			result = append(result, adminProxyInfo(&proxyCopy, details, startPort, !proxyChecker.MonitoringEnabled(stableID), proxyChecker.DisplayName(stableID)))
+			info := adminProxyInfo(&proxyCopy, details, startPort, !proxyChecker.MonitoringEnabled(stableID), proxyChecker.DisplayName(stableID))
+			result = append(result, withPanelView(info, &proxyCopy, details, panel))
 		}
 		writeJSON(w, result)
 	}

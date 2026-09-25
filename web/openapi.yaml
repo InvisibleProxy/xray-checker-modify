@@ -1988,6 +1988,60 @@ components:
               type: string
             failureDetail:
               type: string
+            panel:
+              $ref: '#/components/schemas/PanelNodeView'
+
+    PanelNodeView:
+      type: object
+      description: >-
+        The Remnawave panel's view of the server a node of the deployment's own subscription runs on, matched by the
+        address the subscription publishes. The Telegram bot quotes the same facts under alerts, speed reports and
+        its node card; a zero or absent field is a fact not shown. Absent for a node the panel does not list, for a
+        subscription added from the panel, and while node telemetry is off or its snapshot is over five minutes old.
+      required: [name, link, usersOnline, fetchedAt]
+      properties:
+        name:
+          type: string
+          description: The node's name in the panel.
+        link:
+          type: string
+          enum: [connected, connecting, disconnected, disabled]
+          description: Whether the panel holds its control connection to the node.
+        message:
+          type: string
+          description: The panel's own reason, present only while the link is disconnected.
+        usersOnline:
+          type: integer
+        usersOnlineBefore:
+          type: integer
+          description: >-
+            The online count before the node's current failure (the same moment the bot's alerts compare with),
+            present only when there was a sample then and the count has moved since.
+        memoryUsedPercent:
+          type: integer
+        load1:
+          type: number
+          description: One-minute load average, rounded to two decimals.
+        cpus:
+          type: integer
+          description: Present only alongside load1.
+        rxMbps:
+          type: integer
+        txMbps:
+          type: integer
+        xrayUptime:
+          type: object
+          description: Coarse Xray uptime.
+          required: [value, unit]
+          properties:
+            value:
+              type: integer
+            unit:
+              type: string
+              enum: [min, h, d]
+        fetchedAt:
+          type: string
+          format: date-time
 
     ProjectMaintenanceRequest:
       type: object
