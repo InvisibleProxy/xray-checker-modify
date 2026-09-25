@@ -102,10 +102,15 @@ type ProxyStatusDetails struct {
 	LastChangedAt     time.Time
 	DownSince         time.Time
 	ProxyFailureSince time.Time
-	HostCheck         HostCheckDetails
-	PingCheck         PingCheckDetails
-	CheckFailure      FailureDetails
-	Failure           FailureDetails
+	// FailingSince is when the node stopped passing checks: the first failed
+	// check after it was last online. DownSince and ProxyFailureSince restart
+	// whenever the failure is reclassified between offline and proxy_failure,
+	// which a single lost ping is enough to do; this clock does not.
+	FailingSince time.Time
+	HostCheck    HostCheckDetails
+	PingCheck    PingCheckDetails
+	CheckFailure FailureDetails
+	Failure      FailureDetails
 }
 
 type AvailabilityState string
@@ -140,8 +145,17 @@ func (details ProxyStatusDetails) IsProxyFailure() bool {
 }
 
 // ServiceFailureSince is used by service-level consumers such as Remnawave
-// announce. A reachable host can still have an unusable proxy service.
+// announce. A reachable host can still have an unusable proxy service, so for
+// them proxy_failure and offline are one outage that starts at the first
+// failed check. A status stored without FailingSince falls back to the timer
+// of its current state.
 func (details ProxyStatusDetails) ServiceFailureSince() time.Time {
+	if details.EffectiveStatus() == AvailabilityStateOnline {
+		return time.Time{}
+	}
+	if !details.FailingSince.IsZero() {
+		return details.FailingSince
+	}
 	if details.IsProxyFailure() {
 		return details.ProxyFailureSince
 	}
@@ -873,6 +887,9 @@ func (pc *ProxyChecker) storeStatusDetailsLockedMode(stableID string, online boo
 		if status == AvailabilityStateProxyFailure && previousStatus == AvailabilityStateProxyFailure && !previous.ProxyFailureSince.IsZero() {
 			details.ProxyFailureSince = previous.ProxyFailureSince
 		}
+		if !online && previousStatus != AvailabilityStateOnline {
+			details.FailingSince = previous.ServiceFailureSince()
+		}
 	}
 
 	if status == AvailabilityStateOffline && details.DownSince.IsZero() {
@@ -880,6 +897,9 @@ func (pc *ProxyChecker) storeStatusDetailsLockedMode(stableID string, online boo
 	}
 	if status == AvailabilityStateProxyFailure && details.ProxyFailureSince.IsZero() {
 		details.ProxyFailureSince = now
+	}
+	if !online && details.FailingSince.IsZero() {
+		details.FailingSince = now
 	}
 	if !online && hostCheck != nil {
 		details.HostCheck = *hostCheck
@@ -946,6 +966,12 @@ func (pc *ProxyChecker) storeOfflineDiagnostics(stableID string, hostCheck HostC
 	status := classifyAvailabilityState(false, &hostCheck, &pingCheck)
 	if previousStatus != status {
 		current.LastChangedAt = time.Now()
+	}
+	if current.FailingSince.IsZero() {
+		current.FailingSince = current.ServiceFailureSince()
+		if current.FailingSince.IsZero() {
+			current.FailingSince = time.Now()
+		}
 	}
 	current.Status = status
 	current.HostCheck = hostCheck
@@ -1015,6 +1041,7 @@ func (pc *ProxyChecker) RefreshHostDiagnosticsByStableID(stableID string) (Proxy
 			Status:        classifyAvailabilityState(false, &hostCheck, &pingCheck),
 			CheckedAt:     now,
 			LastChangedAt: now,
+			FailingSince:  now,
 			HostCheck:     hostCheck,
 			PingCheck:     pingCheck,
 			Failure:       DiagnoseFailure(FailureDetails{}, hostCheck, pingCheck),
@@ -1348,6 +1375,7 @@ func (pc *ProxyChecker) RestoreOfflineStatus(stableID string, downSince time.Tim
 		CheckedAt:     now,
 		LastChangedAt: downSince,
 		DownSince:     downSince,
+		FailingSince:  downSince,
 		HostCheck:     hostCheck,
 		PingCheck:     pingCheck,
 		CheckFailure:  failure,
@@ -1395,6 +1423,7 @@ func (pc *ProxyChecker) RestoreProxyFailureStatus(stableID string, failureSince 
 		CheckedAt:         now,
 		LastChangedAt:     failureSince,
 		ProxyFailureSince: failureSince,
+		FailingSince:      failureSince,
 		HostCheck:         hostCheck,
 		PingCheck:         pingCheck,
 		CheckFailure:      failure,

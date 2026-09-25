@@ -186,6 +186,96 @@ func TestOfflineDowntimeStartsAfterProxyFailureDiagnostics(t *testing.T) {
 	}
 }
 
+// Germany #2 on 2026-09-25: one lost ping turned a proxy failure into offline
+// for a single check and back, and the announce clock started over each time.
+func TestServiceFailureClockSurvivesReclassification(t *testing.T) {
+	proxy := testProxy("node-1", "Node one")
+	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{proxy})
+	failingSince := time.Now().Add(-20 * time.Minute)
+	proxyChecker.statusDetails.Store(proxy.StableID, ProxyStatusDetails{
+		Status:            AvailabilityStateProxyFailure,
+		ProxyFailureSince: failingSince,
+		FailingSince:      failingSince,
+	})
+
+	pingOnline := false
+	proxyChecker.hostDiagnosticsFunc = func(*models.ProxyConfig) (HostCheckDetails, PingCheckDetails) {
+		return HostCheckDetails{Checked: true, Online: false}, PingCheckDetails{Checked: true, Online: pingOnline}
+	}
+	for _, step := range []struct {
+		pingOnline bool
+		want       AvailabilityState
+	}{
+		{pingOnline: false, want: AvailabilityStateOffline},
+		{pingOnline: true, want: AvailabilityStateProxyFailure},
+		{pingOnline: false, want: AvailabilityStateOffline},
+		{pingOnline: true, want: AvailabilityStateProxyFailure},
+	} {
+		pingOnline = step.pingOnline
+		proxyChecker.markUnavailableAndCollectDiagnostics(proxy, failureDetails(FailureCodeProxyTimeout, "timeout"))
+		details, err := proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if details.EffectiveStatus() != step.want {
+			t.Fatalf("status = %s, want %s: %+v", details.EffectiveStatus(), step.want, details)
+		}
+		if !details.ServiceFailureSince().Equal(failingSince) {
+			t.Fatalf("%s restarted the service failure clock: got %s, want %s", step.want, details.ServiceFailureSince(), failingSince)
+		}
+	}
+
+	proxyChecker.storeStatusDetails(proxy.StableID, true, 10*time.Millisecond, nil, nil)
+	details, err := proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !details.ServiceFailureSince().IsZero() || !details.FailingSince.IsZero() {
+		t.Fatalf("an online node kept a failure clock: %+v", details)
+	}
+
+	beforeNewFailure := time.Now()
+	proxyChecker.markUnavailableAndCollectDiagnostics(proxy, failureDetails(FailureCodeProxyTimeout, "timeout"))
+	details, err = proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if details.ServiceFailureSince().Before(beforeNewFailure) {
+		t.Fatalf("a failure after recovery inherited the old clock: %s", details.ServiceFailureSince())
+	}
+}
+
+// A status restored or stored before FailingSince existed keeps the timer of
+// its state until the next failed check carries it over.
+func TestServiceFailureClockFallsBackToStateTimer(t *testing.T) {
+	proxy := testProxy("node-1", "Node one")
+	proxyChecker := newTestProxyChecker([]*models.ProxyConfig{proxy})
+	proxyFailureSince := time.Now().Add(-20 * time.Minute)
+	proxyChecker.statusDetails.Store(proxy.StableID, ProxyStatusDetails{
+		Status:            AvailabilityStateProxyFailure,
+		ProxyFailureSince: proxyFailureSince,
+	})
+	details, err := proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !details.ServiceFailureSince().Equal(proxyFailureSince) {
+		t.Fatalf("legacy status clock = %s, want %s", details.ServiceFailureSince(), proxyFailureSince)
+	}
+
+	proxyChecker.hostDiagnosticsFunc = func(*models.ProxyConfig) (HostCheckDetails, PingCheckDetails) {
+		return HostCheckDetails{Checked: true, Online: false}, PingCheckDetails{Checked: true, Online: false}
+	}
+	proxyChecker.markUnavailableAndCollectDiagnostics(proxy, failureDetails(FailureCodeProxyTimeout, "timeout"))
+	details, err = proxyChecker.GetProxyStatusDetailsByStableID(proxy.StableID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !details.IsOffline() || !details.FailingSince.Equal(proxyFailureSince) {
+		t.Fatalf("legacy clock was not carried into the offline state: %+v", details)
+	}
+}
+
 func TestMatchesPingReplyWhenKernelRewritesEchoID(t *testing.T) {
 	probeData := []byte("xray-checker:probe")
 	reply := &icmp.Message{

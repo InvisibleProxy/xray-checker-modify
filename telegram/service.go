@@ -94,6 +94,7 @@ type Service struct {
 	lastDigestAt        time.Time
 	digestNow           func() time.Time
 	digestSendFunc      func(Config, formattedMessage) error
+	announceSendFunc    func(Config, formattedMessage) error
 }
 
 // AvailabilityDiagnostics is the read side of the availability automations —

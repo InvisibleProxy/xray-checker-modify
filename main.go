@@ -408,6 +408,7 @@ func main() {
 	telegramService.SetProjectMaintenance(projectMaintenance.Enabled())
 	telegramService.SetSpeedDiagnosticAutomation(diagnosticAutomation)
 	telegramService.SetAvailabilityDiagnostics(diagnosticAutomation)
+	remnawaveService.SetConflictNotifier(telegramService)
 	if panelTelemetry != nil {
 		telegramService.SetPanelTelemetry(panelTelemetry)
 	}

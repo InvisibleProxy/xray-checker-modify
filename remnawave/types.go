@@ -119,6 +119,12 @@ type RuntimeFile struct {
 	Version   int                            `json:"version"`
 	UpdatedAt time.Time                      `json:"updatedAt"`
 	Managed   map[string]ManagedAnnouncement `json:"managed"`
+	// Restored remembers, per External Squad, the exact operator text the
+	// checker put back when it withdrew its status line. A multi-line text
+	// passes none of the rules for taking over a foreign announce, so without
+	// this the checker would refuse the very text it restored itself. The field
+	// is optional: older files load as they are and older builds ignore it.
+	Restored map[string]string `json:"restored,omitempty"`
 }
 
 // Internal squad visibility modes published by the panel from 3.4 onwards.
@@ -251,8 +257,9 @@ func defaultConfig() ConfigFile {
 
 func defaultRuntime() RuntimeFile {
 	return RuntimeFile{
-		Version: RuntimeVersion,
-		Managed: map[string]ManagedAnnouncement{},
+		Version:  RuntimeVersion,
+		Managed:  map[string]ManagedAnnouncement{},
+		Restored: map[string]string{},
 	}
 }
 
@@ -362,6 +369,9 @@ func normalizeRuntime(runtime *RuntimeFile) {
 			managed.MaintenanceGroups = map[string]string{}
 		}
 		runtime.Managed[externalUUID] = managed
+	}
+	if runtime.Restored == nil {
+		runtime.Restored = map[string]string{}
 	}
 }
 
@@ -475,6 +485,14 @@ func validateRuntime(runtime RuntimeFile) error {
 		}
 		if err := validateDisplayText("managed announce", managed.Message, maxMessageRunes); err != nil {
 			return err
+		}
+	}
+	for externalUUID, value := range runtime.Restored {
+		if invalidIdentifier(externalUUID) {
+			return fmt.Errorf("restored announce contains an invalid external squad UUID")
+		}
+		if !isManagedBaseAnnounce(value) {
+			return fmt.Errorf("restored announce for %s has an invalid base value", externalUUID)
 		}
 	}
 	return nil

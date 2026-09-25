@@ -70,12 +70,49 @@ type Service struct {
 	recoverySince       map[string]time.Time
 	now                 func() time.Time
 
+	// conflicts tracks External Squads the checker could not write to, by
+	// UUID. It is only touched by reconcile, which runs under operationMu.
+	conflicts        map[string]*conflictState
+	conflictNotifier ConflictNotifier
+
 	startStopMu        sync.Mutex
 	started            bool
 	cancel             context.CancelFunc
 	wg                 sync.WaitGroup
 	trigger            chan struct{}
 	projectMaintenance atomic.Bool
+}
+
+// ConflictNotifier hears about External Squads whose announce the checker
+// cannot write. Subscribers of such a squad see no status at all, and a
+// conflict shown only in the admin panel went unnoticed for three days.
+type ConflictNotifier interface {
+	AnnounceConflict(squadName, reason string, since time.Time)
+	AnnounceConflictResolved(squadName string, since time.Time)
+}
+
+// conflictAlertDelay is how long a squad may stay blocked before the operator
+// is told. A conflict that clears on the next pass or two is not worth a
+// message; one that outlives this delay is not going to clear by itself.
+const conflictAlertDelay = 10 * time.Minute
+
+const (
+	conflictDuplicateHeaders = "duplicate_headers"
+	conflictChangedOutside   = "changed_outside"
+	conflictUnrecognized     = "unrecognized"
+)
+
+type squadConflict struct {
+	Name string
+	Kind string
+	Text string
+}
+
+type conflictState struct {
+	name     string
+	kind     string
+	since    time.Time
+	notified bool
 }
 
 type desiredAnnouncement struct {
@@ -132,8 +169,14 @@ func NewService(options Options) *Service {
 		failureObservations: map[string]int{},
 		recoverySince:       map[string]time.Time{},
 		now:                 time.Now,
+		conflicts:           map[string]*conflictState{},
 		trigger:             make(chan struct{}, 1),
 	}
+}
+
+// SetConflictNotifier must be called before Start.
+func (s *Service) SetConflictNotifier(notifier ConflictNotifier) {
+	s.conflictNotifier = notifier
 }
 
 func (s *Service) LoadConfig() error {
@@ -475,6 +518,7 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 	config.NodeMappings = cloneNodeMappings(config.NodeMappings)
 	runtime := s.runtime
 	runtime.Managed = cloneManaged(runtime.Managed)
+	runtime.Restored = cloneStringMap(runtime.Restored)
 	topology := cloneTopology(s.topology)
 	observations := make(map[string]int, len(s.failureObservations))
 	for stableID, count := range s.failureObservations {
@@ -510,6 +554,11 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 		externalByUUID[squad.UUID] = squad
 	}
 	conflicts := make([]string, 0)
+	squadConflicts := make(map[string]squadConflict)
+	addConflict := func(squad ExternalSquad, kind, text string) {
+		conflicts = append(conflicts, text)
+		squadConflicts[squad.UUID] = squadConflict{Name: squad.Name, Kind: kind, Text: text}
+	}
 	errorsSeen := make([]string, 0)
 	runtimeChanged := false
 	for _, externalUUID := range sortedMapKeys(desired) {
@@ -523,18 +572,28 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 		previous, wasManaged := runtime.Managed[externalUUID]
 		owned := wasManaged && currentPresent && currentValue == previous.Value
 
+		// A remembered restoration vouches only for the exact text it recorded.
+		// Once the checker owns the squad again, or anyone changed the text in
+		// the panel, it says nothing any more.
+		restored, wasRestored := runtime.Restored[externalUUID]
+		if wasRestored && (wasManaged || duplicateHeader || !currentPresent || currentValue != restored) {
+			delete(runtime.Restored, externalUUID)
+			runtimeChanged = true
+			wasRestored = false
+		}
+
 		if duplicateHeader {
 			if wasManaged {
 				delete(runtime.Managed, externalUUID)
 				runtimeChanged = true
 			}
-			conflicts = append(conflicts, fmt.Sprintf("%s: multiple case-insensitive announce headers were left untouched", squad.Name))
+			addConflict(squad, conflictDuplicateHeaders, fmt.Sprintf("%s: multiple case-insensitive announce headers were left untouched", squad.Name))
 			continue
 		}
 		if wasManaged && (!currentPresent || currentValue != previous.Value) {
 			delete(runtime.Managed, externalUUID)
 			runtimeChanged = true
-			conflicts = append(conflicts, fmt.Sprintf("%s: managed announce was changed or removed outside xray-checker and was left untouched", squad.Name))
+			addConflict(squad, conflictChangedOutside, fmt.Sprintf("%s: managed announce was changed or removed outside xray-checker and was left untouched", squad.Name))
 			continue
 		}
 
@@ -556,11 +615,16 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 				// previous status into part of the base.
 				basePresent = true
 				baseValue = adopted
+			} else if wasRestored {
+				// Byte for byte the text the checker itself put back when it withdrew
+				// its status. It was the base then and nobody has touched it since.
+				basePresent = true
+				baseValue = currentValue
 			} else if knownBasePresent, knownBaseValue, known := splitKnownManagedAnnounce(currentValue, target.Message, target.KnownHealthyMessage); known {
 				basePresent = knownBasePresent
 				baseValue = knownBaseValue
 			} else if !isAppendableBaseAnnounce(currentValue) {
-				conflicts = append(conflicts, fmt.Sprintf("%s: existing announce is neither an appendable single-line rwEncodeBase64 value nor a recognized managed suffix and was left untouched", squad.Name))
+				addConflict(squad, conflictUnrecognized, fmt.Sprintf("%s: existing announce is neither an appendable single-line rwEncodeBase64 value nor a recognized managed suffix and was left untouched", squad.Name))
 				continue
 			} else {
 				basePresent = true
@@ -605,7 +669,11 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 		externalByUUID[externalUUID] = squad
 		if target.Message == "" {
 			delete(runtime.Managed, externalUUID)
+			if basePresent {
+				runtime.Restored[externalUUID] = baseValue
+			}
 		} else {
+			delete(runtime.Restored, externalUUID)
 			runtime.Managed[externalUUID] = ManagedAnnouncement{
 				Value:             targetValue,
 				Message:           target.Message,
@@ -619,6 +687,7 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 		}
 		runtimeChanged = true
 	}
+	s.trackConflicts(squadConflicts, runtime.Managed, desired, externalByUUID, now)
 
 	if runtimeChanged {
 		if err := writeRuntimeFile(s.runtimePath, runtime, now); err != nil {
@@ -660,6 +729,81 @@ func (s *Service) reconcileLocked(parent context.Context) error {
 		return fmt.Errorf("%s", strings.Join(errorsSeen, "; "))
 	}
 	return nil
+}
+
+// trackConflicts remembers, per squad, since when the checker has been unable
+// to write its status there. Only conflicts that block every later write are
+// tracked: a manual edit of a managed announce drops ownership once and is
+// judged afresh on the next pass, so it is logged and nothing more. A blocked
+// squad stays blocked while nothing is attempted - there is no status to show -
+// and clears only once the checker manages it again, or it leaves the
+// configured pairs or the panel.
+func (s *Service) trackConflicts(
+	current map[string]squadConflict,
+	managed map[string]ManagedAnnouncement,
+	desired map[string]desiredAnnouncement,
+	externalByUUID map[string]ExternalSquad,
+	now time.Time,
+) {
+	for externalUUID, conflict := range current {
+		if conflict.Kind == conflictChangedOutside {
+			logger.Warn("Remnawave announce conflict: %s", conflict.Text)
+			continue
+		}
+		state, known := s.conflicts[externalUUID]
+		if !known || state.kind != conflict.Kind {
+			logger.Warn("Remnawave announce conflict: %s", conflict.Text)
+		}
+		if !known {
+			state = &conflictState{since: now}
+			s.conflicts[externalUUID] = state
+		}
+		state.name = conflict.Name
+		state.kind = conflict.Kind
+	}
+	for externalUUID, state := range s.conflicts {
+		if _, blocked := current[externalUUID]; blocked {
+			continue
+		}
+		_, exists := externalByUUID[externalUUID]
+		_, configured := desired[externalUUID]
+		_, isManaged := managed[externalUUID]
+		if exists && configured && !isManaged {
+			continue
+		}
+		delete(s.conflicts, externalUUID)
+		if !isManaged {
+			continue
+		}
+		logger.Info("Remnawave announce conflict resolved: %s carries the checker status again", state.name)
+		if state.notified && s.conflictNotifier != nil {
+			s.conflictNotifier.AnnounceConflictResolved(state.name, state.since)
+		}
+	}
+	if s.conflictNotifier == nil {
+		return
+	}
+	for _, externalUUID := range sortedMapKeys(s.conflicts) {
+		state := s.conflicts[externalUUID]
+		if state.notified || now.Sub(state.since) < conflictAlertDelay {
+			continue
+		}
+		state.notified = true
+		s.conflictNotifier.AnnounceConflict(state.name, conflictReason(state.kind), state.since)
+	}
+}
+
+// conflictReason is the operator-facing explanation sent to Telegram, whose
+// messages are in Russian.
+func conflictReason(kind string) string {
+	switch kind {
+	case conflictDuplicateHeaders:
+		return "В responseHeadersAdd сквада несколько заголовков announce, различающихся только регистром. Оставьте один."
+	case conflictUnrecognized:
+		return "Текст announce в панели многострочный и не совпадает ни с принятой базой, ни с текстом, который checker вернул сам. " +
+			"Примите его заново кнопкой Adopt current announce as base (если база уже принята — сначала Forget adopted base) или сделайте текст однострочным."
+	}
+	return ""
 }
 
 // ownProxies lists the nodes of the subscription this deployment configures
@@ -1306,9 +1450,8 @@ func announcementStatuses(external []ExternalSquad, managed map[string]ManagedAn
 			PreservesBase:     (!isManaged && present && !duplicateHeader && isAppendableBaseAnnounce(value)) || (isManaged && owned.BasePresent),
 		}
 		_, status.BaseAdopted = bases[squad.UUID]
-		status.Adoptable = present && !duplicateHeader && isManagedBaseAnnounce(value)
-		_, status.BaseAdopted = bases[squad.UUID]
-		status.Adoptable = present && !duplicateHeader && isManagedBaseAnnounce(value)
+		// A value the checker wrote whole holds no operator text to adopt.
+		status.Adoptable = present && !duplicateHeader && isManagedBaseAnnounce(value) && !(status.Managed && !owned.BasePresent)
 		if status.Managed {
 			status.Message = owned.Message
 		}
@@ -1454,6 +1597,7 @@ func (s *Service) AdoptAnnounceBase(externalSquadUUID string, release bool) (Sna
 	config.NodeMappings = cloneNodeMappings(config.NodeMappings)
 	config.AnnounceBases = cloneStringMap(config.AnnounceBases)
 	squads := append([]ExternalSquad(nil), s.topology.ExternalSquads...)
+	owned, isManaged := s.runtime.Managed[externalSquadUUID]
 	s.mu.RUnlock()
 
 	if release {
@@ -1476,13 +1620,24 @@ func (s *Service) AdoptAnnounceBase(externalSquadUUID string, release bool) (Sna
 		if !found {
 			return Snapshot{}, fmt.Errorf("external squad %s is not in the loaded topology; sync it first", externalSquadUUID)
 		}
-		if !isManagedBaseAnnounce(current) {
+		base := current
+		if isManaged && current == owned.Value {
+			// The panel shows the checker's own status line after the operator
+			// text. Adopting the whole value would make that status part of the
+			// base, and once the checker withdrew its line the text left in the
+			// panel would no longer start with the base: a conflict for good.
+			if !owned.BasePresent {
+				return Snapshot{}, fmt.Errorf("the checker wrote this squad's whole announce; there is no operator text in it to adopt")
+			}
+			base = owned.BaseValue
+		}
+		if !isManagedBaseAnnounce(base) {
 			return Snapshot{}, fmt.Errorf("this squad has no announce value the checker can build on; it must start with %s", announceValuePrefix)
 		}
 		if config.AnnounceBases == nil {
 			config.AnnounceBases = map[string]string{}
 		}
-		config.AnnounceBases[externalSquadUUID] = current
+		config.AnnounceBases[externalSquadUUID] = base
 	}
 
 	if err := validateConfig(config); err != nil {

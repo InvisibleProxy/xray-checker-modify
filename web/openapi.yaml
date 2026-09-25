@@ -1126,7 +1126,10 @@ paths:
         so a multi-line operator announce can be extended with a status line. The value is captured
         by this explicit action rather than inferred during reconcile: a base that had to be guessed
         could absorb a stale status line whenever ownership state is lost, and the message would grow
-        on every pass. Send release=true to forget it again.
+        on every pass. While the checker manages the squad, the value it holds ends with the checker's
+        own status line, so the base recorded is the operator text in front of that line; an announce
+        the checker wrote whole has no operator text and is refused. Send release=true to forget it
+        again.
       tags: [Admin]
       requestBody:
         required: true
