@@ -297,16 +297,29 @@ func (c *Controller) createTargeted(request targetedRequest) (SessionView, error
 	return view(updated), nil
 }
 
-// automaticProfile asks the agent to transfer the same amount the run did, so
-// the two rates describe the same thing.
+// automaticProfile asks the agent to repeat the run's measurement as closely as
+// the agent can: against the same server, for the same amount.
+//
+// The server is asked for whatever the outcome, when the run's test URL is in the
+// catalogue and the agent can download from it. A technical failure against a
+// server is a question about that server as much as a slowdown is, and an agent
+// that answers from another one answers a different question.
 //
 // Only a low-speed outcome carries a size worth copying. A technical failure
 // transferred whatever it managed before it gave up, and asking the agent to
 // stop at that many bytes would measure the checker's timeout rather than the
 // node — so that case keeps the agent's own configured amount.
-func automaticProfile(descriptor diagnostics.ProfileDescriptor, alternativeID string, context diagnostics.AutomationContext) diagnostics.TestProfile {
+func automaticProfile(descriptor diagnostics.ProfileDescriptor, alternativeID string, context diagnostics.AutomationContext, capabilities []string) diagnostics.TestProfile {
 	profile := descriptor.TestProfileFor(alternativeID)
-	if profile.Method != diagnostics.ProbeMethodDownload || context.Outcome != diagnostics.AutomationOutcomeLowSpeed {
+	if profile.Method != diagnostics.ProbeMethodDownload {
+		return profile
+	}
+	if context.SpeedServerID != "" && contains(capabilities, diagnostics.CapabilitySpeedServersV1) {
+		if _, known := diagnostics.SpeedServerByID(context.SpeedServerID); known {
+			profile.ServerID = context.SpeedServerID
+		}
+	}
+	if context.Outcome != diagnostics.AutomationOutcomeLowSpeed {
 		return profile
 	}
 	if bytes, ok := diagnostics.ProfileDownloadBytes(context.MeasuredBytes); ok {
@@ -422,7 +435,9 @@ func (c *Controller) CreateAutomatic(request CreateAutomaticRequest) (SessionVie
 	}
 	request.StableID = strings.TrimSpace(request.StableID)
 	request.ProfileID = strings.TrimSpace(request.ProfileID)
-	if request.Trigger != diagnostics.TriggerAutoSpeedFallback && request.Trigger != diagnostics.TriggerAutoProxyFailure {
+	switch request.Trigger {
+	case diagnostics.TriggerAutoSpeedFallback, diagnostics.TriggerAutoProxyFailure, diagnostics.TriggerAutoOffline:
+	default:
 		return SessionView{}, fmt.Errorf("unsupported automatic diagnostic trigger %q", request.Trigger)
 	}
 	if c.checker.ProjectMaintenanceEnabled() {
@@ -508,7 +523,7 @@ func (c *Controller) CreateAutomatic(request CreateAutomaticRequest) (SessionVie
 	job, err := c.manager.RegisterJob(diagnostics.RegisterJobRequest{
 		SessionID: session.SessionID,
 		AgentID:   agent.AgentID,
-		Profile:   automaticProfile(descriptor, alternativeID, request.AutomationContext),
+		Profile:   automaticProfile(descriptor, alternativeID, request.AutomationContext, agent.Capabilities),
 		ExpiresAt: expiresAt,
 	})
 	if err != nil {
@@ -839,21 +854,17 @@ func summarize(session diagnostics.DiagnosticSession) string {
 		return "The agent network failed direct connectivity control; this result is unreliable."
 	}
 	if session.Trigger == diagnostics.TriggerAutoSpeedFallback {
-		if alternative := remote.AlternativeEndpoint; alternative != nil && alternative.Status == diagnostics.ProbeStatusOnline {
-			return "The agent reproduced a failure only against its download endpoint; the alternative tunnelled endpoint worked, so an endpoint-specific problem is likely."
-		}
-		if remote.Status == diagnostics.ProbeStatusOnline {
-			if session.AutomationContext.Outcome == diagnostics.AutomationOutcomeLowSpeed && session.AutomationContext.ThresholdMbps > 0 {
-				if remote.Throughput == nil {
-					return "The agent reached the endpoint but returned no throughput evidence; there is not enough data to compare the low-speed result."
-				}
-				if float64(remote.Throughput.Mbps) < session.AutomationContext.ThresholdMbps {
-					return "Low throughput was reproduced from another network; a shared node, server or upstream capacity issue is likely."
-				}
-			}
-			return "The speed-test problem was not reproduced from another network; the controller route or its Test URLs are more likely involved."
-		}
-		return "The speed-test problem was reproduced from another network; a shared node, server or configuration issue is likely."
+		// The same judgement the automation hands to alerts and the verdict
+		// journal, so the session list never tells a different story.
+		context := session.AutomationContext
+		verdict, reason := diagnostics.JudgeSpeed(diagnostics.SpeedEvidence{
+			Outcome: context.Outcome, ThresholdMbps: context.ThresholdMbps,
+			ObservedMbps: context.ObservedMbps, ServerID: context.SpeedServerID,
+		}, remote, observation.Reliable)
+		return speedSummary(verdict, reason, remote)
+	}
+	if session.Trigger == diagnostics.TriggerAutoOffline {
+		return offlineSummary(remote)
 	}
 	if session.Trigger == diagnostics.TriggerAutoProxyFailure && remote.Status != diagnostics.ProbeStatusOnline {
 		// Read before the generic comparison below, which only calls a failure
@@ -875,6 +886,53 @@ func summarize(session diagnostics.DiagnosticSession) string {
 		return "The outage was reproduced; the server, port, firewall or hosting network may be involved."
 	}
 	return "The results differ without a stable pattern; there is not enough data."
+}
+
+// speedSummary words a speed verdict. It names where the evidence points and
+// stops there: "the path" is the stretch between the checker and the node, which
+// is where a checker inside a filtering or congested network loses rate its
+// clients may lose too — it is not a claim that the checker is at fault.
+func speedSummary(verdict diagnostics.Verdict, reason string, remote diagnostics.Observation) string {
+	switch verdict {
+	case diagnostics.VerdictReproduced:
+		if remote.Status == diagnostics.ProbeStatusOnline {
+			return "Low throughput was reproduced from another network against the same speed-test server; the node, its uplink or its hosting network is likely involved."
+		}
+		return "The speed-test problem was reproduced from another network; a shared node, server or configuration issue is likely."
+	case diagnostics.VerdictPathLimited:
+		if reason == diagnostics.ReasonAgentAlsoBelowThreshold {
+			return "The agent got many times the checker's rate through the same node but stayed below the threshold; most of the loss is on the path between the checker and the node, and the node is not above suspicion."
+		}
+		return "The agent got many times the checker's rate through the same node; the loss is on the path between the checker and the node, not in the node."
+	case diagnostics.VerdictInconclusive:
+		if reason == diagnostics.ReasonNearThreshold {
+			return "The agent's rate is too close to the threshold to confirm or clear the slowdown."
+		}
+		return "The agent measured a different speed-test server, so its rate can neither confirm nor clear the slowdown."
+	case diagnostics.VerdictUnreliable:
+		return "The agent reached the endpoint but returned no throughput evidence; there is not enough data to compare the low-speed result."
+	default:
+		if reason == diagnostics.ReasonAlternativeWorked {
+			return "The agent reproduced a failure only against its download endpoint; the alternative tunnelled endpoint worked, so an endpoint-specific problem is likely."
+		}
+		return "The node delivered the threshold to another network; the problem is on the path between the checker and the node, or at the checker's test server."
+	}
+}
+
+// offlineSummary words the answer to "the checker cannot reach this node at
+// all". From a checker inside a filtered network a blocked IP and a dead host
+// look the same; which of the two it is decides what the operator does next.
+func offlineSummary(remote diagnostics.Observation) string {
+	switch {
+	case remote.Status == diagnostics.ProbeStatusOnline:
+		return "The node works from another network; it is unreachable only on the checker's path, so an IP or route block on that side is likely."
+	case remote.AlternativeEndpoint != nil && remote.AlternativeEndpoint.Status == diagnostics.ProbeStatusOnline:
+		return "The node's tunnel works from another network against the alternative endpoint; it is unreachable only on the checker's path, so an IP or route block on that side is likely."
+	case remote.Status == diagnostics.ProbeStatusProxyFailure:
+		return "The host answers from another network but its tunnel does not carry traffic; the proxy service on the node is likely down, and the checker's path does not reach the host at all."
+	default:
+		return "The node is unreachable from another network as well; the host, its port or the hosting network is likely down."
+	}
 }
 
 func contains(values []string, wanted string) bool {

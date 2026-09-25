@@ -24,6 +24,8 @@ import (
 	"xray-checker/nodearchive"
 	"xray-checker/nodemerge"
 	"xray-checker/observation"
+	"xray-checker/paneltelemetry"
+	"xray-checker/pathquality"
 	"xray-checker/probeagent"
 	"xray-checker/projectmaintenance"
 	"xray-checker/reachability"
@@ -34,6 +36,7 @@ import (
 	"xray-checker/subscription"
 	"xray-checker/subsource"
 	"xray-checker/telegram"
+	"xray-checker/verdictlog"
 	"xray-checker/web"
 	"xray-checker/xray"
 
@@ -219,6 +222,26 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to configure remote diagnostic jobs: %v", err)
 	}
+	// The verdict journal keeps what the agents answered after the sessions are
+	// gone. It is evidence only: nothing operational reads it, and it is not in
+	// the backup.
+	verdictRetention := time.Duration(config.CLIConfig.RemoteDiagnostics.VerdictRetentionDays) * 24 * time.Hour
+	verdictJournal, err := verdictlog.New(verdictlog.Config{Path: "data/diagnostic_verdicts.jsonl", Retention: verdictRetention})
+	if err != nil {
+		logger.Fatal("Failed to configure the agent verdict journal: %v", err)
+	}
+	if err := verdictJournal.Compact(); err != nil {
+		logger.Warn("Failed to compact the agent verdict journal: %v", err)
+	}
+	nodeLabel := func(stableID string) string {
+		if label := proxyChecker.DisplayName(stableID); label != "" {
+			return label
+		}
+		if proxy, ok := proxyChecker.GetProxyByStableID(stableID); ok {
+			return proxy.Name
+		}
+		return ""
+	}
 	diagnosticAutomation, err := agentautomation.New(agentautomation.Config{
 		Enabled:       config.CLIConfig.RemoteDiagnostics.AutomationEnabled,
 		Cooldown:      time.Duration(config.CLIConfig.RemoteDiagnostics.AutomationCooldownMinutes) * time.Minute,
@@ -230,6 +253,13 @@ func main() {
 		EnvironmentSourced:    proxyChecker.EnvironmentSourced,
 		ProxyFailureEnabled:   config.CLIConfig.RemoteDiagnostics.AutomationProxyFailure,
 		ProxyFailureProfileID: proxyFailureProfileID(config.CLIConfig.Proxy.CheckMethod),
+		// An unreachable node is asked the same tunnelled question: an agent
+		// that gets through proves the node works, and one that does not still
+		// collects TCP and ping evidence from its own side.
+		OfflineEnabled:   config.CLIConfig.RemoteDiagnostics.AutomationOffline,
+		OfflineProfileID: proxyFailureProfileID(config.CLIConfig.Proxy.CheckMethod),
+		Journal:          verdictJournal,
+		NodeName:         nodeLabel,
 	}, remoteDiagnosticController, probeAgentRegistry)
 	if err != nil {
 		logger.Fatal("Failed to configure diagnostic automation: %v", err)
@@ -255,6 +285,17 @@ func main() {
 			}
 			logger.Info("Reachability sweep: %d agents, %d nodes, %d cells, %d confirmed divergences, %d timeouts, %d errors%s",
 				summary.Agents, summary.Nodes, summary.Recorded, summary.Confirmed, summary.Timeouts, summary.Errors, skipped)
+		},
+		// Only disagreements are journaled. The agreeing majority is what the
+		// matrix already shows, and a line per agent per node per hour would bury
+		// the few cells worth reading back.
+		OnCell: func(target reachability.Target, cell reachability.Cell) {
+			if cell.Verdict == reachability.VerdictAgreedUp {
+				return
+			}
+			if err := verdictJournal.Record(sweepVerdictEntry(target, cell, probeAgentRegistry)); err != nil {
+				logger.Warn("Failed to journal the reachability verdict for %s: %v", target.StableID, err)
+			}
 		},
 	}, remoteDiagnosticController, probeAgentRegistry, func() []reachability.Target {
 		return reachabilityTargets(proxyChecker)
@@ -299,16 +340,39 @@ func main() {
 	nodeMergeCoordinator := nodemerge.NewCoordinator("data", nodeArchive, speedTestManager)
 
 	var remnawaveAPI remnawaveannounce.API
-	if config.CLIConfig.Remnawave.Enabled {
+	var remnawaveClient *remnawaveannounce.HTTPClient
+	// Node telemetry needs only the panel URL and a token, so it works without
+	// the announce integration; announce still requires both, as before.
+	remnawaveConfigured := strings.TrimSpace(config.CLIConfig.Remnawave.APIURL) != "" && strings.TrimSpace(config.CLIConfig.Remnawave.APIToken) != ""
+	if config.CLIConfig.Remnawave.Enabled || (config.CLIConfig.Remnawave.NodeTelemetryEnabled && remnawaveConfigured) {
 		client, clientErr := remnawaveannounce.NewHTTPClient(
 			config.CLIConfig.Remnawave.APIURL,
 			config.CLIConfig.Remnawave.APIToken,
 			time.Duration(config.CLIConfig.Remnawave.TimeoutSeconds)*time.Second,
 		)
-		if clientErr != nil {
+		switch {
+		case clientErr != nil && config.CLIConfig.Remnawave.Enabled:
 			logger.Fatal("Failed to configure Remnawave announce integration: %v", clientErr)
+		case clientErr != nil:
+			logger.Warn("Remnawave node telemetry is off: %v", clientErr)
+		default:
+			remnawaveClient = client
+			if config.CLIConfig.Remnawave.Enabled {
+				remnawaveAPI = client
+			}
 		}
-		remnawaveAPI = client
+	}
+	var panelTelemetry *paneltelemetry.Poller
+	if remnawaveClient != nil && config.CLIConfig.Remnawave.NodeTelemetryEnabled {
+		interval := time.Duration(config.CLIConfig.Remnawave.NodeTelemetryIntervalSeconds) * time.Second
+		panelTelemetry = paneltelemetry.NewPoller(remnawaveClient, paneltelemetry.Config{
+			Interval: interval,
+			OnError: func(err error) {
+				logger.Warn("Remnawave node telemetry unavailable: %v", err)
+			},
+		})
+		go panelTelemetry.Run(context.Background())
+		logger.Startup("Remnawave node telemetry enabled every %s", interval)
 	}
 	remnawaveService := remnawaveannounce.NewService(remnawaveannounce.Options{
 		MasterEnabled:      config.CLIConfig.Remnawave.Enabled,
@@ -343,7 +407,27 @@ func main() {
 	)
 	telegramService.SetProjectMaintenance(projectMaintenance.Enabled())
 	telegramService.SetSpeedDiagnosticAutomation(diagnosticAutomation)
-	telegramService.SetProxyFailureDiagnostics(diagnosticAutomation)
+	telegramService.SetAvailabilityDiagnostics(diagnosticAutomation)
+	if panelTelemetry != nil {
+		telegramService.SetPanelTelemetry(panelTelemetry)
+	}
+	pathQuality := newPathQualitySource(proxyChecker, speedTestManager)
+	telegramService.SetDigestSources(telegram.DigestSources{
+		// The digest speaks about the deployment's own service only, like
+		// every other Telegram message, and in the clients' time zone.
+		PathQuality: func(from, to time.Time) (pathquality.Report, bool) {
+			report := pathQuality.Report(from, to, nil, func(node pathquality.NodeInput) bool { return node.Environment })
+			return report, len(report.Nodes) > 0
+		},
+		Verdicts: func(from, to time.Time) []verdictlog.Entry {
+			entries, err := verdictJournal.Query(verdictlog.Filter{From: from, To: to, Limit: 2000})
+			if err != nil {
+				logger.Warn("Failed to read the agent verdict journal for the digest: %v", err)
+			}
+			return entries
+		},
+		Agents: probeAgentRegistry.Snapshot,
+	})
 	handleStateLoadError("Telegram", telegramService.Load())
 	if projectMaintenance.Enabled() {
 		if err := telegramService.ClearAllMonitoringState(); err != nil {
@@ -416,7 +500,7 @@ func main() {
 			remnawaveService.Trigger()
 			notifyRecoveredNodes(recovered)
 			// Off the request path: starting a session may resolve a node name.
-			go diagnosticAutomation.StartProxyFailureDiagnostics(proxyFailureEpisodes(proxyChecker))
+			go diagnosticAutomation.StartAvailabilityDiagnostics(availabilityEpisodes(proxyChecker))
 		}
 		return checkErr
 	}
@@ -501,6 +585,7 @@ func main() {
 	// even when no alert was sent.
 	agentProbeRecorder := speedprobe.New(speedprobe.Config{
 		Threshold: speedTestManager.LowSpeedThresholdMbps,
+		Journal:   verdictJournal,
 	}, diagnosticAutomation, speedTestManager)
 	if agentProbeRecorder != nil {
 		speedTestManager.SetAgentProbeRunner(agentProbeRecorder)
@@ -538,12 +623,12 @@ func main() {
 			logger.Warn("Failed to record node availability: %v", err)
 		}
 		remnawaveService.ObserveFullCheck()
-		failures := proxyFailureEpisodes(proxyChecker)
+		failures := availabilityEpisodes(proxyChecker)
 		go func() {
 			// Before the alert pass, so an alert due in this pass finds the probe
 			// already asked for. Its result stays evidence: it can add a line to
 			// that alert, never decide whether the alert is sent.
-			diagnosticAutomation.StartProxyFailureDiagnostics(failures)
+			diagnosticAutomation.StartAvailabilityDiagnostics(failures)
 			if !telegramService.NotifyNodeStatuses() {
 				notifyRecoveredNodes(recovered)
 			}
@@ -816,6 +901,13 @@ func main() {
 	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions/export", web.AdminDiagnosticSessionExportHandler(remoteDiagnosticController))
 	protectedHandler.Handle("/api/v1/admin/diagnostic-sessions", web.AdminDiagnosticSessionsHandler(remoteDiagnosticController, diagnosticAutomation.Snapshot))
 	protectedHandler.Handle("/api/v1/admin/reachability", web.AdminReachabilityHandler(reachabilitySweeper))
+	protectedHandler.Handle("/api/v1/admin/diagnostic-verdicts", web.AdminDiagnosticVerdictsHandler(verdictJournal))
+	protectedHandler.Handle("/api/v1/admin/path-quality", web.AdminPathQualityHandler(pathQuality))
+	var panelTelemetryState func() paneltelemetry.State
+	if panelTelemetry != nil {
+		panelTelemetryState = panelTelemetry.State
+	}
+	protectedHandler.Handle("/api/v1/admin/remnawave/telemetry", web.AdminPanelTelemetryHandler(panelTelemetryState))
 
 	if config.CLIConfig.Web.Public {
 		mux.Handle("/", web.IndexHandler(version, proxyChecker, projectMaintenance))
@@ -917,12 +1009,14 @@ func reachabilityTargets(proxyChecker *checker.ProxyChecker) []reachability.Targ
 	return targets
 }
 
-// proxyFailureEpisodes lists every node the last check left in proxy_failure,
-// with the start of its episode. Only nodes whose availability is accounted
-// qualify: a node in maintenance or on a paused source has no verdict for an
-// agent to second.
-func proxyFailureEpisodes(proxyChecker *checker.ProxyChecker) []agentautomation.ProxyFailure {
-	var failures []agentautomation.ProxyFailure
+// availabilityEpisodes lists every node the last check left failing, with the
+// kind of failure and the start of its episode: proxy_failure since
+// ProxyFailureSince, offline since DownSince. Only nodes whose availability is
+// accounted qualify: a node in maintenance or on a paused source has no verdict
+// for an agent to second. Which kinds are actually probed is the
+// coordinator's opt-in, not this list's.
+func availabilityEpisodes(proxyChecker *checker.ProxyChecker) []agentautomation.AvailabilityFailure {
+	var failures []agentautomation.AvailabilityFailure
 	for _, proxy := range proxyChecker.GetProxies() {
 		if proxy == nil {
 			continue
@@ -935,12 +1029,92 @@ func proxyFailureEpisodes(proxyChecker *checker.ProxyChecker) []agentautomation.
 			continue
 		}
 		details, err := proxyChecker.GetProxyStatusDetailsByStableID(stableID)
-		if err != nil || !details.IsProxyFailure() {
+		if err != nil {
 			continue
 		}
-		failures = append(failures, agentautomation.ProxyFailure{StableID: stableID, Since: details.ProxyFailureSince})
+		switch {
+		case details.IsProxyFailure():
+			failures = append(failures, agentautomation.AvailabilityFailure{
+				StableID: stableID, Kind: diagnostics.AutomationKindProxyFailure, Since: details.ProxyFailureSince,
+			})
+		case details.IsOffline() && !details.CheckedAt.IsZero():
+			failures = append(failures, agentautomation.AvailabilityFailure{
+				StableID: stableID, Kind: diagnostics.AutomationKindOffline, Since: details.DownSince,
+			})
+		}
 	}
 	return failures
+}
+
+// sweepVerdictEntry is one reachability disagreement as the verdict journal
+// keeps it.
+func sweepVerdictEntry(target reachability.Target, cell reachability.Cell, agents *probeagent.Registry) verdictlog.Entry {
+	entry := verdictlog.Entry{
+		At: cell.CheckedAt, Source: verdictlog.SourceSweep, Trigger: string(diagnostics.TriggerReachabilitySweep),
+		StableID: target.StableID, Node: target.Name, AgentID: cell.AgentID,
+		Verdict: string(cell.Verdict), Detail: cell.Detail,
+		LocalStatus: string(cell.LocalStatus), LocalAt: cell.LocalCheckedAt,
+		AgentStatus: string(cell.AgentStatus), AgentFailureCode: cell.FailureCode, AgentFailureStage: string(cell.FailureStage),
+		AgentLatencyMs: cell.LatencyMillis, AgentAt: cell.CheckedAt,
+	}
+	if cell.AgentStatus != "" {
+		reached := cell.TCPReached
+		entry.AgentTCPReached = &reached
+	}
+	if agent, ok := agents.Agent(cell.AgentID); ok {
+		entry.AgentName, entry.Region, entry.Provider = agent.DisplayName, agent.Region, agent.Provider
+	}
+	return entry
+}
+
+// newPathQualitySource reads the live speed-test history into path-quality
+// reports. The peak window comes from the configuration and is read in the
+// clients' time zone.
+func newPathQualitySource(proxyChecker *checker.ProxyChecker, speedTests *speedtest.Manager) pathquality.Source {
+	peakStart, peakEnd, err := config.ParsePeakHours(config.CLIConfig.PathQuality.PeakHours)
+	if err != nil {
+		peakStart, peakEnd = 18, 24
+	}
+	peakLocation := time.UTC
+	if zone := strings.TrimSpace(config.CLIConfig.PathQuality.PeakTimeZone); zone != "" {
+		if location, loadErr := time.LoadLocation(zone); loadErr == nil {
+			peakLocation = location
+		}
+	} else if location, loadErr := time.LoadLocation("Europe/Moscow"); loadErr == nil {
+		peakLocation = location
+	}
+	return pathquality.Source{
+		PeakLocation: peakLocation, PeakStart: peakStart, PeakEnd: peakEnd,
+		Threshold: speedTests.LowSpeedThresholdMbps,
+		Nodes: func() []pathquality.NodeInput {
+			proxies := proxyChecker.GetProxies()
+			nodes := make([]pathquality.NodeInput, 0, len(proxies))
+			for _, proxy := range proxies {
+				if proxy == nil {
+					continue
+				}
+				stableID := strings.TrimSpace(proxy.StableID)
+				if stableID == "" {
+					stableID = proxy.GenerateStableID()
+				}
+				// A paused node is not being measured, and a node whose source is
+				// not watched has no verdict to report.
+				if stableID == "" || !proxyChecker.MonitoringEnabled(stableID) {
+					continue
+				}
+				name := proxyChecker.DisplayName(stableID)
+				if name == "" {
+					name = proxy.Name
+				}
+				nodes = append(nodes, pathquality.NodeInput{
+					StableID: stableID, Name: name, Subscription: proxy.SubName,
+					Environment: proxyChecker.EnvironmentSourced(stableID),
+					Results:     speedTests.ResultHistory(stableID),
+				})
+			}
+			return nodes
+		},
+	}
 }
 
 // proxyFailureProfileID asks the agent the question the availability check

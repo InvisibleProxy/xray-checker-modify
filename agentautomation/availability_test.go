@@ -51,12 +51,12 @@ func TestProxyFailureStartsOneProbePerEpisode(t *testing.T) {
 		config.ProxyFailureProfileID = diagnostics.ProfileIP
 	})
 
-	coordinator.StartProxyFailureDiagnostics([]ProxyFailure{{StableID: "node-one", Since: since}})
+	coordinator.StartAvailabilityDiagnostics([]AvailabilityFailure{{StableID: "node-one", Since: since}})
 	now = now.Add(5 * time.Minute)
-	coordinator.StartProxyFailureDiagnostics([]ProxyFailure{{StableID: "node-one", Since: since}})
+	coordinator.StartAvailabilityDiagnostics([]AvailabilityFailure{{StableID: "node-one", Since: since}})
 	answer(controller, "diag-one", diagnostics.ProbeStatusProxyFailure)
 	now = now.Add(time.Hour)
-	coordinator.StartProxyFailureDiagnostics([]ProxyFailure{{StableID: "node-one", Since: since}})
+	coordinator.StartAvailabilityDiagnostics([]AvailabilityFailure{{StableID: "node-one", Since: since}})
 
 	if len(controller.requests) != 1 {
 		t.Fatalf("automatic creates = %d, want one for the whole episode", len(controller.requests))
@@ -66,7 +66,7 @@ func TestProxyFailureStartsOneProbePerEpisode(t *testing.T) {
 		request.AutomationContext != diagnostics.ProxyFailureAutomationContext() {
 		t.Fatalf("automatic request = %+v", request)
 	}
-	annotation := coordinator.ProxyFailureAnnotations([]string{"node-one"})["node-one"]
+	annotation := coordinator.AvailabilityAnnotations([]string{"node-one"})["node-one"]
 	if annotation.State != speedtest.AgentDiagnosticReproduced || annotation.AgentName != "EU probe" {
 		t.Fatalf("annotation = %+v, want the agent's reproduced failure", annotation)
 	}
@@ -79,10 +79,10 @@ func TestProxyFailureTunnelThatWorksForTheAgentIsNotReproduced(t *testing.T) {
 	controller := &fakeSessionController{enabled: true}
 	now := time.Date(2026, 9, 1, 1, 0, 0, 0, time.UTC)
 	coordinator := newProxyFailureCoordinator(t, controller, &now)
-	coordinator.StartProxyFailureDiagnostics([]ProxyFailure{{StableID: "node-one", Since: now}})
+	coordinator.StartAvailabilityDiagnostics([]AvailabilityFailure{{StableID: "node-one", Since: now}})
 	answer(controller, "diag-one", diagnostics.ProbeStatusOnline)
 
-	annotation := coordinator.ProxyFailureAnnotations([]string{"node-one"})["node-one"]
+	annotation := coordinator.AvailabilityAnnotations([]string{"node-one"})["node-one"]
 	if annotation.State != speedtest.AgentDiagnosticNotReproduced {
 		t.Fatalf("annotation state = %q, want not reproduced", annotation.State)
 	}
@@ -95,7 +95,7 @@ func TestProxyFailureSkipsWhenDisabledAndForPanelSourcedNodes(t *testing.T) {
 	disabled := &fakeSessionController{enabled: true}
 	newProxyFailureCoordinator(t, disabled, &now, func(config *Config) {
 		config.ProxyFailureEnabled = false
-	}).StartProxyFailureDiagnostics([]ProxyFailure{{StableID: "node-one", Since: now}})
+	}).StartAvailabilityDiagnostics([]AvailabilityFailure{{StableID: "node-one", Since: now}})
 	if len(disabled.requests) != 0 {
 		t.Fatalf("creates with the trigger off = %d, want none", len(disabled.requests))
 	}
@@ -104,14 +104,14 @@ func TestProxyFailureSkipsWhenDisabledAndForPanelSourcedNodes(t *testing.T) {
 	coordinator := newProxyFailureCoordinator(t, foreign, &now, func(config *Config) {
 		config.EnvironmentSourced = func(stableID string) bool { return stableID != "node-foreign" }
 	})
-	coordinator.StartProxyFailureDiagnostics([]ProxyFailure{
+	coordinator.StartAvailabilityDiagnostics([]AvailabilityFailure{
 		{StableID: "node-foreign", Since: now},
 		{StableID: "node-own", Since: now},
 	})
 	if len(foreign.requests) != 1 || foreign.requests[0].StableID != "node-own" {
 		t.Fatalf("requests = %+v, want only the environment's node", foreign.requests)
 	}
-	if annotations := coordinator.ProxyFailureAnnotations([]string{"node-foreign"}); len(annotations) != 0 {
+	if annotations := coordinator.AvailabilityAnnotations([]string{"node-foreign"}); len(annotations) != 0 {
 		t.Fatalf("annotations for the panel-added node = %+v, want none", annotations)
 	}
 }
@@ -122,21 +122,21 @@ func TestProxyFailureRetriesARefusedStartAtTheNextCheck(t *testing.T) {
 	controller := &fakeSessionController{enabled: true, err: remoteprobe.ErrUnavailableAgent}
 	now := time.Date(2026, 9, 1, 1, 0, 0, 0, time.UTC)
 	coordinator := newProxyFailureCoordinator(t, controller, &now)
-	failures := []ProxyFailure{{StableID: "node-one", Since: now}}
+	failures := []AvailabilityFailure{{StableID: "node-one", Since: now}}
 
-	coordinator.StartProxyFailureDiagnostics(failures)
-	annotation := coordinator.ProxyFailureAnnotations([]string{"node-one"})["node-one"]
+	coordinator.StartAvailabilityDiagnostics(failures)
+	annotation := coordinator.AvailabilityAnnotations([]string{"node-one"})["node-one"]
 	if annotation.State != speedtest.AgentDiagnosticUnavailable || annotation.Detail != "no healthy idle diagnostic agent is connected" {
 		t.Fatalf("annotation = %+v, want the refusal", annotation)
 	}
 
 	controller.err = nil
 	now = now.Add(5 * time.Minute)
-	coordinator.StartProxyFailureDiagnostics(failures)
+	coordinator.StartAvailabilityDiagnostics(failures)
 	if len(controller.requests) != 2 {
 		t.Fatalf("creates = %d, want the refused start asked again", len(controller.requests))
 	}
-	if annotation := coordinator.ProxyFailureAnnotations([]string{"node-one"})["node-one"]; annotation.State != speedtest.AgentDiagnosticRunning {
+	if annotation := coordinator.AvailabilityAnnotations([]string{"node-one"})["node-one"]; annotation.State != speedtest.AgentDiagnosticRunning {
 		t.Fatalf("annotation state = %q, want running", annotation.State)
 	}
 }
@@ -147,12 +147,12 @@ func TestProxyFailureRetriesAnAbandonedSession(t *testing.T) {
 	controller := &fakeSessionController{enabled: true}
 	now := time.Date(2026, 9, 1, 1, 0, 0, 0, time.UTC)
 	coordinator := newProxyFailureCoordinator(t, controller, &now)
-	failures := []ProxyFailure{{StableID: "node-one", Since: now}}
+	failures := []AvailabilityFailure{{StableID: "node-one", Since: now}}
 
-	coordinator.StartProxyFailureDiagnostics(failures)
+	coordinator.StartAvailabilityDiagnostics(failures)
 	controller.expire("diag-one", nil)
 	now = now.Add(5 * time.Minute)
-	coordinator.StartProxyFailureDiagnostics(failures)
+	coordinator.StartAvailabilityDiagnostics(failures)
 	if len(controller.requests) != 2 {
 		t.Fatalf("creates = %d, want the abandoned episode asked again", len(controller.requests))
 	}
@@ -166,18 +166,18 @@ func TestProxyFailureNewEpisodeReusesAFreshAnswerAndProbesAfterTheCooldown(t *te
 	now := time.Date(2026, 9, 1, 1, 0, 0, 0, time.UTC)
 	coordinator := newProxyFailureCoordinator(t, controller, &now)
 
-	coordinator.StartProxyFailureDiagnostics([]ProxyFailure{{StableID: "node-one", Since: now}})
+	coordinator.StartAvailabilityDiagnostics([]AvailabilityFailure{{StableID: "node-one", Since: now}})
 	answer(controller, "diag-one", diagnostics.ProbeStatusProxyFailure)
 	now = now.Add(5 * time.Minute)
-	coordinator.StartProxyFailureDiagnostics(nil)
+	coordinator.StartAvailabilityDiagnostics(nil)
 	now = now.Add(5 * time.Minute)
-	coordinator.StartProxyFailureDiagnostics([]ProxyFailure{{StableID: "node-one", Since: now}})
+	coordinator.StartAvailabilityDiagnostics([]AvailabilityFailure{{StableID: "node-one", Since: now}})
 	if len(controller.requests) != 1 {
 		t.Fatalf("creates inside the cooldown = %d, want the fresh answer reused", len(controller.requests))
 	}
 
 	now = now.Add(10 * time.Minute)
-	coordinator.StartProxyFailureDiagnostics([]ProxyFailure{{StableID: "node-one", Since: now}})
+	coordinator.StartAvailabilityDiagnostics([]AvailabilityFailure{{StableID: "node-one", Since: now}})
 	if len(controller.requests) != 2 {
 		t.Fatalf("creates after the cooldown = %d, want a probe for the new episode", len(controller.requests))
 	}
@@ -189,12 +189,12 @@ func TestProxyFailureReleasesARecoveredNodeAfterTheCooldown(t *testing.T) {
 	controller := &fakeSessionController{enabled: true}
 	now := time.Date(2026, 9, 1, 1, 0, 0, 0, time.UTC)
 	coordinator := newProxyFailureCoordinator(t, controller, &now)
-	coordinator.StartProxyFailureDiagnostics([]ProxyFailure{{StableID: "node-one", Since: now}})
+	coordinator.StartAvailabilityDiagnostics([]AvailabilityFailure{{StableID: "node-one", Since: now}})
 	answer(controller, "diag-one", diagnostics.ProbeStatusProxyFailure)
 
 	now = now.Add(20 * time.Minute)
-	coordinator.StartProxyFailureDiagnostics(nil)
-	if annotations := coordinator.ProxyFailureAnnotations([]string{"node-one"}); len(annotations) != 0 {
+	coordinator.StartAvailabilityDiagnostics(nil)
+	if annotations := coordinator.AvailabilityAnnotations([]string{"node-one"}); len(annotations) != 0 {
 		t.Fatalf("annotations after recovery = %+v, want none", annotations)
 	}
 }
@@ -205,18 +205,18 @@ func TestProxyFailureVerdictOutlivesTheSession(t *testing.T) {
 	controller := &fakeSessionController{enabled: true}
 	now := time.Date(2026, 9, 1, 1, 0, 0, 0, time.UTC)
 	coordinator := newProxyFailureCoordinator(t, controller, &now)
-	failures := []ProxyFailure{{StableID: "node-one", Since: now}}
-	coordinator.StartProxyFailureDiagnostics(failures)
+	failures := []AvailabilityFailure{{StableID: "node-one", Since: now}}
+	coordinator.StartAvailabilityDiagnostics(failures)
 	answer(controller, "diag-one", diagnostics.ProbeStatusProxyFailure)
-	coordinator.ProxyFailureAnnotations([]string{"node-one"})
+	coordinator.AvailabilityAnnotations([]string{"node-one"})
 
 	delete(controller.views, "diag-one")
 	now = now.Add(6 * time.Hour)
-	coordinator.StartProxyFailureDiagnostics(failures)
+	coordinator.StartAvailabilityDiagnostics(failures)
 	if len(controller.requests) != 1 {
 		t.Fatalf("creates after eviction = %d, want the answered episode left alone", len(controller.requests))
 	}
-	if annotation := coordinator.ProxyFailureAnnotations([]string{"node-one"})["node-one"]; annotation.State != speedtest.AgentDiagnosticReproduced {
+	if annotation := coordinator.AvailabilityAnnotations([]string{"node-one"})["node-one"]; annotation.State != speedtest.AgentDiagnosticReproduced {
 		t.Fatalf("annotation after eviction = %+v, want the kept verdict", annotation)
 	}
 }
@@ -232,14 +232,14 @@ func TestProxyFailureSharesCapacityAndIdleWaitWithSpeedProbes(t *testing.T) {
 	coordinator.StartSpeedDiagnostics(speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{
 		{StableID: "node-speed", Error: "timeout"},
 	}}, 10)
-	coordinator.StartProxyFailureDiagnostics([]ProxyFailure{{StableID: "node-one", Since: now}})
-	annotation := coordinator.ProxyFailureAnnotations([]string{"node-one"})["node-one"]
+	coordinator.StartAvailabilityDiagnostics([]AvailabilityFailure{{StableID: "node-one", Since: now}})
+	annotation := coordinator.AvailabilityAnnotations([]string{"node-one"})["node-one"]
 	if annotation.State != speedtest.AgentDiagnosticUnavailable || annotation.Detail != "automation capacity is busy" {
 		t.Fatalf("annotation = %+v, want the shared limit reached", annotation)
 	}
 
 	controller.complete("diag-one")
-	coordinator.StartProxyFailureDiagnostics([]ProxyFailure{{StableID: "node-one", Since: now}})
+	coordinator.StartAvailabilityDiagnostics([]AvailabilityFailure{{StableID: "node-one", Since: now}})
 	if got := coordinator.measuringCount(map[string]bool{"node-one": true}); got != 1 {
 		t.Fatalf("probes measuring node-one = %d, want the proxy-failure probe counted", got)
 	}
@@ -248,19 +248,19 @@ func TestProxyFailureSharesCapacityAndIdleWaitWithSpeedProbes(t *testing.T) {
 	}
 }
 
-func TestAwaitProxyFailureReturnsOnceTheProbeAnswers(t *testing.T) {
+func TestAwaitAvailabilityReturnsOnceTheProbeAnswers(t *testing.T) {
 	controller := &fakeSessionController{enabled: true}
 	now := time.Date(2026, 9, 1, 1, 0, 0, 0, time.UTC)
 	coordinator := newProxyFailureCoordinator(t, controller, &now)
-	coordinator.StartProxyFailureDiagnostics([]ProxyFailure{{StableID: "node-one", Since: now}})
+	coordinator.StartAvailabilityDiagnostics([]AvailabilityFailure{{StableID: "node-one", Since: now}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if annotation := coordinator.AwaitProxyFailure(ctx, []string{"node-one"})["node-one"]; annotation.State != speedtest.AgentDiagnosticRunning {
+	if annotation := coordinator.AwaitAvailability(ctx, []string{"node-one"})["node-one"]; annotation.State != speedtest.AgentDiagnosticRunning {
 		t.Fatalf("annotation at the deadline = %+v, want still running", annotation)
 	}
 	answer(controller, "diag-one", diagnostics.ProbeStatusProxyFailure)
-	if annotation := coordinator.AwaitProxyFailure(context.Background(), []string{"node-one"})["node-one"]; annotation.State != speedtest.AgentDiagnosticReproduced {
+	if annotation := coordinator.AwaitAvailability(context.Background(), []string{"node-one"})["node-one"]; annotation.State != speedtest.AgentDiagnosticReproduced {
 		t.Fatalf("annotation = %+v, want the answer", annotation)
 	}
 }

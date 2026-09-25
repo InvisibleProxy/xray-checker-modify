@@ -1,6 +1,6 @@
 # Remote Diagnostics через distributed probe-agent'ов
 
-> Статус: защищённый manual workflow реализован полностью; из этапа 2 реализован opt-in `auto_speed_fallback` с одним агентом, cooldown/concurrency, read-only обогащением уже разрешённого Telegram speed alert и справочной записью пробы рядом с замером в speedtest history.
+> Статус: защищённый manual workflow реализован полностью; из этапа 2 реализованы opt-in `auto_speed_fallback`, `auto_proxy_failure` и `auto_offline` с одним агентом, cooldown/concurrency, read-only обогащением уже разрешённых Telegram-алертов, справочной записью пробы рядом с замером и отдельным журналом вердиктов `data/diagnostic_verdicts.jsonl`.
 
 ## Текущее состояние реализации
 
@@ -27,8 +27,16 @@
 - cancel, sanitized JSON export и вероятностная summary без operational side effects.
 - opt-in `auto_speed_fallback`, выбирающий одну healthy idle probe — по ранжированию матрицы достижимости, когда sweep её поддерживает, и никогда не ту, чей expected source IP совпадает с адресом проверяемой ноды (имя ноды резолвится; не разрешилось — проба не запускается), — с per-node cooldown, concurrency limit, повтором отложенного старта внутри окна ожидания алерта, bounded read-only alert enrichment и справочной записью пробы в speedtest history.
 - opt-in `reachability_sweep`: периодический обход «каждая нода × каждый подключённый агент» с persisted матрицей вердиктов, hysteresis по streak и отдельной вкладкой `Reachability`.
+- opt-in `auto_offline` (`PROBE_AUTOMATION_OFFLINE_ENABLED`): одна проба на эпизод недоступности ноды (TCP и ping не проходят), тем же туннельным профилем, что `auto_proxy_failure`. Из сети с фильтрацией так же выглядит заблокированный IP, и ответ агента разделяет «нода жива, заблокирован путь checker-а» и «отказал хост или хостер». Эпизод другого вида — `proxy_failure`, сменившийся `offline`, — получает собственную пробу даже внутри cooldown: ответ про туннель не отвечает на вопрос «есть ли нода вообще».
+- каталог серверов замера `diagnostics.SpeedServers()` и capability `speed-servers-v1`: задание download может назвать сервер каталога — ID, не URL, — и агент качает с того же сервера, что прогон. Сопоставление по хосту test URL прогона; сервер вне каталога и агент без capability дают «несопоставимо», а не ложное «воспроизведено».
+- единая функция вердикта `diagnostics.JudgeSpeed`/`JudgeAvailability` для алертов, истории замеров, summary сессии и журнала. По скорости: `reproduced` — тот же сервер и скорость агента не выше `PathRateFactor` (3) от скорости прогона; `path_limited` — агент в разы быстрее прогона через ту же ноду, потеря на пути checker-а (reason отмечает, если и агент ниже порога); `inconclusive` — другой сервер или скорость на границе порога; `not_reproduced` — агент дал порог. Пропустить 30-минутное подтверждение по-прежнему может только `reproduced`.
+- журнал вердиктов `data/diagnostic_verdicts.jsonl` (`verdictlog/`): одна строка на итоговый вердикт автоматической пробы и на каждую несовпавшую ячейку sweep-а, с обеими сторонами сравнения; retention `DIAGNOSTIC_VERDICT_RETENTION_DAYS`. Не входит в backup и никем из operational кода не читается; API `GET /api/v1/admin/diagnostic-verdicts`.
 
-Manager diagnostic sessions связан с отдельным manual admin workflow, agent endpoints, узким automation coordinator-ом и sweep-ом достижимости. Он не является writer-ом availability или speedtest workflow: код не меняет status/incidents/retries/Remnawave и не влияет на классификацию замеров. Единственная запись в persisted state — справочная копия автоматической пробы рядом с вызвавшим её замером, которую переносит `speedprobe/`; сам manager и координатор по-прежнему без callbacks в operational state. Automatic trigger реализован для неразрешённого замера скорости и для периодического sweep-а; availability-trigger по-прежнему не реализован.
+Manager diagnostic sessions связан с отдельным manual admin workflow, agent endpoints, узким automation coordinator-ом и sweep-ом достижимости. Он не является writer-ом availability или speedtest workflow: код не меняет status/incidents/retries/Remnawave и не влияет на классификацию замеров. Persisted записи — справочная копия автоматической пробы рядом с вызвавшим её замером, которую переносит `speedprobe/`, и отдельный журнал вердиктов, который никто из operational кода не читает; сам manager и координатор по-прежнему без callbacks в operational state. Automatic trigger реализован для неразрешённого замера скорости, для `proxy_failure` и `offline` по доступности и для периодического sweep-а.
+
+### Совместимость версий
+
+Поле `speedServerId` в observation подписывается агентом только тогда, когда задание назвало сервер, а задание называет его только агенту с `speed-servers-v1`. Поэтому старый агент работает с новым контроллером (он не видит сервер и мерит свой URL — вердикт «несопоставимо»), и новый агент — со старым контроллером (тот сервер не называет, поле в подпись не попадает). Сопоставимые вердикты по скорости появляются, когда обновлены обе стороны.
 
 ### Sweep достижимости
 
@@ -306,9 +314,13 @@ Diagnostic summary не должен использовать формулиро
 
 Это позволяет проверить полезность функции без новой persisted schema и риска случайно связать diagnostics с основной history.
 
+### Журнал вердиктов (реализовано)
+
+История хранит не сессии, а их итог: `data/diagnostic_verdicts.jsonl`, по строке на итоговый вердикт, с retention `DIAGNOSTIC_VERDICT_RETENTION_DAYS` (90 дней по умолчанию) и потолком размера. Строка содержит идентификаторы, коды и числа обеих сторон сравнения — без URL, конфигов и сырых ошибок. Правила ниже выполнены для него так же, как задуманы для файла сессий.
+
 ### Возможное отдельное хранение позже
 
-Если потребуется история расследований, она должна храниться в отдельном versioned файле, например `diagnostic_sessions.json`, с собственным retention.
+Если потребуется история расследований целиком, она должна храниться в отдельном versioned файле, например `diagnostic_sessions.json`, с собственным retention.
 
 Этот файл:
 
@@ -426,6 +438,8 @@ Metadata network condition используется только для выбо
 - Реализованы direct connectivity и alternative endpoint probes; automatic download использует status как alternative.
 - Operational retry/alert decision выполняется до ожидания агента; automatic session остаётся полностью изолированной.
 - Реализован opt-in `auto_proxy_failure` (`PROBE_AUTOMATION_PROXY_FAILURE_ENABLED`): одна проба на эпизод `proxy_failure` профилем, соответствующим `CHECK_METHOD`. Повтор — только если проба не дала observation. Лимит одновременных сессий общий с `auto_speed_fallback`. Вердикт дополняет уже решённый down-алерт и не влияет ни на его отправку, ни на время.
+- Реализован opt-in `auto_offline` (`PROBE_AUTOMATION_OFFLINE_ENABLED`) по тем же правилам эпизода; алерт получает ответ только на свой вид сбоя.
+- Реализованы сопоставимый сервер замера (каталог + `speed-servers-v1`), вердикты `path_limited`/`inconclusive` и журнал вердиктов.
 
 ### Этап 3. Несколько агентов и улучшение подсказок
 

@@ -12,6 +12,7 @@ import (
 	"xray-checker/probeagent"
 	"xray-checker/remoteprobe"
 	"xray-checker/speedtest"
+	"xray-checker/verdictlog"
 )
 
 const (
@@ -51,12 +52,28 @@ type Config struct {
 	// should match the controller's own availability check method, so the agent
 	// is asked the same question the check failed; empty means the status probe.
 	ProxyFailureProfileID string
+	// OfflineEnabled adds the trigger for a node the availability check cannot
+	// reach at all. It is its own opt-in for the same reason the proxy-failure
+	// one is: it spends agent slots on every such episode.
+	OfflineEnabled bool
+	// OfflineProfileID is the probe an offline session asks for; empty means the
+	// proxy-failure profile. A tunnelled probe is required: an agent that gets
+	// through the tunnel proves the node works, and one that fails still collects
+	// TCP and ping evidence on its own path.
+	OfflineProfileID string
+	// Journal receives every final availability verdict. The speed verdicts are
+	// journaled by whoever awaits them to the end (see speedprobe), because only
+	// that caller knows when an answer is final. Nil forgets them.
+	Journal verdictlog.Recorder
+	// NodeName labels a journal line with the name the operator reads. Optional.
+	NodeName func(stableID string) string
 }
 
 type Snapshot struct {
 	Enabled              bool `json:"enabled"`
 	SpeedFallbackEnabled bool `json:"speedFallbackEnabled"`
 	ProxyFailureEnabled  bool `json:"proxyFailureEnabled"`
+	OfflineEnabled       bool `json:"offlineEnabled"`
 	CooldownSeconds      int  `json:"cooldownSeconds"`
 	AlertWaitSeconds     int  `json:"alertWaitSeconds"`
 	MaxConcurrent        int  `json:"maxConcurrent"`
@@ -112,13 +129,13 @@ type Coordinator struct {
 	controller SessionController
 	agents     AgentSource
 	entries    map[string]entry
-	// proxyFailures is kept apart from entries on purpose. The two automations
-	// ask different questions of the same node — a transfer against a threshold,
-	// and whether the tunnel carries traffic at all — so a speed run must not
-	// read its verdict off a proxy-failure session or the other way round. They
-	// share the concurrency limit and the idle wait, because the agents they
-	// spend are the same.
-	proxyFailures map[string]proxyFailureEntry
+	// availability is kept apart from entries on purpose. The automations ask
+	// different questions of the same node — a transfer against a threshold, and
+	// whether the node works at all — so a speed run must not read its verdict
+	// off an availability session or the other way round. They share the
+	// concurrency limit and the idle wait, because the agents they spend are the
+	// same.
+	availability map[string]availabilityEntry
 }
 
 func New(config Config, controller SessionController, agents AgentSource) (*Coordinator, error) {
@@ -138,6 +155,10 @@ func New(config Config, controller SessionController, agents AgentSource) (*Coor
 	if config.ProxyFailureProfileID == "" {
 		config.ProxyFailureProfileID = diagnostics.ProfileStatus
 	}
+	config.OfflineProfileID = strings.TrimSpace(config.OfflineProfileID)
+	if config.OfflineProfileID == "" {
+		config.OfflineProfileID = config.ProxyFailureProfileID
+	}
 	if controller == nil || agents == nil || config.Cooldown < time.Minute || config.AlertWait < 0 ||
 		config.MaxConcurrent < 1 || config.PollInterval <= 0 {
 		return nil, errors.New("invalid agent automation configuration")
@@ -147,9 +168,14 @@ func New(config Config, controller SessionController, agents AgentSource) (*Coor
 		// TCP and ping, and what failed is traffic through the tunnel.
 		return nil, errors.New("invalid agent automation configuration: proxy failure profile must be a tunnelled probe")
 	}
+	if descriptor, ok := diagnostics.ProfileByID(config.OfflineProfileID); !ok || !descriptor.Tunnelled {
+		// A transport probe would only say whether the port answers, and a node
+		// that answers TCP but carries no traffic is still down for a client.
+		return nil, errors.New("invalid agent automation configuration: offline profile must be a tunnelled probe")
+	}
 	return &Coordinator{
 		config: config, controller: controller, agents: agents,
-		entries: make(map[string]entry), proxyFailures: make(map[string]proxyFailureEntry),
+		entries: make(map[string]entry), availability: make(map[string]availabilityEntry),
 	}, nil
 }
 
@@ -176,6 +202,7 @@ func (c *Coordinator) Snapshot() Snapshot {
 		Enabled:              c.Enabled(),
 		SpeedFallbackEnabled: c.Enabled(),
 		ProxyFailureEnabled:  c.ProxyFailureEnabled(),
+		OfflineEnabled:       c.OfflineEnabled(),
 		CooldownSeconds:      int(c.config.Cooldown / time.Second),
 		AlertWaitSeconds:     int(c.config.AlertWait / time.Second),
 		MaxConcurrent:        c.config.MaxConcurrent,
@@ -226,6 +253,10 @@ type startRequest struct {
 	// fraction of it. Zero means there is no number to compare, which is the
 	// case for every technical failure; see speedAutomationCandidates.
 	shortfall float64
+	// speedServerID is the catalogue server the run measured, empty when its
+	// test URL is not in the catalogue. The agent is asked for the same server,
+	// and only a rate from it can reproduce the run's.
+	speedServerID string
 	// notBefore paces the retries of a deferred start.
 	notBefore time.Time
 }
@@ -269,6 +300,11 @@ func speedAutomationCandidates(results []speedtest.Result, source string, thresh
 			source: source, outcome: outcome, threshold: effective,
 			observedMbps: result.Mbps, measuredBytes: result.DownloadedBytes,
 			fallbackAttempts: result.FallbackAttempts,
+		}
+		// URL is the server the reported rate came from, the reserve one when a
+		// reserve replaced the primary; that is the server to compare against.
+		if server, ok := diagnostics.SpeedServerForURL(result.URL); ok {
+			candidate.speedServerID = server.ID
 		}
 		if outcome == diagnostics.AutomationOutcomeLowSpeed && effective > 0 {
 			candidate.shortfall = (effective - result.Mbps) / effective
@@ -364,6 +400,7 @@ func (c *Coordinator) startSpeed(request startRequest) Handle {
 			ObservedMbps:     request.observedMbps,
 			MeasuredBytes:    request.measuredBytes,
 			FallbackAttempts: request.fallbackAttempts,
+			SpeedServerID:    request.speedServerID,
 		},
 	})
 	if err != nil {
@@ -529,9 +566,9 @@ func (c *Coordinator) measuringCount(wanted map[string]bool) int {
 			sessions = append(sessions, current.handle.SessionID)
 		}
 	}
-	// A proxy-failure probe holds the node just the same: a speed run started
+	// An availability probe holds the node just the same: a speed run started
 	// under it would share the node's capacity with the agent's own transfer.
-	for stableID, current := range c.proxyFailures {
+	for stableID, current := range c.availability {
 		if len(wanted) > 0 && !wanted[stableID] {
 			continue
 		}
@@ -649,46 +686,30 @@ func (c *Coordinator) annotation(handle Handle) speedtest.AgentDiagnostic {
 		annotation.AlternativeProfile = observation.AlternativeEndpoint.ProfileID
 		annotation.AlternativeStatus = string(observation.AlternativeEndpoint.Status)
 	}
-	if !record.Reliable {
-		annotation.State = speedtest.AgentDiagnosticUnreliable
-		annotation.Detail = "agent direct connectivity control failed"
-		return annotation
+	// The verdict comes from the diagnostics package, the one place that
+	// judges an observation, so an alert, a stored probe, the session summary
+	// and the verdict journal can never disagree about the same answer.
+	var verdict diagnostics.Verdict
+	var reason string
+	if availabilityKind(handle.request.kind) {
+		verdict, reason = diagnostics.JudgeAvailability(observation, record.Reliable)
+	} else {
+		verdict, reason = diagnostics.JudgeSpeed(diagnostics.SpeedEvidence{
+			Outcome:       handle.Outcome,
+			ThresholdMbps: handle.Threshold,
+			ObservedMbps:  handle.request.observedMbps,
+			ServerID:      handle.request.speedServerID,
+		}, observation, record.Reliable)
 	}
-	if observation.AlternativeEndpoint != nil && observation.AlternativeEndpoint.Status == diagnostics.ProbeStatusOnline {
-		annotation.State = speedtest.AgentDiagnosticNotReproduced
-		annotation.Detail = "the agent alternative tunnelled endpoint worked"
-		return annotation
-	}
-	if observation.Status == diagnostics.ProbeStatusOnline {
-		// The agent's own rate decides, whichever outcome sent it. A run that
-		// timed out and an agent that gets through at half the threshold is not
-		// a node the agent found healthy: calling that "not reproduced" sends an
-		// operator to look at the checker while the node is the thing that is
-		// slow. It was the shape of the very first alerts this handled — a node
-		// reported as fine at 42 Mbps against a threshold of 100.
-		if handle.Threshold > 0 && observation.Throughput != nil {
-			// The agent reports whole Mbps, so its true rate lies in
-			// [Mbps, Mbps+1). Only claim the slowdown was reproduced when the
-			// whole interval is below the threshold; near the boundary the
-			// evidence cannot tell, and a false "reproduced" is the costly one.
-			if float64(observation.Throughput.Mbps)+1 <= handle.Threshold {
-				annotation.State = speedtest.AgentDiagnosticReproduced
-				return annotation
-			}
-		}
-		// A slowdown answered with no rate at all settles nothing, and saying so
-		// is the honest reading. A technical failure is different: the agent got
-		// through, which is an answer on its own terms.
-		if handle.Outcome == diagnostics.AutomationOutcomeLowSpeed && handle.Threshold > 0 && observation.Throughput == nil {
-			annotation.State = speedtest.AgentDiagnosticUnreliable
-			annotation.Detail = "agent download observation has no throughput evidence"
-			return annotation
-		}
-		annotation.State = speedtest.AgentDiagnosticNotReproduced
-		return annotation
-	}
-	annotation.State = speedtest.AgentDiagnosticReproduced
+	annotation.State = string(verdict)
+	annotation.Detail = reason
 	return annotation
+}
+
+// availabilityKind reports the automations that ask whether a node works at
+// all, as opposed to how fast it is.
+func availabilityKind(kind string) bool {
+	return kind == diagnostics.AutomationKindProxyFailure || kind == diagnostics.AutomationKindOffline
 }
 
 // requestTask describes the job that was asked for, from the request alone. It
@@ -715,6 +736,7 @@ func requestTask(request startRequest) *speedtest.AgentProbeTask {
 		ObservedMbps:     request.observedMbps,
 		MeasuredBytes:    request.measuredBytes,
 		FallbackAttempts: request.fallbackAttempts,
+		SpeedServerID:    request.speedServerID,
 	}
 }
 
@@ -735,6 +757,7 @@ func sessionTask(session diagnostics.DiagnosticSession, request startRequest) *s
 		task.ObservedMbps = context.ObservedMbps
 		task.MeasuredBytes = context.MeasuredBytes
 		task.FallbackAttempts = context.FallbackAttempts
+		task.SpeedServerID = context.SpeedServerID
 	}
 	task.RequestedAgents = append([]string(nil), session.RequestedAgents...)
 	task.CreatedAt = session.CreatedAt
@@ -746,6 +769,7 @@ func sessionTask(session diagnostics.DiagnosticSession, request startRequest) *s
 		task.Method = string(job.Profile.Method)
 		task.AlternativeProfileID = job.Profile.AlternativeProfileID
 		task.DownloadBytes = job.Profile.DownloadBytes
+		task.RequestedServerID = job.Profile.ServerID
 		task.JobState = string(job.State)
 		task.ExpiresAt = job.ExpiresAt
 	}
@@ -770,6 +794,7 @@ func probeObservation(record diagnostics.AcceptedObservation) *speedtest.AgentPr
 		Ping:               probeCheck(observation.Ping),
 		DirectConnectivity: probeCheck(observation.DirectConnectivity),
 		AgentVersion:       observation.AgentVersion,
+		SpeedServerID:      observation.SpeedServerID,
 		Reliable:           record.Reliable,
 	}
 	if alternative := observation.AlternativeEndpoint; alternative != nil {
@@ -851,8 +876,8 @@ func (c *Coordinator) abandonedLocked(handle Handle) bool {
 	return view.Session.State.Terminal() && len(view.Session.AgentObservations) == 0
 }
 
-// activeLocked counts sessions of both automations: the limit is on agents
-// spent, and a speed probe and a proxy-failure probe spend the same ones.
+// activeLocked counts sessions of every automation: the limit is on agents
+// spent, and a speed probe and an availability probe spend the same ones.
 func (c *Coordinator) activeLocked() int {
 	active := 0
 	for _, current := range c.entries {
@@ -860,7 +885,7 @@ func (c *Coordinator) activeLocked() int {
 			active++
 		}
 	}
-	for _, current := range c.proxyFailures {
+	for _, current := range c.availability {
 		if c.inFlightLocked(current.handle) {
 			active++
 		}

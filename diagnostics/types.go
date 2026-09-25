@@ -13,8 +13,13 @@ const (
 type Trigger string
 
 const (
-	TriggerManual               Trigger = "manual"
-	TriggerAutoProxyFailure     Trigger = "auto_proxy_failure"
+	TriggerManual           Trigger = "manual"
+	TriggerAutoProxyFailure Trigger = "auto_proxy_failure"
+	// TriggerAutoOffline is the availability check reporting a node it cannot
+	// reach at all: neither the tunnel, nor TCP, nor ping. From a checker inside a
+	// filtered network that is also what a blocked IP looks like, and only a
+	// second vantage point tells the two apart.
+	TriggerAutoOffline          Trigger = "auto_offline"
 	TriggerAutoCheckEndpoint    Trigger = "auto_check_endpoint"
 	TriggerAutoAmbiguousFailure Trigger = "auto_ambiguous_failure"
 	TriggerAutoSpeedFallback    Trigger = "auto_speed_fallback"
@@ -226,6 +231,10 @@ const (
 	// host answers but whose tunnel does not. The local failure itself travels in
 	// the session's LocalResultSnapshot, so the context carries nothing else.
 	AutomationKindProxyFailure = "proxy_failure"
+	// AutomationKindOffline is the availability check reporting a node whose
+	// tunnel, TCP port and ping all failed. Like a proxy failure, the local
+	// evidence travels in the session's LocalResultSnapshot.
+	AutomationKindOffline = "offline"
 	// AutomationSourceAvailability names the periodic availability check as the
 	// origin of a proxy-failure session, the way a speed session names its run.
 	AutomationSourceAvailability = "availability"
@@ -235,6 +244,11 @@ const (
 // accepts; see validateCreateSessionRequest.
 func ProxyFailureAutomationContext() AutomationContext {
 	return AutomationContext{Kind: AutomationKindProxyFailure, Source: AutomationSourceAvailability}
+}
+
+// OfflineAutomationContext is the only context an offline session accepts.
+func OfflineAutomationContext() AutomationContext {
+	return AutomationContext{Kind: AutomationKindOffline, Source: AutomationSourceAvailability}
 }
 
 // AutomationContext records only the bounded facts that explain why the
@@ -253,6 +267,11 @@ type AutomationContext struct {
 	// and a short transfer spends its whole life in TCP slow start, so the
 	// smaller one reads low for reasons that have nothing to do with the node.
 	MeasuredBytes int64 `json:"measuredBytes,omitempty"`
+	// SpeedServerID is the catalogue server the run measured, when its test URL
+	// is in the catalogue. It is an ID, never the URL: the session and its export
+	// stay free of addresses, and an agent that supports the catalogue is asked
+	// to download from the same server so the two rates can be compared.
+	SpeedServerID string `json:"speedServerId,omitempty"`
 }
 
 // Bounds on a requested transfer size. The floor keeps a request from asking
@@ -288,6 +307,11 @@ type TestProfile struct {
 	// amount, and the answer is still a valid observation — just not a directly
 	// comparable rate. It carries no URL, so it cannot redirect the fetch.
 	DownloadBytes int64 `json:"downloadBytes,omitempty"`
+	// ServerID asks a download probe to measure a catalogue server instead of
+	// the agent's own download URL; see SpeedServer. An agent that predates the
+	// catalogue ignores it, and one that does not know the ID measures its own
+	// URL — either way the observation says which server it actually used.
+	ServerID string `json:"serverId,omitempty"`
 }
 
 type DiagnosticJob struct {
@@ -341,7 +365,12 @@ type Observation struct {
 	TLS          *TLSEvidence           `json:"tls,omitempty"`
 	DNS          *DNSEvidence           `json:"dns,omitempty"`
 	AgentVersion string                 `json:"agentVersion"`
-	Signature    []byte                 `json:"signature"`
+	// SpeedServerID names the catalogue server the download probe measured. It
+	// is set only when the job asked for one and the agent used it, so an agent
+	// talking to a controller that predates the catalogue never signs a field
+	// that controller would drop before verifying the signature.
+	SpeedServerID string `json:"speedServerId,omitempty"`
+	Signature     []byte `json:"signature"`
 }
 
 type AcceptedObservation struct {

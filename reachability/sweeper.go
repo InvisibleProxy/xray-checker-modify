@@ -69,6 +69,10 @@ type Config struct {
 	// sweep without this package taking a dependency on the logger, which is
 	// what keeps it testable without capturing output.
 	OnSweep func(Summary)
+	// OnCell reports every cell the moment it is recorded, with the node it is
+	// about. The matrix keeps only the latest cell per pair; a caller that wants
+	// the history of disagreements — the verdict journal — takes it from here.
+	OnCell func(Target, Cell)
 }
 
 // Sweeper walks the node list once per agent and records what each agent saw.
@@ -370,7 +374,11 @@ func (s *Sweeper) sweepPair(ctx context.Context, agentID string, target Target) 
 		return Summary{Timeouts: 1}, false
 	}
 
-	s.matrix.Record(target.StableID, CellFor(session, agentID, s.config.Now()))
+	cell := CellFor(session, agentID, s.config.Now())
+	s.matrix.Record(target.StableID, cell)
+	if s.config.OnCell != nil {
+		s.config.OnCell(target, cell)
+	}
 	// The session has served its purpose. Deleting it keeps the sweep from
 	// filling the operator's diagnostics list with hundreds of entries and
 	// bounds the manager's in-memory state, while the cell keeps the part worth

@@ -65,6 +65,9 @@ func main() {
 		// stability, TLS and DNS profiles. An older agent advertises only v1 and
 		// is never offered them.
 		diagnostics.CapabilityDiagnosticV2,
+		// speed-servers-v1: a download job may name a catalogue server, so the
+		// agent measures the server the run measured and the rates compare.
+		diagnostics.CapabilitySpeedServersV1,
 	}
 
 	// Printed before the first connection attempt so a container that never
@@ -170,6 +173,9 @@ func describeResult(job probeagent.JobFinished) string {
 	}
 	if job.ThroughputMbps > 0 {
 		parts = append(parts, fmt.Sprintf("%d Mbps", job.ThroughputMbps))
+	}
+	if job.SpeedServerID != "" {
+		parts = append(parts, "server "+job.SpeedServerID)
 	}
 	if job.FailureCode != "" {
 		failure := job.FailureCode

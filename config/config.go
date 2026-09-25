@@ -3,7 +3,9 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/alecthomas/kong"
 )
@@ -81,6 +83,17 @@ type CLI struct {
 		TimeoutSeconds           int    `name:"remnawave-api-timeout" help:"Remnawave API request timeout in seconds" default:"10" env:"REMNAWAVE_API_TIMEOUT_SECONDS"`
 		ReconcileIntervalSeconds int    `name:"remnawave-reconcile-interval" help:"Managed announce reconciliation interval in seconds" default:"60" env:"REMNAWAVE_RECONCILE_INTERVAL_SECONDS"`
 		TopologyIntervalSeconds  int    `name:"remnawave-topology-interval" help:"Remnawave hosts and squads refresh interval in seconds" default:"300" env:"REMNAWAVE_TOPOLOGY_INTERVAL_SECONDS"`
+		// Node telemetry reads GET /api/nodes (token scope nodes:list) to put the
+		// panel's view of a node — online users, memory, load, whether the panel
+		// reaches it — into the checker's alerts. It needs only the API URL and
+		// token, not the announce integration.
+		NodeTelemetryEnabled         bool `name:"remnawave-node-telemetry" help:"Read Remnawave node telemetry (online users, memory, load, panel connectivity) into alerts; needs the nodes:list token scope" default:"true" env:"REMNAWAVE_NODE_TELEMETRY_ENABLED"`
+		NodeTelemetryIntervalSeconds int  `name:"remnawave-node-telemetry-interval" help:"Remnawave node telemetry refresh interval in seconds" default:"60" env:"REMNAWAVE_NODE_TELEMETRY_INTERVAL_SECONDS"`
+	} `embed:"" prefix:""`
+
+	PathQuality struct {
+		PeakHours    string `name:"path-quality-peak-hours" help:"Evening peak window the path-quality report singles out, as start-end hours (end exclusive, 24 = midnight)" default:"18-24" env:"PATH_QUALITY_PEAK_HOURS"`
+		PeakTimeZone string `name:"path-quality-peak-timezone" help:"IANA time zone the peak window is read in: the clients' zone, not the operator's" default:"Europe/Moscow" env:"PATH_QUALITY_PEAK_TIMEZONE"`
 	} `embed:"" prefix:""`
 
 	RemoteDiagnostics struct {
@@ -90,6 +103,8 @@ type CLI struct {
 		AutomationAlertWaitSeconds int    `name:"probe-automation-alert-wait" help:"Maximum time a background Telegram speed alert waits for agent evidence" default:"90" env:"PROBE_AUTOMATION_ALERT_WAIT_SECONDS"`
 		AutomationMaxConcurrent    int    `name:"probe-automation-max-concurrent" help:"Maximum concurrent automatic diagnostic sessions" default:"2" env:"PROBE_AUTOMATION_MAX_CONCURRENT"`
 		AutomationProxyFailure     bool   `name:"probe-automation-proxy-failure" help:"Also run one isolated agent probe per episode when the availability check puts a node into proxy_failure; requires automation to be enabled" default:"false" env:"PROBE_AUTOMATION_PROXY_FAILURE_ENABLED"`
+		AutomationOffline          bool   `name:"probe-automation-offline" help:"Also run one isolated agent probe per episode when the availability check cannot reach a node at all; requires automation to be enabled" default:"false" env:"PROBE_AUTOMATION_OFFLINE_ENABLED"`
+		VerdictRetentionDays       int    `name:"diagnostic-verdict-retention" help:"How long the agent verdict journal keeps a verdict, in days" default:"90" env:"DIAGNOSTIC_VERDICT_RETENTION_DAYS"`
 		ReachabilityEnabled        bool   `name:"reachability-sweep-enabled" help:"Periodically ask every connected agent whether it can reach every node, and record the disagreements" default:"false" env:"REACHABILITY_SWEEP_ENABLED"`
 		ReachabilityIntervalMin    int    `name:"reachability-sweep-interval" help:"Gap between the end of one reachability sweep and the start of the next, in minutes" default:"60" env:"REACHABILITY_SWEEP_INTERVAL_MINUTES"`
 		ReachabilityTimeoutSeconds int    `name:"reachability-sweep-timeout" help:"How long one reachability probe may take before the sweep moves on, in seconds" default:"120" env:"REACHABILITY_SWEEP_TIMEOUT_SECONDS"`
@@ -140,6 +155,27 @@ func (c *CLI) Validate() error {
 	if c.RemoteDiagnostics.AutomationProxyFailure && !c.RemoteDiagnostics.AutomationEnabled {
 		return fmt.Errorf("--probe-automation-proxy-failure requires --remote-diagnostics-automation-enabled")
 	}
+	if c.RemoteDiagnostics.AutomationOffline && !c.RemoteDiagnostics.AutomationEnabled {
+		return fmt.Errorf("--probe-automation-offline requires --remote-diagnostics-automation-enabled")
+	}
+	// Zero keeps the default for each of the settings below; only a value that
+	// was set and cannot work is refused.
+	if c.RemoteDiagnostics.VerdictRetentionDays < 0 || c.RemoteDiagnostics.VerdictRetentionDays > 3650 {
+		return fmt.Errorf("--diagnostic-verdict-retention must be between 1 and 3650 days")
+	}
+	if c.Remnawave.NodeTelemetryIntervalSeconds != 0 && c.Remnawave.NodeTelemetryIntervalSeconds < 15 {
+		return fmt.Errorf("--remnawave-node-telemetry-interval must be at least 15 seconds")
+	}
+	if strings.TrimSpace(c.PathQuality.PeakHours) != "" {
+		if _, _, err := ParsePeakHours(c.PathQuality.PeakHours); err != nil {
+			return fmt.Errorf("--path-quality-peak-hours: %w", err)
+		}
+	}
+	if zone := strings.TrimSpace(c.PathQuality.PeakTimeZone); zone != "" {
+		if _, err := time.LoadLocation(zone); err != nil {
+			return fmt.Errorf("--path-quality-peak-timezone must be an IANA time zone such as Europe/Moscow")
+		}
+	}
 	if c.RemoteDiagnostics.ReachabilityEnabled {
 		if !c.RemoteDiagnostics.Enabled {
 			return fmt.Errorf("the reachability sweep requires Remote Diagnostics to be enabled")
@@ -176,6 +212,21 @@ func (c *CLI) Validate() error {
 		}
 	}
 	return nil
+}
+
+// ParsePeakHours reads "start-end" as whole hours, end exclusive: "18-24" is
+// 18:00 to midnight, "22-2" wraps past it.
+func ParsePeakHours(value string) (int, int, error) {
+	parts := strings.Split(strings.TrimSpace(value), "-")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("want start-end hours such as 18-24, got %q", value)
+	}
+	start, startErr := strconv.Atoi(strings.TrimSpace(parts[0]))
+	end, endErr := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if startErr != nil || endErr != nil || start < 0 || start > 23 || end < 1 || end > 24 || start == end%24 {
+		return 0, 0, fmt.Errorf("want start 0-23 and end 1-24 that differ, got %q", value)
+	}
+	return start, end, nil
 }
 
 type VersionFlag string

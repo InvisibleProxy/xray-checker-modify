@@ -326,6 +326,12 @@ func (m *DiagnosticSessionManager) AcceptObservation(observation Observation) (A
 			return AcceptedObservation{}, ErrBindingMismatch
 		}
 	}
+	// An agent may measure its own URL instead of the requested server — it may
+	// not know the ID yet — and then names no server. Naming a server it was not
+	// asked for is a binding error like any other.
+	if observation.SpeedServerID != "" && observation.SpeedServerID != job.Profile.ServerID {
+		return AcceptedObservation{}, ErrBindingMismatch
+	}
 
 	record := AcceptedObservation{
 		Observation: cloneObservation(observation),
@@ -555,7 +561,7 @@ func validateCreateSessionRequest(request CreateSessionRequest, now time.Time, m
 		return fmt.Errorf("%w: stableId is required", ErrInvalidRequest)
 	}
 	switch request.Trigger {
-	case TriggerManual, TriggerAutoProxyFailure, TriggerAutoCheckEndpoint, TriggerAutoAmbiguousFailure,
+	case TriggerManual, TriggerAutoProxyFailure, TriggerAutoOffline, TriggerAutoCheckEndpoint, TriggerAutoAmbiguousFailure,
 		TriggerAutoSpeedFallback, TriggerReachabilitySweep:
 	default:
 		return fmt.Errorf("%w: unsupported trigger", ErrInvalidRequest)
@@ -573,7 +579,8 @@ func validateCreateSessionRequest(request CreateSessionRequest, now time.Time, m
 		if context.Kind != AutomationKindSpeedFallback ||
 			(context.Outcome != AutomationOutcomeTechnical && context.Outcome != AutomationOutcomeLowSpeed) ||
 			!validToken(context.Source) || context.ThresholdMbps < 0 || context.ObservedMbps < 0 ||
-			context.MeasuredBytes < 0 || context.FallbackAttempts < 0 {
+			context.MeasuredBytes < 0 || context.FallbackAttempts < 0 ||
+			(context.SpeedServerID != "" && !validSpeedServerID(context.SpeedServerID)) {
 			return fmt.Errorf("%w: invalid speed fallback automation context", ErrInvalidRequest)
 		}
 	} else if request.Trigger == TriggerAutoProxyFailure {
@@ -582,6 +589,10 @@ func validateCreateSessionRequest(request CreateSessionRequest, now time.Time, m
 		// caller mixing the two automations up.
 		if request.AutomationContext != ProxyFailureAutomationContext() {
 			return fmt.Errorf("%w: invalid proxy failure automation context", ErrInvalidRequest)
+		}
+	} else if request.Trigger == TriggerAutoOffline {
+		if request.AutomationContext != OfflineAutomationContext() {
+			return fmt.Errorf("%w: invalid offline automation context", ErrInvalidRequest)
 		}
 	} else if request.AutomationContext != (AutomationContext{}) {
 		return fmt.Errorf("%w: automation context does not match trigger", ErrInvalidRequest)
@@ -683,6 +694,9 @@ func validateObservation(observation Observation) error {
 			return err
 		}
 	}
+	if observation.SpeedServerID != "" && !validSpeedServerID(observation.SpeedServerID) {
+		return fmt.Errorf("%w: unknown speed-test server", ErrInvalidRequest)
+	}
 	return nil
 }
 
@@ -753,6 +767,14 @@ func validateProfile(profile TestProfile) error {
 		}
 		if _, ok := ProfileDownloadBytes(profile.DownloadBytes); !ok {
 			return fmt.Errorf("%w: requested transfer size is out of range", ErrInvalidRequest)
+		}
+	}
+	if profile.ServerID != "" {
+		if profile.Method != ProbeMethodDownload {
+			return fmt.Errorf("%w: only a download probe may be given a speed-test server", ErrInvalidRequest)
+		}
+		if !validSpeedServerID(profile.ServerID) {
+			return fmt.Errorf("%w: unknown speed-test server", ErrInvalidRequest)
 		}
 	}
 	return nil

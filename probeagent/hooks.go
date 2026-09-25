@@ -71,6 +71,9 @@ type JobFinished struct {
 	// refuses to derive a verdict from it, so it belongs in the log.
 	Direct         diagnostics.CheckEvidence
 	ThroughputMbps int64
+	// SpeedServerID is the catalogue server a download measured, empty when the
+	// agent used its own download URL.
+	SpeedServerID string
 	// Alternative reports that the tunnelled probe failed and was retried
 	// against the fallback endpoint, which is what separates a dead endpoint
 	// from a dead node.
@@ -95,18 +98,19 @@ func jobStartedFrom(assignment JobAssignment, now time.Time) JobStarted {
 
 func jobFinishedFrom(observation diagnostics.Observation, elapsed time.Duration) JobFinished {
 	finished := JobFinished{
-		JobID:        observation.JobID,
-		StableID:     observation.StableID,
-		ProfileID:    observation.EndpointProfile,
-		Status:       observation.Status,
-		Latency:      time.Duration(observation.LatencyMillis) * time.Millisecond,
-		Elapsed:      elapsed,
-		FailureCode:  observation.Failure.Code,
-		FailureStage: observation.Failure.Stage,
-		TCP:          observation.TCP,
-		Ping:         observation.Ping,
-		Direct:       observation.DirectConnectivity,
-		Alternative:  observation.AlternativeEndpoint != nil,
+		JobID:         observation.JobID,
+		StableID:      observation.StableID,
+		ProfileID:     observation.EndpointProfile,
+		Status:        observation.Status,
+		Latency:       time.Duration(observation.LatencyMillis) * time.Millisecond,
+		Elapsed:       elapsed,
+		FailureCode:   observation.Failure.Code,
+		FailureStage:  observation.Failure.Stage,
+		TCP:           observation.TCP,
+		Ping:          observation.Ping,
+		Direct:        observation.DirectConnectivity,
+		SpeedServerID: observation.SpeedServerID,
+		Alternative:   observation.AlternativeEndpoint != nil,
 	}
 	if observation.Throughput != nil {
 		finished.ThroughputMbps = observation.Throughput.Mbps

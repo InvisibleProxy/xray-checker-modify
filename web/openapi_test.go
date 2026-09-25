@@ -76,6 +76,9 @@ func TestOpenAPISpecDocumentsEveryForkAdminRoute(t *testing.T) {
 		"/api/v1/admin/diagnostic-sessions/cancel",
 		"/api/v1/admin/diagnostic-sessions/export",
 		"/api/v1/admin/reachability",
+		"/api/v1/admin/diagnostic-verdicts",
+		"/api/v1/admin/path-quality",
+		"/api/v1/admin/remnawave/telemetry",
 	}
 	for _, path := range want {
 		if _, ok := paths[path]; !ok {

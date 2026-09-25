@@ -1428,6 +1428,89 @@ paths:
         '503':
           description: The reachability sweep is disabled
 
+  /api/v1/admin/diagnostic-verdicts:
+    get:
+      summary: Agent verdict journal
+      description: >-
+        Final verdicts of agent diagnostics, newest first, kept after the in-memory sessions are gone: every
+        automatic speed and availability probe, and every reachability cell that disagreed. Each line carries
+        both sides of the comparison — the checker's status or rate and the agent's — as identifiers, bounded
+        codes and numbers; never a URL, a node config or a raw error. The journal is evidence only: nothing
+        operational reads it and it is not part of the backup.
+      tags: [Admin]
+      parameters:
+        - {name: stableId, in: query, schema: {type: string}}
+        - {name: source, in: query, schema: {type: string, enum: [speed, availability, sweep]}}
+        - {name: verdict, in: query, schema: {type: string}}
+        - {name: from, in: query, schema: {type: string, format: date-time}}
+        - {name: to, in: query, schema: {type: string, format: date-time}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 2000, default: 200}}
+      responses:
+        '200':
+          description: Matching verdicts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DiagnosticVerdict'
+        '400':
+          description: Invalid filter
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/path-quality:
+    get:
+      summary: Path quality by node and hour of day
+      description: >-
+        Share of bad speed-test measurements and median rate per node and hour of day over the last days,
+        with a peak window read in the clients' time zone (PATH_QUALITY_PEAK_HOURS, PATH_QUALITY_PEAK_TIMEZONE).
+        A node that degrades every evening is a fact about the route to its hoster rather than a series of
+        incidents. Confirmation re-runs are left out, because they only follow a bad measurement. Derived from
+        the stored history on every request; nothing is persisted.
+      tags: [Admin]
+      parameters:
+        - {name: days, in: query, schema: {type: integer, minimum: 1, maximum: 90, default: 14}}
+        - name: tz
+          in: query
+          description: IANA zone the hours are bucketed in. Defaults to the peak time zone.
+          schema: {type: string}
+        - {name: subscription, in: query, schema: {type: string}}
+      responses:
+        '200':
+          description: Report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PathQualityReport'
+        '400':
+          description: Invalid period or time zone
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/remnawave/telemetry:
+    get:
+      summary: Remnawave node telemetry state
+      description: >-
+        Whether the checker reads the panel's node list (GET /api/nodes, token scope nodes:list) to put online
+        users, memory, load and panel connectivity into its alerts. Read-only; enabled is false when the
+        telemetry is not configured.
+      tags: [Admin]
+      responses:
+        '200':
+          description: Telemetry state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled: {type: boolean}
+                  fetchedAt: {type: string, format: date-time}
+                  nodes: {type: integer}
+                  error: {type: string}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /api/v1/admin/diagnostic-sessions/cancel:
     post:
       summary: Cancel an active diagnostic session
@@ -2328,11 +2411,16 @@ components:
       properties:
         state:
           type: string
-          enum: [running, reproduced, not_reproduced, unreliable, unavailable]
+          enum: [running, reproduced, not_reproduced, path_limited, inconclusive, unreliable, unavailable]
           description: >-
-            Verdict of the probe. reproduced — the agent saw the same problem; not_reproduced — the agent
-            got through; unreliable — the observation cannot be read as a verdict, usually because the
-            agent's own direct connectivity control failed; unavailable — no session produced evidence.
+            Verdict of the probe. reproduced — the agent saw the same problem, and for a slowdown a rate in
+            the run's range against the same speed-test server; not_reproduced — the agent got through;
+            path_limited — the agent got many times the run's rate through the same node, so most of the loss
+            is on the checker's side of the path (detail says when the agent was below the threshold too);
+            inconclusive — the agent measured another server, or its rate straddles the threshold;
+            unreliable — the observation cannot be read as a verdict, usually because the agent's own direct
+            connectivity control failed; unavailable — no session produced evidence. Only reproduced lets a
+            speed alert skip its confirmation wait.
         detail:
           type: string
         sessionId:
@@ -2395,6 +2483,12 @@ components:
           format: int64
         fallbackAttempts:
           type: integer
+        speedServerId:
+          type: string
+          description: Catalogue ID of the speed-test server the run measured; absent when its test URL is not in the catalogue.
+        requestedServerId:
+          type: string
+          description: Catalogue server the agent was asked to measure; absent when the agent cannot download from catalogue servers.
         requestedAgents:
           type: array
           items:
@@ -2491,6 +2585,9 @@ components:
               format: int64
         agentVersion:
           type: string
+        speedServerId:
+          type: string
+          description: Catalogue speed-test server the agent actually downloaded from; absent when it measured its own URL.
         reliable:
           type: boolean
           description: Controller-derived. A signed result whose direct connectivity control failed stays evidence but is not a verdict.
@@ -2906,6 +3003,12 @@ components:
             IANA name the bot prints its timestamps in, for example `Europe/Moscow`. An empty value keeps the
             process time zone. An unknown or unloadable name is rejected with `400`.
           example: Europe/Moscow
+        weeklyDigestEnabled:
+          type: boolean
+          description: >
+            Sends the path-quality digest every Monday at 10:00 in `timeZone`: the nodes whose evening
+            measurements were worst, the fleet by hour and what the agents answered. On by default. Omitting the
+            field on update keeps the current value.
         botTokenConfigured:
           type: boolean
           readOnly: true
@@ -3522,13 +3625,107 @@ components:
         session: {$ref: '#/components/schemas/DiagnosticSession'}
         summary: {type: string}
 
+    DiagnosticVerdict:
+      type: object
+      required: [at, source, stableId, verdict]
+      properties:
+        at: {type: string, format: date-time, description: When the verdict became final.}
+        source: {type: string, enum: [speed, availability, sweep]}
+        trigger: {type: string}
+        kind: {type: string, enum: [speed_fallback, proxy_failure, offline]}
+        outcome: {type: string, enum: [technical_error, low_speed]}
+        stableId: {type: string}
+        node: {type: string}
+        sessionId: {type: string}
+        agentId: {type: string}
+        agentName: {type: string}
+        region: {type: string}
+        provider: {type: string}
+        verdict:
+          type: string
+          description: >-
+            reproduced, not_reproduced, path_limited, inconclusive, unreliable or unavailable for automatic
+            probes; the reachability verdict (agreed_down, agent_only_failure, local_only_failure, unknown) for a
+            sweep cell.
+        detail: {type: string}
+        localStatus: {type: string}
+        localFailureCode: {type: string}
+        localMbps: {type: number, format: double}
+        thresholdMbps: {type: number, format: double}
+        localServerId: {type: string}
+        localAt: {type: string, format: date-time}
+        agentStatus: {type: string}
+        agentFailureCode: {type: string}
+        agentFailureStage: {type: string}
+        agentMbps: {type: integer, format: int64}
+        agentServerId: {type: string}
+        agentLatencyMs: {type: integer, format: int64}
+        agentTcpReached: {type: boolean}
+        agentAt: {type: string, format: date-time}
+
+    PathQualityCell:
+      type: object
+      properties:
+        hour: {type: integer, minimum: 0, maximum: 23}
+        runs: {type: integer}
+        bad: {type: integer}
+        medianMbps: {type: number, format: double}
+
+    PathQualityWindow:
+      type: object
+      properties:
+        runs: {type: integer}
+        bad: {type: integer}
+        badShare: {type: number, format: double}
+        medianMbps: {type: number, format: double}
+
+    PathQualityReport:
+      type: object
+      properties:
+        from: {type: string, format: date-time}
+        to: {type: string, format: date-time}
+        timeZone: {type: string, description: Zone the hours are bucketed in.}
+        peakTimeZone: {type: string}
+        peakStart: {type: integer}
+        peakEnd: {type: integer, description: End hour, exclusive; 24 means midnight.}
+        excluded: {type: integer, description: Confirmation re-runs left out of the counts.}
+        fleet:
+          type: array
+          items: {$ref: '#/components/schemas/PathQualityCell'}
+        nodes:
+          type: array
+          items:
+            type: object
+            properties:
+              stableId: {type: string}
+              name: {type: string}
+              subscription: {type: string}
+              environment: {type: boolean}
+              hours:
+                type: array
+                items: {$ref: '#/components/schemas/PathQualityCell'}
+              peak: {$ref: '#/components/schemas/PathQualityWindow'}
+              offPeak: {$ref: '#/components/schemas/PathQualityWindow'}
+              worstHour: {type: integer, description: Hour with the highest bad share, or -1.}
+              verdicts:
+                type: object
+                additionalProperties: {type: integer}
+                description: Agent probe verdicts of the measurements in the period.
+              servers:
+                type: object
+                additionalProperties: {type: integer}
+                description: Measurements by test URL host.
+
     DiagnosticAutomationSnapshot:
       type: object
-      required: [enabled, speedFallbackEnabled, proxyFailureEnabled, cooldownSeconds, alertWaitSeconds, maxConcurrent, active]
+      required: [enabled, speedFallbackEnabled, proxyFailureEnabled, offlineEnabled, cooldownSeconds, alertWaitSeconds, maxConcurrent, active]
       properties:
         enabled: {type: boolean}
         speedFallbackEnabled: {type: boolean}
         proxyFailureEnabled: {type: boolean}
+        offlineEnabled:
+          type: boolean
+          description: One agent probe per episode for a node the availability check cannot reach at all.
         cooldownSeconds: {type: integer, minimum: 0}
         alertWaitSeconds: {type: integer, minimum: 0}
         maxConcurrent: {type: integer, minimum: 0}
@@ -3670,7 +3867,7 @@ components:
         schemaVersion: {type: integer, enum: [2]}
         sessionId: {type: string}
         stableId: {type: string}
-        trigger: {type: string, enum: [manual, auto_proxy_failure, auto_check_endpoint, auto_ambiguous_failure, auto_speed_fallback, reachability_sweep]}
+        trigger: {type: string, enum: [manual, auto_proxy_failure, auto_offline, auto_check_endpoint, auto_ambiguous_failure, auto_speed_fallback, reachability_sweep]}
         configGeneration: {type: integer, format: int64}
         configFingerprint: {type: string}
         localResultSnapshot: {type: object}
@@ -3678,12 +3875,16 @@ components:
           type: object
           description: Sanitized reason for an automatic session. URLs and raw transport errors are excluded.
           properties:
-            kind: {type: string, enum: [speed_fallback]}
+            kind: {type: string, enum: [speed_fallback, proxy_failure, offline]}
             outcome: {type: string, enum: [technical_error, low_speed]}
             source: {type: string}
             thresholdMbps: {type: number, format: double}
             observedMbps: {type: number, format: double}
-            fallbackAttempts: {type: integer, minimum: 1}
+            fallbackAttempts: {type: integer, minimum: 0}
+            measuredBytes: {type: integer, format: int64}
+            speedServerId:
+              type: string
+              description: Catalogue ID of the speed-test server the run measured — an ID, never a URL.
         requestedAgents: {type: array, items: {type: string}}
         jobs: {type: array, items: {$ref: '#/components/schemas/DiagnosticJob'}}
         agentObservations:

@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"xray-checker/checker"
+	"xray-checker/diagnostics"
 	"xray-checker/logger"
 	"xray-checker/models"
+	"xray-checker/paneltelemetry"
 	"xray-checker/speedtest"
 )
 
@@ -16,9 +18,13 @@ type nodeDownAlert struct {
 	Proxy     *models.ProxyConfig
 	State     nodeAlertState
 	NextAfter time.Duration
-	// Agent is what a probe agent found for a proxy failure. It is attached
-	// after the decision to send is made and never feeds back into it.
+	// Agent is what a probe agent found for this failure. It is attached after
+	// the decision to send is made and never feeds back into it.
 	Agent *speedtest.AgentDiagnostic
+	// Panel is the Remnawave panel's view of the node: whether it still reaches
+	// the node, how many clients are on it now and before the failure, memory
+	// and load. Evidence like Agent, attached after the decision.
+	Panel *paneltelemetry.Status
 }
 
 type nodeDownIncidentGroup struct {
@@ -217,7 +223,10 @@ func (s *Service) NotifyNodeStatuses() bool {
 			downAlerts = append(downAlerts, alert)
 		}
 	}
-	downAlerts = s.attachProxyFailureDiagnostics(downAlerts)
+	downAlerts = s.attachAvailabilityDiagnostics(downAlerts)
+	for index := range downAlerts {
+		downAlerts[index].Panel = s.panelStatus(downAlerts[index].Proxy, nodeAlertIssueSince(downAlerts[index].State))
+	}
 	// Checked after the agent wait, which can outlast a switch into maintenance.
 	if s.ProjectMaintenanceEnabled() {
 		return false
@@ -415,19 +424,25 @@ func (s *Service) pendingNodeDownAlert(proxy *models.ProxyConfig, cfg Config, no
 	}, true
 }
 
-// attachProxyFailureDiagnostics adds the agent's answer to every due alert about
-// a proxy failure. The alerts are already decided: this can make one wait for a
-// probe still in flight, bounded by the automation's alert wait, but it neither
-// adds an alert nor holds one back. A probe normally answered a whole check
-// interval ago, and then nothing waits at all.
-func (s *Service) attachProxyFailureDiagnostics(alerts []nodeDownAlert) []nodeDownAlert {
-	probes := s.proxyFailureProbes
-	if probes == nil || len(alerts) == 0 || !probes.ProxyFailureEnabled() {
+// attachAvailabilityDiagnostics adds the agent's answer to every due alert about
+// a node that failed — a tunnel that carries no traffic, or a node the checker
+// cannot reach at all. The alerts are already decided: this can make one wait
+// for a probe still in flight, bounded by the automation's alert wait, but it
+// neither adds an alert nor holds one back. A probe normally answered a whole
+// check interval ago, and then nothing waits at all.
+//
+// An answer is attached only when it was asked about the failure the alert
+// reports: a node that moved from proxy_failure to offline keeps its old answer
+// until the new probe replaces it, and "the tunnel works from elsewhere" must
+// not be printed under "unreachable".
+func (s *Service) attachAvailabilityDiagnostics(alerts []nodeDownAlert) []nodeDownAlert {
+	probes := s.availabilityProbes
+	if probes == nil || len(alerts) == 0 || !probes.AvailabilityEnabled() {
 		return alerts
 	}
 	stableIDs := make([]string, 0, len(alerts))
 	for _, alert := range alerts {
-		if alert.Proxy != nil && nodeAlertStatus(alert.State) == checker.AvailabilityStateProxyFailure {
+		if alert.Proxy != nil {
 			stableIDs = append(stableIDs, alert.Proxy.StableID)
 		}
 	}
@@ -437,21 +452,40 @@ func (s *Service) attachProxyFailureDiagnostics(alerts []nodeDownAlert) []nodeDo
 	var annotations map[string]speedtest.AgentDiagnostic
 	if wait := probes.AlertWait(); wait > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), wait)
-		annotations = probes.AwaitProxyFailure(ctx, stableIDs)
+		annotations = probes.AwaitAvailability(ctx, stableIDs)
 		cancel()
 	} else {
-		annotations = probes.ProxyFailureAnnotations(stableIDs)
+		annotations = probes.AvailabilityAnnotations(stableIDs)
 	}
 	for index := range alerts {
-		if alerts[index].Proxy == nil || nodeAlertStatus(alerts[index].State) != checker.AvailabilityStateProxyFailure {
+		if alerts[index].Proxy == nil {
 			continue
 		}
-		if annotation, ok := annotations[alerts[index].Proxy.StableID]; ok {
-			copyValue := annotation
-			alerts[index].Agent = &copyValue
+		annotation, ok := annotations[alerts[index].Proxy.StableID]
+		if !ok || !agentAnswersStatus(annotation, nodeAlertStatus(alerts[index].State)) {
+			continue
 		}
+		copyValue := annotation
+		alerts[index].Agent = &copyValue
 	}
 	return alerts
+}
+
+// agentAnswersStatus reports whether a probe was asked about the kind of
+// failure an alert reports.
+func agentAnswersStatus(annotation speedtest.AgentDiagnostic, status checker.AvailabilityState) bool {
+	kind := ""
+	if annotation.Task != nil {
+		kind = annotation.Task.Kind
+	}
+	switch status {
+	case checker.AvailabilityStateOffline:
+		return kind == diagnostics.AutomationKindOffline
+	case checker.AvailabilityStateProxyFailure:
+		return kind == "" || kind == diagnostics.AutomationKindProxyFailure
+	default:
+		return false
+	}
 }
 
 func shouldNotifyNodeRecovery(state nodeAlertState, cfg Config, isMuted bool) bool {

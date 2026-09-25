@@ -362,6 +362,14 @@ func TestCreateAutomaticAcceptsTheProxyFailureTriggerAndRefusesTheUnimplementedO
 		t.Fatalf("automatic profile = %+v", assignment.Job.Profile)
 	}
 
+	offline, err := newControllerFixture(t).controller.CreateAutomatic(CreateAutomaticRequest{
+		StableID: "node-one", Trigger: diagnostics.TriggerAutoOffline, ProfileID: diagnostics.ProfileStatus,
+		AutomationContext: diagnostics.OfflineAutomationContext(),
+	})
+	if err != nil || offline.Session.Trigger != diagnostics.TriggerAutoOffline {
+		t.Fatalf("offline diagnostics = %+v, %v; want an offline session", offline.Session, err)
+	}
+
 	for _, trigger := range []diagnostics.Trigger{diagnostics.TriggerManual, diagnostics.TriggerAutoCheckEndpoint, diagnostics.TriggerReachabilitySweep} {
 		if _, err := newControllerFixture(t).controller.CreateAutomatic(CreateAutomaticRequest{
 			StableID: "node-one", Trigger: trigger, ProfileID: diagnostics.ProfileStatus,
@@ -710,7 +718,7 @@ func TestAutomaticDownloadProfileCopiesTheRunTransferSizeOnlyForASlowdown(t *tes
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			profile := automaticProfile(descriptor, diagnostics.ProfileStatus, test.context)
+			profile := automaticProfile(descriptor, diagnostics.ProfileStatus, test.context, nil)
 			if profile.DownloadBytes != test.want {
 				t.Fatalf("download bytes = %d, want %d", profile.DownloadBytes, test.want)
 			}

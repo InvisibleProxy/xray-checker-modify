@@ -163,7 +163,7 @@ func TestSpeedDiagnosticAnnotationUsesReliableRemoteEvidenceWithoutChangingTheRe
 		t.Fatal(err)
 	}
 	report := speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{{
-		StableID: "node-one", Mbps: 2, FallbackAttempted: true, FallbackAttempts: 1, FallbackUsed: true,
+		StableID: "node-one", Mbps: 2, URL: testServerURL, FallbackAttempted: true, FallbackAttempts: 1, FallbackUsed: true,
 	}}}
 	handles := coordinator.StartSpeedDiagnostics(report, 10)
 	view := controller.views["diag-one"]
@@ -174,6 +174,7 @@ func TestSpeedDiagnosticAnnotationUsesReliableRemoteEvidenceWithoutChangingTheRe
 			Status: diagnostics.ProbeStatusOnline, CheckedAt: time.Now(),
 			DirectConnectivity: diagnostics.CheckEvidence{Checked: true, Online: true},
 			Throughput:         &diagnostics.ThroughputEvidence{Mbps: 3},
+			SpeedServerID:      testServerID,
 		},
 	}}
 	controller.views["diag-one"] = view
@@ -309,7 +310,7 @@ func TestAgentPlacementRefusalsNameTheirReason(t *testing.T) {
 
 // The agent reports whole Mbps, so its true rate lies in [Mbps, Mbps+1). Only a
 // whole interval below the threshold proves a slowdown; an interval straddling it
-// must not be announced as reproduced.
+// cannot tell, and a rate many times the run's is the path, not the node.
 func TestAgentThroughputAtTheThresholdBoundaryIsNotCalledReproduced(t *testing.T) {
 	for _, test := range []struct {
 		name      string
@@ -317,8 +318,9 @@ func TestAgentThroughputAtTheThresholdBoundaryIsNotCalledReproduced(t *testing.T
 		want      string
 	}{
 		{"whole interval below the threshold", 9, speedtest.AgentDiagnosticReproduced},
-		{"interval straddles the threshold", 10, speedtest.AgentDiagnosticNotReproduced},
-		{"clearly above", 40, speedtest.AgentDiagnosticNotReproduced},
+		{"interval straddles the threshold", 10, speedtest.AgentDiagnosticInconclusive},
+		{"above the threshold in the run's range", 12, speedtest.AgentDiagnosticNotReproduced},
+		{"many times the run's rate", 40, speedtest.AgentDiagnosticPathLimited},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			controller := &fakeSessionController{enabled: true}
@@ -327,7 +329,7 @@ func TestAgentThroughputAtTheThresholdBoundaryIsNotCalledReproduced(t *testing.T
 				t.Fatal(err)
 			}
 			report := speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{{
-				StableID: "node-one", Mbps: 2, FallbackAttempted: true, FallbackAttempts: 1, FallbackUsed: true,
+				StableID: "node-one", Mbps: 5, URL: testServerURL, FallbackAttempted: true, FallbackAttempts: 1, FallbackUsed: true,
 			}}}
 			handles := coordinator.StartSpeedDiagnostics(report, 10.5)
 
@@ -339,6 +341,7 @@ func TestAgentThroughputAtTheThresholdBoundaryIsNotCalledReproduced(t *testing.T
 					AgentID: "agent-signing", Status: diagnostics.ProbeStatusOnline, CheckedAt: time.Now(),
 					DirectConnectivity: diagnostics.CheckEvidence{Checked: true, Online: true},
 					Throughput:         &diagnostics.ThroughputEvidence{Mbps: test.agentMbps},
+					SpeedServerID:      testServerID,
 				},
 			}}
 			controller.views["diag-one"] = view
@@ -616,7 +619,7 @@ func TestAnAgentRateBelowTheThresholdIsReproducedWhateverTheRunFailedWith(t *tes
 		t.Fatal(err)
 	}
 	report := speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{{
-		StableID: "node-one", Error: "context deadline exceeded",
+		StableID: "node-one", Error: "context deadline exceeded", URL: testServerURL,
 		FallbackAttempted: true, FallbackAttempts: 2, FallbackExhausted: true,
 	}}}
 	handles := coordinator.StartSpeedDiagnostics(report, 100)
@@ -632,6 +635,7 @@ func TestAnAgentRateBelowTheThresholdIsReproducedWhateverTheRunFailedWith(t *tes
 			Status: diagnostics.ProbeStatusOnline, CheckedAt: time.Now(),
 			DirectConnectivity: diagnostics.CheckEvidence{Checked: true, Online: true},
 			Throughput:         &diagnostics.ThroughputEvidence{Mbps: 42},
+			SpeedServerID:      testServerID,
 		},
 	}}
 	controller.views["diag-one"] = view
@@ -642,6 +646,87 @@ func TestAnAgentRateBelowTheThresholdIsReproducedWhateverTheRunFailedWith(t *tes
 	}
 	if annotation.RemoteStatus != string(diagnostics.ProbeStatusOnline) {
 		t.Errorf("remote status = %q, want the alert to still say the agent got through", annotation.RemoteStatus)
+	}
+
+	// The same rate from another server is not evidence about the node: the
+	// agent's own server may be what is slow.
+	view.Session.AgentObservations[0].Observation.SpeedServerID = ""
+	controller.views["diag-one"] = view
+	if state := coordinator.Annotations(handles)["node-one"].State; state != speedtest.AgentDiagnosticInconclusive {
+		t.Fatalf("state = %q for the same rate from another server, want inconclusive", state)
+	}
+}
+
+// The run's server, as the tests name it: the catalogue matches by host, so any
+// file on it will do.
+const (
+	testServerURL = "https://fsn1-speed.hetzner.com/100MB.bin"
+	testServerID  = "hetzner-falkenstein-fsn1"
+)
+
+// The agent is asked for the server the run measured, by its catalogue ID.
+func TestTheAgentIsAskedForTheServerTheRunMeasured(t *testing.T) {
+	controller := &fakeSessionController{enabled: true}
+	coordinator, err := New(Config{Enabled: true, Cooldown: time.Minute, AlertWait: time.Second, MaxConcurrent: 2}, controller, fakeAgentSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator.StartSpeedDiagnostics(speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{
+		{StableID: "node-catalogue", Mbps: 3, URL: "http://speedtest.ams1.nl.leaseweb.net/100mb.bin"},
+		{StableID: "node-elsewhere", Mbps: 3, URL: "https://speed.example.com/100MB.bin"},
+	}}, 100)
+	servers := make(map[string]string)
+	for _, request := range controller.requests {
+		servers[request.StableID] = request.AutomationContext.SpeedServerID
+	}
+	if servers["node-catalogue"] != "leaseweb-amsterdam-ams1" || servers["node-elsewhere"] != "" {
+		t.Fatalf("servers = %+v, want the catalogue ID for the known host only", servers)
+	}
+}
+
+// Many times the run's rate through the same node is the checker's path, even
+// when the agent is under the threshold too: the production case was a node in
+// the United States at 2 Mbps from the checker and 40 from an agent, reported as
+// a reproduced slowdown and sent at once.
+func TestAnAgentManyTimesFasterThanTheRunIsReadAsThePath(t *testing.T) {
+	controller := &fakeSessionController{enabled: true}
+	coordinator, err := New(Config{Enabled: true, Cooldown: time.Minute, AlertWait: time.Second, MaxConcurrent: 2}, controller, fakeAgentSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handles := coordinator.StartSpeedDiagnostics(speedtest.RunReport{Source: speedtest.ScheduleSource, Results: []speedtest.Result{{
+		StableID: "node-us", Mbps: 2, LowSpeedThresholdMbps: 50, URL: "https://us.edisglobal.com/100MB.test",
+	}}}, 100)
+	view := controller.views["diag-one"]
+	view.Session.State = diagnostics.SessionStateCompleted
+	view.Session.AgentObservations = []diagnostics.AcceptedObservation{{Reliable: true, Observation: diagnostics.Observation{
+		Status: diagnostics.ProbeStatusOnline, DirectConnectivity: diagnostics.CheckEvidence{Checked: true, Online: true},
+		Throughput: &diagnostics.ThroughputEvidence{Mbps: 40}, SpeedServerID: "edis-new-york",
+	}}}
+	controller.views["diag-one"] = view
+
+	annotation := coordinator.Annotations(handles)["node-us"]
+	if annotation.State != speedtest.AgentDiagnosticPathLimited || annotation.Detail != diagnostics.ReasonAgentAlsoBelowThreshold {
+		t.Fatalf("annotation = %+v, want the path, with the agent also below the threshold", annotation)
+	}
+	if annotation.Task == nil || annotation.Task.SpeedServerID != "edis-new-york" {
+		t.Fatalf("task = %+v, want the run's server recorded", annotation.Task)
+	}
+}
+
+// The coordinator hands the verdict's own words to the speed-test states, so the
+// two vocabularies must stay one.
+func TestVerdictNamesMatchTheStoredProbeStates(t *testing.T) {
+	for verdict, state := range map[diagnostics.Verdict]string{
+		diagnostics.VerdictReproduced:    speedtest.AgentDiagnosticReproduced,
+		diagnostics.VerdictNotReproduced: speedtest.AgentDiagnosticNotReproduced,
+		diagnostics.VerdictPathLimited:   speedtest.AgentDiagnosticPathLimited,
+		diagnostics.VerdictInconclusive:  speedtest.AgentDiagnosticInconclusive,
+		diagnostics.VerdictUnreliable:    speedtest.AgentDiagnosticUnreliable,
+	} {
+		if string(verdict) != state {
+			t.Errorf("verdict %q is stored as %q", verdict, state)
+		}
 	}
 }
 

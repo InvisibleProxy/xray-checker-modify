@@ -26,6 +26,7 @@ import (
 	"xray-checker/agentautomation"
 	"xray-checker/logger"
 	"xray-checker/speedtest"
+	"xray-checker/verdictlog"
 )
 
 // DefaultWait bounds how long a probe is followed. A diagnostic job expires
@@ -58,6 +59,12 @@ type Config struct {
 	// fallback for measurements taken before per-node thresholds existed.
 	Threshold func() float64
 	Wait      time.Duration
+	// Journal receives the final verdict of every probe this recorder follows
+	// to the end. The recorder is the one consumer that always waits for the
+	// answer, which is what makes it the place a verdict becomes final; the
+	// alert path may stop waiting earlier and must not write a verdict that
+	// could still change. Nil forgets them.
+	Journal verdictlog.Recorder
 }
 
 type Recorder struct {
@@ -65,6 +72,8 @@ type Recorder struct {
 	history     History
 	threshold   func() float64
 	wait        time.Duration
+	journal     verdictlog.Recorder
+	now         func() time.Time
 	stop        chan struct{}
 }
 
@@ -80,6 +89,8 @@ func New(config Config, coordinator Coordinator, history History) *Recorder {
 		history:     history,
 		threshold:   config.Threshold,
 		wait:        config.Wait,
+		journal:     config.Journal,
+		now:         time.Now,
 		stop:        make(chan struct{}),
 	}
 }
@@ -129,7 +140,62 @@ func (r *Recorder) RunSpeedProbes(report speedtest.RunReport) {
 		case <-ctx.Done():
 		}
 	}()
-	r.record(measured, r.coordinator.Await(ctx, handles), written)
+	final := r.coordinator.Await(ctx, handles)
+	r.record(measured, final, written)
+	r.journalVerdicts(report.Results, final)
+}
+
+// journalVerdicts writes each probe's final answer to the verdict journal. A
+// probe still running when the wait ends — only at shutdown, since the wait
+// outlasts the job deadline — has no verdict yet and is left out rather than
+// recorded as something it is not.
+func (r *Recorder) journalVerdicts(results []speedtest.Result, probes map[string]speedtest.AgentDiagnostic) {
+	if r.journal == nil || len(probes) == 0 {
+		return
+	}
+	measured := make(map[string]speedtest.Result, len(probes))
+	for _, result := range results {
+		if _, ok := probes[result.StableID]; !ok {
+			continue
+		}
+		if _, seen := measured[result.StableID]; !seen {
+			measured[result.StableID] = result
+		}
+	}
+	now := r.now().UTC()
+	for stableID, probe := range probes {
+		if probe.State == speedtest.AgentDiagnosticRunning {
+			continue
+		}
+		result := measured[stableID]
+		entry := verdictlog.Entry{
+			At: now, Source: verdictlog.SourceSpeed, Trigger: probe.Trigger,
+			StableID: stableID, Node: result.Name, SessionID: probe.SessionID,
+			AgentID: probe.AgentID, AgentName: probe.AgentName, Region: probe.Region, Provider: probe.Provider,
+			Verdict: probe.State, Detail: probe.Detail,
+			LocalMbps: result.Mbps, LocalAt: result.CheckedAt,
+		}
+		if entry.Trigger == "" {
+			entry.Trigger = "auto_speed_fallback"
+		}
+		if task := probe.Task; task != nil {
+			entry.Kind, entry.Outcome = task.Kind, task.Outcome
+			entry.ThresholdMbps, entry.LocalServerID = task.ThresholdMbps, task.SpeedServerID
+		}
+		if observation := probe.Observation; observation != nil {
+			entry.AgentStatus = observation.Status
+			entry.AgentFailureCode, entry.AgentFailureStage = observation.Failure.Code, observation.Failure.Stage
+			entry.AgentServerID = observation.SpeedServerID
+			entry.AgentLatencyMs = observation.LatencyMillis
+			entry.AgentAt = observation.CheckedAt
+			if observation.Throughput != nil {
+				entry.AgentMbps = observation.Throughput.Mbps
+			}
+		}
+		if err := r.journal.Record(entry); err != nil {
+			logger.Warn("Failed to journal the agent verdict for %s: %v", stableID, err)
+		}
+	}
 }
 
 // AwaitIdleNodes holds a starting run until the agents have stopped measuring

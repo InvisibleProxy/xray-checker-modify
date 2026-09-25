@@ -111,6 +111,14 @@ func speedReportScopeHTML(scope speedReportScope, shown int) string {
 }
 
 func buildSpeedReport(report speedtest.RunReport, cfg Config, issuesOnly bool, scopes []speedReportScope) formattedMessage {
+	return buildSpeedReportWithPanels(report, cfg, issuesOnly, scopes, nil)
+}
+
+// buildSpeedReportWithPanels is buildSpeedReport with the panel's view of each
+// problem node, keyed by StableID. A slow node that is moving a gigabit of
+// client traffic is a different finding from one sitting idle, and only the
+// panel knows which.
+func buildSpeedReportWithPanels(report speedtest.RunReport, cfg Config, issuesOnly bool, scopes []speedReportScope, panels map[string]string) formattedMessage {
 	failed, slow, healthy := groupSpeedResults(report.Results, cfg.LowSpeedThresholdMbps)
 	issues := append(append([]speedtest.Result{}, failed...), slow...)
 	visibleIssues := visibleSpeedResults(issues, cfg.LowSpeedThresholdMbps, cfg.SpeedReportLimit, 2200)
@@ -142,8 +150,14 @@ func buildSpeedReport(report speedtest.RunReport, cfg Config, issuesOnly bool, s
 		lines = append(lines, "", "<b>Требуют внимания</b>")
 		rich.WriteString("<h3>Требуют внимания</h3><ul>")
 		for _, result := range visibleIssues {
-			lines = append(lines, speedIssuesHTML([]speedtest.Result{result}, cfg.LowSpeedThresholdMbps)...)
-			rich.WriteString(formatSpeedIssueRichItem(result, cfg.LowSpeedThresholdMbps))
+			blocks := speedIssuesHTML([]speedtest.Result{result}, cfg.LowSpeedThresholdMbps)
+			item := formatSpeedIssueRichItem(result, cfg.LowSpeedThresholdMbps)
+			if panel := panels[result.StableID]; panel != "" && len(blocks) > 0 {
+				blocks[len(blocks)-1] += "\n  ↳ " + panel
+				item = strings.TrimSuffix(item, "</li>") + "<br>↳ " + panel + "</li>"
+			}
+			lines = append(lines, blocks...)
+			rich.WriteString(item)
 		}
 		if hidden := speedHiddenHTML(len(issues), len(visibleIssues)); hidden != "" {
 			lines = append(lines, hidden)

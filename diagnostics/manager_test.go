@@ -403,6 +403,61 @@ func TestSpeedFallbackAutomationContextIsValidatedAndStored(t *testing.T) {
 	}
 }
 
+// An offline session carries its own fixed context, and the proxy-failure one
+// does not stand in for it: the two triggers ask different questions and are
+// counted apart everywhere a verdict is read back.
+func TestOfflineAutomationContextIsValidated(t *testing.T) {
+	fixture := newManagerFixture(t)
+	request := CreateSessionRequest{
+		StableID:          "stable-node-1",
+		Trigger:           TriggerAutoOffline,
+		ConfigGeneration:  7,
+		ConfigFingerprint: ConfigFingerprint([]byte("config")),
+		LocalResultSnapshot: LocalResultSnapshot{
+			Status: ProbeStatusOffline, CheckedAt: *fixture.now,
+			Failure: FailureEvidence{Code: "host_unreachable", Stage: FailureStageTCP},
+		},
+		RequestedAgents:   []string{"agent-eu"},
+		AutomationContext: OfflineAutomationContext(),
+	}
+	if _, err := fixture.manager.CreateSession(request); err != nil {
+		t.Fatalf("create offline session: %v", err)
+	}
+	request.AutomationContext = ProxyFailureAutomationContext()
+	if _, err := fixture.manager.CreateSession(request); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("offline session with the proxy-failure context error = %v", err)
+	}
+	request.AutomationContext = AutomationContext{}
+	if _, err := fixture.manager.CreateSession(request); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("offline session without its context error = %v", err)
+	}
+}
+
+// A speed session may name the catalogue server its run measured, and nothing
+// that is not in the catalogue.
+func TestSpeedFallbackContextAcceptsOnlyCatalogueServers(t *testing.T) {
+	fixture := newManagerFixture(t)
+	request := CreateSessionRequest{
+		StableID:            "stable-node-1",
+		Trigger:             TriggerAutoSpeedFallback,
+		ConfigGeneration:    7,
+		ConfigFingerprint:   ConfigFingerprint([]byte("config")),
+		LocalResultSnapshot: LocalResultSnapshot{Status: ProbeStatusOnline, CheckedAt: *fixture.now},
+		RequestedAgents:     []string{"agent-eu"},
+		AutomationContext: AutomationContext{
+			Kind: AutomationKindSpeedFallback, Outcome: AutomationOutcomeLowSpeed,
+			Source: "schedule", ThresholdMbps: 100, ObservedMbps: 3, SpeedServerID: "leaseweb-amsterdam-ams1",
+		},
+	}
+	if _, err := fixture.manager.CreateSession(request); err != nil {
+		t.Fatalf("create speed session with a catalogue server: %v", err)
+	}
+	request.AutomationContext.SpeedServerID = "http://speedtest.ams1.nl.leaseweb.net/100mb.bin"
+	if _, err := fixture.manager.CreateSession(request); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("speed session naming a URL instead of a server error = %v", err)
+	}
+}
+
 // A proxy-failure session carries its fixed context and nothing else: the local
 // verdict is in the snapshot, and a speed field here could only be a mix-up.
 func TestProxyFailureAutomationContextIsValidated(t *testing.T) {

@@ -185,8 +185,15 @@ const (
 	AgentDiagnosticRunning       = "running"
 	AgentDiagnosticReproduced    = "reproduced"
 	AgentDiagnosticNotReproduced = "not_reproduced"
-	AgentDiagnosticUnreliable    = "unreliable"
-	AgentDiagnosticUnavailable   = "unavailable"
+	// AgentDiagnosticPathLimited is an agent many times faster than the run
+	// through the same node: the rate was lost on the checker's side of the
+	// path. See diagnostics.VerdictPathLimited.
+	AgentDiagnosticPathLimited = "path_limited"
+	// AgentDiagnosticInconclusive is an answer that cannot be compared with the
+	// run: another server, or a rate on the threshold's rounding edge.
+	AgentDiagnosticInconclusive = "inconclusive"
+	AgentDiagnosticUnreliable   = "unreliable"
+	AgentDiagnosticUnavailable  = "unavailable"
 )
 
 // AgentDiagnostic is a sanitized read-only record of one automatic agent probe.
@@ -230,22 +237,27 @@ type AgentDiagnostic struct {
 // diagnostic schema allows: profile identifiers rather than URLs, and the
 // numbers the run produced rather than its raw errors.
 type AgentProbeTask struct {
-	ProfileID            string    `json:"profileId,omitempty"`
-	Method               string    `json:"method,omitempty"`
-	AlternativeProfileID string    `json:"alternativeProfileId,omitempty"`
-	DownloadBytes        int64     `json:"downloadBytes,omitempty"`
-	JobState             string    `json:"jobState,omitempty"`
-	Kind                 string    `json:"kind,omitempty"`
-	Outcome              string    `json:"outcome,omitempty"`
-	Source               string    `json:"source,omitempty"`
-	ThresholdMbps        float64   `json:"thresholdMbps,omitempty"`
-	ObservedMbps         float64   `json:"observedMbps,omitempty"`
-	MeasuredBytes        int64     `json:"measuredBytes,omitempty"`
-	FallbackAttempts     int       `json:"fallbackAttempts,omitempty"`
-	RequestedAgents      []string  `json:"requestedAgents,omitempty"`
-	CreatedAt            time.Time `json:"createdAt,omitempty"`
-	ExpiresAt            time.Time `json:"expiresAt,omitempty"`
-	ConfigGeneration     uint64    `json:"configGeneration,omitempty"`
+	ProfileID            string  `json:"profileId,omitempty"`
+	Method               string  `json:"method,omitempty"`
+	AlternativeProfileID string  `json:"alternativeProfileId,omitempty"`
+	DownloadBytes        int64   `json:"downloadBytes,omitempty"`
+	JobState             string  `json:"jobState,omitempty"`
+	Kind                 string  `json:"kind,omitempty"`
+	Outcome              string  `json:"outcome,omitempty"`
+	Source               string  `json:"source,omitempty"`
+	ThresholdMbps        float64 `json:"thresholdMbps,omitempty"`
+	ObservedMbps         float64 `json:"observedMbps,omitempty"`
+	MeasuredBytes        int64   `json:"measuredBytes,omitempty"`
+	FallbackAttempts     int     `json:"fallbackAttempts,omitempty"`
+	// SpeedServerID is the catalogue server the run measured; RequestedServerID
+	// is the one the agent was asked to measure, empty when the agent could not
+	// be asked. Kept apart, they say why a stored verdict is "inconclusive".
+	SpeedServerID     string    `json:"speedServerId,omitempty"`
+	RequestedServerID string    `json:"requestedServerId,omitempty"`
+	RequestedAgents   []string  `json:"requestedAgents,omitempty"`
+	CreatedAt         time.Time `json:"createdAt,omitempty"`
+	ExpiresAt         time.Time `json:"expiresAt,omitempty"`
+	ConfigGeneration  uint64    `json:"configGeneration,omitempty"`
 }
 
 // The observation types below mirror the diagnostic schema field for field,
@@ -308,6 +320,9 @@ type AgentProbeObservation struct {
 	AlternativeEndpoint *AgentProbeAlternative `json:"alternativeEndpoint,omitempty"`
 	Throughput          *AgentProbeThroughput  `json:"throughput,omitempty"`
 	AgentVersion        string                 `json:"agentVersion,omitempty"`
+	// SpeedServerID is the catalogue server the agent actually downloaded from,
+	// empty when it measured its own URL.
+	SpeedServerID string `json:"speedServerId,omitempty"`
 	// Reliable is the controller's judgement, not the agent's: an observation
 	// whose direct connectivity control failed stays evidence but must not be
 	// read as a verdict about the node.

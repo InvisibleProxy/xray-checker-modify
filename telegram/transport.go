@@ -464,6 +464,7 @@ func (s *Service) syncBotCommands(ctx context.Context) error {
 		{Command: "menu", Description: "Главное меню"},
 		{Command: "status", Description: "Статусы нод"},
 		{Command: "speed", Description: "История замеров ноды"},
+		{Command: "quality", Description: "Качество пути за неделю"},
 		{Command: "speedtest", Description: "Запустить speed-test (админ)"},
 		{Command: "id", Description: "ID чата, топика и пользователя"},
 		{Command: "help", Description: "Справка по командам"},

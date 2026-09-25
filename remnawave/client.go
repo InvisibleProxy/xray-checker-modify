@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"xray-checker/paneltelemetry"
 )
 
 const maxAPIResponseBytes = 8 * 1024 * 1024
@@ -151,7 +153,7 @@ func (c *HTTPClient) doJSON(ctx context.Context, method, path string, body, dest
 		if c.token != "" {
 			message = strings.ReplaceAll(message, c.token, "[redacted]")
 		}
-		return fmt.Errorf("Remnawave API %s %s returned HTTP %d: %s", method, path, response.StatusCode, message)
+		return &APIError{Method: method, Path: path, StatusCode: response.StatusCode, Message: message}
 	}
 	if destination == nil || len(bytes.TrimSpace(data)) == 0 {
 		return nil
@@ -160,6 +162,37 @@ func (c *HTTPClient) doJSON(ctx context.Context, method, path string, body, dest
 		return fmt.Errorf("decode Remnawave API %s response: %w", path, err)
 	}
 	return nil
+}
+
+// APIError is a response outside 2xx. It keeps the status code so a caller can
+// tell a missing permission from a broken panel; the text is what the error
+// always said.
+type APIError struct {
+	Method     string
+	Path       string
+	StatusCode int
+	Message    string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("Remnawave API %s %s returned HTTP %d: %s", e.Method, e.Path, e.StatusCode, e.Message)
+}
+
+// GetNodes reads the panel's node list for telemetry. A refused token is
+// reported as paneltelemetry.ErrForbidden, because the fix — granting the
+// nodes:list scope — is the same whatever the panel's message says.
+func (c *HTTPClient) GetNodes(ctx context.Context) ([]paneltelemetry.Node, error) {
+	var envelope struct {
+		Response []paneltelemetry.Node `json:"response"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/nodes", nil, &envelope); err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
+			return nil, fmt.Errorf("%w (HTTP %d)", paneltelemetry.ErrForbidden, apiErr.StatusCode)
+		}
+		return nil, err
+	}
+	return envelope.Response, nil
 }
 
 func compactAPIError(data []byte) string {

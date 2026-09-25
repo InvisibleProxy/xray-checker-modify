@@ -84,6 +84,12 @@ type ExecutorConfig struct {
 	// the binary decides whether its log level is verbose enough to show it.
 	// Neither ever reaches the controller or the observation.
 	OnDetail func(jobID string, message string, err error)
+	// ResolveSpeedServer turns a catalogue ID from a job into the URL to
+	// download. Nil uses the catalogue compiled into this binary, which is the
+	// only production behaviour; tests point it at a local server. It is never
+	// fed anything but the ID a job named, so it cannot widen what a job may
+	// fetch beyond the catalogue.
+	ResolveSpeedServer func(id string) (string, bool)
 }
 
 type Executor struct {
@@ -112,6 +118,12 @@ func NewExecutor(config ExecutorConfig) (*Executor, error) {
 		config.StabilityDuration = DefaultStabilityDuration
 	}
 	config.DNSResolver = valueOrDefault(config.DNSResolver, DefaultDNSResolver)
+	if config.ResolveSpeedServer == nil {
+		config.ResolveSpeedServer = func(id string) (string, bool) {
+			server, ok := diagnostics.SpeedServerByID(id)
+			return server.URL, ok
+		}
+	}
 	if config.LatencySamples < 1 || config.LatencySamples > maxLatencySamples ||
 		config.StabilityDuration < time.Second || config.StabilityDuration > maxStabilityDuration {
 		return nil, fmt.Errorf("invalid probe executor limits")
@@ -247,6 +259,7 @@ func (e *Executor) Execute(ctx context.Context, assignment JobAssignment) (obser
 	observation.Throughput = proxyResult.throughput
 	observation.Latency = proxyResult.latencySeries
 	observation.Stability = proxyResult.stability
+	observation.SpeedServerID = proxyResult.speedServerID
 	if proxyResult.status == diagnostics.ProbeStatusOnline {
 		return observation
 	}
@@ -292,10 +305,15 @@ type proxyCheckResult struct {
 	throughput    *diagnostics.ThroughputEvidence
 	latencySeries *diagnostics.LatencySeriesEvidence
 	stability     *diagnostics.StabilityEvidence
+	// speedServerID names the catalogue server a download measured. It stays
+	// empty when the agent fell back to its own URL, which is what tells the
+	// controller the two rates came from different servers.
+	speedServerID string
 }
 
-func (e *Executor) proxyCheck(ctx context.Context, profile diagnostics.TestProfile, socksPort int, directBody string) proxyCheckResult {
+func (e *Executor) proxyCheck(ctx context.Context, profile diagnostics.TestProfile, socksPort int, directBody string) (result proxyCheckResult) {
 	endpoint := ""
+	speedServerID := ""
 	timeout := e.config.ProxyTimeout
 	switch profile.ID {
 	case diagnostics.ProfileLatency:
@@ -324,9 +342,22 @@ func (e *Executor) proxyCheck(ctx context.Context, profile diagnostics.TestProfi
 		}
 		endpoint = e.config.DownloadURL
 		timeout = e.config.DownloadTimeout
+		// The server the run measured, when the job names one this build knows.
+		// An unknown ID is not a failure: the agent measures its own URL and the
+		// empty server in the answer marks the rates as not comparable.
+		if serverID := strings.TrimSpace(profile.ServerID); serverID != "" {
+			if serverURL, ok := e.config.ResolveSpeedServer(serverID); ok && validateEndpointURL(serverURL) == nil {
+				endpoint = serverURL
+				speedServerID = serverID
+			}
+		}
 	default:
 		return configurationResult()
 	}
+	// Every answer from here on is about the server chosen above, failures
+	// included: a run's server the agent could not download from is evidence
+	// about that server, not about the agent's own URL.
+	defer func() { result.speedServerID = speedServerID }()
 	client := e.socksClient(socksPort, timeout)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {

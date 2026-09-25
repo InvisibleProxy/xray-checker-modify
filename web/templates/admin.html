@@ -837,6 +837,62 @@
       .heatmap-axis span:last-child {
         transform: translateX(-100%);
       }
+      /* Path quality: the same rows, 24 hour cells and a summary column. A
+         cell's colour is the share of bad measurements in that hour, so a node
+         whose evenings are red reads at a glance whatever its daytime speed. */
+      .path-quality .heatmap-row {
+        grid-template-columns: minmax(150px, 210px) minmax(0, 1fr) minmax(190px, 260px);
+        /* Wide enough for 24 legible cells; the panel scrolls sideways below it. */
+        min-width: 820px;
+      }
+      .path-quality .heatmap-cells {
+        grid-template-columns: repeat(24, minmax(6px, 1fr));
+      }
+      .path-quality .heat-cell.ok {
+        background: rgba(110, 168, 254, 0.55);
+      }
+      .path-quality .heat-cell.low {
+        background: var(--yellow);
+        opacity: 0.55;
+      }
+      .path-quality .heat-cell.mid {
+        background: var(--yellow);
+      }
+      .path-quality .heat-cell.high {
+        background: var(--red);
+      }
+      .path-quality-hours {
+        display: grid;
+        grid-template-columns: repeat(24, minmax(6px, 1fr));
+        gap: 2px;
+        color: var(--muted);
+        font-size: 0.6875rem;
+        text-align: center;
+      }
+      .path-quality-hours span.peak {
+        color: var(--text);
+        font-weight: 700;
+        border-bottom: 2px solid var(--yellow);
+      }
+      .path-quality .heatmap-label {
+        display: flex;
+        align-items: center;
+        min-width: 0;
+        padding: 2px 6px;
+      }
+      .path-quality .heatmap-label > span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .path-quality-summary {
+        color: var(--muted);
+        font-size: 0.75rem;
+        line-height: 1.3;
+      }
+      .path-quality-summary strong {
+        color: var(--text);
+      }
       .history-url {
         min-width: 260px;
       }
@@ -2689,6 +2745,10 @@
                 <input id="telegram-recovery" type="checkbox" />
                 Recovery alerts
               </label>
+              <label class="row" title="Every Monday at 10:00: which nodes were worst in the evening peak, the fleet by hour and what the agents answered. /quality sends it on demand.">
+                <input id="telegram-weekly-digest" type="checkbox" />
+                Weekly path-quality digest
+              </label>
             </div>
 
             <div class="row">
@@ -2705,6 +2765,8 @@
               </div>
               <div class="hint">A failed or slow measurement starts an isolated agent probe. Its evidence is stored with that measurement and enriches the Telegram alert; it never changes status, classification, incidents, retries or Remnawave.</div>
               <div class="hint">When the proxy-failure trigger is on, a node entering proxy_failure gets one agent probe per episode. The answer appears among the node's diagnostic sessions and in its Telegram down alert; it never decides whether that alert is sent.</div>
+              <div class="hint">When the unreachable-node trigger is on, a node the checker cannot reach at all gets one probe per episode as well. A node that works from the agent points at a block on the checker's path; one that fails there too points at the host or its hoster.</div>
+              <div class="hint">A slowdown counts as reproduced only when the agent measured the same speed-test server and got a rate in the run's range. An agent many times faster than the run reads as the checker's path; another server or a rate on the threshold's edge reads as inconclusive.</div>
               <div class="config-status">
                 <div><span>Trigger</span><strong id="diagnostic-automation-trigger">Speed fallback</strong></div>
                 <div><span>Cooldown</span><strong id="diagnostic-automation-cooldown">—</strong></div>
@@ -3409,6 +3471,35 @@
           </div>
           <div class="muted" id="reachability-legend"></div>
         </section>
+
+        <!-- What the agents answered, kept after the in-memory sessions are
+             gone. The matrix shows the latest cell per pair; this is the
+             history, including the verdicts of automatic probes. -->
+        <section class="panel panel-strong stack">
+          <div class="panel-actions">
+            <div>
+              <h2>Agent verdicts</h2>
+              <div class="muted">Final answers of automatic probes and reachability disagreements, newest first. Evidence only: nothing here changes a status, an incident or an alert.</div>
+            </div>
+            <div class="row">
+              <select id="verdicts-source" aria-label="Verdict source">
+                <option value="">All sources</option>
+                <option value="speed">Speed</option>
+                <option value="availability">Availability</option>
+                <option value="sweep">Sweep</option>
+              </select>
+              <span id="verdicts-state" class="table-meta"></span>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="verdicts-table">
+              <thead>
+                <tr><th>When</th><th>Node</th><th>Question</th><th>Agent</th><th>Verdict</th><th>Checker</th><th>Agent result</th></tr>
+              </thead>
+              <tbody id="verdicts-body"></tbody>
+            </table>
+          </div>
+        </section>
       </section>
 
       <section id="history-view" class="view stack" role="tabpanel" aria-labelledby="tab-history" hidden>
@@ -3461,6 +3552,27 @@
             <span id="history-heatmap-meta" class="table-meta"></span>
           </div>
           <div id="history-heatmap" class="speed-heatmap"></div>
+        </section>
+
+        <!-- The same history folded onto the hour of day. A node that is slow
+             every evening is a fact about the route to its hoster, not a string
+             of incidents, and on a time axis it reads as scattered dips. -->
+        <section class="panel stack">
+          <div class="panel-actions">
+            <div>
+              <h2>Path quality by hour</h2>
+              <div class="muted">Share of bad measurements per node and hour of day, in the clients' time zone. The evening peak is marked on the axis; confirmation re-runs are left out. Agent verdicts show whether the node or the checker's path lost the rate.</div>
+            </div>
+            <div class="row">
+              <div class="chart-ranges" id="path-quality-ranges" aria-label="Path quality period">
+                <button class="chart-range" type="button" data-path-quality-days="7">7 d</button>
+                <button class="chart-range" type="button" data-path-quality-days="14">14 d</button>
+                <button class="chart-range" type="button" data-path-quality-days="30">30 d</button>
+              </div>
+              <span id="path-quality-meta" class="table-meta"></span>
+            </div>
+          </div>
+          <div id="path-quality" class="speed-heatmap path-quality"></div>
         </section>
 
         <section class="panel stack">
@@ -3674,6 +3786,8 @@
         incidentFilters: { search: "", status: "", period: "", minDurationSec: 0, subscription: "", groupRepeats: true },
         historyChart: null,
         historyHeatmap: { loading: false, error: "", rows: [], request: 0 },
+        pathQuality: { days: 14, loading: false, error: "", report: null, request: 0, key: "" },
+        verdicts: { source: "", loading: false, error: "", entries: [], request: 0 },
         speedPollRunning: false,
         loadRunning: false,
         speedRunStarting: false,
@@ -4343,6 +4457,7 @@
           alertMaxReminderMinutes: Math.max(1, Number($("telegram-alert-max").value || 1440)),
           groupOfflineReminders: $("telegram-alert-group").checked,
           notifyRecovery: $("telegram-recovery").checked,
+          weeklyDigestEnabled: $("telegram-weekly-digest").checked,
           mutedNodeIds: activeTelegramMuteNodeIds("all"),
           mutedSpeedNodeIds: activeTelegramMuteNodeIds("speed"),
           mutedAlertNodeIds: activeTelegramMuteNodeIds("alerts"),
@@ -6870,6 +6985,7 @@
           case "manual": return tr("Manual");
           case "auto_speed_fallback": return tr("Speed fallback");
           case "auto_proxy_failure": return tr("Proxy failure");
+          case "auto_offline": return tr("Unreachable node");
           case "auto_check_endpoint": return tr("Check endpoint");
           case "auto_ambiguous_failure": return tr("Ambiguous failure");
           case "reachability_sweep": return tr("Reachability sweep");
@@ -6884,6 +7000,7 @@
           parts.push(`${context.observedMbps} / ${context.thresholdMbps} Mbps`);
         }
         if (context.fallbackAttempts) parts.push(`${tr("Fallback attempts")}: ${context.fallbackAttempts}`);
+        if (context.speedServerId) parts.push(context.speedServerId);
         return parts.join(" · ");
       }
 
@@ -8051,6 +8168,11 @@
         switch (probe && probe.state) {
           case "reproduced": return { label: "Reproduced", chip: "error" };
           case "not_reproduced": return { label: "Not reproduced", chip: "ok" };
+          // Many times the checker's rate through the same node: the loss is on
+          // the checker's side of the path. Not "ok" — clients on that path may
+          // be losing the same rate.
+          case "path_limited": return { label: "Checker path", chip: "warn" };
+          case "inconclusive": return { label: "Inconclusive", chip: "neutral" };
           case "unreliable": return { label: "Unreliable", chip: "warn" };
           case "running": return { label: "Probing", chip: "warn" };
           case "unavailable": return { label: "No agent", chip: "neutral" };
@@ -8106,6 +8228,8 @@
           ["Probe", task.profileId ? diagnosticProfileLabel(task.profileId) : ""],
           ["Method", task.method],
           ["Asked to transfer", task.downloadBytes > 0 ? formatBytes(task.downloadBytes) : tr("Agent's own amount")],
+          ["Server measured by the run", task.speedServerId || (task.outcome ? tr("Not in the catalogue") : "")],
+          ["Server asked of the agent", task.requestedServerId || (task.speedServerId ? tr("Agent's own URL") : "")],
           ["Alternative endpoint", task.alternativeProfileId ? diagnosticProfileLabel(task.alternativeProfileId) : ""],
           ["Job", task.jobState],
           ["Requested agents", agents],
@@ -8130,6 +8254,7 @@
           ["Duration", observation.durationMillis > 0 ? `${observation.durationMillis} ms` : ""],
           ["Latency", observation.latencyMillis > 0 ? `${observation.latencyMillis} ms` : ""],
           ["Endpoint", observation.endpointProfile ? diagnosticProfileLabel(observation.endpointProfile) : ""],
+          ["Server the agent measured", observation.speedServerId || (observation.throughput ? tr("Agent's own URL") : "")],
           ["Failure", observation.failure && observation.failure.code ? observation.failure.code : ""],
           ["Failed at", observation.failure && observation.failure.stage ? observation.failure.stage : ""],
           ["Agent version", observation.agentVersion],
@@ -8631,6 +8756,7 @@
         $("telegram-alert-max").value = cfg.alertMaxReminderMinutes || 1440;
         $("telegram-alert-group").checked = cfg.groupOfflineReminders !== false;
         $("telegram-recovery").checked = cfg.notifyRecovery !== false;
+        $("telegram-weekly-digest").checked = cfg.weeklyDigestEnabled !== false;
         cfg.mutedNodeIds = activeTelegramMuteNodeIds("all");
         cfg.mutedSpeedNodeIds = activeTelegramMuteNodeIds("speed");
         cfg.mutedAlertNodeIds = activeTelegramMuteNodeIds("alerts");
@@ -8865,7 +8991,124 @@
             state.historyHeatmap = { ...state.historyHeatmap, loading: false, error: err.message };
             renderHistoryHeatmap();
           }),
+          loadPathQuality(options.force === true),
         ]);
+      }
+
+      // One request for the whole fleet: the report is folded on the server,
+      // where the history already is, instead of fetching every node's
+      // measurements again. Refetched when the period or the subscription
+      // changes, on Refresh, and at most every five minutes otherwise.
+      const pathQualityMaxAgeMs = 5 * 60 * 1000;
+
+      async function loadPathQuality(force = false) {
+        const current = state.pathQuality;
+        const key = [current.days, state.historySubName || ""].join("|");
+        if (!force && current.key === key && current.report && !current.error && Date.now() - (current.loadedAt || 0) < pathQualityMaxAgeMs) {
+          renderPathQuality();
+          return;
+        }
+        const requestID = (current.request || 0) + 1;
+        state.pathQuality = { ...current, key, request: requestID, loading: true, error: "" };
+        renderPathQuality();
+        const query = new URLSearchParams({ days: String(current.days) });
+        if (state.historySubName) query.set("subscription", state.historySubName);
+        try {
+          const report = await request(`/path-quality?${query.toString()}`);
+          if (state.pathQuality.request !== requestID) return;
+          state.pathQuality = { ...state.pathQuality, loading: false, report, loadedAt: Date.now() };
+        } catch (err) {
+          if (state.pathQuality.request !== requestID) return;
+          state.pathQuality = { ...state.pathQuality, loading: false, error: err.message };
+        }
+        renderPathQuality();
+      }
+
+      function pathQualityPercent(share) {
+        return `${Math.round((Number(share) || 0) * 100)}%`;
+      }
+
+      function pathQualityInPeak(hour, start, end) {
+        if (start === end) return false;
+        return start < end ? hour >= start && hour < end : hour >= start || hour < end;
+      }
+
+      function pathQualityCellHTML(cell) {
+        if (!cell || !cell.runs) return `<span class="heat-cell"></span>`;
+        const share = cell.bad / cell.runs;
+        const level = share === 0 ? "ok" : share < 0.25 ? "low" : share < 0.5 ? "mid" : "high";
+        const hour = String(cell.hour).padStart(2, "0");
+        const lines = [
+          `${hour}:00–${String((cell.hour + 1) % 24).padStart(2, "0")}:00`,
+          `${cell.bad} / ${cell.runs} ${tr("bad measurements")} (${pathQualityPercent(share)})`,
+        ];
+        if (cell.medianMbps > 0) lines.push(`${tr("Median")} ${formatMbps(cell.medianMbps)}`);
+        return `<span class="heat-cell ${level}" title="${escapeHtml(lines.join("\n"))}"></span>`;
+      }
+
+      // The agents' verdicts are what tells the two evening problems apart: the
+      // node running out of capacity, or the path from the checker to it.
+      function pathQualityVerdictsText(verdicts) {
+        const labels = [
+          ["path_limited", "checker path"], ["reproduced", "reproduced"], ["not_reproduced", "not reproduced"],
+          ["inconclusive", "inconclusive"], ["unavailable", "no agent"],
+        ];
+        return labels
+          .filter(([state]) => verdicts && verdicts[state] > 0)
+          .map(([state, label]) => `${tr(label)} ${verdicts[state]}`)
+          .join(", ");
+      }
+
+      function renderPathQuality() {
+        const container = $("path-quality");
+        if (!container) return;
+        document.querySelectorAll("[data-path-quality-days]").forEach((button) => {
+          button.classList.toggle("active", Number(button.dataset.pathQualityDays) === state.pathQuality.days);
+        });
+        const current = state.pathQuality;
+        const meta = $("path-quality-meta");
+        if (current.error) {
+          container.innerHTML = `<div class="chart-empty warn">${escapeHtml(tr(current.error))}</div>`;
+          meta.textContent = "";
+          return;
+        }
+        const report = current.report;
+        const nodes = report ? (report.nodes || []).filter((node) => (node.peak.runs + node.offPeak.runs) > 0) : [];
+        if (!report || nodes.length === 0) {
+          container.innerHTML = `<div class="chart-empty">${current.loading ? tr("Folding the speed history by hour…") : tr("No measurements in this period")}</div>`;
+          meta.textContent = "";
+          return;
+        }
+        const start = report.peakStart;
+        const end = report.peakEnd;
+        const ranked = nodes.slice().sort((a, b) => {
+          if ((a.peak.runs === 0) !== (b.peak.runs === 0)) return a.peak.runs === 0 ? 1 : -1;
+          if (b.peak.badShare !== a.peak.badShare) return b.peak.badShare - a.peak.badShare;
+          return (a.name || "").localeCompare(b.name || "", undefined, { numeric: true, sensitivity: "base" });
+        });
+        const hoursHeader = Array.from({ length: 24 }, (_, hour) => {
+          const label = hour % 3 === 0 ? String(hour).padStart(2, "0") : "";
+          return `<span class="${pathQualityInPeak(hour, start, end) ? "peak" : ""}">${label}</span>`;
+        }).join("");
+        const rowsHTML = ranked.map((node) => {
+          const cells = (node.hours || []).map(pathQualityCellHTML).join("");
+          const verdicts = pathQualityVerdictsText(node.verdicts);
+          const summary = [
+            `<strong>${escapeHtml(tr("peak"))} ${pathQualityPercent(node.peak.badShare)}</strong> (${node.peak.bad}/${node.peak.runs})` +
+              (node.peak.medianMbps > 0 ? ` · ${escapeHtml(formatMbps(node.peak.medianMbps))}` : ""),
+            `${escapeHtml(tr("off-peak"))} ${pathQualityPercent(node.offPeak.badShare)}` +
+              (node.offPeak.medianMbps > 0 ? ` · ${escapeHtml(formatMbps(node.offPeak.medianMbps))}` : ""),
+            verdicts ? `${escapeHtml(tr("agents"))}: ${escapeHtml(verdicts)}` : "",
+          ].filter(Boolean).join("<br>");
+          return `<div class="heatmap-row">
+            <span class="heatmap-label" title="${escapeHtml(node.stableId)}"><span>${escapeHtml(node.name || node.stableId)}</span></span>
+            <div class="heatmap-cells">${cells}</div>
+            <div class="path-quality-summary">${summary}</div>
+          </div>`;
+        }).join("");
+        container.innerHTML = `<div class="heatmap-row heatmap-axis-row" aria-hidden="true"><span></span><div class="path-quality-hours">${hoursHeader}</div><span></span></div>${rowsHTML}`;
+        const excluded = report.excluded ? ` · ${report.excluded} ${tr("re-runs left out")}` : "";
+        meta.textContent = `${ranked.length} ${tr("nodes")} · ${tr("hours in")} ${report.timeZone} · ${tr("peak")} ${String(start).padStart(2, "0")}–${String(end % 24).padStart(2, "0")}${excluded}${current.loading ? " · refreshing" : ""}`;
       }
 
       async function loadSelectedHistory() {
@@ -9560,6 +9803,7 @@
       }
 
       async function loadReachability() {
+        loadVerdicts();
         try {
           state.reachability = await request("/reachability");
           renderReachability();
@@ -9569,6 +9813,88 @@
           $("reachability-state").textContent = err.message;
           $("reachability-state").className = "error";
         }
+      }
+
+      async function loadVerdicts() {
+        const current = state.verdicts;
+        const requestID = (current.request || 0) + 1;
+        state.verdicts = { ...current, request: requestID, loading: true, error: "" };
+        renderVerdicts();
+        const query = new URLSearchParams({ limit: "200" });
+        if (current.source) query.set("source", current.source);
+        try {
+          const entries = await request(`/diagnostic-verdicts?${query.toString()}`);
+          if (state.verdicts.request !== requestID) return;
+          state.verdicts = { ...state.verdicts, loading: false, entries: entries || [] };
+        } catch (err) {
+          if (state.verdicts.request !== requestID) return;
+          state.verdicts = { ...state.verdicts, loading: false, error: err.message };
+        }
+        renderVerdicts();
+      }
+
+      // A sweep cell keeps the matrix's own vocabulary; an automatic probe the
+      // verdict it was stored with.
+      function verdictChip(entry) {
+        if (entry.source === "sweep") {
+          const labels = {
+            agreed_down: ["Down for both", "error"], agent_only_failure: ["Agent only", "warn"],
+            local_only_failure: ["Checker only", "warn"], unknown: ["Unknown", "neutral"],
+          };
+          const [label, chip] = labels[entry.verdict] || [entry.verdict, "neutral"];
+          return `<span class="chip ${chip}">${escapeHtml(tr(label))}</span>`;
+        }
+        const verdict = agentProbeVerdict({ state: entry.verdict });
+        return `<span class="chip ${verdict.chip}">${escapeHtml(tr(verdict.label))}</span>`;
+      }
+
+      function verdictQuestion(entry) {
+        if (entry.source === "sweep") return tr("Reachability sweep");
+        if (entry.kind === "offline") return tr("Unreachable node");
+        if (entry.kind === "proxy_failure") return tr("Proxy failure");
+        return entry.outcome === "technical_error" ? tr("Speed test failed") : tr("Low speed");
+      }
+
+      function verdictSide(status, mbps, threshold, failure, server) {
+        const parts = [];
+        if (status) parts.push(status);
+        if (mbps > 0) parts.push(threshold > 0 ? `${formatMbps(mbps)} / ${formatMbps(threshold)}` : formatMbps(mbps));
+        if (failure) parts.push(failure);
+        if (server) parts.push(server);
+        return escapeHtml(parts.join(" · ") || "—");
+      }
+
+      function renderVerdicts() {
+        const body = $("verdicts-body");
+        if (!body) return;
+        const current = state.verdicts;
+        $("verdicts-source").value = current.source || "";
+        const meta = $("verdicts-state");
+        if (current.error) {
+          body.innerHTML = `<tr><td colspan="7" class="warn">${escapeHtml(tr(current.error))}</td></tr>`;
+          meta.textContent = "";
+          return;
+        }
+        const entries = current.entries || [];
+        if (entries.length === 0) {
+          body.innerHTML = `<tr><td colspan="7" class="muted">${current.loading ? tr("Loading") : tr("No verdicts recorded yet")}</td></tr>`;
+          meta.textContent = "";
+          return;
+        }
+        body.innerHTML = entries.map((entry) => {
+          const agent = [entry.agentName || entry.agentId, entry.region].filter(Boolean).join(" · ");
+          const detail = entry.detail ? ` title="${escapeHtml(tr(entry.detail))}"` : "";
+          return `<tr>
+            <td>${escapeHtml(formatTime(entry.at))}</td>
+            <td>${escapeHtml(entry.node || entry.stableId)}</td>
+            <td>${escapeHtml(verdictQuestion(entry))}</td>
+            <td>${escapeHtml(agent || "—")}</td>
+            <td${detail}>${verdictChip(entry)}</td>
+            <td>${verdictSide(entry.localStatus, entry.localMbps, entry.thresholdMbps, entry.localFailureCode, entry.localServerId)}</td>
+            <td>${verdictSide(entry.agentStatus, entry.agentMbps, 0, entry.agentFailureCode, entry.agentServerId)}</td>
+          </tr>`;
+        }).join("");
+        meta.textContent = `${entries.length} ${tr("verdicts")}${current.loading ? " · refreshing" : ""}`;
       }
 
       // stableId narrows the pass to one node, which is how a single finding is
@@ -9993,6 +10319,7 @@
         const triggers = [];
         if (automation.speedFallbackEnabled) triggers.push(tr("Speed fallback"));
         if (automation.proxyFailureEnabled) triggers.push(tr("Proxy failure"));
+        if (automation.offlineEnabled) triggers.push(tr("Unreachable node"));
         $("diagnostic-automation-trigger").textContent = triggers.length ? triggers.join(" · ") : tr("Disabled");
         $("diagnostic-automation-cooldown").textContent = automation.cooldownSeconds ? `${Math.round(automation.cooldownSeconds / 60)} ${tr("min")}` : "—";
         $("diagnostic-automation-wait").textContent = automation.alertWaitSeconds >= 0 ? `${automation.alertWaitSeconds || 0} ${tr("sec")}` : "—";
@@ -10959,6 +11286,10 @@
       $("tab-incidents").addEventListener("click", () => switchTab("incidents"));
       $("tab-reachability").addEventListener("click", () => switchTab("reachability"));
       $("reachability-refresh").addEventListener("click", loadReachability);
+      $("verdicts-source").addEventListener("change", () => {
+        state.verdicts = { ...state.verdicts, source: $("verdicts-source").value };
+        loadVerdicts();
+      });
       $("reachability-sweep").addEventListener("click", () => sweepReachability());
       $("reachability-sub-filter").addEventListener("change", (event) => {
         state.reachabilitySubscription = event.target.value || "";
@@ -11175,6 +11506,12 @@
           if (state.historyRange === "custom") loadHistory();
         });
       });
+      document.querySelectorAll("[data-path-quality-days]").forEach((button) => {
+        button.addEventListener("click", () => {
+          state.pathQuality = { ...state.pathQuality, days: Number(button.dataset.pathQualityDays) || 14 };
+          loadPathQuality();
+        });
+      });
       $("history-results").addEventListener("click", (event) => {
         const target = event.target instanceof Element ? event.target.closest("[data-agent-probe]") : null;
         if (target) openAgentProbeDialog(target.dataset.agentProbe);
@@ -11225,6 +11562,7 @@
           loadHistory();
         } else {
           loadHistoryHeatmap().catch(() => {});
+          loadPathQuality();
         }
       });
       $("run").addEventListener("click", () => (speedRunActive() ? cancelSpeedRun() : runSelected()));

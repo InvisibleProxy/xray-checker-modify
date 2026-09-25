@@ -155,6 +155,8 @@ func (s *Service) handleUpdate(upd update) {
 		s.sendFormattedCommandReplyWithMarkup(msg, s.formatSpeedHistoryMessage(strings.Join(args, " ")), backToMenuMarkup())
 	case "nodes":
 		s.sendFormattedCommandReplyWithMarkup(msg, s.formatNodeListMessage(1), s.nodeListMarkup(1))
+	case "quality":
+		s.sendFormattedCommandReplyWithMarkup(msg, s.formatQualityMessage(), backToMenuMarkup())
 	case "speedtest":
 		if !s.isAdmin(msg, cfg) {
 			s.sendCommandReply(msg, "<b>Нет доступа</b>\n\nSpeed-test может запускать только администратор.")

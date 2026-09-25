@@ -22,6 +22,7 @@ func (s *Service) formatHelp(cfg Config) string {
 		"• <code>/start</code> — открыть главное меню",
 		"• <code>/status</code> — статусы нод",
 		"• <code>/speed &lt;id или имя&gt;</code> — история замеров ноды",
+		"• <code>/quality</code> — качество пути за неделю: какие ноды проседают в пик",
 		"• <code>/id</code> — ID чата, топика и пользователя",
 	)
 	if len(cfg.AdminUserIDs) > 0 {
@@ -40,6 +41,7 @@ func (s *Service) formatHelpMessage(cfg Config) formattedMessage {
 		"<li><code>/start</code> — главное меню</li>",
 		"<li><code>/status</code> — состояние нод</li>",
 		"<li><code>/speed &lt;ID или имя&gt;</code> — история замеров</li>",
+		"<li><code>/quality</code> — качество пути за неделю</li>",
 		"<li><code>/id</code> — ID чата, топика и пользователя</li>",
 	}
 	if len(cfg.AdminUserIDs) > 0 {

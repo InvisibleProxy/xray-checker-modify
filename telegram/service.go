@@ -34,6 +34,7 @@ import (
 	"xray-checker/checker"
 	"xray-checker/logger"
 	"xray-checker/models"
+	"xray-checker/paneltelemetry"
 	"xray-checker/speedtest"
 )
 
@@ -86,17 +87,31 @@ type Service struct {
 	nodeAlertSendFunc   func(Config, formattedMessage) error
 	projectMaintenance  atomic.Bool
 	speedDiagnostics    SpeedDiagnosticAutomation
-	proxyFailureProbes  ProxyFailureDiagnostics
+	availabilityProbes  AvailabilityDiagnostics
+	panelTelemetry      PanelTelemetry
+	digestSources       DigestSources
+	digestMu            sync.Mutex
+	lastDigestAt        time.Time
+	digestNow           func() time.Time
+	digestSendFunc      func(Config, formattedMessage) error
 }
 
-// ProxyFailureDiagnostics is the read side of the proxy-failure automation. The
-// probes are started by the availability loop, not here, so a node gets its
-// probe whether or not Telegram is configured; an alert only reads the answer.
-type ProxyFailureDiagnostics interface {
-	ProxyFailureEnabled() bool
+// AvailabilityDiagnostics is the read side of the availability automations —
+// proxy failure and unreachable node. The probes are started by the
+// availability loop, not here, so a node gets its probe whether or not Telegram
+// is configured; an alert only reads the answer.
+type AvailabilityDiagnostics interface {
+	AvailabilityEnabled() bool
 	AlertWait() time.Duration
-	ProxyFailureAnnotations([]string) map[string]speedtest.AgentDiagnostic
-	AwaitProxyFailure(context.Context, []string) map[string]speedtest.AgentDiagnostic
+	AvailabilityAnnotations([]string) map[string]speedtest.AgentDiagnostic
+	AwaitAvailability(context.Context, []string) map[string]speedtest.AgentDiagnostic
+}
+
+// PanelTelemetry is the panel's view of a node, by the address the
+// subscription publishes; before is when the problem started, so the online
+// count can be compared with what it was then.
+type PanelTelemetry interface {
+	NodeStatus(server string, before time.Time) (paneltelemetry.Status, bool)
 }
 
 type SpeedDiagnosticAutomation interface {
@@ -142,8 +157,26 @@ func (s *Service) SetSpeedDiagnosticAutomation(automation SpeedDiagnosticAutomat
 	s.speedDiagnostics = automation
 }
 
-func (s *Service) SetProxyFailureDiagnostics(probes ProxyFailureDiagnostics) {
-	s.proxyFailureProbes = probes
+func (s *Service) SetAvailabilityDiagnostics(probes AvailabilityDiagnostics) {
+	s.availabilityProbes = probes
+}
+
+// SetPanelTelemetry adds the panel's view of a node to alerts. Nil — no panel
+// integration — leaves alerts as they were.
+func (s *Service) SetPanelTelemetry(telemetry PanelTelemetry) {
+	s.panelTelemetry = telemetry
+}
+
+// panelStatus reads the panel's view of the node behind a proxy.
+func (s *Service) panelStatus(proxy *models.ProxyConfig, before time.Time) *paneltelemetry.Status {
+	if s.panelTelemetry == nil || proxy == nil {
+		return nil
+	}
+	status, ok := s.panelTelemetry.NodeStatus(proxy.Server, before)
+	if !ok {
+		return nil
+	}
+	return &status
 }
 
 func (s *Service) SetProjectMaintenance(enabled bool) {
@@ -220,6 +253,7 @@ func (s *Service) AdminConfig() AdminConfig {
 		MutedSpeedNodeIDs:            mutedSpeedNodeIDs,
 		MutedAlertNodeIDs:            mutedAlertNodeIDs,
 		TimeZone:                     cfg.TimeZone,
+		WeeklyDigestEnabled:          &cfg.WeeklyDigestEnabled,
 		BotTokenConfigured:           cfg.BotToken != "",
 		ChatConfigured:               cfg.ChatID != "",
 		MessageThreadConfigured:      cfg.MessageThreadID > 0,
@@ -248,6 +282,9 @@ func (s *Service) UpdateAdminConfig(input AdminConfig) error {
 	cfg.MutedSpeedNodeIDs = s.activeMutedNodeIDs(input.MutedSpeedNodeIDs)
 	cfg.MutedAlertNodeIDs = s.activeMutedNodeIDs(input.MutedAlertNodeIDs)
 	cfg.TimeZone = input.TimeZone
+	if input.WeeklyDigestEnabled != nil {
+		cfg.WeeklyDigestEnabled = *input.WeeklyDigestEnabled
+	}
 	cfg.Normalize()
 	if cfg.Enabled && cfg.BotToken == "" {
 		return fmt.Errorf("bot token is required when Telegram is enabled; set TELEGRAM_BOT_TOKEN")
@@ -385,6 +422,7 @@ func (s *Service) UpdateConfig(cfg Config) error {
 func (s *Service) Start() {
 	s.startRestoredSpeedRetries()
 	go s.pollingLoop()
+	go s.digestLoop()
 }
 
 func (s *Service) Stop() {

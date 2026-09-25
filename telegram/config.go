@@ -84,6 +84,9 @@ type Config struct {
 	MutedAlertNodeIDs            []string `json:"mutedAlertNodeIds,omitempty"`
 	TimeZone                     string   `json:"timeZone,omitempty"`
 	TimeoutSec                   int      `json:"timeoutSec"`
+	// WeeklyDigestEnabled sends the path-quality digest every Monday morning.
+	// A file written before the setting existed keeps the default, which is on.
+	WeeklyDigestEnabled bool `json:"weeklyDigestEnabled"`
 }
 
 type AdminConfig struct {
@@ -106,10 +109,14 @@ type AdminConfig struct {
 	MutedSpeedNodeIDs            []string `json:"mutedSpeedNodeIds,omitempty"`
 	MutedAlertNodeIDs            []string `json:"mutedAlertNodeIds,omitempty"`
 	TimeZone                     string   `json:"timeZone"`
-	BotTokenConfigured           bool     `json:"botTokenConfigured"`
-	ChatConfigured               bool     `json:"chatConfigured"`
-	MessageThreadConfigured      bool     `json:"messageThreadConfigured"`
-	AdminUserCount               int      `json:"adminUserCount"`
+	// WeeklyDigestEnabled is a pointer so that a client which does not know the
+	// setting — an admin page cached from an older build — leaves it as it is
+	// instead of switching the digest off by omission.
+	WeeklyDigestEnabled     *bool `json:"weeklyDigestEnabled,omitempty"`
+	BotTokenConfigured      bool  `json:"botTokenConfigured"`
+	ChatConfigured          bool  `json:"chatConfigured"`
+	MessageThreadConfigured bool  `json:"messageThreadConfigured"`
+	AdminUserCount          int   `json:"adminUserCount"`
 }
 
 func DefaultConfig() Config {
@@ -127,6 +134,7 @@ func DefaultConfig() Config {
 		GroupOfflineReminders:        true,
 		NotifyRecovery:               true,
 		TimeoutSec:                   defaultTimeoutSec,
+		WeeklyDigestEnabled:          true,
 	}
 }
 

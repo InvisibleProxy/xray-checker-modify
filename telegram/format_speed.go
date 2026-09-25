@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"xray-checker/checker"
+	"xray-checker/diagnostics"
 	"xray-checker/speedtest"
 )
 
@@ -176,7 +177,25 @@ func (s *Service) formatSpeedReport(report speedtest.RunReport, cfg Config, fail
 }
 
 func (s *Service) formatSpeedReportMessage(report speedtest.RunReport, cfg Config, failed int, slow int, issuesOnly bool, scopes ...speedReportScope) formattedMessage {
-	return buildSpeedReport(report, cfg, issuesOnly, scopes)
+	return buildSpeedReportWithPanels(report, cfg, issuesOnly, scopes, s.speedPanelLines(report.Results, cfg.LowSpeedThresholdMbps))
+}
+
+// speedPanelLines renders the panel's view of every problem node in a report.
+func (s *Service) speedPanelLines(results []speedtest.Result, threshold float64) map[string]string {
+	if s.panelTelemetry == nil || s.proxyChecker == nil {
+		return nil
+	}
+	lines := make(map[string]string)
+	for _, result := range speedIssueResults(results, threshold) {
+		proxy, ok := s.proxyChecker.GetProxyByStableID(result.StableID)
+		if !ok {
+			continue
+		}
+		if line := formatPanelStatusHTML(s.panelStatus(proxy, time.Time{})); line != "" {
+			lines[result.StableID] = line
+		}
+	}
+	return lines
 }
 
 func speedIssuesHTML(results []speedtest.Result, threshold float64) []string {
@@ -370,13 +389,25 @@ func formatSpeedAgentDiagnosticHTML(diagnostic *speedtest.AgentDiagnostic) strin
 	case speedtest.AgentDiagnosticReproduced:
 		verdict = "проблема воспроизведена"
 		if diagnostic.RemoteStatus == "online" {
-			verdict = "просадка воспроизведена"
+			verdict = "просадка воспроизведена на том же сервере — вероятно, дело в ноде"
 		}
 	case speedtest.AgentDiagnosticNotReproduced:
 		verdict = "проблема не воспроизвелась"
 		if diagnostic.AlternativeStatus == "online" {
 			verdict = "основной URL не сработал, резервный доступен"
 		}
+	case speedtest.AgentDiagnosticPathLimited:
+		// The operator's next question is "how much faster", because that is
+		// what makes this the path and not the node.
+		verdict = "узкое место — путь от checker-а до ноды"
+		if ratio := agentRateRatio(diagnostic); ratio >= 2 {
+			verdict = fmt.Sprintf("в %.0f раз быстрее checker-а — узкое место на пути от checker-а до ноды", ratio)
+		}
+		if diagnostic.Detail == diagnostics.ReasonAgentAlsoBelowThreshold {
+			verdict += "; у агента тоже ниже порога"
+		}
+	case speedtest.AgentDiagnosticInconclusive:
+		verdict = "несопоставимо: " + localizedSpeedDiagnosticDetail(diagnostic.Detail)
 	case speedtest.AgentDiagnosticUnreliable, speedtest.AgentDiagnosticUnavailable:
 		verdict = localizedSpeedDiagnosticDetail(diagnostic.Detail)
 	}
@@ -467,6 +498,14 @@ func localizedSpeedDiagnosticDetail(detail string) string {
 		return "у агента не прошла контрольная проверка интернета"
 	case "agent download observation has no throughput evidence":
 		return "агент не передал данные о скорости"
+	case diagnostics.ReasonDifferentServer:
+		return "агент мерил другой сервер"
+	case diagnostics.ReasonNearThreshold:
+		return "скорость агента на границе порога"
+	case diagnostics.ReasonAgentAlsoBelowThreshold:
+		return "у агента тоже ниже порога"
+	case diagnostics.ReasonAlternativeWorked:
+		return "у агента сработал резервный endpoint"
 	default:
 		return "недостаточно данных для вывода"
 	}
