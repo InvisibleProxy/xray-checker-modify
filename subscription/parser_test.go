@@ -151,7 +151,7 @@ func TestRemnawaveBalancerGroupKeepsOutboundTags(t *testing.T) {
 // operator-authored remarks must win and no group is reported.
 func TestRemnawaveSingleHostConfigUsesRemarks(t *testing.T) {
 	sub := fmt.Sprintf(`[{"remarks": "DE #2", "outbounds": [%s, %s]}]`,
-		remnawaveOutbound("proxy", "31.76.38.179", 443, "44444444-4444-4444-8444-444444444444"),
+		remnawaveOutbound("proxy", "31.59.178.215", 443, "44444444-4444-4444-8444-444444444444"),
 		remnawaveServiceOutbounds,
 	)
 
@@ -174,7 +174,7 @@ func TestRemnawaveSingleHostConfigUsesRemarks(t *testing.T) {
 // still name them apart.
 func TestRemnawaveGroupDisambiguatesDuplicateTags(t *testing.T) {
 	sub := fmt.Sprintf(`[{"remarks": "EU", "outbounds": [%s, %s]}]`,
-		remnawaveOutbound("DE", "31.76.38.179", 443, "55555555-5555-4555-8555-555555555555"),
+		remnawaveOutbound("DE", "31.59.178.215", 443, "55555555-5555-4555-8555-555555555555"),
 		remnawaveOutbound("DE", "83.219.249.142", 4443, "66666666-6666-4666-8666-666666666666"),
 	)
 
@@ -186,7 +186,7 @@ func TestRemnawaveGroupDisambiguatesDuplicateTags(t *testing.T) {
 		t.Fatalf("Parse() configs = %d, want 2", len(parsed.Configs))
 	}
 
-	wantNames := []string{"DE (31.76.38.179:443)", "DE (83.219.249.142:4443)"}
+	wantNames := []string{"DE (31.59.178.215:443)", "DE (83.219.249.142:4443)"}
 	for i, proxy := range parsed.Configs {
 		if proxy.Name != wantNames[i] {
 			t.Errorf("Configs[%d].Name = %q, want %q", i, proxy.Name, wantNames[i])
@@ -203,7 +203,7 @@ func TestRemnawaveMultipleGroupsStayIndependent(t *testing.T) {
 		remnawaveOutbound("NL core", "144.31.86.63", 8443, "77777777-7777-4777-8777-777777777777"),
 		remnawaveOutbound("NL xHTTP", "144.31.86.63", 2096, "88888888-8888-4888-8888-888888888888"),
 		remnawaveServiceOutbounds,
-		remnawaveOutbound("proxy", "31.76.38.179", 443, "99999999-9999-4999-8999-999999999999"),
+		remnawaveOutbound("proxy", "31.59.178.215", 443, "99999999-9999-4999-8999-999999999999"),
 		remnawaveServiceOutbounds,
 	)
 

@@ -122,7 +122,7 @@ func TestEvaluateLocationsReportsDownWhenEveryServerIsLost(t *testing.T) {
 func TestEvaluateLocationsStillReportsPartialForSingleTransportServers(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	f := newLocationFixture(now)
-	f.add("de", "31.76.38.179", 443, true)
+	f.add("de", "31.59.178.215", 443, true)
 	f.add("de", "83.219.249.142", 4443, false)
 
 	if got := f.evaluate()["de"].State; got != groupPartial {
@@ -210,17 +210,17 @@ func TestSuggestLocationsGroupsNodesByHostTag(t *testing.T) {
 		proxySource: suggestProxySource{proxies: []*models.ProxyConfig{
 			{StableID: "nl-tcp", Name: "🇳🇱 Нидерланды", Server: "144.31.86.63", Port: 8443},
 			{StableID: "nl-xhttp", Name: "🇳🇱 Нидерланды xHTTP", Server: "144.31.86.63", Port: 2096},
-			{StableID: "de-tcp", Name: "🇩🇪 Германия #2", Server: "31.76.38.179", Port: 443},
+			{StableID: "de-tcp", Name: "🇩🇪 Германия #2", Server: "31.59.178.215", Port: 443},
 			{StableID: "stranger", Name: "Other subscription", Server: "10.0.0.1", Port: 443},
 			// A node from a panel-added source shares an endpoint with one of
 			// ours, so only the source tells them apart. It belongs in neither
 			// list: announce locations are built from our own fleet.
-			{StableID: "foreign", Name: "Somebody else's", Server: "31.76.38.179", Port: 443, SourceID: "src-foreign"},
+			{StableID: "foreign", Name: "Somebody else's", Server: "31.59.178.215", Port: 443, SourceID: "src-foreign"},
 		}},
 		topology: Topology{Hosts: []Host{
 			{UUID: "h-nl-tcp", Remark: "NL", Address: "144.31.86.63", Port: 8443, Tags: []string{"BALANCER_NL", "EU"}},
 			{UUID: "h-nl-xhttp", Remark: "NL xHTTP", Address: "144.31.86.63", Port: 2096, Tags: []string{"BALANCER_NL", "EU"}},
-			{UUID: "h-de", Remark: "DE", Address: "31.76.38.179", Port: 443, Tags: []string{"BALANCER_GE", "EU"}},
+			{UUID: "h-de", Remark: "DE", Address: "31.59.178.215", Port: 443, Tags: []string{"BALANCER_GE", "EU"}},
 		}},
 	}
 

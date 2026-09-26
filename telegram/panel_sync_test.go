@@ -26,7 +26,7 @@ func (r *recordingPanel) NodeStatus(_ string, before time.Time) (paneltelemetry.
 // card does: when the node's failure began, not when the alert state last
 // restarted its own timer.
 func TestPanelLineSharesTheFailureStartAcrossTheBot(t *testing.T) {
-	proxy := &models.ProxyConfig{Protocol: "vless", Server: "31.76.38.179", Port: 443, Name: "Германия #2", UUID: "uuid"}
+	proxy := &models.ProxyConfig{Protocol: "vless", Server: "31.59.178.215", Port: 443, Name: "Германия #2", UUID: "uuid"}
 	proxy.StableID = proxy.GenerateStableID()
 	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{proxy}, 10000, "", 1, "", "", 1, 0, "status")
 	failingSince := time.Now().Add(-time.Hour).Truncate(time.Second)

@@ -28,7 +28,7 @@ func (r *recordingAdminPanel) NodeStatus(server string, before time.Time) (panel
 // with the start of the node's failure, and only for the deployment's own
 // subscription: a node added from the panel belongs to another service.
 func TestAdminProxiesCarryThePanelViewOfOwnNodes(t *testing.T) {
-	own := &models.ProxyConfig{StableID: "own", Name: "Германия #2", Protocol: "vless", Server: "31.76.38.179", Port: 443, UUID: "a"}
+	own := &models.ProxyConfig{StableID: "own", Name: "Германия #2", Protocol: "vless", Server: "31.59.178.215", Port: 443, UUID: "a"}
 	added := &models.ProxyConfig{StableID: "added", Name: "Added", SourceID: "src-1", Protocol: "vless", Server: "added.example", Port: 443, UUID: "b"}
 	proxyChecker := checker.NewProxyChecker([]*models.ProxyConfig{own, added}, 10000, "", 1, "", "", 1, 0, "status")
 	failingSince := time.Now().Add(-time.Hour).Truncate(time.Second)
@@ -55,8 +55,8 @@ func TestAdminProxiesCarryThePanelViewOfOwnNodes(t *testing.T) {
 		view.XrayUptime == nil || *view.XrayUptime != (paneltelemetry.Uptime{Value: 26, Unit: paneltelemetry.UptimeMinutes}) {
 		t.Fatalf("own node panel = %+v", view)
 	}
-	if !panel.before["31.76.38.179"].Equal(failingSince) {
-		t.Fatalf("panel compared with %s, want the failure start %s", panel.before["31.76.38.179"], failingSince)
+	if !panel.before["31.59.178.215"].Equal(failingSince) {
+		t.Fatalf("panel compared with %s, want the failure start %s", panel.before["31.59.178.215"], failingSince)
 	}
 	if byID["added"].Panel != nil {
 		t.Fatalf("a node added from the panel got the panel view: %+v", byID["added"].Panel)

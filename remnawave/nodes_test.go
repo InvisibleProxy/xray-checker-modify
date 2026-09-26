@@ -20,9 +20,9 @@ func TestGetNodesDecodesThePanelNodeRecord(t *testing.T) {
 			return
 		}
 		_, _ = w.Write([]byte(`{"response":[{
-			"uuid":"node-1","name":"Germany-02","address":"31.76.38.179","isConnected":true,"isDisabled":false,
+			"uuid":"node-1","name":"Germany-02","address":"31.59.178.215","isConnected":true,"isDisabled":false,
 			"isConnecting":false,"lastStatusMessage":null,"xrayUptime":3600,"usersOnline":37,
-			"ips":[{"ip":"31.76.38.179","status":"active"}],
+			"ips":[{"ip":"31.59.178.215","status":"active"}],
 			"system":{"info":{"cpus":1,"memoryTotal":2000},"stats":{"memoryFree":400,"memoryUsed":1600,"loadAvg":[0.9,0.5,0.4],
 				"interface":{"interface":"eth0","rxBytesPerSec":12500000,"txBytesPerSec":25000000,"rxTotal":1,"txTotal":1}}},
 			"versions":{"xray":"26.2.6","node":"2.3.1"}
